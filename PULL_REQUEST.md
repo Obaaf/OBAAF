@@ -26,7 +26,7 @@ This pull request brings the first draft of the Open Build and Agent Assurance F
 ### Action items and pending decisions
 
 - **Decisions.** 24 entries in `DECISIONS.md` are marked *Proposed*. Accept, change or reject each one, and date it.
-- **CODEOWNERS.** Set to `@Ofonna-N` in `.github/CODEOWNERS`. Enable code-owner review when repository settings permit it.
+- **CODEOWNERS.** Set to `@Ofonna-N` and `@seanudeke` in `.github/CODEOWNERS`. Enable code-owner review when repository settings permit it.
 - **Open before release:** D-003 (copyright and affiliation), D-007 (predicate URIs) and D-011 (dependency hashes).
 - **Licenses.** Confirm the intended licenses with your employer.
 

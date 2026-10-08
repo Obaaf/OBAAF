@@ -6,7 +6,7 @@ The repository is a private draft. Uploading it does not accept the remaining de
 
 - Cleaned the implementation documents, both manuscript sources, and pull request description.
 - Updated the document generator and offline form template, then regenerated their outputs.
-- Set the repository code owner to @Ofonna-N.
+- Set the repository code owners to @Ofonna-N and @seanudeke.
 - Preserved the paper author's name and copyright notice.
 - Retired D-012 and D-022 without reusing their identifiers. There are 24 remaining proposed decisions.
 - Excluded stale archives, the old manuscript preview, Mac metadata and original Git history from the upload copy. Original history and archives remain locally available.
