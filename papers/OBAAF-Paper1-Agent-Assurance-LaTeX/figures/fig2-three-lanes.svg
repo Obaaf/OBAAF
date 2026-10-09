@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="16 56 728 496" width="728" height="496" font-family="FreeSans, Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4a4a4a"/></marker></defs>
+<rect x="24" y="64" width="712" height="144" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.25"/>
+<text x="40" y="88" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Agent lane, at the level of its inputs (Public)</text>
+<rect x="24" y="232" width="712" height="144" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.25"/>
+<text x="40" y="256" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Effect lane, Maintainer level</text>
+<rect x="24" y="400" width="712" height="144" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.25"/>
+<text x="720" y="424" text-anchor="end" font-weight="700" font-size="15" fill="#111111">Release lane, Release level</text>
+<g fill="none" stroke="#4a4a4a" stroke-width="1.25">
+<path d="M192 148H216" marker-end="url(#a)"/>
+<path d="M368 148H392" marker-end="url(#a)"/>
+<path d="M544 148H568" marker-end="url(#a)"/>
+<path d="M644 192V272" marker-end="url(#a)"/>
+<path d="M568 316H544" marker-end="url(#a)"/>
+<path d="M392 316H368" marker-end="url(#a)"/>
+<path d="M216 316H192" marker-end="url(#a)"/>
+<path d="M116 360V440" marker-end="url(#a)"/>
+<path d="M192 484H216" marker-end="url(#a)"/>
+</g>
+<rect x="40" y="104" width="152" height="88" rx="8" fill="none" stroke="#b5562a" stroke-width="1.25"/>
+<text x="116" y="128" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Untrusted event</text>
+<text x="116" y="145" text-anchor="middle" font-size="14" fill="#111111">Issue, PR, comment</text>
+<text x="116" y="162" text-anchor="middle" font-size="14" fill="#111111">written by anyone</text>
+<rect x="216" y="104" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="292" y="128" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Snapshot step</text>
+<text x="292" y="145" text-anchor="middle" font-size="14" fill="#111111">Captures inputs</text>
+<text x="292" y="162" text-anchor="middle" font-size="14" fill="#111111">Records digests</text>
+<text x="292" y="179" text-anchor="middle" font-size="14" fill="#111111">and integrity level</text>
+<rect x="392" y="104" width="152" height="88" rx="8" fill="#1f5fa8" fill-opacity="0.12" stroke="#1f5fa8" stroke-width="2"/>
+<text x="468" y="128" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Agent run</text>
+<text x="468" y="145" text-anchor="middle" font-size="14" fill="#111111">Read-only token</text>
+<text x="468" y="162" text-anchor="middle" font-size="14" fill="#111111">No secrets or OIDC</text>
+<text x="468" y="179" text-anchor="middle" font-size="14" fill="#111111">Egress to proxy only</text>
+<rect x="568" y="104" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="644" y="128" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Proposal bundle</text>
+<text x="644" y="145" text-anchor="middle" font-size="14" fill="#111111">Patch, comment,</text>
+<text x="644" y="162" text-anchor="middle" font-size="14" fill="#111111">or label changes</text>
+<rect x="568" y="272" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="644" y="296" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Attestation step</text>
+<text x="644" y="313" text-anchor="middle" font-size="14" fill="#111111">Signs digests of</text>
+<text x="644" y="330" text-anchor="middle" font-size="14" fill="#111111">inputs, authority,</text>
+<text x="644" y="347" text-anchor="middle" font-size="14" fill="#111111">and outputs</text>
+<rect x="392" y="272" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="468" y="296" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Required review</text>
+<text x="468" y="313" text-anchor="middle" font-size="14" fill="#111111">A maintainer other</text>
+<text x="468" y="330" text-anchor="middle" font-size="14" fill="#111111">than the requester</text>
+<rect x="216" y="272" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="292" y="296" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Effect job</text>
+<text x="292" y="313" text-anchor="middle" font-size="14" fill="#111111">Verifies and checks,</text>
+<text x="292" y="330" text-anchor="middle" font-size="14" fill="#111111">then applies under</text>
+<text x="292" y="347" text-anchor="middle" font-size="14" fill="#111111">its own identity</text>
+<rect x="40" y="272" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="116" y="296" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Protected branch</text>
+<text x="116" y="313" text-anchor="middle" font-size="14" fill="#111111">Changed only by</text>
+<text x="116" y="330" text-anchor="middle" font-size="14" fill="#111111">the effect job</text>
+<rect x="40" y="440" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="116" y="464" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Release job</text>
+<text x="116" y="481" text-anchor="middle" font-size="14" fill="#111111">Checks each agent</text>
+<text x="116" y="498" text-anchor="middle" font-size="14" fill="#111111">change is attested</text>
+<text x="116" y="515" text-anchor="middle" font-size="14" fill="#111111">and approved</text>
+<rect x="216" y="440" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="292" y="464" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Signed release</text>
+<text x="292" y="481" text-anchor="middle" font-size="14" fill="#111111">Provenance records</text>
+<text x="292" y="498" text-anchor="middle" font-size="14" fill="#111111">the agent runs</text>
+</svg>

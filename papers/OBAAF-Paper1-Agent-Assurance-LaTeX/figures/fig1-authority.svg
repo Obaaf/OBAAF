@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="16 72 728 328" width="728" height="328" font-family="FreeSans, Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4a4a4a"/></marker></defs>
+<g fill="none" stroke="#4a4a4a" stroke-width="1.25">
+<path d="M252 124H271V150H290" marker-end="url(#a)"/>
+<path d="M252 220H271V194H290" marker-end="url(#a)"/>
+<path d="M470 160H489V124H508" marker-end="url(#a)"/>
+<path d="M470 176H489V212H508" marker-end="url(#a)"/>
+<path d="M470 196H481V292H508" marker-end="url(#a)"/>
+</g>
+<rect x="24" y="80" width="228" height="88" rx="8" fill="none" stroke="#b5562a" stroke-width="1.25"/>
+<text x="36" y="104" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Public content</text>
+<text x="36" y="121" text-anchor="start" font-size="14" fill="#111111">Issue bodies and comments</text>
+<text x="36" y="138" text-anchor="start" font-size="14" fill="#111111">PR titles and branch names</text>
+<text x="36" y="155" text-anchor="start" font-size="14" fill="#111111">Fetched pages, tool outputs</text>
+<rect x="24" y="184" width="228" height="72" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="36" y="208" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Maintainer content</text>
+<text x="36" y="225" text-anchor="start" font-size="14" fill="#111111">Protected workflow files</text>
+<text x="36" y="242" text-anchor="start" font-size="14" fill="#111111">Agent instruction files</text>
+<rect x="290" y="128" width="180" height="88" rx="8" fill="#1f5fa8" fill-opacity="0.12" stroke="#1f5fa8" stroke-width="2"/>
+<text x="380" y="152" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Agent invocation</text>
+<text x="380" y="169" text-anchor="middle" font-size="14" fill="#111111">Model, harness, tools</text>
+<text x="380" y="186" text-anchor="middle" font-size="14" fill="#111111">Integrity falls to its</text>
+<text x="380" y="203" text-anchor="middle" font-size="14" fill="#111111">least-trusted author</text>
+<rect x="508" y="80" width="228" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="520" y="104" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Maintainer capabilities</text>
+<text x="520" y="121" text-anchor="start" font-size="14" fill="#111111">Read private source, secrets</text>
+<text x="520" y="138" text-anchor="start" font-size="14" fill="#111111">Write protected branches</text>
+<text x="520" y="155" text-anchor="start" font-size="14" fill="#111111">Edit workflow files</text>
+<rect x="508" y="184" width="228" height="56" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="520" y="208" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Release capabilities</text>
+<text x="520" y="225" text-anchor="start" font-size="14" fill="#111111">Sign and publish releases</text>
+<rect x="508" y="256" width="228" height="72" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="520" y="280" text-anchor="start" font-weight="700" font-size="15" fill="#111111">Ambient authority</text>
+<text x="520" y="297" text-anchor="start" font-size="14" fill="#111111">Network egress</text>
+<text x="520" y="314" text-anchor="start" font-size="14" fill="#111111">Persisted tokens and caches</text>
+<rect x="24" y="344" width="712" height="48" rx="8" fill="#eef2f7" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="380" y="373" text-anchor="middle" font-weight="700" font-size="14" fill="#111111">Taint-bounded authority grants only what the least-trusted author could do directly</text>
+</svg>
