@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="16 64 728 360" width="728" height="360" font-family="FreeSans, Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4a4a4a"/></marker></defs>
+<g fill="none" stroke="#4a4a4a" stroke-width="1.25">
+<path d="M192 116H216" marker-end="url(#a)"/>
+<path d="M368 116H392" marker-end="url(#a)"/>
+<path d="M544 116H568" marker-end="url(#a)"/>
+<path d="M468 160V200" marker-start="url(#a)" marker-end="url(#a)"/>
+<path d="M116 200V160" marker-end="url(#a)"/>
+<path d="M292 200V160" marker-end="url(#a)"/>
+<path d="M644 160V328" marker-end="url(#a)"/>
+<path d="M568 372H544" marker-end="url(#a)"/>
+<path d="M392 372H368" marker-end="url(#a)"/>
+<path d="M216 372H192" marker-end="url(#a)"/>
+</g>
+<line x1="380" x2="380" y1="316" y2="428" stroke="#4a4a4a" stroke-width="1.25" stroke-dasharray="4 4"/>
+<text x="380" y="306" text-anchor="middle" font-size="13" fill="#555555">platform boundary</text>
+<rect x="40" y="72" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="116" y="96" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Source and assets</text>
+<text x="116" y="113" text-anchor="middle" font-size="14" fill="#111111">Code, assets,</text>
+<text x="116" y="130" text-anchor="middle" font-size="14" fill="#111111">build scripts</text>
+<text x="116" y="147" text-anchor="middle" font-size="14" fill="#555555">F1</text>
+<rect x="216" y="72" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="292" y="96" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Intake</text>
+<text x="292" y="113" text-anchor="middle" font-size="14" fill="#111111">SDKs, engines,</text>
+<text x="292" y="130" text-anchor="middle" font-size="14" fill="#111111">partner deliveries</text>
+<text x="292" y="147" text-anchor="middle" font-size="14" fill="#555555">F2</text>
+<rect x="392" y="72" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="468" y="96" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Release builds</text>
+<text x="468" y="113" text-anchor="middle" font-size="14" fill="#111111">Tier A: ephemeral</text>
+<text x="468" y="130" text-anchor="middle" font-size="14" fill="#111111">Tier B: persistent</text>
+<text x="468" y="147" text-anchor="middle" font-size="14" fill="#555555">F3</text>
+<rect x="568" y="72" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="644" y="96" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Signing</text>
+<text x="644" y="113" text-anchor="middle" font-size="14" fill="#111111">Keys in hardware</text>
+<text x="644" y="130" text-anchor="middle" font-size="14" fill="#111111">or managed service</text>
+<text x="644" y="147" text-anchor="middle" font-size="14" fill="#555555">F5</text>
+<rect x="40" y="200" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="116" y="224" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Agents and bots</text>
+<text x="116" y="241" text-anchor="middle" font-size="14" fill="#111111">Bounded by the</text>
+<text x="116" y="258" text-anchor="middle" font-size="14" fill="#111111">trust of inputs</text>
+<text x="116" y="275" text-anchor="middle" font-size="14" fill="#555555">F8</text>
+<rect x="216" y="200" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="292" y="224" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Partners</text>
+<text x="292" y="241" text-anchor="middle" font-size="14" fill="#111111">Scoped access</text>
+<text x="292" y="258" text-anchor="middle" font-size="14" fill="#111111">that expires</text>
+<text x="292" y="275" text-anchor="middle" font-size="14" fill="#555555">F9</text>
+<rect x="392" y="200" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="468" y="224" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Build caches</text>
+<text x="468" y="241" text-anchor="middle" font-size="14" fill="#111111">Release lane reads</text>
+<text x="468" y="258" text-anchor="middle" font-size="14" fill="#111111">only its own entries</text>
+<text x="468" y="275" text-anchor="middle" font-size="14" fill="#555555">F4</text>
+<rect x="568" y="328" width="152" height="88" rx="8" fill="#1f5fa8" fill-opacity="0.12" stroke="#1f5fa8" stroke-width="2"/>
+<text x="644" y="352" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Provenance check</text>
+<text x="644" y="369" text-anchor="middle" font-size="14" fill="#111111">Verified before</text>
+<text x="644" y="386" text-anchor="middle" font-size="14" fill="#111111">any upload</text>
+<text x="644" y="403" text-anchor="middle" font-size="14" fill="#555555">F7</text>
+<rect x="392" y="328" width="152" height="88" rx="8" fill="none" stroke="#4a4a4a" stroke-width="1.25"/>
+<text x="468" y="352" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Store upload</text>
+<text x="468" y="369" text-anchor="middle" font-size="14" fill="#111111">Dedicated account;</text>
+<text x="468" y="386" text-anchor="middle" font-size="14" fill="#111111">a person sets live</text>
+<text x="468" y="403" text-anchor="middle" font-size="14" fill="#555555">F6</text>
+<rect x="216" y="328" width="152" height="88" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.25"/>
+<text x="292" y="352" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Platform</text>
+<text x="292" y="369" text-anchor="middle" font-size="14" fill="#111111">Re-signs or</text>
+<text x="292" y="386" text-anchor="middle" font-size="14" fill="#111111">distributes</text>
+<rect x="40" y="328" width="152" height="88" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.25"/>
+<text x="116" y="352" text-anchor="middle" font-weight="700" font-size="15" fill="#111111">Players</text>
+<text x="116" y="369" text-anchor="middle" font-size="14" fill="#111111">Install the</text>
+<text x="116" y="386" text-anchor="middle" font-size="14" fill="#111111">update</text>
+</svg>
