@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No network access: this page cannot send your answers anywhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
+<title>OBAAF Self-Assessment</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --ink: #1b1d21; --muted: #5b616b; --line: #dcdfe4;
+  --accent: #1f5fa8; --accent-soft: #e8eff8; --ok: #22744a; --ok-soft: #e6f3eb; --warn: #9a4a1d; --warn-soft: #fbeee5;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121417; --panel: #1a1d21; --ink: #e9ebee; --muted: #a2a8b1; --line: #2e333a;
+          --accent: #7fb0ef; --accent-soft: #1c2a3c; --ok: #6fcf97; --ok-soft: #17291f; --warn: #f0a070; --warn-soft: #33221a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+header, main { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+header { padding-top: 28px; padding-bottom: 8px; }
+.draft-note { font-size: 0.85rem; color: var(--muted, #5f6368); margin: 10px 0 0; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+.lead { color: var(--muted); margin: 0 0 12px; max-width: 70ch; }
+.privacy { display: inline-block; background: var(--ok-soft); color: var(--ok); border-radius: 999px;
+           padding: 2px 12px; font-size: 0.85rem; font-weight: 600; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; padding-bottom: 48px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .result { position: static !important; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+label.field { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+input[type=text], input[type=date], textarea { font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+textarea { min-height: 2.2em; resize: vertical; font-size: 0.9rem; }
+.tier { margin-top: 20px; }
+.tier h2 { font-size: 1.15rem; margin: 0; }
+.tier .summary { color: var(--muted); margin: 2px 0 10px; font-size: 0.95rem; }
+fieldset.item { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  margin: 0 0 10px; padding: 12px 14px; }
+fieldset.item legend { padding: 0; font-weight: 600; float: left; width: 100%; margin-bottom: 4px; }
+.item .id { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.item .evidence, .item .na { clear: both; color: var(--muted); font-size: 0.88rem; margin: 2px 0 8px; }
+.item .tags { font-size: 0.78rem; color: var(--muted); }
+.choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.choices label { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; cursor: pointer; font-size: 0.9rem; }
+.choices input { margin: 0 6px 0 0; }
+.choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+.result { position: sticky; top: 12px; }
+.result h2 { font-size: 1rem; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tier-reached { font-size: 2rem; font-weight: 700; line-height: 1.1; }
+.tier-name { color: var(--muted); margin-bottom: 12px; }
+.bars { display: grid; gap: 6px; margin-bottom: 14px; }
+.bar { display: grid; grid-template-columns: 92px 1fr 46px; align-items: center; gap: 8px; font-size: 0.85rem; }
+.track { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.fill { height: 100%; background: var(--accent); }
+.bar.done .fill { background: var(--ok); }
+ol.fixes { padding-left: 1.3em; margin: 6px 0 0; display: grid; gap: 8px; max-height: 52vh; overflow: auto; }
+ol.fixes li { font-size: 0.9rem; }
+ol.fixes .why { color: var(--muted); font-size: 0.8rem; }
+.effort { font-size: 0.75rem; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+button, .filebtn { font: inherit; font-size: 0.9rem; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.note { font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.error { color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 6px 10px; font-size: 0.9rem; display: none; }
+a { color: var(--accent); }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .buttons, .privacy, .filebtn { display: none !important; }
+  .layout { display: block; }
+  .result { position: static; page-break-before: always; }
+  fieldset.item { page-break-inside: avoid; }
+  ol.fixes { max-height: none; overflow: visible; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>OBAAF Self-Assessment</h1>
+  <p class="lead">Thirty-four yes-or-no questions in four tiers for a game studio without security staff. Answer each from the evidence named beside it. You reach a tier when every item at that tier and below is answered yes. A tier describes controls in place, not a guarantee of security.</p>
+  <span class="privacy">Private: your answers stay on this page and are never sent anywhere</span>
+  <p class="draft-note">Draft version 0.1.0.dev0, not yet piloted. Pending maintainer review.</p>
+</header>
+<main>
+  <div class="layout">
+    <div>
+      <div class="meta card">
+        <label class="field">Studio<input type="text" id="studio" autocomplete="off"></label>
+        <label class="field">Respondent<input type="text" id="respondent" autocomplete="off"></label>
+        <label class="field">Date<input type="date" id="date"></label>
+      </div>
+      <div class="error" id="error" role="alert"></div>
+      <div id="tiers"></div>
+    </div>
+    <aside class="result card" aria-live="polite">
+      <h2>Your result</h2>
+      <div class="tier-reached" id="reached">Tier 0</div>
+      <div class="tier-name" id="reached-name">Not yet Accounted</div>
+      <div class="bars" id="bars"></div>
+      <h2>Fix next</h2>
+      <ol class="fixes" id="fixes"></ol>
+      <div class="buttons">
+        <button class="primary" id="export">Save answers</button>
+        <label class="filebtn">Load answers<input type="file" id="import" accept=".json,application/json" hidden></label>
+        <button id="print">Print or save as PDF</button>
+        <button id="reset">Clear</button>
+      </div>
+      <p class="note">Saved answers are a JSON file you keep. Score the same file with <code>obaaf assess score</code>. Form version 0.1.0.dev0.</p>
+    </aside>
+  </div>
+</main>
+<script id="obaaf-data" type="application/json">{"format":"obaaf-assessment/v0.1","version":"0.1.0","tool":"0.1.0.dev0","tiers":[{"id":1,"name":"Accounted","summary":"Establishes who and what can publish or sign."},{"id":2,"name":"Controlled","summary":"Separates release builds from untrusted work and removes standing credentials."},{"id":3,"name":"Verified","summary":"Produces and checks provenance and isolates builds."},{"id":4,"name":"Assured","summary":"Adds two-person control and independent verification."}],"effort":{"L":{"label":"Hours","rank":1},"M":{"label":"Days","rank":2},"H":{"label":"Weeks","rank":3}},"items":[{"id":"1.1","tier":1,"short":"MFA on publishing accounts","question":"Does every account that can publish builds to a store require multi-factor authentication?","evidence":"Security settings of each publishing account","effort":"L","profile":["G6.3"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-1-1","label":"guide for item 1.1"}],"prevents":["Steamworks accounts (2023)"],"limits":[]},{"id":"1.2","tier":1,"short":"Dedicated upload account","question":"Do automated uploads use a dedicated build account that has only publishing permissions?","evidence":"The account's permissions in the store's partner portal","effort":"L","profile":["G6.1"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-1-2","label":"guide for item 1.2"}],"prevents":["Steamworks accounts (2023)"],"limits":[]},{"id":"1.3","tier":1,"short":"A person sets builds live","question":"Does setting a build live on a public channel require a person rather than an automated step?","evidence":"Release procedure and store release settings","effort":"L","profile":["G6.2"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-1-3","label":"guide for item 1.3"}],"prevents":[],"limits":[]},{"id":"1.4","tier":1,"short":"List of build and signing machines","question":"Do you keep a list of every machine that builds or signs release builds, with an owner for each?","evidence":"The list, updated within the last 90 days","effort":"L","profile":["G3.1"],"naWhen":"","fix":[{"href":"../docs/guides/F3-build-execution.md#item-1-4","label":"guide for item 1.4"}],"prevents":[],"limits":[]},{"id":"1.5","tier":1,"short":"Key inventory","question":"Do you know where every signing key and store upload credential is kept, and who can use it?","evidence":"A key inventory naming location and authorized users","effort":"L","profile":["G5.1","G5.3"],"naWhen":"","fix":[{"href":"../docs/guides/F5-signing.md#item-1-5","label":"guide for item 1.5"}],"prevents":[],"limits":["Winnti campaign (2013)"]},{"id":"1.6","tier":1,"short":"Protected release branches","question":"Are release branches or streams protected so that changes need review?","evidence":"Branch or stream protection settings","effort":"L","profile":["G1.1"],"naWhen":"","fix":[{"href":"../docs/guides/F1-source-and-assets.md#item-1-6","label":"guide for item 1.6"},{"href":"../docs/github-settings.md#protect-release-branches","label":"GitHub settings"}],"prevents":[],"limits":[]},{"id":"1.7","tier":1,"short":"Individual accounts","question":"Does every person, including contractors, use an individual source-control account?","evidence":"User list with no shared accounts","effort":"L","profile":["G1.3","G9.1"],"naWhen":"","fix":[{"href":"../docs/guides/F1-source-and-assets.md#item-1-7","label":"guide for item 1.7"}],"prevents":[],"limits":[]},{"id":"1.8","tier":1,"short":"SDK and plugin list","question":"Do you keep a list of every third-party SDK and plugin that ships to players, with its version?","evidence":"The list, matching the current build","effort":"L","profile":["G2.1"],"naWhen":"","fix":[{"href":"../docs/guides/F2-intake.md#item-1-8","label":"guide for item 1.8"}],"prevents":[],"limits":["SpinOk (2023)"]},{"id":"2.1","tier":2,"short":"Release-only build machines","question":"Do release builds run only on machines that never build unreviewed changes?","evidence":"Build-agent pool configuration","effort":"M","profile":["G3.1"],"naWhen":"","fix":[{"href":"../docs/guides/F3-build-execution.md#item-2-1","label":"guide for item 2.1"},{"href":"../templates/github-actions/workflows/obaaf-release.yml","label":"obaaf-release.yml template"}],"prevents":["APT41 (2019)","PipeMon (2020)","3CX (2023)","PyTorch (2024)"],"limits":[]},{"id":"2.2","tier":2,"short":"Reviewed build-script changes","question":"Can build scripts, packaging steps, and CI configuration change only through reviewed commits approved by someone other than the author?","evidence":"Protection rules on those paths; a sample of recent changes","effort":"M","profile":["G1.2"],"naWhen":"","fix":[{"href":"../docs/guides/F1-source-and-assets.md#item-2-2","label":"guide for item 2.2"},{"href":"../templates/github-actions/CODEOWNERS.example","label":"CODEOWNERS example"}],"prevents":["Winnti build compromises (2019)"],"limits":[]},{"id":"2.3","tier":2,"short":"Keys in hardware or a key service","question":"Are signing keys held in a hardware device, a cloud key service, or platform-managed signing, rather than as files?","evidence":"Key-service configuration; no key files on build hosts","effort":"M","profile":["G5.1"],"naWhen":"","fix":[{"href":"../docs/guides/F5-signing.md#item-2-3","label":"guide for item 2.3"}],"prevents":["Winnti campaign (2013)","APT41 (2019)"],"limits":[]},{"id":"2.4","tier":2,"short":"Job-scoped credentials","question":"Do build jobs receive signing and upload credentials only for the duration of the job?","evidence":"Credential configuration; no stored credentials on hosts","effort":"M","profile":["G3.4"],"naWhen":"","fix":[{"href":"../docs/guides/F3-build-execution.md#item-2-4","label":"guide for item 2.4"}],"prevents":["PipeMon (2020)","PyTorch (2024)","tj-actions (2025)"],"limits":[]},{"id":"2.5","tier":2,"short":"Asset and plugin quarantine","question":"Are third-party asset packages and plugins first opened in an isolated environment with automatic script execution turned off?","evidence":"Intake procedure and settings of the quarantine machine","effort":"M","profile":["G2.2"],"naWhen":"","fix":[{"href":"../docs/guides/F2-intake.md#item-2-5","label":"guide for item 2.5"}],"prevents":[],"limits":[]},{"id":"2.6","tier":2,"short":"Digest checks for vendored files","question":"Does the build check recorded digests for vendored binaries and SDKs?","evidence":"Manifest file and the build step that checks it","effort":"M","profile":["G2.1"],"naWhen":"","fix":[{"href":"../docs/guides/F2-intake.md#item-2-6","label":"guide for item 2.6"}],"prevents":[],"limits":[]},{"id":"2.7","tier":2,"short":"Release caches protected from untrusted writers","question":"Do release builds use caches that untrusted builds and developer workstations cannot write?","evidence":"Cache access permissions","effort":"M","profile":["G4.1"],"naWhen":"","fix":[{"href":"../docs/guides/F4-caches.md#item-2-7","label":"guide for item 2.7"},{"href":"../templates/github-actions/workflows/obaaf-release.yml","label":"obaaf-release.yml template"}],"prevents":["Ultralytics (2024)","Clinejection (2026)"],"limits":[]},{"id":"2.8","tier":2,"short":"Scoped partner access","question":"Do contractors and porting partners have separate, scoped access that expires?","evidence":"Access lists with expiry dates","effort":"L","profile":["G9.1"],"naWhen":"","fix":[{"href":"../docs/guides/F9-partners.md#item-2-8","label":"guide for item 2.8"}],"prevents":[],"limits":[]},{"id":"2.9","tier":2,"short":"Revocation plan","question":"Do you have a written plan to revoke signing certificates and rotate upload credentials?","evidence":"The plan, with named owners","effort":"L","profile":["G5.3"],"naWhen":"","fix":[{"href":"../docs/guides/F5-signing.md#item-2-9","label":"guide for item 2.9"}],"prevents":[],"limits":[]},{"id":"2.10","tier":2,"short":"Updater checks signatures","question":"If you run your own launcher or patcher, does it verify update signatures with a key that is not stored on the update server?","evidence":"Updater code or vendor documentation","effort":"M","profile":["G6.5"],"naWhen":"You do not run your own launcher or patcher.","fix":[{"href":"../docs/guides/F6-distribution.md#item-2-10","label":"guide for item 2.10"}],"prevents":["Winnti campaign (2013)"],"limits":[]},{"id":"2.11","tier":2,"short":"SDK behavior review","question":"Is each player-facing SDK reviewed for the data it collects and where it sends data, before adoption and on each update?","evidence":"Review records for current SDK versions","effort":"M","profile":["G2.3"],"naWhen":"","fix":[{"href":"../docs/guides/F2-intake.md#item-2-11","label":"guide for item 2.11"}],"prevents":["SpinOk (2023)"],"limits":[]},{"id":"2.12","tier":2,"short":"Set-live and permission alerts","question":"Are you alerted whenever a build is set live or publishing permissions change?","evidence":"Alert configuration and a recent alert","effort":"L","profile":["G6.3"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-2-12","label":"guide for item 2.12"}],"prevents":[],"limits":["Steamworks accounts (2023)","Downfall mod (2023)","Chemia (2025)","BlockBlasters (2025)"]},{"id":"3.1","tier":3,"short":"Signed provenance","question":"Does every release build produce signed provenance listing source revision, asset revision, manifest digest, SDK versions, and builder?","evidence":"Provenance for the latest release","effort":"H","profile":["G7.1"],"naWhen":"","fix":[{"href":"../docs/guides/F7-provenance.md#item-3-1","label":"guide for item 3.1"},{"href":"../templates/github-actions/workflows/obaaf-release.yml","label":"obaaf-release.yml template"}],"prevents":[],"limits":[]},{"id":"3.2","tier":3,"short":"Automatic provenance check before upload","question":"Is provenance checked automatically, in a separate step, before any upload to a store?","evidence":"The pipeline step and its log for the latest release","effort":"M","profile":["G7.2","G5.2"],"naWhen":"","fix":[{"href":"../docs/guides/F7-provenance.md#item-3-2","label":"guide for item 3.2"},{"href":"../templates/github-actions/workflows/obaaf-publish.yml","label":"obaaf-publish.yml template"}],"prevents":[],"limits":["APT41 (2019)","PipeMon (2020)"]},{"id":"3.3","tier":3,"short":"Fresh environments where possible","question":"Do release builds for targets that can build in fresh containers or virtual machines always do so?","evidence":"Build-agent configuration for each target","effort":"H","profile":["G3.2","Tier A"],"naWhen":"None of your release targets can build in a fresh container or virtual machine.","fix":[{"href":"../docs/guides/F3-build-execution.md#item-3-3","label":"guide for item 3.3"}],"prevents":["SUNSPOT (2021)"],"limits":[]},{"id":"3.4","tier":3,"short":"Reimaged persistent hosts","question":"Are persistent build hosts reimaged from a versioned image on a fixed schedule and after any suspected exposure?","evidence":"Reimage log","effort":"M","profile":["G3.2","Tier B"],"naWhen":"You have no persistent build hosts for release builds.","fix":[{"href":"../docs/guides/F3-build-execution.md#item-3-4","label":"guide for item 3.4"}],"prevents":["SUNSPOT (2021)"],"limits":["Winnti build compromises (2019)","3CX (2023)"]},{"id":"3.5","tier":3,"short":"Egress allow-list for release hosts","question":"Is outbound network traffic from release build hosts limited to an approved list?","evidence":"Firewall or proxy rules","effort":"M","profile":["G3.3"],"naWhen":"","fix":[{"href":"../docs/guides/F3-build-execution.md#item-3-5","label":"guide for item 3.5"}],"prevents":[],"limits":["3CX (2023)","tj-actions (2025)"]},{"id":"3.6","tier":3,"short":"Agents without secrets","question":"Do AI agents and bots triggered by public, player, or partner content run without secrets or write access to protected branches?","evidence":"Workflow permissions for each agent","effort":"M","profile":["G8.1"],"naWhen":"You use no AI agents.","fix":[{"href":"../docs/guides/F8-agents.md#item-3-6","label":"guide for item 3.6"},{"href":"../templates/github-actions/workflows/obaaf-agent-propose.yml","label":"obaaf-agent-propose.yml template"}],"prevents":[],"limits":["Clinejection (2026)"]},{"id":"3.7","tier":3,"short":"Code-owner protection of agent files","question":"Are agent instruction files, and the workflows that invoke agents, protected by code-owner review?","evidence":"Protection rules on those paths","effort":"L","profile":["G8.2"],"naWhen":"You use no AI agents.","fix":[{"href":"../docs/guides/F8-agents.md#item-3-7","label":"guide for item 3.7"},{"href":"../templates/github-actions/CODEOWNERS.example","label":"CODEOWNERS example"}],"prevents":[],"limits":[]},{"id":"3.8","tier":3,"short":"Staged rollout and tested rollback","question":"Are live updates rolled out in stages, with a tested rollback?","evidence":"Rollout configuration; record of a rollback test","effort":"M","profile":["G6.4"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-3-8","label":"guide for item 3.8"}],"prevents":[],"limits":[]},{"id":"3.9","tier":3,"short":"Read-only release archive","question":"Are released artifacts, symbols, and provenance archived read-only?","evidence":"Archive permissions","effort":"L","profile":["G7.3"],"naWhen":"","fix":[{"href":"../docs/guides/F7-provenance.md#item-3-9","label":"guide for item 3.9"}],"prevents":[],"limits":[]},{"id":"4.1","tier":4,"short":"Two approvers for release branches","question":"Do two people approve every change to release branches?","evidence":"Branch rules requiring two approvals","effort":"M","profile":["G1.1"],"naWhen":"","fix":[{"href":"../docs/guides/F1-source-and-assets.md#item-4-1","label":"guide for item 4.1"},{"href":"../docs/github-settings.md#protect-release-branches","label":"GitHub settings"}],"prevents":[],"limits":[]},{"id":"4.2","tier":4,"short":"Independent rebuild","question":"Do you rebuild release executables independently and compare them, recording expected differences?","evidence":"Comparison report for the latest release","effort":"H","profile":["G4.3"],"naWhen":"","fix":[{"href":"../docs/guides/F4-caches.md#item-4-2","label":"guide for item 4.2"}],"prevents":[],"limits":["Winnti build compromises (2019)","SUNSPOT (2021)"]},{"id":"4.3","tier":4,"short":"Two-person set-live","question":"Does setting a build live on a public channel require confirmation by two people?","evidence":"Release procedure; approval records","effort":"M","profile":["G6.2"],"naWhen":"","fix":[{"href":"../docs/guides/F6-distribution.md#item-4-3","label":"guide for item 4.3"}],"prevents":["Downfall mod (2023)","Chemia (2025)","BlockBlasters (2025)"],"limits":[]},{"id":"4.4","tier":4,"short":"Release-lane derived data","question":"Do release builds regenerate derived data, or use only cache entries written by the release lane?","evidence":"Cache configuration for release builds","effort":"H","profile":["G4.2"],"naWhen":"","fix":[{"href":"../docs/guides/F4-caches.md#item-4-4","label":"guide for item 4.4"},{"href":"../templates/github-actions/workflows/obaaf-release.yml","label":"obaaf-release.yml template"}],"prevents":[],"limits":[]},{"id":"4.5","tier":4,"short":"Attested and verified agent runs","question":"Are agent runs attested, with agent-authored changes verified before release?","evidence":"Attestations for agent-authored commits in the latest release","effort":"H","profile":["G8.3"],"naWhen":"You use no AI agents.","fix":[{"href":"../docs/guides/F8-agents.md#item-4-5","label":"guide for item 4.5"},{"href":"../templates/github-actions/workflows/obaaf-agent-apply.yml","label":"obaaf-agent-apply.yml template"},{"href":"../templates/github-actions/workflows/obaaf-publish.yml","label":"obaaf-publish.yml template"}],"prevents":[],"limits":[]}]}</script>
+<script>
+"use strict";
+// BEGIN OBAAF SCORING
+function obaafScore(data, answers) {
+  const rank = {};
+  for (const [k, v] of Object.entries(data.effort)) rank[k] = v.rank;
+  const value = (id) => (answers[id] && answers[id].answer) || "unanswered";
+  const perTier = {};
+  for (const t of data.tiers) perTier[t.id] = { items: 0, yes: 0, na: 0, no: 0, unanswered: 0 };
+  for (const item of data.items) { perTier[item.tier].items += 1; perTier[item.tier][value(item.id)] += 1; }
+  let tier = 0;
+  for (const id of data.tiers.map((t) => t.id).sort((a, b) => a - b)) {
+    const c = perTier[id];
+    if (c.yes + c.na === c.items) tier = id; else break;
+  }
+  const order = (id) => id.split(".").map(Number);
+  const open = data.items.filter((i) => value(i.id) === "no" || value(i.id) === "unanswered");
+  open.sort((a, b) => (a.tier - b.tier) || (rank[a.effort] - rank[b.effort]) ||
+    (b.prevents.length - a.prevents.length) || (b.limits.length - a.limits.length) ||
+    (order(a.id)[0] - order(b.id)[0]) || (order(a.id)[1] - order(b.id)[1]));
+  return { tier, perTier, fixes: open.map((item, i) => ({ rank: i + 1, id: item.id })) };
+}
+// END OBAAF SCORING
+
+const DATA = JSON.parse(document.getElementById("obaaf-data").textContent);
+const answers = {};
+const byId = Object.fromEntries(DATA.items.map((i) => [i.id, i]));
+const $ = (id) => document.getElementById(id);
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v; else if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  for (const child of children) if (child) node.append(child);
+  return node;
+}
+
+function renderItems() {
+  const root = $("tiers");
+  for (const tier of DATA.tiers) {
+    const section = el("section", { class: "tier", "aria-labelledby": `tier-${tier.id}` });
+    section.append(el("h2", { id: `tier-${tier.id}`, text: `Tier ${tier.id}: ${tier.name}` }),
+                   el("p", { class: "summary", text: tier.summary }));
+    for (const item of DATA.items.filter((i) => i.tier === tier.id)) {
+      const fs = el("fieldset", { class: "item", id: `item-${item.id}` });
+      const legend = el("legend");
+      legend.append(el("span", { class: "id", text: item.id }), document.createTextNode(item.question));
+      fs.append(legend, el("div", { class: "evidence", text: `Evidence: ${item.evidence}` }));
+      if (item.naWhen) fs.append(el("div", { class: "na", text: `N/A only if: ${item.naWhen}` }));
+      const choices = el("div", { class: "choices" });
+      const opts = [["yes", "Yes"], ["no", "No"]].concat(item.naWhen ? [["na", "N/A"]] : []).concat([["unanswered", "Not sure"]]);
+      for (const [value, label] of opts) {
+        const input = el("input", { type: "radio", name: `a-${item.id}`, value });
+        if (value === "unanswered") input.checked = true;
+        input.addEventListener("change", () => { setAnswer(item.id, value); });
+        choices.append(el("label", {}, input, document.createTextNode(label)));
+      }
+      const notes = el("textarea", { "aria-label": `Evidence notes for ${item.id}`, placeholder: "Where you found the evidence (optional)" });
+      notes.addEventListener("input", () => { answers[item.id] = Object.assign(answers[item.id] || { answer: "unanswered" }, { evidence: notes.value }); });
+      fs.append(choices, notes,
+        el("div", { class: "tags", text: `Profile ${item.profile.join(", ")} · effort ${DATA.effort[item.effort].label.toLowerCase()}` }));
+      section.append(fs);
+    }
+    root.append(section);
+  }
+}
+
+function setAnswer(id, value) {
+  answers[id] = Object.assign(answers[id] || {}, { answer: value });
+  update();
+}
+
+function update() {
+  const result = obaafScore(DATA, answers);
+  const tier = DATA.tiers.find((t) => t.id === result.tier);
+  $("reached").textContent = `Tier ${result.tier}`;
+  $("reached-name").textContent = tier ? tier.name : "Not yet Accounted";
+  const bars = $("bars");
+  bars.replaceChildren();
+  for (const t of DATA.tiers) {
+    const c = result.perTier[t.id];
+    const done = c.yes + c.na;
+    const bar = el("div", { class: "bar" + (done === c.items ? " done" : "") });
+    const track = el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(100 * done / c.items).toFixed(1)}%` }));
+    bar.append(el("span", { text: `${t.id} ${t.name}` }), track, el("span", { text: `${done}/${c.items}` }));
+    bars.append(bar);
+  }
+  const list = $("fixes");
+  list.replaceChildren();
+  for (const fix of result.fixes.slice(0, 12)) {
+    const item = byId[fix.id];
+    const li = el("li");
+    li.append(el("strong", { text: `${item.id} ${item.short} ` }), el("span", { class: "effort", text: DATA.effort[item.effort].label }));
+    const why = [];
+    if (item.prevents.length) why.push(`Would have prevented ${item.prevents.join(", ")}.`);
+    if (item.limits.length) why.push(`Detects or limits ${item.limits.join(", ")}.`);
+    if (why.length) li.append(el("div", { class: "why", text: why.join(" ") }));
+    const links = el("div", { class: "why" });
+    item.fix.forEach((f, i) => {
+      if (i) links.append(document.createTextNode(" · "));
+      links.append(el("a", { href: f.href, text: `How to fix: ${f.label}` }));
+    });
+    li.append(links);
+    list.append(li);
+  }
+  if (!result.fixes.length) list.append(el("li", { text: "All items satisfied." }));
+}
+
+function exportAnswers() {
+  const out = { format: DATA.format, studio: $("studio").value, respondent: $("respondent").value, date: $("date").value, answers: {} };
+  for (const item of DATA.items) {
+    const a = answers[item.id] || {};
+    out.answers[item.id] = { answer: a.answer || "unanswered", evidence: a.evidence || "" };
+  }
+  const blob = new Blob([JSON.stringify(out, null, 2) + "\n"], { type: "application/json" });
+  const link = el("a", { href: URL.createObjectURL(blob), download: `obaaf-assessment-${out.date || "answers"}.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function showError(message) {
+  const box = $("error");
+  box.textContent = message;
+  box.style.display = message ? "block" : "none";
+}
+
+function importAnswers(file) {
+  file.text().then((text) => {
+    const data = JSON.parse(text);
+    if (data.format !== DATA.format || typeof data.answers !== "object") throw new Error("This file is not an OBAAF answer file.");
+    for (const [id, a] of Object.entries(data.answers)) {
+      if (!byId[id]) throw new Error(`Unknown item ${id}.`);
+      const value = (typeof a === "string" ? a : a.answer || "unanswered").toLowerCase();
+      if (!["yes", "no", "na", "unanswered"].includes(value)) throw new Error(`Item ${id}: unknown answer "${value}".`);
+      if (value === "na" && !byId[id].naWhen) throw new Error(`Item ${id} cannot be marked N/A.`);
+    }
+    resetForm();
+    $("studio").value = data.studio || ""; $("respondent").value = data.respondent || ""; $("date").value = data.date || "";
+    for (const [id, a] of Object.entries(data.answers)) {
+      const value = (typeof a === "string" ? a : a.answer || "unanswered").toLowerCase();
+      answers[id] = { answer: value, evidence: (a && a.evidence) || "" };
+      const input = document.querySelector(`input[name="a-${CSS.escape(id)}"][value="${value}"]`);
+      if (input) input.checked = true;
+      const notes = document.querySelector(`#item-${CSS.escape(id)} textarea`);
+      if (notes) notes.value = answers[id].evidence;
+    }
+    showError("");
+    update();
+  }).catch((err) => showError(`Could not load answers: ${err.message}`));
+}
+
+function resetForm() {
+  for (const key of Object.keys(answers)) delete answers[key];
+  document.querySelectorAll("input[type=radio][value=unanswered]").forEach((i) => { i.checked = true; });
+  document.querySelectorAll("textarea").forEach((t) => { t.value = ""; });
+  update();
+}
+
+renderItems();
+$("date").value = new Date().toISOString().slice(0, 10);
+$("export").addEventListener("click", exportAnswers);
+$("import").addEventListener("change", (e) => { if (e.target.files[0]) importAnswers(e.target.files[0]); e.target.value = ""; });
+$("print").addEventListener("click", () => window.print());
+$("reset").addEventListener("click", () => { if (confirm("Clear all answers?")) resetForm(); });
+update();
+</script>
+</body>
+</html>

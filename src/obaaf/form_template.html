@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No network access: this page cannot send your answers anywhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">
+<title>OBAAF Self-Assessment</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --ink: #1b1d21; --muted: #5b616b; --line: #dcdfe4;
+  --accent: #1f5fa8; --accent-soft: #e8eff8; --ok: #22744a; --ok-soft: #e6f3eb; --warn: #9a4a1d; --warn-soft: #fbeee5;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121417; --panel: #1a1d21; --ink: #e9ebee; --muted: #a2a8b1; --line: #2e333a;
+          --accent: #7fb0ef; --accent-soft: #1c2a3c; --ok: #6fcf97; --ok-soft: #17291f; --warn: #f0a070; --warn-soft: #33221a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+header, main { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+header { padding-top: 28px; padding-bottom: 8px; }
+.draft-note { font-size: 0.85rem; color: var(--muted, #5f6368); margin: 10px 0 0; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+.lead { color: var(--muted); margin: 0 0 12px; max-width: 70ch; }
+.privacy { display: inline-block; background: var(--ok-soft); color: var(--ok); border-radius: 999px;
+           padding: 2px 12px; font-size: 0.85rem; font-weight: 600; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; padding-bottom: 48px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .result { position: static !important; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+label.field { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+input[type=text], input[type=date], textarea { font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+textarea { min-height: 2.2em; resize: vertical; font-size: 0.9rem; }
+.tier { margin-top: 20px; }
+.tier h2 { font-size: 1.15rem; margin: 0; }
+.tier .summary { color: var(--muted); margin: 2px 0 10px; font-size: 0.95rem; }
+fieldset.item { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  margin: 0 0 10px; padding: 12px 14px; }
+fieldset.item legend { padding: 0; font-weight: 600; float: left; width: 100%; margin-bottom: 4px; }
+.item .id { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.item .evidence, .item .na { clear: both; color: var(--muted); font-size: 0.88rem; margin: 2px 0 8px; }
+.item .tags { font-size: 0.78rem; color: var(--muted); }
+.choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.choices label { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; cursor: pointer; font-size: 0.9rem; }
+.choices input { margin: 0 6px 0 0; }
+.choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+.result { position: sticky; top: 12px; }
+.result h2 { font-size: 1rem; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tier-reached { font-size: 2rem; font-weight: 700; line-height: 1.1; }
+.tier-name { color: var(--muted); margin-bottom: 12px; }
+.bars { display: grid; gap: 6px; margin-bottom: 14px; }
+.bar { display: grid; grid-template-columns: 92px 1fr 46px; align-items: center; gap: 8px; font-size: 0.85rem; }
+.track { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.fill { height: 100%; background: var(--accent); }
+.bar.done .fill { background: var(--ok); }
+ol.fixes { padding-left: 1.3em; margin: 6px 0 0; display: grid; gap: 8px; max-height: 52vh; overflow: auto; }
+ol.fixes li { font-size: 0.9rem; }
+ol.fixes .why { color: var(--muted); font-size: 0.8rem; }
+.effort { font-size: 0.75rem; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+button, .filebtn { font: inherit; font-size: 0.9rem; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.note { font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+.error { color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 6px 10px; font-size: 0.9rem; display: none; }
+a { color: var(--accent); }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .buttons, .privacy, .filebtn { display: none !important; }
+  .layout { display: block; }
+  .result { position: static; page-break-before: always; }
+  fieldset.item { page-break-inside: avoid; }
+  ol.fixes { max-height: none; overflow: visible; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>OBAAF Self-Assessment</h1>
+  <p class="lead">Thirty-four yes-or-no questions in four tiers for a game studio without security staff. Answer each from the evidence named beside it. You reach a tier when every item at that tier and below is answered yes. A tier describes controls in place, not a guarantee of security.</p>
+  <span class="privacy">Private: your answers stay on this page and are never sent anywhere</span>
+  <p class="draft-note">Draft version {{VERSION}}, not yet piloted. Pending maintainer review.</p>
+</header>
+<main>
+  <div class="layout">
+    <div>
+      <div class="meta card">
+        <label class="field">Studio<input type="text" id="studio" autocomplete="off"></label>
+        <label class="field">Respondent<input type="text" id="respondent" autocomplete="off"></label>
+        <label class="field">Date<input type="date" id="date"></label>
+      </div>
+      <div class="error" id="error" role="alert"></div>
+      <div id="tiers"></div>
+    </div>
+    <aside class="result card" aria-live="polite">
+      <h2>Your result</h2>
+      <div class="tier-reached" id="reached">Tier 0</div>
+      <div class="tier-name" id="reached-name">Not yet Accounted</div>
+      <div class="bars" id="bars"></div>
+      <h2>Fix next</h2>
+      <ol class="fixes" id="fixes"></ol>
+      <div class="buttons">
+        <button class="primary" id="export">Save answers</button>
+        <label class="filebtn">Load answers<input type="file" id="import" accept=".json,application/json" hidden></label>
+        <button id="print">Print or save as PDF</button>
+        <button id="reset">Clear</button>
+      </div>
+      <p class="note">Saved answers are a JSON file you keep. Score the same file with <code>obaaf assess score</code>. Form version {{VERSION}}.</p>
+    </aside>
+  </div>
+</main>
+<script id="obaaf-data" type="application/json">/*OBAAF_DATA*/{}</script>
+<script>
+"use strict";
+// BEGIN OBAAF SCORING
+function obaafScore(data, answers) {
+  const rank = {};
+  for (const [k, v] of Object.entries(data.effort)) rank[k] = v.rank;
+  const value = (id) => (answers[id] && answers[id].answer) || "unanswered";
+  const perTier = {};
+  for (const t of data.tiers) perTier[t.id] = { items: 0, yes: 0, na: 0, no: 0, unanswered: 0 };
+  for (const item of data.items) { perTier[item.tier].items += 1; perTier[item.tier][value(item.id)] += 1; }
+  let tier = 0;
+  for (const id of data.tiers.map((t) => t.id).sort((a, b) => a - b)) {
+    const c = perTier[id];
+    if (c.yes + c.na === c.items) tier = id; else break;
+  }
+  const order = (id) => id.split(".").map(Number);
+  const open = data.items.filter((i) => value(i.id) === "no" || value(i.id) === "unanswered");
+  open.sort((a, b) => (a.tier - b.tier) || (rank[a.effort] - rank[b.effort]) ||
+    (b.prevents.length - a.prevents.length) || (b.limits.length - a.limits.length) ||
+    (order(a.id)[0] - order(b.id)[0]) || (order(a.id)[1] - order(b.id)[1]));
+  return { tier, perTier, fixes: open.map((item, i) => ({ rank: i + 1, id: item.id })) };
+}
+// END OBAAF SCORING
+
+const DATA = JSON.parse(document.getElementById("obaaf-data").textContent);
+const answers = {};
+const byId = Object.fromEntries(DATA.items.map((i) => [i.id, i]));
+const $ = (id) => document.getElementById(id);
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v; else if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  for (const child of children) if (child) node.append(child);
+  return node;
+}
+
+function renderItems() {
+  const root = $("tiers");
+  for (const tier of DATA.tiers) {
+    const section = el("section", { class: "tier", "aria-labelledby": `tier-${tier.id}` });
+    section.append(el("h2", { id: `tier-${tier.id}`, text: `Tier ${tier.id}: ${tier.name}` }),
+                   el("p", { class: "summary", text: tier.summary }));
+    for (const item of DATA.items.filter((i) => i.tier === tier.id)) {
+      const fs = el("fieldset", { class: "item", id: `item-${item.id}` });
+      const legend = el("legend");
+      legend.append(el("span", { class: "id", text: item.id }), document.createTextNode(item.question));
+      fs.append(legend, el("div", { class: "evidence", text: `Evidence: ${item.evidence}` }));
+      if (item.naWhen) fs.append(el("div", { class: "na", text: `N/A only if: ${item.naWhen}` }));
+      const choices = el("div", { class: "choices" });
+      const opts = [["yes", "Yes"], ["no", "No"]].concat(item.naWhen ? [["na", "N/A"]] : []).concat([["unanswered", "Not sure"]]);
+      for (const [value, label] of opts) {
+        const input = el("input", { type: "radio", name: `a-${item.id}`, value });
+        if (value === "unanswered") input.checked = true;
+        input.addEventListener("change", () => { setAnswer(item.id, value); });
+        choices.append(el("label", {}, input, document.createTextNode(label)));
+      }
+      const notes = el("textarea", { "aria-label": `Evidence notes for ${item.id}`, placeholder: "Where you found the evidence (optional)" });
+      notes.addEventListener("input", () => { answers[item.id] = Object.assign(answers[item.id] || { answer: "unanswered" }, { evidence: notes.value }); });
+      fs.append(choices, notes,
+        el("div", { class: "tags", text: `Profile ${item.profile.join(", ")} · effort ${DATA.effort[item.effort].label.toLowerCase()}` }));
+      section.append(fs);
+    }
+    root.append(section);
+  }
+}
+
+function setAnswer(id, value) {
+  answers[id] = Object.assign(answers[id] || {}, { answer: value });
+  update();
+}
+
+function update() {
+  const result = obaafScore(DATA, answers);
+  const tier = DATA.tiers.find((t) => t.id === result.tier);
+  $("reached").textContent = `Tier ${result.tier}`;
+  $("reached-name").textContent = tier ? tier.name : "Not yet Accounted";
+  const bars = $("bars");
+  bars.replaceChildren();
+  for (const t of DATA.tiers) {
+    const c = result.perTier[t.id];
+    const done = c.yes + c.na;
+    const bar = el("div", { class: "bar" + (done === c.items ? " done" : "") });
+    const track = el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(100 * done / c.items).toFixed(1)}%` }));
+    bar.append(el("span", { text: `${t.id} ${t.name}` }), track, el("span", { text: `${done}/${c.items}` }));
+    bars.append(bar);
+  }
+  const list = $("fixes");
+  list.replaceChildren();
+  for (const fix of result.fixes.slice(0, 12)) {
+    const item = byId[fix.id];
+    const li = el("li");
+    li.append(el("strong", { text: `${item.id} ${item.short} ` }), el("span", { class: "effort", text: DATA.effort[item.effort].label }));
+    const why = [];
+    if (item.prevents.length) why.push(`Would have prevented ${item.prevents.join(", ")}.`);
+    if (item.limits.length) why.push(`Detects or limits ${item.limits.join(", ")}.`);
+    if (why.length) li.append(el("div", { class: "why", text: why.join(" ") }));
+    const links = el("div", { class: "why" });
+    item.fix.forEach((f, i) => {
+      if (i) links.append(document.createTextNode(" · "));
+      links.append(el("a", { href: f.href, text: `How to fix: ${f.label}` }));
+    });
+    li.append(links);
+    list.append(li);
+  }
+  if (!result.fixes.length) list.append(el("li", { text: "All items satisfied." }));
+}
+
+function exportAnswers() {
+  const out = { format: DATA.format, studio: $("studio").value, respondent: $("respondent").value, date: $("date").value, answers: {} };
+  for (const item of DATA.items) {
+    const a = answers[item.id] || {};
+    out.answers[item.id] = { answer: a.answer || "unanswered", evidence: a.evidence || "" };
+  }
+  const blob = new Blob([JSON.stringify(out, null, 2) + "\n"], { type: "application/json" });
+  const link = el("a", { href: URL.createObjectURL(blob), download: `obaaf-assessment-${out.date || "answers"}.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function showError(message) {
+  const box = $("error");
+  box.textContent = message;
+  box.style.display = message ? "block" : "none";
+}
+
+function importAnswers(file) {
+  file.text().then((text) => {
+    const data = JSON.parse(text);
+    if (data.format !== DATA.format || typeof data.answers !== "object") throw new Error("This file is not an OBAAF answer file.");
+    for (const [id, a] of Object.entries(data.answers)) {
+      if (!byId[id]) throw new Error(`Unknown item ${id}.`);
+      const value = (typeof a === "string" ? a : a.answer || "unanswered").toLowerCase();
+      if (!["yes", "no", "na", "unanswered"].includes(value)) throw new Error(`Item ${id}: unknown answer "${value}".`);
+      if (value === "na" && !byId[id].naWhen) throw new Error(`Item ${id} cannot be marked N/A.`);
+    }
+    resetForm();
+    $("studio").value = data.studio || ""; $("respondent").value = data.respondent || ""; $("date").value = data.date || "";
+    for (const [id, a] of Object.entries(data.answers)) {
+      const value = (typeof a === "string" ? a : a.answer || "unanswered").toLowerCase();
+      answers[id] = { answer: value, evidence: (a && a.evidence) || "" };
+      const input = document.querySelector(`input[name="a-${CSS.escape(id)}"][value="${value}"]`);
+      if (input) input.checked = true;
+      const notes = document.querySelector(`#item-${CSS.escape(id)} textarea`);
+      if (notes) notes.value = answers[id].evidence;
+    }
+    showError("");
+    update();
+  }).catch((err) => showError(`Could not load answers: ${err.message}`));
+}
+
+function resetForm() {
+  for (const key of Object.keys(answers)) delete answers[key];
+  document.querySelectorAll("input[type=radio][value=unanswered]").forEach((i) => { i.checked = true; });
+  document.querySelectorAll("textarea").forEach((t) => { t.value = ""; });
+  update();
+}
+
+renderItems();
+$("date").value = new Date().toISOString().slice(0, 10);
+$("export").addEventListener("click", exportAnswers);
+$("import").addEventListener("change", (e) => { if (e.target.files[0]) importAnswers(e.target.files[0]); e.target.value = ""; });
+$("print").addEventListener("click", () => window.print());
+$("reset").addEventListener("click", () => { if (confirm("Clear all answers?")) resetForm(); });
+update();
+</script>
+</body>
+</html>
