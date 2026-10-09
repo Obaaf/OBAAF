@@ -89,4 +89,6 @@ Each functional requirement of the specification (FR1–FR12) has an offline tes
 - [SECURITY.md](SECURITY.md): how to report a vulnerability
 - [LICENSING.md](LICENSING.md): intended licenses and the release condition
 
-Maintainer: Osita Sean Keluo-Udeke. This is the author's independent work; nothing here implies endorsement by any government agency or by the author's employer.
+Maintainers: [Ofonna Nweze](https://github.com/Ofonna-N) and [Osita Sean Keluo-Udeke](https://github.com/seanudeke).
+
+The companion research papers are the independent work of Osita Sean Keluo-Udeke. The project does not imply endorsement by any government agency or by the research author's employer.
