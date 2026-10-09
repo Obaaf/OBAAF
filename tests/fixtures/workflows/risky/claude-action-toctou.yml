@@ -1,0 +1,17 @@
+# obaaf-models: Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk.
+# obaaf-expect: OBAAF-GHA-012 OBAAF-GHA-011 OBAAF-GHA-020
+name: AI review
+on:
+  pull_request:
+    types: [opened, synchronize]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1
+        with:
+          prompt-file: .github/prompts/review.md

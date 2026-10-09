@@ -1,0 +1,16 @@
+# obaaf-models: Nx "s1ngularity": a pull-request title expanded inside a shell step of a privileged workflow.
+# obaaf-expect: OBAAF-GHA-010 OBAAF-GHA-001
+name: Validate PR title
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize]
+permissions: write-all
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Validating: ${{ github.event.pull_request.title }}"
+          ./scripts/validate-title.sh "${{ github.event.pull_request.title }}"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

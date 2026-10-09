@@ -1,0 +1,20 @@
+# obaaf-models: Clinejection, part 2: the release workflow restores the shared cache and publishes with a long-lived token, unchecked.
+# obaaf-expect: OBAAF-GHA-006 OBAAF-GHA-014 OBAAF-GHA-016 OBAAF-GHA-017 OBAAF-GHA-008
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+      - run: npm ci && npm run build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

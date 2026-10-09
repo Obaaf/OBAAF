@@ -1,0 +1,10 @@
+# obaaf-models: PyTorch: pull requests run on persistent self-hosted runners that later build releases.
+# obaaf-expect: OBAAF-GHA-013 OBAAF-GHA-008 OBAAF-GHA-009
+name: CI
+on: [pull_request]
+jobs:
+  build:
+    runs-on: [self-hosted, linux, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./build.sh

@@ -1,0 +1,20 @@
+# obaaf-models: Clinejection, part 1: an issue-triage agent that any user can start runs shell tools with a write-capable cache.
+# obaaf-expect: OBAAF-GHA-007 OBAAF-GHA-003 OBAAF-GHA-008
+name: Issue triage
+on:
+  issues:
+    types: [opened]
+cache-mode: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+      - run: npx @anthropic-ai/claude-code -p "Label this issue" --allowedTools Bash
+        env:
+          OBAAF_EGRESS: none

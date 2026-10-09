@@ -1,0 +1,23 @@
+# obaaf-models: PromptPwnd: an agent triggered by issues and comments reads outsider text while holding write tokens, OIDC and an API key.
+# obaaf-expect: OBAAF-GHA-001 OBAAF-GHA-003 OBAAF-GHA-004 OBAAF-GHA-005 OBAAF-GHA-008 OBAAF-GHA-020
+name: Issue assistant
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+  issues: write
+  id-token: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Triage this issue and fix it if you can:
+            ${{ github.event.issue.body }}

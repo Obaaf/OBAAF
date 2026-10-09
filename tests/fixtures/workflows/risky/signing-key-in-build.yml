@@ -1,0 +1,23 @@
+# obaaf-models: Winnti and APT41: a code-signing certificate stored as a secret and loaded into the build job.
+# obaaf-expect: OBAAF-GHA-018
+name: Windows release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    environment: release
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:CERT))
+          signtool sign /f cert.pfx /p $env:CERT_PASSWORD /fd SHA256 build\Game.exe
+        env:
+          CERT: ${{ secrets.WINDOWS_SIGNING_CERT_PFX }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}

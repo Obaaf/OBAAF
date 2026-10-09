@@ -1,0 +1,16 @@
+# obaaf-models: Opting out of actions/checkout's fork protection in a privileged workflow.
+# obaaf-expect: OBAAF-GHA-019 OBAAF-GHA-002
+name: Label PR
+on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
+      - run: ./scripts/label.sh

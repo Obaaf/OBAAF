@@ -1,0 +1,22 @@
+# obaaf-models: tj-actions: a release job runs a third-party action by a movable tag while credentials are in reach.
+# obaaf-expect: OBAAF-GHA-008 OBAAF-GHA-016 OBAAF-GHA-017
+name: Ship
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    environment: release
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: tj-actions/changed-files@v45
+        id: changed
+      - run: ./scripts/publish.sh
+        env:
+          STEAM_PASSWORD: ${{ secrets.STEAM_BUILD_PASSWORD }}

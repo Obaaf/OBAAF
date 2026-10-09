@@ -1,0 +1,20 @@
+# obaaf-models: A release lane that a comment can start.
+# obaaf-expect: OBAAF-GHA-015
+name: Release on command
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+jobs:
+  release:
+    if: contains(github.event.comment.body, '/release')
+    runs-on: ubuntu-latest
+    env:
+      OBAAF_LANE: release
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./build.sh

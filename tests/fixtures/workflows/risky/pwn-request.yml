@@ -1,0 +1,16 @@
+# obaaf-models: A "pwn request": pull_request_target builds a fork's code with the base repository's token and secrets.
+# obaaf-expect: OBAAF-GHA-001 OBAAF-GHA-002 OBAAF-GHA-008 OBAAF-GHA-009 OBAAF-GHA-011
+name: PR preview
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm ci && npm run build
+        env:
+          DEPLOY_TOKEN: ${{ secrets.PREVIEW_DEPLOY_TOKEN }}
