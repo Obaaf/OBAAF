@@ -1,0 +1,276 @@
+# OBAAF agent controls.
+#
+# Source: Paper 1 ("Untrusted Text, Trusted Tokens"), sections 3, 5, 6 and 7
+# and Tables 2, 3, 5 and 6. `statement` and `rationale` reproduce section 6.
+# The `obaaf` block of each requirement says where this repository implements
+# it; it is new here.
+
+id: obaaf-agent-controls
+version: 0.1.0
+status: draft
+source: "Paper 1, sections 5–7"
+
+principle:
+  name: Taint-bounded authority
+  statement: >-
+    Every capability an agent invocation can exercise must be one its least-trusted influencer could
+    exercise directly. Adding text to an agent's context must never add authority.
+  formula: '\forall c \in A(\alpha):\quad \mathrm{req}(c) \sqsubseteq I(\alpha) = \bigsqcap_{p \in \mathit{Inf}(\alpha)} \ell(p)'
+
+trust_levels:
+  # Ordered from least to most trusted: Public ⊑ Contributor ⊑ Maintainer ⊑ Release.
+  - id: Public
+    rank: 0
+    typical_capabilities: "Comment on a public issue; open a pull request from a fork"
+  - id: Contributor
+    rank: 1
+    typical_capabilities: "Push to a non-protected branch; apply labels"
+  - id: Maintainer
+    rank: 2
+    typical_capabilities: "Merge to a protected branch; edit workflow or agent-instruction files; read repository secrets"
+  - id: Release
+    rank: 3
+    typical_capabilities: "Approve or publish a release; use a signing key"
+
+root_causes:
+  RC1: "Input–authority mismatch: text from a principal less trusted than the authority it could direct reached the agent's context."
+  RC2: "Excess standing authority: credentials, tools, or network access were broader or longer-lived than the task needed."
+  RC3: "Unbound effects: nothing bound the agent's inputs, granted authority, and resulting changes into a record that could be verified later."
+
+adversaries:
+  A1: "Outside author: can write text in any channel open to the public, but cannot push to the base repository."
+  A2: "Upstream supplier: controls content an agent ingests indirectly, or an action, container, or MCP server the pipeline runs."
+  A3: "Low-privilege insider: holds Contributor rights and seeks effects that need Maintainer or Release level."
+
+lanes:
+  - id: agent
+    level: "The integrity level of its inputs (Public for a public repository)"
+    summary: >-
+      Triggered by issue, comment, or pull-request events. A deterministic snapshot step runs first and
+      records the digests and integrity level of the inputs. The agent then runs on a fresh runner with
+      a read-only token, no secrets, no permission to request OIDC tokens, and egress limited to an
+      inference proxy that holds the model credential. Its instruction files come from the protected
+      base branch. Its only output is a proposal bundle.
+  - id: attestation
+    name: Attestation step
+    level: "- (a separate job the agent cannot influence)"
+    summary: "Computes the digest of the proposal bundle and signs the agent-run attestation with the platform's OIDC identity."
+  - id: effect
+    level: Maintainer
+    summary: >-
+      Triggered when the agent lane completes, behind a protected environment whose required reviewers
+      must approve. Verifies the attestation and the proposal digest, applies deterministic checks, and
+      applies the proposal under its own identity. It never runs the model.
+  - id: release
+    level: Release
+    summary: >-
+      Agents do not change it. It builds only from protected branches and, before publishing, verifies
+      that every agent-authored commit in the release range carries an attestation and an approval
+      record.
+
+requirements:
+  - id: R1
+    name: Provenance labels and snapshot binding
+    title: Label inputs by provenance and bind the snapshot
+    statement: >-
+      Every channel through which content can reach an agent is labeled with the lowest level among the
+      principals able to influence it, and unknown channels are labeled Public. The content an
+      invocation will read is captured when authority is decided, recorded by cryptographic digest, and
+      delivered to the agent from that snapshot. Content fetched during the run is labeled Public unless
+      it comes from a source pinned in advance.
+    rationale: >-
+      R1 makes Inf(α) computable and closes the time-of-check-to-time-of-use gap exploited in the Claude
+      Code action case.
+    root_causes: [RC1]
+    assumption: "(ii) sound labeling"
+    cases: [Claude Code action, PromptPwnd]
+    nccoe: "Prompt-injection controls"
+    ssdf: []
+    slsa: "None"
+    new: "Trust labels for content an automated actor reads"
+    github_native: "Event payloads identify authors; workflows can be split by trust"
+    github_gap: "No provenance labels or snapshot binding; implement as a deterministic step before the agent"
+    obaaf:
+      tools: ["obaaf snapshot"]
+      templates: ["obaaf-agent-propose.yml: snapshot job"]
+      checks: [OBAAF-GHA-010]
+
+  - id: R2
+    name: Authority derived from labels
+    title: Derive authority from labels
+    statement: >-
+      Token permissions, secrets, tool sets, and network policy are derived from the invocation's
+      integrity level and fixed when the job starts. An invocation at Public level receives read-only
+      access to public content, no secrets, no write access to protected refs or instruction files, and
+      no general network egress. Reads of private source and secrets are treated as capabilities, so
+      they are withheld from any invocation that untrusted text can steer.
+    rationale: "R2 is the principle itself, applied at the pipeline layer."
+    root_causes: [RC1, RC2]
+    assumption: "The principle itself"
+    cases: [GitHub MCP, GitLab Duo, CamoLeak]
+    nccoe: "Authorization; prompt-injection controls"
+    ssdf: [PO.5]
+    slsa: "Build L3: secrets inaccessible to user-defined steps"
+    new: "Labels determine permissions"
+    github_native: "Job-level permissions; environment secrets released only after approval"
+    github_gap: "No policy engine maps labels to permissions; enforce through lane structure and organization policy"
+    obaaf:
+      templates: ["obaaf-agent-propose.yml: agent job permissions"]
+      checks: [OBAAF-GHA-003, OBAAF-GHA-005]
+
+  - id: R3
+    name: Per-invocation short-lived identity
+    title: Give each invocation its own short-lived identity
+    statement: >-
+      Each invocation authenticates as a workload identity distinct from human users and from other
+      workflows, with credentials issued per job, scoped to one repository and purpose, and expiring
+      when the job ends, as with per-job OIDC-federated credentials. Long-lived personal access tokens
+      are not used. Credentials for the model API are held by a proxy outside the agent's reach, or are
+      short-lived and budget-limited. Calls to downstream services use tokens issued for those services,
+      through token exchange with audience restriction; a token issued for one service is never passed
+      through to another.
+    rationale: "R3 removes standing authority that the task does not need, and supports assumption (i)."
+    root_causes: [RC2]
+    assumption: "(i) complete mediation"
+    cases: [PromptPwnd, Amazon Q, Nx]
+    nccoe: "Identification; authorization"
+    ssdf: [PO.5]
+    slsa: "Build provenance identifies the builder"
+    new: "A distinct identity per agent invocation"
+    github_native: "Job tokens that expire with the job; per-job OIDC tokens with claims"
+    github_gap: "Cloud trust policies must constrain the claims; model keys need a proxy"
+    obaaf:
+      docs: ["docs/inference-proxy.md"]
+      checks: [OBAAF-GHA-004, OBAAF-GHA-005]
+
+  - id: R4
+    name: Proposal–effect separation
+    title: Separate proposals from effects
+    statement: >-
+      Any agent output that would change protected state (protected branches, workflow and instruction
+      files, releases, secrets, repository settings) is a proposal. A separate deterministic job applies
+      it, under a different identity, only after policy checks pass and a principal at the required
+      level, other than the requester, approves.
+    rationale: "R4 is the certified endorsement of Paper 1, section 5.5."
+    root_causes: [RC2]
+    assumption: "Certified endorsement"
+    cases: [Nx, Amazon Q]
+    nccoe: "Authorization"
+    ssdf: [PS.1, PW.7]
+    slsa: "Source L4: two-party review"
+    new: "Approval of agent proposals by someone other than the requester"
+    github_native: "Environments with required reviewers and self-review prevention; branch rulesets"
+    github_gap: "Deterministic checks on proposals are project-defined"
+    obaaf:
+      tools: ["obaaf proposal check", "obaaf attest approval"]
+      templates: ["obaaf-agent-apply.yml"]
+      checks: [OBAAF-GHA-003, OBAAF-GHA-021, OBAAF-GHA-022]
+
+  - id: R5
+    name: Instruction-plane integrity
+    title: Protect the instruction plane
+    statement: >-
+      Files that steer agents (system prompts, agent instruction files, rules files, tool allow-lists,
+      MCP configurations, and the workflow files that invoke agents) are code. They live on protected
+      branches under code-owner review, are scanned for hidden characters, and are loaded from the
+      protected base branch rather than from the change under review. Agents cannot modify them.
+    rationale: "Poisoned instructions persist across runs and were the vector in two cases."
+    root_causes: [RC1, RC3]
+    assumption: "(ii) sound labeling"
+    cases: [Rules File Backdoor, Amazon Q]
+    nccoe: "Prompt-injection controls"
+    ssdf: [PS.1]
+    slsa: "Source L3: continuous technical controls"
+    new: "Agent instruction files treated as code"
+    github_native: "Code owners and branch rulesets; push rulesets that restrict file paths, on paid plans for private repositories"
+    github_gap: "Hidden-character scanning is project-defined, though GitHub now warns about hidden Unicode"
+    obaaf:
+      tools: ["obaaf check (instruction-file scan)", "obaaf proposal check"]
+      templates: ["CODEOWNERS.example", "obaaf-agent-propose.yml: instructions from the base branch"]
+      checks: [OBAAF-INS-001, OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-GHA-012]
+
+  - id: R6
+    name: Tool and model verification
+    title: Verify tools and models as supply chain inputs
+    statement: >-
+      Agent actions, harnesses, containers, and MCP servers are pinned by immutable digest and verified
+      against their provenance where it exists. Tool descriptions and outputs from servers not verified
+      at Maintainer level are labeled Public under R1.
+    rationale: "A pipeline's trusted components were the vector in the tj-actions compromise."
+    root_causes: [RC1]
+    assumption: "(ii) sound labeling"
+    cases: [tj-actions (non-agent)]
+    nccoe: "None"
+    ssdf: [PO.3, PW.4]
+    slsa: "Verification of artifact provenance"
+    new: "Tool descriptions treated as untrusted input"
+    github_native: "Referencing actions by full commit digest"
+    github_gap: "No native verification of an action's provenance when it is consumed"
+    obaaf:
+      checks: [OBAAF-GHA-008]
+
+  - id: R7
+    name: Isolation and egress control
+    title: Isolate the run and constrain egress
+    statement: >-
+      Each invocation runs in a fresh, isolated environment. That environment shares no writable state,
+      including caches, with release jobs, and cannot reach cloud metadata endpoints or container
+      sockets. Network egress is denied by default, except to the model endpoint and to pinned package
+      sources the task requires.
+    rationale: >-
+      R7 removes ambient authority, supporting assumption (i). A cache shared with release jobs turned a
+      triage run into a release compromise in the Cline case, and unexpected egress is how the
+      tj-actions compromise was first detected.
+    root_causes: [RC2]
+    assumption: "(i) complete mediation"
+    cases: [Gemini CLI, GitLab Duo, Clinejection]
+    nccoe: "Prompt-injection containment"
+    ssdf: [PO.5]
+    slsa: "Build L3: isolated, ephemeral environments"
+    new: "Default-deny egress for agents"
+    github_native: "A new virtual machine for each job on GitHub-hosted runners"
+    github_gap: "No native egress allow-list; use self-hosted ephemeral runners with network policy, or a runtime monitor"
+    obaaf:
+      templates: ["obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor"]
+      checks: [OBAAF-GHA-006, OBAAF-GHA-007, OBAAF-GHA-011, OBAAF-GHA-013, OBAAF-GHA-020]
+
+  - id: R8
+    name: Attested agent runs
+    title: Attest every agent run
+    statement: >-
+      Each invocation produces a signed attestation. It binds the triggering event and principal; the
+      digests and labels of the input snapshot (R1); the granted authority and identity (R2, R3); the
+      versions of the agent, harness, and model (R6); the digests of the proposals produced; and any
+      approvals (R4). Fields describing inputs, authority, and outputs are generated by jobs the agent
+      cannot influence. The agent's self-reported trace of tool calls is recorded but marked untrusted.
+      Release verification checks that every change made through the agent path carries an attestation.
+    rationale: "R8 addresses RC3 and gives auditors a record of what each agent saw, could do, and did."
+    root_causes: [RC3]
+    assumption: "Detection and audit"
+    cases: [Amazon Q, Nx]
+    nccoe: "Auditing; non-repudiation"
+    ssdf: [PS.2, PS.3]
+    slsa: "Build provenance (L2–L3)"
+    new: "An agent-run predicate"
+    github_native: "The attest action with custom predicates"
+    github_gap: "Agent-specific fields are project-defined"
+    obaaf:
+      tools: ["obaaf attest agent-run", "obaaf verify agent-run", "obaaf attest approval", "obaaf verify release"]
+      schemas: ["agent-run.schema.json", "agent-approval.schema.json"]
+      templates: ["obaaf-agent-propose.yml: attest job", "obaaf-agent-apply.yml", "obaaf-publish.yml: verify jobs"]
+      checks: [OBAAF-GHA-016, OBAAF-GHA-021]
+
+# Paper 1, Table 3. Where each field of the agent-run record comes from.
+attestation_v01_note: >-
+  The Trace field holds one digest of the agent's trace file, not a digest per tool call. The approval
+  time is when the effect lane read the approval, because GitHub's approvals API returns no review
+  time. The model identifier and version stay empty until an inference proxy reports them (version
+  0.2, DECISIONS.md D-020). Models are therefore not yet pinned by digest (FR10).
+attestation_fields:
+  - {field: Subject, content: "Digests of the proposal bundle files", produced_by: "Attestation step", trusted: true}
+  - {field: Trigger, content: "Event type and identifier, repository, triggering principal and level", produced_by: "Snapshot step", trusted: true}
+  - {field: Inputs, content: "Each snapshot item with digest, channel, and label; the computed integrity level", produced_by: "Snapshot step", trusted: true}
+  - {field: Authority, content: "Token permissions, names of secrets granted, network policy, OIDC permission", produced_by: "Protected workflow definition and snapshot step", trusted: true}
+  - {field: Agent, content: "Digests of the action and harness; model identifier and version as reported by the inference proxy", produced_by: "Snapshot step and proxy", trusted: true}
+  - {field: Trace, content: "Tool calls with digests of their arguments", produced_by: "Agent harness", trusted: false}
+  - {field: Approvals, content: "Reviewer identity, time, and environment", produced_by: "Effect lane", trusted: true}

@@ -1,0 +1,220 @@
+# Documented cases that motivate OBAAF's controls.
+#
+# game_cases and transfer_cases: Paper 2, Tables 1, 2 and 7.
+# agent_cases: Paper 1, Tables 1 and 4.
+#
+# In `prevent_items` and `limit_items`, the "Deciding items" column of Paper 2
+# Table 7 is split by tier: items at the "Prevented at" tier go in
+# prevent_items; the rest go in limit_items (detected or limited). The
+# self-assessment uses these lists to rank fixes (DECISIONS.md, D-006).
+
+version: 0.1.0
+source: "Paper 2, Tables 1, 2 and 7; Paper 1, Tables 1 and 4"
+
+game_cases:
+  - id: winnti-2013
+    name: Winnti campaign
+    reported: 2013
+    attack_paths: [AP2, AP3]
+    summary: >-
+      Attackers compromised at least 35 game companies and stole source code and more than a dozen
+      code-signing certificates. They delivered a trojan through a publisher's official update server
+      and used the stolen certificates to sign malware.
+    url: https://securelist.com/winnti-more-than-just-a-game/37029/
+    prevented_at: 2
+    detected_or_limited_at: 1
+    prevent_items: ["2.3", "2.10"]
+    limit_items: ["1.5"]
+    deciding: "2.3 keys out of files; 2.10 updater verifies signatures; 1.5 key inventory speeds revocation"
+
+  - id: apt41-2019
+    name: APT41
+    reported: 2019
+    attack_paths: [AP1, AP2]
+    summary: >-
+      Attackers reached game production environments, source code and certificates. They injected
+      malicious code into legitimate files that were later distributed, and signed malware with stolen
+      certificates.
+    url: https://cloud.google.com/blog/topics/threat-intelligence/apt41-dual-espionage-and-cyber-crime-operation
+    prevented_at: 2
+    detected_or_limited_at: 3
+    prevent_items: ["2.1", "2.3"]
+    limit_items: ["3.2"]
+    deciding: "2.1 separate release lane; 2.3 keys; 3.2 provenance check flags files the release lane did not build"
+
+  - id: winnti-builds-2019
+    name: Winnti build compromises
+    reported: 2019
+    attack_paths: [AP1]
+    summary: >-
+      Attackers changed the build configuration of two games and one gaming platform application,
+      producing backdoored official executables with victims estimated in the tens or hundreds of
+      thousands.
+    url: https://www.welivesecurity.com/2019/03/11/gaming-industry-scope-attackers-asia/
+    prevented_at: 2
+    detected_or_limited_at: 4
+    prevent_items: ["2.2"]
+    limit_items: ["3.4", "4.2"]
+    deciding: "2.2 build configuration only from reviewed version control; 3.4 reimaging removes drift; 4.2 independent rebuild"
+
+  - id: pipemon-2020
+    name: PipeMon
+    reported: 2020
+    attack_paths: [AP1, AP2]
+    summary: >-
+      A build orchestration server at massively multiplayer game developers was compromised, with a
+      backdoor signed with a previously stolen certificate. It could have trojanized game executables;
+      there is no evidence that it did.
+    url: https://www.eset.com/us/about/newsroom/press-releases/winnti-group-targets-video-game-developers-again-eset-researchers-uncover-1/
+    prevented_at: 2
+    detected_or_limited_at: 3
+    prevent_items: ["2.1", "2.4"]
+    limit_items: ["3.2"]
+    deciding: "2.1 separate release lane; 2.4 no standing credentials; 3.2 provenance check"
+
+  - id: spinok-2023
+    name: SpinOk
+    reported: 2023
+    attack_paths: [AP4]
+    summary: "A marketing SDK embedded in apps and games carried a spyware module, in 101 apps with more than 421 million downloads."
+    url: https://news.drweb.com/show/?i=14705
+    prevented_at: 2
+    detected_or_limited_at: 1
+    prevent_items: ["2.11"]
+    limit_items: ["1.8"]
+    deciding: "2.11 SDK behavior review; 1.8 SDK inventory"
+
+  - id: steamworks-2023
+    name: Steamworks accounts
+    reported: 2023
+    attack_paths: [AP3]
+    summary: "Developer publishing accounts were used to push malicious updates to released games."
+    url: https://www.bleepingcomputer.com/news/security/steam-enforces-sms-verification-to-curb-malware-ridden-updates/
+    prevented_at: 1
+    detected_or_limited_at: 2
+    prevent_items: ["1.1", "1.2"]
+    limit_items: ["2.12"]
+    deciding: "1.1 multi-factor authentication; 1.2 dedicated build account; 2.12 alerts"
+
+  - id: downfall-2023
+    name: Downfall mod
+    reported: 2023
+    attack_paths: [AP3]
+    summary: >-
+      Attackers took over a developer's Steam and Discord accounts, likely through session-token theft.
+      A malicious update that installed an infostealer was live for about an hour.
+    url: https://www.bleepingcomputer.com/news/security/steam-game-mod-breached-to-push-password-stealing-malware/
+    prevented_at: 4
+    detected_or_limited_at: 2
+    prevent_items: ["4.3"]
+    limit_items: ["2.12"]
+    deciding: "4.3 two-person release; 2.12 alerts"
+
+  - id: chemia-2025
+    name: Chemia
+    reported: 2025
+    attack_paths: [AP3]
+    attack_path_presumed: true
+    summary: "An early-access Steam game delivered updates carrying three malware families; the origin of the change is undetermined."
+    url: https://www.tomshardware.com/tech-industry/cyber-security/hacker-plants-three-strains-of-malware-in-a-steam-early-access-game-called-chemia-security-company-found-crypto-jacking-infostealers-and-a-backdoor-to-install-yet-more-malware-in-the-future
+    prevented_at: 4
+    prevented_condition: "if an account was taken over"
+    detected_or_limited_at: 2
+    prevent_items: ["4.3"]
+    limit_items: ["2.12"]
+    deciding: "As for Downfall; a malicious publisher is outside a studio's self-assessment"
+
+  - id: blockblasters-2025
+    name: BlockBlasters
+    reported: 2025
+    attack_paths: [AP3]
+    attack_path_presumed: true
+    summary: >-
+      A verified free Steam game released a patch a month after launch that delivered a cryptocurrency
+      stealer; the origin of the change is undetermined.
+    url: https://www.bleepingcomputer.com/news/security/verified-steam-game-steals-streamers-cancer-treatment-donations/
+    prevented_at: 4
+    prevented_condition: "if an account was taken over"
+    detected_or_limited_at: 2
+    prevent_items: ["4.3"]
+    limit_items: ["2.12"]
+    deciding: "As for Downfall; a malicious publisher is outside a studio's self-assessment"
+
+transfer_cases:
+  - id: sunspot-2021
+    name: SUNSPOT
+    reported: 2021
+    technique: "Malware on the build server swapped a source file during compilation and restored it afterward, so the repository stayed clean."
+    url: https://www.crowdstrike.com/en-us/blog/sunspot-malware-technical-analysis/
+    prevented_at: 3
+    detected_or_limited_at: 4
+    prevent_items: ["3.3", "3.4"]
+    limit_items: ["4.2"]
+    deciding: "3.3 or 3.4 limit implant persistence; 4.2 independent rebuild"
+
+  - id: 3cx-2023
+    name: 3CX
+    reported: 2023
+    technique: "Attackers compromised Windows and macOS build environments and shipped trojanized, signed installers."
+    url: https://cloud.google.com/blog/topics/threat-intelligence/3cx-software-supply-chain-compromise
+    prevented_at: 2
+    detected_or_limited_at: 3
+    prevent_items: ["2.1"]
+    limit_items: ["3.4", "3.5"]
+    deciding: "2.1 separate release lane; 3.4 reimaging; 3.5 egress limits"
+
+  - id: pytorch-2024
+    name: PyTorch
+    reported: 2024
+    technique: "Persistent self-hosted runners ran workflows from pull requests and exposed release credentials."
+    url: https://johnstawinski.com/2024/01/11/playing-with-fire-how-we-executed-a-critical-supply-chain-attack-on-pytorch/
+    prevented_at: 2
+    detected_or_limited_at: null
+    prevent_items: ["2.1", "2.4"]
+    limit_items: []
+    deciding: "2.1 release builds never run unreviewed changes; 2.4 no standing credentials"
+
+  - id: ultralytics-2024
+    name: Ultralytics
+    reported: 2024
+    technique: "A poisoned CI cache was consumed by the release build."
+    url: https://blog.pypi.org/posts/2024-12-11-ultralytics-attack-analysis/
+    prevented_at: 2
+    detected_or_limited_at: null
+    prevent_items: ["2.7"]
+    limit_items: []
+    deciding: "2.7 release caches not writable by untrusted builds"
+
+  - id: tj-actions-2025
+    name: tj-actions
+    reported: 2025
+    technique: "A widely used CI component was altered to dump secrets into build logs."
+    url: https://www.stepsecurity.io/blog/harden-runner-detection-tj-actions-changed-files-action-is-compromised
+    prevented_at: 2
+    detected_or_limited_at: 3
+    prevent_items: ["2.4"]
+    limit_items: ["3.5"]
+    deciding: "2.4 short-lived credentials limit exposure; 3.5 egress limits"
+
+  - id: clinejection-2026
+    name: Clinejection
+    reported: 2026
+    technique: "An AI triage workflow, steered by an issue title, poisoned a cache used by release jobs and exposed publishing tokens."
+    url: https://adnanthekhan.com/posts/clinejection/
+    prevented_at: 2
+    detected_or_limited_at: 3
+    prevent_items: ["2.7"]
+    limit_items: ["3.6"]
+    deciding: "2.7 release caches not writable by untrusted builds; 3.6 agents without secrets"
+
+agent_cases:
+  - {id: rules-file-backdoor, name: Rules File Backdoor, disclosed: "2025-03", status: Demonstrated, root_causes: [RC1, RC3], prevented_by: [R5], prevented_condition: "if the file entered through review", contained_by: [R4, R8]}
+  - {id: github-mcp, name: GitHub MCP, disclosed: "2025-05", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [R2], contained_by: [R1, R3]}
+  - {id: gitlab-duo, name: GitLab Duo, disclosed: "2025-05", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [R2], contained_by: [R7]}
+  - {id: gemini-cli, name: Gemini CLI, disclosed: "2025-07", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [], contained_by: [R2, R7]}
+  - {id: amazon-q, name: Amazon Q extension, disclosed: "2025-07", status: Exploited, root_causes: [RC2, RC3], prevented_by: [R3, R4, R5], contained_by: [R8]}
+  - {id: nx-s1ngularity, name: Nx "s1ngularity", disclosed: "2025-08", status: Exploited, root_causes: [RC1, RC2, RC3], prevented_by: [R1, R2, R3, R4], contained_by: [R8]}
+  - {id: camoleak, name: CamoLeak, disclosed: "2025-10", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [R2], contained_by: [R7]}
+  - {id: promptpwnd, name: PromptPwnd, disclosed: "2025-12", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [R2, R3], contained_by: [R4, R7]}
+  - {id: claude-code-action, name: Claude Code action, disclosed: "2026-02", status: Demonstrated, root_causes: [RC1, RC2], prevented_by: [R1], contained_by: [R2]}
+  - {id: clinejection, name: Clinejection, disclosed: "2026-02", status: Exploited, root_causes: [RC1, RC2, RC3], prevented_by: [R7], contained_by: [R2, R3, R8]}

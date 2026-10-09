@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://obaaf.example/schemas/agent-run/v0.1.json",
+  "title": "OBAAF agent-run predicate, version 0.1 (draft)",
+  "description": "Predicate of the in-toto statement that records one agent run (Paper 1, Table 3; R8, FR10). The statement's subjects are the files of the proposal bundle. Every field except `trace` is produced by a job the agent cannot influence.",
+  "type": "object",
+  "required": [
+    "obaafVersion",
+    "trigger",
+    "inputs",
+    "authority",
+    "agent",
+    "trace",
+    "run",
+    "recordedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "obaafVersion": {
+      "type": "string"
+    },
+    "trigger": {
+      "description": "Event type and identifier, repository, triggering principal and level (snapshot step).",
+      "type": "object",
+      "required": [
+        "event",
+        "repository",
+        "principal"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string"
+        },
+        "number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "repositoryVisibility": {
+          "enum": [
+            "public",
+            "private",
+            "internal"
+          ]
+        },
+        "principal": {
+          "type": "object",
+          "required": [
+            "login",
+            "level"
+          ],
+          "properties": {
+            "login": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/$defs/level"
+            },
+            "labelSource": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "inputs": {
+      "description": "Each snapshot item with digest, channel and label, and the computed integrity level (snapshot step).",
+      "type": "object",
+      "required": [
+        "snapshotDigest",
+        "items",
+        "floor",
+        "integrityLevel"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "snapshotDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "channel",
+              "digest",
+              "label"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "channel": {
+                "type": "string"
+              },
+              "digest": {
+                "$ref": "#/$defs/digest"
+              },
+              "label": {
+                "$ref": "#/$defs/level"
+              },
+              "author": {
+                "type": "string"
+              },
+              "labelSource": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "floor": {
+          "type": "object",
+          "required": [
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "$ref": "#/$defs/level"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "integrityLevel": {
+          "$ref": "#/$defs/level"
+        },
+        "takenAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "authority": {
+      "description": "Token permissions, secrets granted (names only), network policy and OIDC permission, from the protected workflow definition.",
+      "type": "object",
+      "required": [
+        "cacheMode",
+        "job",
+        "network",
+        "oidc",
+        "runner",
+        "secrets",
+        "source",
+        "tokenPermissions"
+      ],
+      "properties": {
+        "job": {
+          "type": "string"
+        },
+        "tokenPermissions": {
+          "type": "object"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oidc": {
+          "type": "boolean"
+        },
+        "cacheMode": {
+          "type": "string"
+        },
+        "network": {
+          "type": "object",
+          "properties": {
+            "declaredPolicy": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "monitors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "runner": {
+          "type": "object",
+          "properties": {
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "selfHosted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "enum": [
+                "github-hosted",
+                "self-hosted",
+                "unknown"
+              ],
+              "description": "github-hosted for standard GitHub-hosted labels; unknown for custom labels, larger runners or labels from expressions."
+            }
+          }
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "agent": {
+      "description": "Digests of the actions and harness; model identifier and version as reported by the inference proxy.",
+      "type": "object",
+      "required": [
+        "actions",
+        "model"
+      ],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "uses"
+            ],
+            "properties": {
+              "uses": {
+                "type": "string"
+              },
+              "digest": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "harness": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "type": "object",
+          "required": [
+            "reportedBy"
+          ],
+          "properties": {
+            "reportedBy": {
+              "enum": [
+                "inference-proxy",
+                "none"
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requests": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "receiptDigest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        }
+      }
+    },
+    "trace": {
+      "description": "The agent's own account of its tool calls. Self-reported and untrusted.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "digest",
+            "trusted"
+          ],
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "trusted": {
+              "const": false
+            },
+            "reportedBy": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "run": {
+      "type": "object"
+    },
+    "approvals": {
+      "description": "Approvals are recorded by the effect lane in a separate agent-approval attestation over the same subjects.",
+      "type": "object"
+    },
+    "recordedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "level": {
+      "enum": [
+        "Public",
+        "Contributor",
+        "Maintainer",
+        "Release"
+      ]
+    },
+    "digest": {
+      "type": "object",
+      "required": [
+        "sha256"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

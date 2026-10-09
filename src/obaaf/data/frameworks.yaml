@@ -1,0 +1,48 @@
+# Vocabulary for the framework references used in the profile and the
+# self-assessment. Practice titles are from NIST SP 800-218 version 1.1.
+# PS.4 is a practice proposed in the initial public draft of SSDF 1.2
+# (NIST SP 800-218r1, December 2025) and may change before the final version.
+#
+# NFR8: update these mappings within 90 days of a final SSDF or SLSA release.
+
+version: 0.1.0
+
+ssdf:
+  versions:
+    "1.1": {title: "NIST SP 800-218, SSDF version 1.1", date: "2022-02", url: "https://doi.org/10.6028/NIST.SP.800-218"}
+    "1.2-ipd": {title: "NIST SP 800-218r1, SSDF version 1.2, initial public draft", date: "2025-12", url: "https://csrc.nist.gov/pubs/sp/800/218/r1/ipd"}
+  practices:
+    PO.2: {title: "Implement Roles and Responsibilities", version: "1.1"}
+    PO.3: {title: "Implement Supporting Toolchains", version: "1.1"}
+    PO.5: {title: "Implement and Maintain Secure Environments for Software Development", version: "1.1"}
+    PS.1: {title: "Protect All Forms of Code from Unauthorized Access and Tampering", version: "1.1"}
+    PS.2: {title: "Provide a Mechanism for Verifying Software Release Integrity", version: "1.1"}
+    PS.3: {title: "Archive and Protect Each Software Release", version: "1.1"}
+    PS.4: {title: "Ensure Software Updates Are Robust and Reliable", version: "1.2-ipd"}
+    PW.4: {title: "Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality", version: "1.1"}
+    PW.7: {title: "Review and/or Analyze Human-Readable Code to Identify Vulnerabilities and Verify Compliance with Security Requirements", version: "1.1"}
+  tasks:
+    # Summaries, not quotations. See the SSDF for the exact task text.
+    PS.3.1: {practice: PS.3, summary: "Archive each release's files and supporting data, such as integrity verification information and provenance data."}
+    PS.3.2: {practice: PS.3, summary: "Collect, safeguard, maintain, and share provenance data for all components of each release."}
+
+slsa:
+  version: "1.2"
+  url: "https://slsa.dev/spec/v1.2/"
+  requirements:
+    build-l1-provenance-exists: {track: build, level: 1, title: "Build L1: provenance exists"}
+    build-l2-hosted-signed: {track: build, level: 2, title: "Build L2: hosted build platform; signed provenance"}
+    build-l3-isolated: {track: build, level: 3, title: "Build L3: isolated, ephemeral builds"}
+    build-l3-cache-integrity: {track: build, level: 3, title: "Build L3: cache integrity"}
+    build-l3-signing-isolated: {track: build, level: 3, title: "Build L3: signing material inaccessible to build steps (unforgeable provenance)"}
+    build-verification: {track: build, level: null, title: "Build track: verification of artifacts against provenance"}
+    source-l1-l2: {track: source, level: 2, title: "Source L1–L2: version control and change history"}
+    source-l3: {track: source, level: 3, title: "Source L3: continuous technical controls"}
+    source-l4: {track: source, level: 4, title: "Source L4: two-party review"}
+  # FR1: every Build-track requirement group must map to at least one assessment item.
+  build_track_groups:
+    - build-l1-provenance-exists
+    - build-l2-hosted-signed
+    - build-l3-isolated
+    - build-l3-cache-integrity
+    - build-l3-signing-isolated

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://obaaf.example/schemas/build-record/v0.1.json",
+  "title": "OBAAF build-record predicate, version 0.1 (draft)",
+  "description": "Predicate of the in-toto statement that records how a release artifact was built (G7.1, FR4, FR5). It accompanies SLSA provenance and adds what games need: the asset revision, the binary-manifest digest, the SDK versions and the isolation tier. Each field says who reported it.",
+  "type": "object",
+  "required": ["obaafVersion", "source", "assets", "manifest", "sdks", "isolation", "builder", "recordedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "obaafVersion": {"type": "string"},
+    "source": {
+      "type": "object",
+      "required": ["revision", "reportedBy"],
+      "properties": {
+        "repository": {"type": "string"},
+        "revision": {"type": "string", "minLength": 1},
+        "ref": {"type": "string"},
+        "reportedBy": {"type": "string"}
+      }
+    },
+    "assets": {
+      "type": "object",
+      "required": ["revision", "system", "reportedBy"],
+      "properties": {
+        "revision": {"type": "string", "minLength": 1},
+        "system": {"type": "string"},
+        "reportedBy": {"type": "string"}
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": ["digest", "reportedBy"],
+      "properties": {
+        "digest": {
+          "type": "object",
+          "required": ["sha256"],
+          "properties": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+        },
+        "entries": {"type": "integer", "minimum": 0},
+        "components": {"type": "integer", "minimum": 0},
+        "reportedBy": {"type": "string"}
+      }
+    },
+    "sdks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "version", "reportedBy"],
+        "properties": {
+          "name": {"type": "string"},
+          "id": {"type": "string"},
+          "version": {"type": "string"},
+          "kind": {"type": "string"},
+          "reportedBy": {"type": "string"}
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "required": ["tier", "slsaBuildLevel3", "runnerEnvironment", "reportedBy"],
+      "properties": {
+        "tier": {"enum": ["A", "B"]},
+        "slsaBuildLevel3": {"type": "boolean"},
+        "runnerEnvironment": {"enum": ["github-hosted", "self-hosted", "unknown"]},
+        "runnerLabels": {"type": "array", "items": {"type": "string"}},
+        "buildJob": {"type": "string"},
+        "reportedBy": {"type": "string"}
+      },
+      "allOf": [
+        {"if": {"properties": {"tier": {"const": "B"}}}, "then": {"properties": {"slsaBuildLevel3": {"const": false}}}}
+      ]
+    },
+    "builder": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "workflow": {"type": "string"}}
+    },
+    "trigger": {"type": "object", "properties": {"actor": {"type": "string"}}},
+    "run": {"type": "object"},
+    "recordedAt": {"type": "string", "format": "date-time"}
+  }
+}

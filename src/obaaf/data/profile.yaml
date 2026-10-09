@@ -1,0 +1,619 @@
+# OBAAF game-pipeline integrity profile.
+#
+# Source: Paper 2 ("Securing the Game Build"), Table 4. The `statement`,
+# `addresses`, `ssdf` and `slsa_or_other` fields reproduce that table. The
+# `title`, `rationale`, `test` and `evidence` fields are new in this repository
+# and are drafts for the maintainer's review (see DECISIONS.md, D-004).
+#
+# IDs are stable (NFR7). Never renumber; retire an ID instead of reusing it.
+
+id: obaaf-game-pipeline-profile
+version: 0.1.0
+status: draft
+source: "Paper 2, Table 4"
+
+attack_paths:
+  AP1: "Build environment: the attacker altered what the studio's own build produced."
+  AP2: "Signing material: the attacker stole certificates or keys and signed malware as the studio."
+  AP3: "Publishing or update channel: the attacker pushed a malicious update through an account, server, or store the players trusted."
+  AP4: "Third-party component: malicious code arrived inside an SDK or dependency the studio shipped."
+
+properties:
+  D1: "Assets dominate inputs, and some can execute code."
+  D2: "Engines, middleware, and platform SDKs arrive outside package registries."
+  D3: "One project fans out to platform-specific build hosts, some persistent."
+  D4: "Builds depend on shared, writable derived-data caches."
+  D5: "Platforms take over signing and distribution."
+  D6: "Updates are frequent and often urgent."
+  D7: "Most studios are small and rely on partners."
+
+isolation_tiers:
+  A: "A fresh environment for every build, where the toolchain allows it. Can meet SLSA Build Level 3."
+  B: >-
+    Persistent hosts dedicated to the release lane: they never build unreviewed changes, accept no
+    interactive sessions, restrict egress, hold no standing secrets, and are reimaged from a versioned
+    image on a schedule and after any suspected exposure. Reported as below SLSA Build Level 3.
+
+families:
+  - id: F1
+    title: Source and assets
+    requirements:
+      - id: G1.1
+        title: Protect release branches and streams
+        statement: >-
+          Protect release branches and streams: changes need review, and build scripts, CI
+          configuration, and engine and plugin code are owner-protected paths
+        addresses: {attack_paths: [AP1], properties: []}
+        ssdf: [PS.1]
+        slsa_or_other: "Source L3"
+        slsa: [source-l3]
+        rationale: >-
+          Build scripts, CI configuration, and engine and plugin code change what ships as surely as
+          game code does, so review that covers only game code leaves the build path open. Owner-protected
+          paths give the review that G1.2 relies on a person who must approve.
+        test: >-
+          For every release branch or stream, confirm that (1) changes cannot land without an
+          approving review, and (2) the paths holding build scripts, CI configuration, and engine and
+          plugin code have named owners whose approval is required. Pass only if both hold for every
+          release branch or stream.
+        evidence: "Branch or stream protection settings; the code-owner file or path protections."
+        checks: [OBAAF-REPO-001]
+
+      - id: G1.2
+        title: Treat the build definition as code
+        statement: >-
+          Treat the build definition as code: build graphs and packaging and signing steps live in
+          version control, changes need approval by someone other than the author, and build hosts
+          take configuration only from version control
+        addresses: {attack_paths: [AP1], properties: [D3]}
+        ssdf: [PS.1, PW.7]
+        slsa_or_other: "Source L4, for the build definition"
+        slsa: [source-l4]
+        rationale: >-
+          Persistent build hosts drift, and configuration edited on a host leaves no review trail.
+          Keeping the build definition in version control, approved by a second person, makes every
+          change to how releases are built visible and attributable.
+        test: >-
+          Confirm that (1) build graphs and packaging and signing steps are stored in version control,
+          (2) a change to them cannot merge without approval from someone other than its author, and
+          (3) build hosts read their build configuration only from version control. Sample the three
+          most recent changes to these files and check each was approved by a non-author.
+        evidence: "Protection rules on build-definition paths; a sample of recent changes; host configuration."
+        checks: [OBAAF-REPO-001]
+
+      - id: G1.3
+        title: Attribute every change
+        statement: >-
+          Attribute every change: individual accounts for every person and partner, with no shared
+          logins
+        addresses: {attack_paths: [AP1], properties: [D7]}
+        ssdf: [PS.1]
+        slsa_or_other: "Source L2"
+        slsa: [source-l1-l2]
+        rationale: >-
+          Change history only identifies who changed what when every person, contractor, and partner
+          has an individual account. Shared logins also make it impossible to revoke one person's
+          access without disrupting everyone.
+        test: >-
+          List the accounts in version control and CI. Pass if every account maps to exactly one person
+          or one automated service, and no account is shared.
+        evidence: "User list for version control and CI, with owners."
+        checks: []
+
+  - id: F2
+    title: Intake of third-party code, SDKs, and assets
+    requirements:
+      - id: G2.1
+        title: Keep a binary manifest
+        statement: >-
+          Keep a binary manifest: record every vendored binary, SDK, engine build, and plugin with its
+          source, version, and digest, and fail builds on unrecorded changes
+        addresses: {attack_paths: [AP4], properties: [D2]}
+        ssdf: [PW.4, PS.3.2]
+        slsa_or_other: "S2C2F ingest and inventory"
+        slsa: []
+        other: ["S2C2F: ingest and inventory practices"]
+        rationale: >-
+          Engines, SDKs, and plugins often arrive as files from vendor portals rather than through a
+          package registry, so dependency tools cannot see them. A manifest with digests turns an
+          unrecorded change into a failed build.
+        test: >-
+          Confirm that a manifest lists every vendored binary, SDK, engine build, and plugin with its
+          source, version, and digest. On a scratch branch, change one byte of a covered file without
+          updating the manifest. Pass if the build fails.
+        evidence: "The manifest file and the build step that checks it."
+        checks: [OBAAF-GHA-008]
+        tools: ["obaaf manifest create", "obaaf manifest check"]
+
+      - id: G2.2
+        title: Quarantine third-party assets and plugins
+        statement: >-
+          Quarantine third-party assets and plugins: open them first in an isolated environment without
+          credentials and with automatic script execution off, and review editor scripts before they
+          enter the project
+        addresses: {attack_paths: [], properties: [D1]}
+        ssdf: [PW.4, PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Game assets can execute code: engines run editor scripts when a project loads, 3D model files
+          have carried scripts that run when the file is opened with automatic script execution enabled,
+          and engine resource packs have carried executable scripts. Opening a new package first on a
+          machine with nothing to steal, with automatic script execution off, contains that risk.
+        test: >-
+          Confirm that a written intake procedure requires new third-party assets and plugins to be
+          opened first on an isolated machine or virtual machine with no credentials and with
+          automatic script execution turned off, and that editor scripts are reviewed before entering
+          the project. Pass if the procedure exists and the most recent intake followed it.
+        evidence: "The intake procedure and the settings of the quarantine machine."
+        checks: []
+
+      - id: G2.3
+        title: Review player-facing SDKs
+        statement: >-
+          Review each player-facing SDK for data access and network behavior before adoption and on
+          each update
+        addresses: {attack_paths: [AP4], properties: [D2]}
+        ssdf: [PW.4]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Third-party SDKs run inside the game on every player's device. A marketing SDK with spyware
+          features shipped inside 101 Android apps with more than 421 million downloads.
+        test: >-
+          For each player-facing SDK in the current build, find a review record covering the data it
+          collects and the network destinations it contacts. Pass if every SDK has a record for its
+          current version, dated before that version first entered a release build.
+        evidence: "Review records for current SDK versions."
+        checks: []
+
+  - id: F3
+    title: Build execution
+    requirements:
+      - id: G3.1
+        title: Separate the release lane
+        statement: >-
+          Separate the release lane: release builds run only on hosts that never build unreviewed
+          changes and accept no interactive sessions
+        addresses: {attack_paths: [AP1], properties: [D3]}
+        ssdf: [PO.5]
+        slsa_or_other: "Build L3, isolation"
+        slsa: [build-l3-isolated]
+        rationale: >-
+          A host that builds unreviewed changes can be made to run attacker code, which can then tamper
+          with later builds on that host. Persistent runners that ran pull-request workflows exposed
+          release credentials in the PyTorch case, and attackers inside build environments shipped
+          signed malware in the 3CX case.
+        test: >-
+          Confirm from the build-system configuration that the hosts or runner pools used for release
+          builds accept no jobs triggered by pull requests, forks, partners, or agents, and that
+          interactive logins to them are disabled. Pass if both hold.
+        evidence: "Build-agent pool configuration and access settings."
+        checks: [OBAAF-GHA-013, OBAAF-GHA-015, OBAAF-GHA-002, OBAAF-GHA-010, OBAAF-GHA-019]
+
+      - id: G3.2
+        title: Use tiered isolation
+        statement: >-
+          Use tiered isolation: Tier A, a fresh environment per build where toolchains allow; Tier B,
+          persistent hosts dedicated to the release lane, reimaged from a versioned image on a
+          schedule and after any suspected exposure, with their builds reported as below Build L3
+        addresses: {attack_paths: [AP1], properties: [D3]}
+        ssdf: [PO.5]
+        slsa_or_other: "Build L3, for Tier A"
+        slsa: [build-l3-isolated]
+        rationale: >-
+          SLSA Build Level 3 requires a fresh environment for every build, which some console and Apple
+          builds cannot meet with a studio's infrastructure. Tier B closes the paths that compromised
+          persistent hosts while keeping the SLSA claim truthful.
+        test: >-
+          For every release target, confirm that the build record states Tier A or Tier B. For Tier A,
+          confirm each build starts from a fresh environment. For Tier B, confirm the hosts are
+          dedicated to the release lane and that the reimage log shows a reimage within the scheduled
+          interval. Pass if every target meets its tier.
+        evidence: "Build records naming the tier; build-agent configuration; the reimage log."
+        checks: [OBAAF-GHA-013]
+        tools: ["obaaf attest build-record --tier"]
+
+      - id: G3.3
+        title: Restrict egress from release hosts
+        statement: >-
+          Restrict egress from release hosts to package mirrors, platform upload endpoints, and the
+          provenance service
+        addresses: {attack_paths: [AP1], properties: []}
+        ssdf: [PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Unrestricted egress lets an implant fetch tools and send stolen data. An unexpected outbound
+          connection is how the tj-actions compromise was first detected.
+        test: >-
+          Review the firewall or proxy rules for release hosts. From a release host, attempt a
+          connection to a destination that is not on the list. Pass if the rules allow only package
+          mirrors, platform upload endpoints, and the provenance service, and the test connection fails.
+        evidence: "Firewall or proxy rules; the result of the test connection."
+        checks: []
+
+      - id: G3.4
+        title: Keep no standing secrets on build hosts
+        statement: >-
+          Keep no standing secrets on build hosts: issue signing and upload credentials per job and
+          short-lived, or use them through a signing service
+        addresses: {attack_paths: [AP2], properties: []}
+        ssdf: [PO.5]
+        slsa_or_other: "Build L3, unforgeable provenance"
+        slsa: [build-l3-signing-isolated]
+        rationale: >-
+          Credentials stored on a build host are stolen by whoever compromises it. Credentials issued
+          per job and expiring with it limit what a compromise yields.
+        test: >-
+          Inspect build hosts and pipeline configuration. Pass if no signing keys, upload credentials,
+          or long-lived tokens are stored on build hosts, and every such credential is issued per job
+          and expires, or is used only through a signing service.
+        evidence: "Credential configuration; inspection of hosts for stored credentials."
+        checks: [OBAAF-GHA-001, OBAAF-GHA-009, OBAAF-GHA-011, OBAAF-GHA-018]
+
+  - id: F4
+    title: Derived data and caches
+    requirements:
+      - id: G4.1
+        title: Scope caches by lane
+        statement: >-
+          Scope caches by lane: caches written by untrusted builds, workstations, or partners are never
+          read by release builds
+        addresses: {attack_paths: [AP1], properties: [D4]}
+        ssdf: [PO.5]
+        slsa_or_other: "Build L3, cache integrity"
+        slsa: [build-l3-cache-integrity]
+        rationale: >-
+          If release builds read a cache that others can write, anyone who can write to it can
+          influence what ships. A poisoned CI cache reached the release build in the Ultralytics case,
+          and an agent run steered by an issue title poisoned a cache used by release jobs in the
+          Clinejection case.
+        test: >-
+          List every cache that release builds read, including engine derived-data caches, and the
+          identities that can write to each. Pass if no untrusted build, workstation, or partner
+          identity can write to any of them.
+        evidence: "Cache access permissions and the release build's cache configuration."
+        checks: [OBAAF-GHA-006, OBAAF-GHA-007]
+
+      - id: G4.2
+        title: Regenerate or verify derived data for releases
+        statement: >-
+          Regenerate or verify derived data for releases: release builds rebuild derived data or
+          consume only content-addressed entries written by the release lane
+        addresses: {attack_paths: [AP1], properties: [D4]}
+        ssdf: [PS.1]
+        slsa_or_other: "Build L3, cache integrity"
+        slsa: [build-l3-cache-integrity]
+        rationale: >-
+          Cooking can be intermittently nondeterministic, so cooked content cannot always be checked by
+          rebuilding it. Treating cache entries as build inputs with an author lets the release lane
+          trust only what it built itself.
+        test: >-
+          Inspect the release build configuration. Pass if release builds either regenerate derived
+          data from scratch or read only content-addressed entries written by the release lane.
+        evidence: "Cache configuration for release builds."
+        checks: [OBAAF-GHA-006]
+
+      - id: G4.3
+        title: Check code artifacts by independent rebuild
+        statement: >-
+          Check code artifacts by independent rebuild, recording expected differences and known engine
+          nondeterminism
+        addresses: {attack_paths: [AP1], properties: [D4]}
+        ssdf: [PS.2]
+        slsa_or_other: "Reproducible builds"
+        slsa: []
+        other: ["Reproducible builds"]
+        rationale: >-
+          Build-time tampering leaves the source clean, as SUNSPOT showed by swapping a source file
+          during compilation. An independent rebuild compared against the release exposes it, provided
+          the rebuild host was not compromised as well.
+        test: >-
+          For the latest release, confirm that its executables were rebuilt on a separate host and
+          compared with the released files. Pass if every difference appears in the recorded list of
+          expected differences or known nondeterminism.
+        evidence: "Comparison report for the latest release."
+        checks: []
+
+  - id: F5
+    title: Signing
+    requirements:
+      - id: G5.1
+        title: Hold keys in hardware or a key service
+        statement: >-
+          Hold signing and upload keys in hardware, a cloud key service, or platform-managed signing,
+          and log every use
+        addresses: {attack_paths: [AP2], properties: [D5]}
+        ssdf: [PS.2]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Stolen code-signing certificates let attackers sign malware in a studio's name, as in the
+          Winnti and APT41 campaigns. A key that cannot be exported cannot be copied by an intruder.
+        test: >-
+          Using the key inventory, confirm that every signing and upload key is held in a hardware
+          device, a cloud key service, or platform-managed signing, and that the service logs each use.
+          Pass if no key exists as an exportable file and the log shows the most recent use.
+        evidence: "Key inventory; key-service configuration; the usage log."
+        checks: [OBAAF-GHA-018]
+
+      - id: G5.2
+        title: Sign only artifacts with release-lane provenance
+        statement: >-
+          Sign only artifacts that carry valid release-lane provenance
+        addresses: {attack_paths: [AP1, AP2], properties: []}
+        ssdf: [PS.2]
+        slsa_or_other: "Build L2–L3"
+        slsa: [build-l2-hosted-signed]
+        rationale: >-
+          A signing step that signs whatever it is given turns any build into a trusted one. Checking
+          provenance first means only files the release lane built receive the studio's signature.
+        test: >-
+          Submit an artifact built outside the release lane to the signing step. Pass if the step
+          refuses to sign it.
+        evidence: "The signing step's configuration and the refusal in its log."
+        checks: [OBAAF-GHA-016]
+        tools: ["obaaf verify release"]
+
+      - id: G5.3
+        title: Plan revocation and rotation
+        statement: >-
+          Keep a written plan to revoke certificates and rotate upload credentials
+        addresses: {attack_paths: [AP2], properties: []}
+        ssdf: [PS.2]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          After a key is stolen, the time to revoke it decides how long malware signed in the studio's
+          name stays trusted.
+        test: >-
+          Pass if a written plan names, for every signing certificate and upload credential, the owner,
+          the steps to revoke or rotate it, and whom to notify.
+        evidence: "The plan, with named owners."
+        checks: []
+
+  - id: F6
+    title: Distribution and updates
+    requirements:
+      - id: G6.1
+        title: Upload from a dedicated identity
+        statement: >-
+          Upload from a dedicated identity with only publishing permissions, as Steam recommends
+        addresses: {attack_paths: [AP3], properties: [D5]}
+        ssdf: [PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          An upload identity that holds only the permissions uploads need limits what a stolen pipeline
+          credential can do: it cannot change who has access, or anything else that the other
+          permissions cover. On Steam, the build account needs only Edit App Metadata and Publish App
+          Changes To Steam, for the one app.
+        test: >-
+          Inspect the permissions of the identity used by automated uploads. Pass if it is used only for
+          uploads and holds no permissions beyond publishing builds.
+        evidence: "The account's permissions in the store's partner portal."
+        checks: []
+
+      - id: G6.2
+        title: A person sets builds live
+        statement: >-
+          Require a person to set a build live on a public channel, and two people at the highest tier
+        addresses: {attack_paths: [AP3], properties: [D5]}
+        ssdf: [PS.4]
+        slsa_or_other: "Analogous to Source L4"
+        slsa: []
+        other: ["Analogous to SLSA Source L4 two-party review"]
+        rationale: >-
+          Hijacked publishing accounts pushed malicious updates to released games in 2023. A person
+          setting each build live keeps an automated path from reaching players unseen. It does not stop
+          someone who has taken over that person's account; at the highest tier, a second person does
+          (Paper 2, section 7.1).
+        test: >-
+          Inspect the release procedure and store settings. Pass if no automated step can set a build
+          live on a public channel; at Tier 4, pass only if two different people must confirm on every
+          path that can set a build live, including the store's own interface.
+        evidence: "Release procedure; store release settings; approval records."
+        checks: [OBAAF-GHA-014]
+
+      - id: G6.3
+        title: MFA and alerts on publishing accounts
+        statement: >-
+          Protect every publishing account with multi-factor authentication, and alert on set-live
+          events and permission changes
+        addresses: {attack_paths: [AP3], properties: []}
+        ssdf: [PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Multi-factor authentication stops a stolen password alone. It does not stop a stolen session,
+          as in the Downfall mod case; alerts on set-live events and permission changes report what such
+          a session does, so the studio can react.
+        test: >-
+          Pass if every account that can publish builds requires multi-factor authentication, and a
+          recent alert shows that set-live events and permission changes notify a named person.
+        evidence: "Security settings of each publishing account; alert configuration and a recent alert."
+        checks: []
+
+      - id: G6.4
+        title: Staged rollout with a tested rollback
+        statement: >-
+          Roll out live updates in stages, with a tested rollback
+        addresses: {attack_paths: [], properties: [D6]}
+        ssdf: [PS.4]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Frequent, urgent updates leave little time for review. Staged rollout limits how many players
+          a bad update reaches before it is noticed, and a tested rollback makes recovery fast.
+        test: >-
+          Pass if live updates are released to a fraction of players first, and a rollback has been
+          tested within the last six months.
+        evidence: "Rollout configuration; record of a rollback test."
+        checks: []
+
+      - id: G6.5
+        title: Updaters verify signatures
+        statement: >-
+          Make self-hosted launchers and patchers verify update signatures with keys not stored on the
+          update server
+        addresses: {attack_paths: [AP3], properties: []}
+        ssdf: [PS.2]
+        slsa_or_other: "The Update Framework"
+        slsa: []
+        other: ["The Update Framework (TUF)"]
+        rationale: >-
+          The 2013 campaign delivered malware through an official update server. Updaters that verify
+          signatures made with keys kept off the server survive a server compromise.
+        test: >-
+          Pass if the launcher or patcher rejects an update whose signature does not verify, and the
+          signing key is not stored on any update server.
+        evidence: "Updater code or vendor documentation; key inventory."
+        checks: []
+
+  - id: F7
+    title: Provenance
+    requirements:
+      - id: G7.1
+        title: Emit signed provenance
+        statement: >-
+          Emit signed provenance for every platform artifact, listing source revision, asset revision,
+          manifest digest, SDK versions, and builder identity
+        addresses: {attack_paths: [AP1], properties: [D5]}
+        ssdf: [PS.3.2]
+        slsa_or_other: "Build L1–L2"
+        slsa: [build-l1-provenance-exists, build-l2-hosted-signed]
+        rationale: >-
+          Build-time tampering leaves the source clean, so detecting it needs evidence about the build
+          itself. Signed provenance binds each artifact to the source, assets, manifest, SDKs, and
+          builder that produced it.
+        test: >-
+          For every platform artifact of the latest release, verify its signed provenance. Pass if the
+          signature verifies and the provenance names the source revision, asset revision, manifest
+          digest, SDK versions, and builder identity.
+        evidence: "Provenance for the latest release."
+        checks: [OBAAF-GHA-017]
+        tools: ["obaaf attest build-record", "obaaf verify release"]
+
+      - id: G7.2
+        title: Verify provenance before upload
+        statement: >-
+          Verify provenance against policy, in a separate step, before any upload to a store
+        addresses: {attack_paths: [AP1, AP3], properties: [D5, D6]}
+        ssdf: [PS.2]
+        slsa_or_other: "Build-track verification"
+        slsa: [build-verification]
+        rationale: >-
+          When a platform re-signs or distributes a build, the moment before upload is the last point at
+          which a studio can bind an artifact to its own pipeline. Provenance not checked there cannot
+          be checked by anyone downstream.
+        test: >-
+          Confirm a separate pipeline step verifies provenance against policy before every upload. Run
+          the release with an artifact that lacks provenance. Pass if the upload is blocked.
+        evidence: "The pipeline step and its log for the latest release."
+        checks: [OBAAF-GHA-016]
+        tools: ["obaaf verify release"]
+
+      - id: G7.3
+        title: Archive releases read-only
+        statement: >-
+          Archive released artifacts, symbols, and provenance read-only
+        addresses: {attack_paths: [AP1, AP2, AP3, AP4], properties: [], as_written: All}
+        ssdf: [PS.3.1]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          A read-only archive lets the studio prove later what it shipped, compare it with a suspected
+          tampered build, and investigate an incident.
+        test: >-
+          Pass if the artifacts, symbols, and provenance of the latest release are stored where no
+          pipeline or user identity can change or delete them.
+        evidence: "Archive permissions or retention settings."
+        checks: []
+
+  - id: F8
+    title: Automation and AI agents
+    requirements:
+      - id: G8.1
+        title: Bound agent authority by input trust
+        statement: >-
+          Bound the authority of agents and bots by the trust of their inputs; agents triggered by
+          player reports, community issues, or partner content run without secrets (companion R1–R4,
+          R7)
+        addresses: {attack_paths: [AP1, AP3], properties: []}
+        ssdf: [PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        agent_controls: [R1, R2, R3, R4, R7]
+        rationale: >-
+          An agent follows instructions found in the text it reads, and outsiders can write that text.
+          An agent may therefore do no more than the least-trusted author of its inputs could do
+          directly.
+        test: >-
+          For every agent or bot that player, community, or partner content can trigger, confirm that it
+          runs with a read-only token, no secrets, no permission to request cloud credentials, and no
+          write access to protected branches, and that a separate approved job applies its proposals.
+          Pass if all hold.
+        evidence: "Workflow permissions for each agent."
+        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022]
+
+      - id: G8.2
+        title: Protect agent instructions as code
+        statement: >-
+          Protect agent instruction and workflow files as code (companion R5)
+        addresses: {attack_paths: [AP1], properties: []}
+        ssdf: [PS.1]
+        slsa_or_other: "Source L3"
+        slsa: [source-l3]
+        agent_controls: [R5]
+        rationale: >-
+          Poisoned instruction files persist across runs. Hidden characters in a rules file were the
+          vector in the Rules File Backdoor case.
+        test: >-
+          Confirm that agent instruction files and the workflows that invoke agents require code-owner
+          review, are scanned for hidden characters, and are loaded from the protected base branch
+          rather than from the change under review. Pass if all three hold.
+        evidence: "Protection rules on those paths; the scan result; the agent workflow."
+        checks: [OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001, OBAAF-GHA-012]
+
+      - id: G8.3
+        title: Attest agent runs and verify them before release
+        statement: >-
+          Attest agent runs, and verify agent-authored changes before release (companion R8)
+        addresses: {attack_paths: [AP1], properties: []}
+        ssdf: [PS.3.2]
+        slsa_or_other: "Build provenance"
+        slsa: [build-l1-provenance-exists]
+        agent_controls: [R8]
+        rationale: >-
+          A signed record of what each agent run saw, could do, and produced lets the release lane
+          refuse changes that did not go through the approved agent path.
+        test: >-
+          Confirm that every agent run produces a signed agent-run record. Add an agent-authored commit
+          without a record to a test release. Pass if the release verifier blocks it.
+        evidence: "Attestations for agent-authored commits in the latest release."
+        checks: [OBAAF-GHA-021]
+        tools: ["obaaf attest agent-run", "obaaf attest approval", "obaaf verify release"]
+
+  - id: F9
+    title: Partners
+    requirements:
+      - id: G9.1
+        title: Scope and expire partner access
+        statement: >-
+          Give contractors and porting partners separate, scoped, time-limited access, and build their
+          contributions in the untrusted lane
+        addresses: {attack_paths: [AP1], properties: [D7]}
+        ssdf: [PO.2, PO.5]
+        slsa_or_other: "-"
+        slsa: []
+        rationale: >-
+          Console ports and outsourced work often go through third-party vendors. Scoped access that
+          expires limits what a compromised partner account can reach, and building partner work in
+          the untrusted lane keeps it away from release credentials until it is reviewed.
+        test: >-
+          Pass if every contractor and porting partner has individual accounts limited to what their
+          work needs, each with an expiry date, and their contributions are built only in the untrusted
+          lane until reviewed.
+        evidence: "Access lists with expiry dates; the pipeline lane used for partner contributions."
+        checks: [OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-019]

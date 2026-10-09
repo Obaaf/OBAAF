@@ -1,0 +1,151 @@
+# Patterns the pipeline checker uses to recognize agents, uploads, signing
+# keys and instruction files. Agent products change quickly (spec risk
+# "Agent products change faster than the controls"), so this list is data,
+# reviewed and extended with each new class of flaw.
+#
+# A workflow can always state a job's lane explicitly with the environment
+# variable OBAAF_LANE (untrusted, agent, effect, release or trusted), which
+# overrides every pattern below.
+
+version: 0.1.0
+
+# Actions that run an AI agent or model with tools. Matched as a prefix of the
+# `uses:` value, before the `@`.
+agent_actions:
+  - anthropics/claude-code-action
+  - anthropics/claude-code-base-action
+  - google-github-actions/run-gemini-cli
+  - openai/codex-action
+  - actions/ai-inference
+  - qodo-ai/pr-agent
+  - Codium-ai/pr-agent
+  - coderabbitai/ai-pr-reviewer
+  - All-Hands-AI/OpenHands
+  - sst/opencode
+  - cline/cline
+
+# Commands in `run:` scripts that start an agent CLI. Python regular
+# expressions, matched against each line.
+agent_commands:
+  - '(^|[\s;&|(])claude\s+(-p|--print)\b'
+  - '@anthropic-ai/claude-code'
+  - '(^|[\s;&|(])gemini\s+(-p|--prompt)\b'
+  - '@google/gemini-cli'
+  - '(^|[\s;&|(])codex\s+exec\b'
+  - '@openai/codex'
+  - '(^|[\s;&|(])aider\s'
+  - '(^|[\s;&|(])opencode\s+run\b'
+  - '(^|[\s;&|(])copilot\s+(-p|--prompt)\b'
+  - '(^|[\s;&|(])cline\s'
+
+# Files that steer agents (R5). Glob patterns relative to the repository
+# root; `**` matches any number of directories.
+instruction_files:
+  - AGENTS.md
+  - "**/AGENTS.md"
+  - AGENT.md
+  - "**/AGENT.md"
+  - opencode.json
+  - opencode.jsonc
+  - CLAUDE.md
+  - "**/CLAUDE.md"
+  - CLAUDE.local.md
+  - GEMINI.md
+  - "**/GEMINI.md"
+  - .github/copilot-instructions.md
+  - ".github/instructions/**"
+  - ".github/prompts/**"
+  - ".github/chatmodes/**"
+  - ".github/agents/**"
+  - .cursorrules
+  - ".cursor/rules/**"
+  - .windsurfrules
+  - ".windsurf/rules/**"
+  - .clinerules
+  - ".clinerules/**"
+  - ".claude/**"
+  - ".gemini/**"
+  - ".codex/**"
+  - .mcp.json
+  - .vscode/mcp.json
+  - ".continue/**"
+  - .aider.conf.yml
+
+# Steps that upload or publish release artifacts (G7.2, FR6).
+upload_actions:
+  - r0adkll/upload-google-play
+  - softprops/action-gh-release
+  - ncipollo/release-action
+  - google-github-actions/upload-cloud-storage
+  - game-ci/steam-deploy
+  - manleydev/butler-publish-itchio-action
+  - yeslayla/butler-publish-itchio-action
+  - Apple-Actions/upload-testflight-build
+upload_commands:
+  - '(^|[\s;&|(])steamcmd\b.*\+run_app_build'
+  - '(^|[\s;&|(])butler\s+push\b'
+  - '(^|[\s;&|(])gh\s+release\s+(upload|create)\b'
+  - '(^|[\s;&|(])aws\s+s3\s+(cp|sync|mv)\b'
+  - '(^|[\s;&|(])gsutil\s+(-m\s+)?(cp|rsync)\b'
+  - '(^|[\s;&|(])gcloud\s+storage\s+cp\b'
+  - '(^|[\s;&|(])az\s+storage\s+blob\s+upload'
+  - '(^|[\s;&|(])fastlane\s+\S*(deliver|upload_to_app_store|upload_to_testflight|pilot|supply|upload_to_play_store)'
+  - '(^|[\s;&|(])xcrun\s+altool\b.*--upload'
+  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+publish\b'
+  - '(^|[\s;&|(])twine\s+upload\b'
+  - '(^|[\s;&|(])cargo\s+publish\b'
+  - '(^|[\s;&|(])dotnet\s+nuget\s+push\b'
+  - '(^|[\s;&|(])docker\s+push\b'
+  - '(^|[\s;&|(]|\./)scripts?/publish'
+
+# Steps that sign provenance or other attestations (G7.1, FR5).
+provenance_actions:
+  - actions/attest-build-provenance
+  - actions/attest
+  - slsa-framework/slsa-github-generator
+provenance_commands:
+  - '(^|[\s;&|(])obaaf\s+attest\s+build-record\b'
+  - '(^|[\s;&|(])cosign\s+attest(-blob)?\b'
+
+# Steps that verify provenance before an upload (G7.2, FR6). Only release_verify_commands also
+# check approvals and agent records; the others check provenance only.
+verify_commands:
+  - '(^|[\s;&|(])obaaf\s+verify\s+release\b'
+  - '(^|[\s;&|(])gh\s+attestation\s+verify\b'
+  - '(^|[\s;&|(])cosign\s+verify-(blob-)?attestation\b'
+  - '(^|[\s;&|(])slsa-verifier\s+verify'
+release_verify_commands:
+  - '(^|[\s;&|(])obaaf\s+verify\s+release\b'
+
+# Steps that verify an agent's signed record (R8) and check its proposal (R4) before applying
+# it. An effect job needs both, in the job itself or in a job it needs (OBAAF-GHA-021).
+record_verify_commands:
+  - '(^|[\s;&|(])obaaf\s+verify\s+agent-run\b'
+  - '(^|[\s;&|(])gh\s+attestation\s+verify\b'
+proposal_check_commands:
+  - '(^|[\s;&|(])obaaf\s+proposal\s+check\b'
+
+# Secret names that suggest a signing key or certificate (FR11).
+signing_secret_patterns:
+  - 'SIGN(ING)?_?(KEY|CERT|CERTIFICATE|IDENTITY|P12|PFX)'
+  - 'CODE_?SIGN'
+  - 'PRIVATE_?KEY'
+  - '(GPG|PGP)_?(KEY|PRIVATE|SECRET)'
+  - 'COSIGN_?(KEY|PRIVATE)'
+  - 'KEYSTORE'
+  - '(^|_)(P12|PFX)($|_)'
+  - 'CERTIFICATE_?(P12|PFX|BASE64)'
+  - 'DEVELOPER_?ID_?CERT'
+  - 'MATCH_?PASSWORD'
+# Commands that load a key file into the build environment.
+signing_commands:
+  - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key\s+(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
+  - 'signtool(\.exe)?\s+sign\b.*\s/f\s'
+  - '(^|[\s;&|(])gpg\s+(--batch\s+)?--import\b'
+  - '(^|[\s;&|(])security\s+import\b.*\.p12'
+  - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
+  - '(^|[\s;&|(])apksigner\s+sign\b.*--ks\b'
+
+# Evidence of an egress restriction for agent jobs (R7, FR7).
+egress_actions:
+  - step-security/harden-runner

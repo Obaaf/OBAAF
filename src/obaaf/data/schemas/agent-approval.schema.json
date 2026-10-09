@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://obaaf.example/schemas/agent-approval/v0.1.json",
+  "title": "OBAAF agent-approval predicate, version 0.1 (draft)",
+  "description": "Predicate of the in-toto statement, signed by the effect lane, that records who approved applying an agent's proposal (Paper 1, Table 3, Approvals; R4, R8). Its subjects are the same proposal-bundle files as the agent-run attestation.",
+  "type": "object",
+  "required": ["obaafVersion", "approvals", "requester", "run", "recordedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "obaafVersion": {"type": "string"},
+    "approvals": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["reviewer", "state", "environment", "recordedAt"],
+        "additionalProperties": false,
+        "properties": {
+          "reviewer": {"type": "string", "minLength": 1},
+          "reviewerId": {"type": ["integer", "null"]},
+          "state": {"const": "approved"},
+          "environment": {"type": "string", "minLength": 1},
+          "comment": {"type": "string"},
+          "recordedAt": {"type": "string", "format": "date-time"},
+          "timeSource": {"type": "string"}
+        }
+      }
+    },
+    "requester": {
+      "description": "Logins treated as the requester; none of them may appear among the reviewers.",
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "agentRun": {"type": "object"},
+    "checks": {"type": "object"},
+    "run": {"type": "object"},
+    "recordedAt": {"type": "string", "format": "date-time"}
+  }
+}

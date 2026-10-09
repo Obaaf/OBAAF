@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "obaaf"
+dynamic = ["version"]
+description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools (draft)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Osita Sean Keluo-Udeke" }]
+# No license is granted yet. See LICENSING.md: the intended licenses take effect
+# only at public release, after written approval.
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Private :: Do Not Upload",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+  "PyYAML>=6.0",
+  "jsonschema>=4.18",
+]
+
+[project.optional-dependencies]
+# Verifying DSSE envelopes signed with a key held in a key service or hardware module.
+keys = ["cryptography>=42"]
+
+[project.scripts]
+obaaf = "obaaf.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "obaaf.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+obaaf = ["form_template.html"]
+"obaaf.data" = ["*.yaml", "schemas/*.json"]
