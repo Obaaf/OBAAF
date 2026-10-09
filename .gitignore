@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.eggs/
+.coverage
+htmlcov/
+.DS_Store
+# Local self-assessment answers stay with the studio.
+answers*.yaml
+obaaf-assessment-*.json
+
+# Operating-system metadata
+.DS_Store
+._*
+
+# Rebuild manuscript previews from the reviewed sources
+*-preview.pdf
+*.zip
