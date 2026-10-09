@@ -1,0 +1,241 @@
+# OBAAF agent lane (Paper 1, section 7.1; R1–R3, R5–R8; G8.1–G8.3; FR7, FR9, FR10).
+#
+# An outside event starts an AI agent that runs at the trust level of its
+# inputs: a read-only token, no secrets, no permission to request OIDC tokens,
+# and no caches. Its network egress is meant to reach only an inference proxy
+# that holds the model credential; that is declared here but enforced only if
+# you turn on the egress monitor or run the job behind a network policy
+# (OBAAF-GHA-020), and the proxy is planned for OBAAF 0.2 (docs/inference-proxy.md).
+# Its only output is a proposal bundle (a patch, comment text or label changes),
+# which obaaf-agent-apply.yml applies after a maintainer approves who neither
+# requested the work nor wrote its inputs.
+#
+# Three jobs, each with its own identity, so the platform enforces the lanes:
+#   snapshot  captures and labels everything the agent will read (R1)
+#   agent     runs the agent from the snapshot and writes the proposal (R2, R3, R5, R7)
+#   attest    signs the agent-run record in a job the agent cannot influence (R8)
+#
+# Before use: read templates/github-actions/README.md and docs/inference-proxy.md.
+name: OBAAF agent propose
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: obaaf-agent-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    # Cost control, not a trust decision: a maintainer labels an issue "agent", or a
+    # collaborator comments "/agent". The agent still runs at the level of everything
+    # it reads, including text written by people outside the project.
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'agent') ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/agent') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    cache-mode: none
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      snapshot-digest: ${{ steps.snap.outputs.snapshot-digest }}
+      integrity-level: ${{ steps.snap.outputs.integrity-level }}
+    steps:
+      - name: Check out the protected default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Look up the repository role of everyone who wrote the inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo '{}' > "$RUNNER_TEMP/roles.json"
+          jq -r '[.sender.login, .issue.user.login, .comment.user.login] | map(select(. != null)) | unique | .[]' \
+            "$GITHUB_EVENT_PATH" | while read -r login; do
+            role=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .role_name 2>/dev/null || echo none)
+            jq --arg l "$login" --arg r "$role" '. + {($l): $r}' "$RUNNER_TEMP/roles.json" > "$RUNNER_TEMP/roles.tmp"
+            mv "$RUNNER_TEMP/roles.tmp" "$RUNNER_TEMP/roles.json"
+          done
+
+      - name: Capture the pull request's changes as data (comments on pull requests only)
+        if: github.event.issue.pull_request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr diff "$NUMBER" --repo "$REPO" > "$RUNNER_TEMP/pull-request.diff"
+
+      - name: Take the snapshot (R1)
+        id: snap
+        env:
+          REPO: ${{ github.repository }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          extra=()
+          # A pull request's changes are labeled Public: anyone may have written them.
+          if [ -f "$RUNNER_TEMP/pull-request.diff" ]; then
+            extra+=(--file "$RUNNER_TEMP/pull-request.diff:pull_request.diff:Public")
+          fi
+          # Instruction files from the protected default branch are Maintainer content (R5).
+          for f in AGENTS.md CLAUDE.md GEMINI.md .github/copilot-instructions.md; do
+            if [ -f "$f" ]; then extra+=(--file "$f:instructions@default-branch:Maintainer"); fi
+          done
+          obaaf snapshot --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME" \
+            --out "$RUNNER_TEMP/obaaf-snapshot" --repository "$REPO" --visibility "$VISIBILITY" \
+            --roles-file "$RUNNER_TEMP/roles.json" "${extra[@]}"
+
+      - name: Keep the snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-snapshot
+          path: ${{ runner.temp }}/obaaf-snapshot
+          if-no-files-found: error
+          retention-days: 30
+
+  agent:
+    needs: snapshot
+    # A fresh GitHub-hosted machine. Never a persistent self-hosted runner (R7).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: none
+    # R2, R3: read-only access, no id-token, no secrets, no environment.
+    permissions:
+      contents: read
+    env:
+      OBAAF_LANE: agent
+      # R7: GitHub-hosted runners have no native egress allow-list. Enforce this policy with
+      # ephemeral self-hosted runners behind a network policy, or turn on the egress monitor below.
+      OBAAF_EGRESS: "inference proxy only (vars.OBAAF_MODEL_ENDPOINT)"
+    steps:
+      - name: Restrict egress with a runtime monitor (optional)
+        if: vars.OBAAF_EGRESS_MONITOR == 'harden-runner'
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          egress-policy: block
+          allowed-endpoints: ${{ vars.OBAAF_ALLOWED_ENDPOINTS }}
+
+      - name: Check out the protected default branch (instructions come from here, R5)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-snapshot
+          path: ${{ runner.temp }}/obaaf-snapshot
+
+      # Replace .github/obaaf/agent.sh with your agent. It must read its task only from
+      # $OBAAF_SNAPSHOT and write only to $OBAAF_PROPOSAL (patch.diff, comment.md, labels.json).
+      - name: Run the agent
+        env:
+          OBAAF_SNAPSHOT: ${{ runner.temp }}/obaaf-snapshot
+          OBAAF_PROPOSAL: ${{ runner.temp }}/obaaf-proposal
+          OBAAF_TRACE: ${{ runner.temp }}/obaaf-trace.jsonl
+          OBAAF_MODEL_ENDPOINT: ${{ vars.OBAAF_MODEL_ENDPOINT }}
+          # Read-only and expires with the job; the inference proxy can use it to identify this run.
+          OBAAF_JOB_TOKEN: ${{ github.token }}
+        run: ./.github/obaaf/agent.sh
+
+      - name: Keep the proposal bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-proposal
+          path: ${{ runner.temp }}/obaaf-proposal
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Keep the agent's own trace (self-reported, untrusted)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-trace
+          path: ${{ runner.temp }}/obaaf-trace.jsonl
+          if-no-files-found: ignore
+          retention-days: 30
+
+  attest:
+    needs: [snapshot, agent]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    cache-mode: none
+    permissions:
+      contents: read
+      id-token: write       # sign through GitHub's Sigstore with this workflow's identity; no long-lived key (FR11)
+      attestations: write
+    steps:
+      - name: Check out the workflow definition this run used
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/workflows
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-snapshot
+          path: ${{ runner.temp }}/obaaf-snapshot
+
+      - name: Download the proposal bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-proposal
+          path: ${{ runner.temp }}/obaaf-proposal
+
+      - name: Download the agent's trace
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-trace
+          path: ${{ runner.temp }}/obaaf-trace
+
+      # The snapshot digest comes from the snapshot job's output, which the agent job cannot
+      # change, so a snapshot replaced during the agent run fails here.
+      - name: Write the agent-run record (R8)
+        env:
+          SNAPSHOT_DIGEST: ${{ needs.snapshot.outputs.snapshot-digest }}
+        run: |
+          set -euo pipefail
+          trace=()
+          if [ -f "$RUNNER_TEMP/obaaf-trace/obaaf-trace.jsonl" ]; then
+            trace=(--trace "$RUNNER_TEMP/obaaf-trace/obaaf-trace.jsonl")
+          fi
+          obaaf attest agent-run --snapshot "$RUNNER_TEMP/obaaf-snapshot" --snapshot-digest "$SNAPSHOT_DIGEST" \
+            --proposal "$RUNNER_TEMP/obaaf-proposal" --workflow-file .github/workflows/obaaf-agent-propose.yml \
+            --job agent --out "$RUNNER_TEMP/agent-run.json" "${trace[@]}"
+
+      - name: Sign the agent-run record
+        id: sign
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/obaaf-proposal/*
+          predicate-type: https://obaaf.example/attestation/agent-run/v0.1
+          predicate-path: ${{ runner.temp }}/agent-run.json
+
+      - name: Keep the signed record for the effect lane
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-agent-run-bundle
+          path: ${{ steps.sign.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 30

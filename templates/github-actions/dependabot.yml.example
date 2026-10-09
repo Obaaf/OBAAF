@@ -1,0 +1,11 @@
+# Keep pinned action SHAs current (R6). Copy to .github/dependabot.yml.
+# Dependabot updates the SHA and the version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

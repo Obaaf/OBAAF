@@ -1,0 +1,110 @@
+# OBAAF release lane, build half (G3.1–G3.4, G4.1, G4.2, G7.1; FR4, FR5, FR11).
+#
+# Builds a release from a protected tag in isolation and signs provenance and an
+# OBAAF build record in a separate job. It uploads nothing: obaaf-publish.yml
+# runs when this workflow completes, from the protected default branch, and
+# uploads only after the release verifier passes and a person approves.
+#   build    builds on a fresh machine (Tier A) or a release-only reimaged host (Tier B),
+#            reads no cache that another lane can write, and holds no credentials
+#   attest   signs SLSA provenance and the build record; build steps never see the signing identity
+#
+# Protect tags matching v* with a ruleset (docs/github-settings.md), so only
+# maintainers can start this workflow, and edit the marked steps.
+name: OBAAF release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+env:
+  OBAAF_LANE: release
+
+jobs:
+  build:
+    # Tier A: GitHub-hosted runners start every job on a fresh machine.
+    # Tier B: use your release-only persistent hosts and declare the tier:
+    #   runs-on: [self-hosted, obaaf-release]
+    #   env: { OBAAF_TIER: B }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    cache-mode: none           # FR4: read no cache that another lane can write (G4.1, G4.2)
+    permissions:
+      contents: read
+    env:
+      OBAAF_LANE: release
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Check vendored binaries against the manifest (G2.1)
+        run: obaaf manifest check --manifest obaaf-manifest.json
+
+      # EDIT: your build. It must write the files to ship into dist/ and use no secrets.
+      # Regenerate derived data (for example an engine's derived-data cache) here rather
+      # than reading a shared cache (G4.2).
+      - name: Build
+        run: ./scripts/build.sh dist
+
+      - name: Keep the release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    cache-mode: none
+    permissions:
+      contents: read
+      id-token: write          # sign through GitHub's Sigstore; no long-lived signing key (FR11)
+      attestations: write
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Sign SLSA provenance (G7.1)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      # The tier is read from this workflow file (the build job's runner and OBAAF_TIER), not
+      # reported by the build. EDIT: if your assets live outside Git (for example Perforce),
+      # pass that system's revision as --asset-revision and name it in --asset-system.
+      - name: Write the build record (G7.1, FR4, FR5)
+        run: |
+          obaaf attest build-record --artifact dist \
+            --source-revision "$GITHUB_SHA" --source-ref "$GITHUB_REF" --repository "$GITHUB_REPOSITORY" \
+            --asset-revision "$GITHUB_SHA" --asset-system git --manifest obaaf-manifest.json \
+            --builder-id "https://github.com/$GITHUB_REPOSITORY/.github/workflows/obaaf-release.yml" \
+            --workflow-file .github/workflows/obaaf-release.yml --build-job build \
+            --actor "$GITHUB_ACTOR" --out "$RUNNER_TEMP/build-record.json"
+
+      - name: Sign the build record
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+          predicate-type: https://obaaf.example/attestation/build-record/v0.1
+          predicate-path: ${{ runner.temp }}/build-record.json

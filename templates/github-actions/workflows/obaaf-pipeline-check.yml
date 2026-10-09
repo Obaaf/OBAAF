@@ -1,0 +1,91 @@
+# OBAAF pipeline check (FR12).
+#
+# Runs `obaaf check` on every pull request and on pushes to main, so a change
+# that opens a documented attack path (a secret in an untrusted workflow, a
+# write token in an agent job, a cache shared with the release lane, an
+# unpinned action, hidden characters in an agent instruction file) fails
+# before it merges. The check runs locally on the runner and sends nothing to
+# OBAAF or anyone else. On a pull request, the checker configuration (lane
+# declarations and ignore entries) comes from the branch it targets, so a pull
+# request cannot loosen the configuration. A pull request can still edit this
+# workflow file; code-owner review of .github/ is what stops that.
+name: OBAAF pipeline check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the checker configuration from the target branch
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref }}
+          path: .obaaf-base
+          persist-credentials: false
+          sparse-checkout: .github/obaaf.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Check workflows, code owners and agent instruction files
+        run: |
+          set -euo pipefail
+          config=()
+          if [ -d .obaaf-base ]; then
+            if [ -f .obaaf-base/.github/obaaf.yml ]; then
+              cp .obaaf-base/.github/obaaf.yml "$RUNNER_TEMP/obaaf.yml"
+            else
+              echo '{}' > "$RUNNER_TEMP/obaaf.yml"
+            fi
+            rm -rf .obaaf-base
+            config=(--config "$RUNNER_TEMP/obaaf.yml")
+          fi
+          obaaf check . "${config[@]}" --format sarif --output obaaf.sarif --fail-on never
+          obaaf check . "${config[@]}" --fail-on medium
+
+      - name: Keep the SARIF report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-check-sarif
+          path: obaaf.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Optional: show findings in the Security tab. Code scanning needs GitHub
+  # Advanced Security for private repositories; set the repository variable
+  # OBAAF_UPLOAD_SARIF to "true" to enable this job.
+  upload:
+    needs: check
+    if: always() && github.event_name == 'push' && vars.OBAAF_UPLOAD_SARIF == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Download the SARIF report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-check-sarif
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: obaaf.sarif
+          category: obaaf

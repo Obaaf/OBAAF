@@ -1,0 +1,41 @@
+# OBAAF example CODEOWNERS. Copy to .github/CODEOWNERS, replace the team names,
+# and turn on "Require review from Code Owners" for protected branches.
+#
+# The last matching pattern wins, so keep these lines at the end of the file.
+
+# How the project builds, releases and runs agents (G1.1, G1.2, G8.2; R5). The whole .github
+# directory: workflows, the OBAAF policy and checker configuration, the agent script, this file,
+# and the agent instruction and prompt files GitHub reads from there.
+/.github/                          @your-org/build-owners
+/.obaaf/                           @your-org/build-owners
+/scripts/                          @your-org/build-owners
+/obaaf-manifest.json               @your-org/build-owners
+/obaaf-sources.yaml                @your-org/build-owners
+
+# Files that steer AI agents, in any directory (R5). Agents must never be able to change these.
+AGENTS.md                          @your-org/build-owners
+AGENT.md                           @your-org/build-owners
+CLAUDE.md                          @your-org/build-owners
+CLAUDE.local.md                    @your-org/build-owners
+GEMINI.md                          @your-org/build-owners
+/.cursor/                          @your-org/build-owners
+/.cursorrules                      @your-org/build-owners
+/.windsurf/                        @your-org/build-owners
+/.windsurfrules                    @your-org/build-owners
+/.clinerules                       @your-org/build-owners
+/.claude/                          @your-org/build-owners
+/.gemini/                          @your-org/build-owners
+/.codex/                           @your-org/build-owners
+/.continue/                        @your-org/build-owners
+/.vscode/                          @your-org/build-owners
+/.mcp.json                         @your-org/build-owners
+/.aider.conf.yml                   @your-org/build-owners
+/opencode.json                     @your-org/build-owners
+/opencode.jsonc                    @your-org/build-owners
+
+# Engine and plugin code that runs at build or editor time (G1.1, D1).
+/Plugins/                          @your-org/engine-owners
+/Assets/**/Editor/                 @your-org/engine-owners
+/Assets/Plugins/                   @your-org/engine-owners
+/Packages/                         @your-org/engine-owners
+/ThirdParty/                       @your-org/engine-owners

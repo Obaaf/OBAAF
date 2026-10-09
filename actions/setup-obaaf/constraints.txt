@@ -1,0 +1,16 @@
+# Exact versions of OBAAF's dependencies for pipeline use (R6), including the
+# build backend. Hashes will be added before the first public release
+# (DECISIONS.md, D-011).
+setuptools==80.10.2
+PyYAML==6.0.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+# Supports both Python versions in the CI matrix.
+rpds-py==0.30.0
+attrs==26.1.0
+typing_extensions==4.16.0
+# Verifying DSSE envelopes in `signing: keys` mode.
+cryptography==50.0.1
+cffi==2.1.1
+pycparser==3.0

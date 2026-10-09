@@ -1,0 +1,19 @@
+# Optional configuration for `obaaf check`. Copy to .github/obaaf.yml.
+#
+# lanes: state a job's lane when the checker cannot infer it
+#        (untrusted, agent, effect, release or trusted).
+# agents: extra actions or commands that run an AI agent in your workflows.
+# ignore: accept a finding for a stated reason until a date. Every entry needs
+#         rule, path, reason and until; it stops applying after `until`.
+lanes:
+  .github/workflows/nightly.yml#package: release
+
+agents:
+  actions: []
+  commands: []
+
+ignore:
+  - rule: OBAAF-GHA-008
+    path: .github/workflows/legacy-tools.yml
+    reason: "The vendor publishes no commit SHAs yet; tracked in issue 12"
+    until: 2027-03-31

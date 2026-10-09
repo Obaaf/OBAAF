@@ -1,0 +1,18 @@
+# OBAAF binary manifest sources (G2.1). List every vendored binary, SDK, engine
+# build and plugin. Create the manifest with:
+#   obaaf manifest create --components obaaf-sources.yaml --out obaaf-manifest.json
+# and commit both files. Builds then fail on any unrecorded change:
+#   obaaf manifest check --manifest obaaf-manifest.json
+components:
+  - id: example-engine-plugin
+    name: Example engine plugin
+    version: "2.4.1"
+    source: Vendor portal, downloaded by the build owner
+    kind: plugin
+    paths: ["Plugins/ExamplePlugin/**"]
+  - id: example-analytics-sdk
+    name: Example analytics SDK
+    version: "5.0.0"
+    source: Vendor release archive
+    kind: sdk
+    paths: ["ThirdParty/ExampleAnalytics/**"]

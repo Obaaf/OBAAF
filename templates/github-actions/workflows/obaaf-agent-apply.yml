@@ -1,0 +1,264 @@
+# OBAAF effect lane (Paper 1, sections 5.5 and 7.1; R4, R8; G8.1, G8.3; FR8).
+#
+# Acts on an agent's proposal only after (1) the agent-run record verifies,
+# (2) deterministic checks pass, and (3) a maintainer approves who neither
+# requested the work nor wrote any of the agent's inputs, through the protected
+# environment "obaaf-agent-apply". It never runs the model or any code from the
+# proposal.
+#
+# Two jobs, so that no job holds both a signing identity and write access:
+#   approve  waits for the approval, verifies the agent run, checks the proposal
+#            against the default branch, signs the approval record and assembles
+#            the agent record
+#   apply    with write access and no signing identity: checks that it has the
+#            same proposal and record, applies the patch to a new branch, opens a
+#            pull request, and posts the comment or label changes
+#
+# A patch becomes a branch and a pull request, which still needs review before
+# it merges. The commit adds an agent record (.obaaf/records/<digest>.json) with
+# both signed attestations, which the release verifier checks.
+#
+# Set up the environment first (docs/github-settings.md): required reviewers,
+# "Prevent self-review" and no administrator bypass.
+name: OBAAF agent apply
+
+on:
+  workflow_run:
+    workflows: ["OBAAF agent propose"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  approve:
+    # Only successful runs of this repository's own agent workflow, started by issue events.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.path == '.github/workflows/obaaf-agent-propose.yml' &&
+      contains(fromJSON('["issues", "issue_comment"]'), github.event.workflow_run.event)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: obaaf-agent-apply
+    cache-mode: none
+    permissions:
+      contents: read         # test the patch against the default branch
+      actions: read          # download the agent run's artifacts and read this run's approvals
+      attestations: write    # sign the approval record
+      id-token: write        # sign through GitHub's Sigstore; no long-lived key (FR11)
+    outputs:
+      bundle-digest: ${{ steps.record.outputs.bundle-digest }}
+      record-sha256: ${{ steps.record.outputs.record-sha256 }}
+      issue-number: ${{ steps.run.outputs.issue-number }}
+    env:
+      OBAAF_LANE: effect
+      AGENT_RUN_ID: ${{ github.event.workflow_run.id }}
+      AGENT_RUN_URL: ${{ github.event.workflow_run.html_url }}
+      AGENT_RUN_ACTOR: ${{ github.event.workflow_run.actor.login }}
+      AGENT_RUN_TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+    steps:
+      - name: Check out the protected default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the proposal bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-proposal
+          path: ${{ runner.temp }}/obaaf-proposal
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-snapshot
+          path: ${{ runner.temp }}/obaaf-snapshot
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the signed agent-run record
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-agent-run-bundle
+          path: ${{ runner.temp }}/obaaf-agent-run-bundle
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # R8: signed by the agent workflow on the default branch, covering exactly these proposal
+      # files, naming this snapshot and this run, with no write access, OIDC, secrets or caches.
+      # The issue number and the requesters come from the verified snapshot.
+      - name: Verify the agent-run record (R8)
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/obaaf-agent-run-bundle/attestation.json"
+          obaaf verify agent-run --policy .github/obaaf-policy.yaml --proposal "$RUNNER_TEMP/obaaf-proposal" \
+            --snapshot "$RUNNER_TEMP/obaaf-snapshot" --bundle "$bundle" --run-id "$AGENT_RUN_ID"
+          echo "AGENT_RUN_BUNDLE=$bundle" >> "$GITHUB_ENV"
+
+      # R4: the patch touches no workflow, instruction or other protected file and applies to the
+      # default branch as regular files only; comments carry no links or images; labels come from
+      # an allow-list (repository variable OBAAF_ALLOWED_LABELS).
+      - name: Check the proposal (R4)
+        env:
+          ALLOWED_LABELS: ${{ vars.OBAAF_ALLOWED_LABELS }}
+        run: |
+          set -euo pipefail
+          labels=()
+          IFS=',' read -ra names <<< "${ALLOWED_LABELS:-}"
+          for name in "${names[@]}"; do
+            name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+            [ -n "$name" ] && labels+=(--allow-label "$name")
+          done
+          obaaf proposal check "$RUNNER_TEMP/obaaf-proposal" --repo . --json \
+            --output "$RUNNER_TEMP/proposal-check.json" "${labels[@]}"
+
+      - name: Read who approved this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$RUNNER_TEMP/approvals.json"
+
+      # Approvals by anyone who started or re-ran either run, triggered the agent or wrote any of
+      # its inputs do not count (the snapshot adds the last two).
+      - name: Write the approval record (R4)
+        run: |
+          obaaf attest approval --proposal "$RUNNER_TEMP/obaaf-proposal" --approvals "$RUNNER_TEMP/approvals.json" \
+            --environment obaaf-agent-apply --snapshot "$RUNNER_TEMP/obaaf-snapshot" \
+            --requester "$AGENT_RUN_ACTOR" --requester "$AGENT_RUN_TRIGGERING_ACTOR" \
+            --requester "$GITHUB_TRIGGERING_ACTOR" \
+            --checks "$RUNNER_TEMP/proposal-check.json" --agent-run-url "$AGENT_RUN_URL" \
+            --out "$RUNNER_TEMP/approval.json"
+
+      - name: Sign the approval record
+        id: sign
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/obaaf-proposal/*
+          predicate-type: https://obaaf.example/attestation/agent-approval/v0.1
+          predicate-path: ${{ runner.temp }}/approval.json
+
+      - name: Write the agent record that travels with the change (G8.3)
+        id: record
+        env:
+          APPROVAL_BUNDLE: ${{ steps.sign.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          obaaf record write --proposal "$RUNNER_TEMP/obaaf-proposal" --agent-run-bundle "$AGENT_RUN_BUNDLE" \
+            --approval-bundle "$APPROVAL_BUNDLE" --agent-run-url "$AGENT_RUN_URL" \
+            --records-dir "$RUNNER_TEMP/obaaf-record"
+
+      - name: Keep the agent record for the apply job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obaaf-agent-record
+          path: ${{ runner.temp }}/obaaf-record
+          if-no-files-found: error
+          retention-days: 30
+
+  apply:
+    needs: approve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    cache-mode: none
+    # Write access, but no environment secrets and no id-token: this job cannot sign anything.
+    permissions:
+      contents: write        # push the proposal's branch
+      pull-requests: write   # open the pull request
+      issues: write          # post the comment or change labels
+      actions: read          # download the proposal and the agent record
+    env:
+      OBAAF_LANE: effect
+      AGENT_RUN_URL: ${{ github.event.workflow_run.html_url }}
+      BUNDLE_DIGEST: ${{ needs.approve.outputs.bundle-digest }}
+      RECORD_SHA256: ${{ needs.approve.outputs.record-sha256 }}
+      ISSUE_NUMBER: ${{ needs.approve.outputs.issue-number }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Check out the commit the approve job tested
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the proposal bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-proposal
+          path: ${{ runner.temp }}/obaaf-proposal
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the agent record
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: obaaf-agent-record
+          path: ${{ runner.temp }}/obaaf-record
+
+      # The digests come from the approve job's outputs, which nothing in this run can change.
+      - name: Check that this is the proposal and record the approve job checked
+        env:
+          ALLOWED_LABELS: ${{ vars.OBAAF_ALLOWED_LABELS }}
+        run: |
+          set -euo pipefail
+          echo "$RECORD_SHA256  $RUNNER_TEMP/obaaf-record/$BUNDLE_DIGEST.json" | sha256sum --check --strict
+          labels=()
+          IFS=',' read -ra names <<< "${ALLOWED_LABELS:-}"
+          for name in "${names[@]}"; do
+            name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+            [ -n "$name" ] && labels+=(--allow-label "$name")
+          done
+          obaaf proposal check "$RUNNER_TEMP/obaaf-proposal" --repo . --expect-digest "$BUNDLE_DIGEST" "${labels[@]}"
+
+      - name: Apply the proposal under this job's identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          proposal="$RUNNER_TEMP/obaaf-proposal"
+          if [ -f "$proposal/patch.diff" ]; then
+            branch="obaaf/agent/${BUNDLE_DIGEST:0:12}"
+            record=".obaaf/records/$BUNDLE_DIGEST.json"
+            # A commit identity used only by this lane (policy: agents.effect_identities), so commits
+            # other workflows make as github-actions[bot] are not mistaken for agent changes.
+            git config user.name "OBAAF effect lane"
+            git config user.email "obaaf-effect-lane@noreply.invalid"
+            git switch -c "$branch"
+            git apply --index -p1 --whitespace=nowarn "$proposal/patch.diff"
+            mkdir -p .obaaf/records
+            cp "$RUNNER_TEMP/obaaf-record/$BUNDLE_DIGEST.json" "$record"
+            git add "$record"
+            git commit -m "Agent proposal for #${ISSUE_NUMBER:-?}" \
+              -m "Applied by the OBAAF effect lane after approval. Agent run: $AGENT_RUN_URL" \
+              -m "OBAAF-Agent-Record: $record"
+            # The token is offered to github.com only.
+            # Expand GH_TOKEN when Git invokes the helper, not while assembling its configuration.
+            # shellcheck disable=SC2016
+            git -c credential.https://github.com.helper= \
+              -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+              push origin "$branch"
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$DEFAULT_BRANCH" --head "$branch" \
+              --title "Agent proposal for #${ISSUE_NUMBER:-?}" \
+              --body "Proposed by an AI agent and approved for review through the OBAAF effect lane. The signed agent record is in \`$record\`. Review this change like any outside contribution before merging; to keep the record valid, merge it unchanged and make follow-up changes in a separate pull request."
+          fi
+          if [ -f "$proposal/comment.md" ] && [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$proposal/comment.md"
+          fi
+          if [ -f "$proposal/labels.json" ] && [ -n "$ISSUE_NUMBER" ]; then
+            add=$(jq -r '(.add // []) | join(",")' "$proposal/labels.json")
+            remove=$(jq -r '(.remove // []) | join(",")' "$proposal/labels.json")
+            edit=()
+            if [ -n "$add" ]; then edit+=(--add-label "$add"); fi
+            if [ -n "$remove" ]; then edit+=(--remove-label "$remove"); fi
+            if [ ${#edit[@]} -gt 0 ]; then gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" "${edit[@]}"; fi
+          fi

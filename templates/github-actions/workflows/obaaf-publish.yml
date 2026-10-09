@@ -1,0 +1,134 @@
+# OBAAF release lane, publish half (G6.1, G6.2, G7.2, G8.3; FR4, FR6; G5.2 marked, not implemented).
+#
+# Runs when "OBAAF release" completes. A workflow_run workflow always runs from
+# the default branch, so this file, the release policy and the checks below come
+# from reviewed files, not from whatever commit a tag points at.
+#   verify   checks the release before anyone is asked to approve it, and puts the
+#            result in the run summary for the approver to read
+#   publish  waits for a person to approve the "release" environment, checks
+#            everything again, now including the approvals, then uploads with the
+#            environment's upload credentials
+#
+# Both checks confirm that the released commit is on the protected default branch
+# and that every agent-authored commit since the policy's agents.since commit
+# carries a valid agent record. Edit the marked step.
+name: OBAAF publish
+
+on:
+  workflow_run:
+    workflows: ["OBAAF release"]
+    types: [completed]
+
+permissions: {}
+
+env:
+  OBAAF_LANE: release
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+  RELEASE_ACTOR: ${{ github.event.workflow_run.actor.login }}
+  RELEASE_TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+
+jobs:
+  verify:
+    # Only successful tag builds of this repository's own release workflow.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.path == '.github/workflows/obaaf-release.yml'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: none
+    permissions:
+      contents: read           # the default branch and its history, for the policy and agent records
+      actions: read            # download the release run's artifacts
+      attestations: read       # fetch attestations for verification
+    steps:
+      - name: Check out the protected default branch with history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # Everything except the approvals, which do not exist yet. The result is in this run's summary.
+      - name: Verify the release before approval (G7.2, G8.3)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          obaaf verify release --policy .github/obaaf-policy.yaml --artifacts dist --pre-approval \
+            --actor "$RELEASE_ACTOR" --actor "$RELEASE_TRIGGERING_ACTOR" --actor "$GITHUB_TRIGGERING_ACTOR" \
+            --repo-dir . --source-revision "$RELEASE_SHA"
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # A person approves here (G6.2), after reading the verify job's summary. Configure required
+    # reviewers, "Prevent self-review" and no administrator bypass; keep the store upload
+    # credentials as this environment's secrets.
+    environment: release
+    cache-mode: none
+    permissions:
+      contents: read
+      actions: read            # download the artifacts and read who approved this run
+      attestations: read
+    steps:
+      - name: Check out the protected default branch with history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Download the release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Read who approved this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$RUNNER_TEMP/approvals.json"
+
+      # FR6: stop here unless provenance, the build record, the approvals and every agent record
+      # verify against .github/obaaf-policy.yaml. Approvals by whoever pushed the tag or re-ran
+      # either run do not count.
+      - name: Verify the release before upload (G7.2, G8.3)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          obaaf verify release --policy .github/obaaf-policy.yaml --artifacts dist \
+            --approvals "$RUNNER_TEMP/approvals.json" \
+            --actor "$RELEASE_ACTOR" --actor "$RELEASE_TRIGGERING_ACTOR" --actor "$GITHUB_TRIGGERING_ACTOR" \
+            --repo-dir . --source-revision "$RELEASE_SHA"
+
+      # Code signing of the binaries themselves (G5.2), if your platform needs it, goes here,
+      # after verification: use a managed signing service that this job reaches through OIDC
+      # (add id-token: write) or that holds the key itself, never a key file in a secret
+      # (docs/guides/F5-signing.md). Signing changes the files, so attest the signed files too.
+
+      # EDIT: your upload, with a dedicated upload identity that can only publish (G6.1).
+      # Upload to a beta or staging channel; a person sets the build live in the store (G6.2).
+      - name: Upload to the store
+        env:
+          OBAAF_STEP: publish
+          STORE_UPLOAD_USER: ${{ secrets.STORE_UPLOAD_USER }}
+          STORE_UPLOAD_TOKEN: ${{ secrets.STORE_UPLOAD_TOKEN }}
+        run: ./scripts/publish.sh dist

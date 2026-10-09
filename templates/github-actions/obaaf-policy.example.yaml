@@ -1,0 +1,51 @@
+# OBAAF release policy, read by `obaaf verify release` in obaaf-publish.yml and by
+# `obaaf verify agent-run` in obaaf-agent-apply.yml. Copy to .github/obaaf-policy.yaml
+# and replace OWNER/REPO. Protect it with CODEOWNERS: whoever can edit this file
+# decides what may ship. Both workflows read it from the default branch.
+format: obaaf-policy/v0.1
+repository: OWNER/REPO
+
+# sigstore: attestations signed in GitHub Actions, checked with `gh attestation verify`.
+# keys:     DSSE envelopes signed with a key held in a key service or hardware module.
+signing: sigstore
+
+provenance:
+  # Only this workflow, on these refs, may sign release provenance and build records.
+  # source_refs is required: which refs may produce a release is this policy's main decision.
+  signer_workflow: OWNER/REPO/.github/workflows/obaaf-release.yml
+  source_refs: ["refs/tags/v*"]
+
+build_record:
+  allowed_tiers: [A, B]      # use [A] to require SLSA Build Level 3 isolation for every target
+  require_sdks: true
+
+release:
+  # The released commit must be on this protected branch. `obaaf verify release` then needs
+  # --repo-dir and --source-revision, as obaaf-publish.yml passes them. "" turns the check off.
+  branch: main
+  # Environments whose approvals count. A GitHub environment proceeds after one approval, so
+  # for two-person release (item 4.3) chain two jobs with two environments and list both.
+  environments: [release]
+  min_approvals: 1           # Tier 4 (item 4.3): 2. 0 only on plans without environment reviewers
+                             # (docs/github-settings.md#plan-limits), with a person setting builds live
+  approver_not_actor: true   # whoever pushed the tag or re-ran a run cannot be the approver
+
+agents:
+  check: true                # set to false only if no agent can change this repository
+  # Agent-authored commits after this commit are checked on every release. Move it forward, in a
+  # reviewed change to this file, only to a commit whose release passed verification. Quote it.
+  # since: "0123456789abcdef0123456789abcdef01234567"
+  records_dir: .obaaf/records
+  propose_workflow: OWNER/REPO/.github/workflows/obaaf-agent-propose.yml
+  apply_workflow: OWNER/REPO/.github/workflows/obaaf-agent-apply.yml
+  source_ref: refs/heads/main
+  # The commit identity the effect lane uses (obaaf-agent-apply.yml). A commit by it without a
+  # valid agent record blocks the release.
+  effect_identities: ["obaaf-effect-lane"]
+  # true: block when the committed change differs from the approved proposal, for example when
+  # a maintainer edited an agent's pull request before merging. Make follow-up changes in a
+  # separate pull request instead.
+  require_exact_diff: true
+  # Agent runs on self-hosted runners are blocked unless this is true; set it only for ephemeral
+  # runners that start clean for every job (R7).
+  allow_self_hosted_runners: false

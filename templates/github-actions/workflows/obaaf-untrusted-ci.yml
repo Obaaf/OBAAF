@@ -1,0 +1,46 @@
+# OBAAF untrusted lane (G3.1, G9.1; FR3).
+#
+# Builds and tests every pull request, including pull requests from forks;
+# partners should contribute from forks too. It references no secrets, asks for
+# a read-only token, and runs on GitHub-hosted runners, which start every job in
+# a fresh environment. Nothing it produces is trusted by the release lane.
+#
+# For pull requests from forks, GitHub withholds secrets and gives the token
+# read-only access. Keep it that way: in private repositories, leave "Send
+# write tokens to workflows from pull requests" and "Send secrets to workflows
+# from pull requests" turned off (docs/github-settings.md). A pull request from
+# a branch in this repository runs the workflow file from that branch, which its
+# author can edit, and gets the repository's secrets; so only people trusted
+# with those secrets should have write access.
+name: OBAAF untrusted CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  OBAAF_LANE: untrusted
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Check vendored binaries against the manifest (G2.1)
+        run: obaaf manifest check --manifest obaaf-manifest.json
+
+      # Replace with your build and tests. Use no secrets here.
+      - name: Build and test
+        run: ./scripts/build.sh && ./scripts/test.sh
