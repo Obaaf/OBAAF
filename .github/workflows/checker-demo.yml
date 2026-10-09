@@ -1,0 +1,40 @@
+name: OBAAF checker demo
+run-name: "OBAAF checker demo: ${{ inputs.sample }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: Which example should OBAAF inspect?
+        required: true
+        default: corrected
+        type: choice
+        options:
+          - unsafe
+          - corrected
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download repository files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install OBAAF
+        uses: ./actions/setup-obaaf
+
+      - name: Check selected example
+        env:
+          SAMPLE: ${{ inputs.sample }}
+        run: |
+          case "$SAMPLE" in
+            unsafe|corrected) ;;
+            *) echo "Unknown sample"; exit 2 ;;
+          esac
+          obaaf check "demo/$SAMPLE.yml" --fail-on medium
