@@ -1,0 +1,14 @@
+{
+  "action": "labeled",
+  "label": {"name": "agent"},
+  "issue": {
+    "number": 5,
+    "title": "Add a settings toggle",
+    "body": "Please add a toggle for subtitles.",
+    "html_url": "https://github.com/studio/secret-game/issues/5",
+    "user": {"login": "designer", "id": 3001},
+    "author_association": "COLLABORATOR"
+  },
+  "repository": {"full_name": "studio/secret-game", "visibility": "private"},
+  "sender": {"login": "lead", "id": 3002}
+}

