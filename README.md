@@ -89,6 +89,8 @@ Each functional requirement of the specification (FR1–FR12) has an offline tes
 - [SECURITY.md](SECURITY.md): how to report a vulnerability
 - [LICENSING.md](LICENSING.md): intended licenses and the release condition
 
-Maintainers: [Ofonna Nweze](https://github.com/Ofonna-N) and [Osita Sean Keluo-Udeke](https://github.com/seanudeke).
+Software project attribution: [Ofonna Nweze](https://github.com/Ofonna-N) and [Osita Sean Keluo-Udeke](https://github.com/seanudeke).
+
+Both contributors maintain the project. The Python package metadata credits both names.
 
 The companion research papers are the independent work of Osita Sean Keluo-Udeke. The project does not imply endorsement by any government agency or by the research author's employer.
