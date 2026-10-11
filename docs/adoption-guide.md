@@ -4,6 +4,9 @@ This guide is for a studio of fewer than 50 people, where one engineer owns the 
 
 ## 1. Take the self-assessment (an hour)
 
+For a command-by-command example with fictional answers, see the
+[self-assessment walkthrough](self-assessment-walkthrough.md).
+
 Open the [offline form](../assessment/obaaf-self-assessment.html) in a browser, or run:
 
 ```bash
