@@ -1,0 +1,13 @@
+# Fictional scoring example. These are not verified organisational answers.
+format: obaaf-assessment/v0.1
+studio: Fictional Tier 1 demonstration
+respondent: Demo only
+answers:
+  "1.1": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.2": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.3": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.4": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.5": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.6": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.7": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
+  "1.8": {answer: "yes", evidence: "Fictional example; no real evidence supplied"}
