@@ -93,4 +93,7 @@ Software project attribution: [Ofonna Nweze](https://github.com/Ofonna-N) and [O
 
 Both contributors maintain the project. The Python package metadata credits both names.
 
+Sean led the research. Ofonna handled implementation, testing, and GitHub
+integration, with Sean contributing across the project.
+
 The companion research papers are the independent work of Osita Sean Keluo-Udeke. The project does not imply endorsement by any government agency or by the research author's employer.

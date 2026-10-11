@@ -6,6 +6,10 @@ Project contributors: Ofonna Nweze and Osita Sean Keluo-Udeke. The companion
 research papers are authored by Osita Sean Keluo-Udeke. Software package
 attribution is recorded separately in `pyproject.toml`.
 
+Sean led the research. Ofonna handled implementation, testing, and GitHub
+integration, with Sean contributing across the project. These contribution
+roles do not change the copyright notice or the release conditions below.
+
 OBAAF is meant to be free and open (NFR1). The intended licenses are:
 
 | Material | Intended license |
