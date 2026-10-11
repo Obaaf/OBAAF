@@ -9,7 +9,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | ID | Decision | Status |
 | --- | --- | --- |
 | D-001 | The framework is named the Open Build and Agent Assurance Framework (OBAAF) | Accepted, 2026-10-05 |
-| D-002 | Nothing is released or submitted without written employer approval | Accepted, 2026-10-05 |
+| D-002 | Public draft repository and resource site authorized by maintainer | Accepted, 2026-10-10; supersedes 2026-10-05 |
 | D-003 | Copyright notice and ownership | Open, before release |
 | D-004 | Titles, rationales and tests for the 28 profile requirements | Proposed |
 | D-005 | Not-applicable answers, including item 3.4 | Proposed |
@@ -49,11 +49,11 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 ### D-002 Release condition
 
-**Decision.** This repository stays private. No paper, specification or code is published or submitted until the author's employer approves it in writing. **Reason.** The specification's governance section; the work is independent of the author's job but done while employed. **Status.** Accepted, 2026-10-05.
+**Decision.** The maintainer authorized making the repository public and publishing the resource site, and stated that written employer approval is not necessary for that publication. Use the default GitHub Pages address until a custom domain is acquired. This supersedes the private-repository requirement accepted on 2026-10-05. It does not grant a license, change copyright ownership, or authorize submission of the research papers. **Status.** Accepted, 2026-10-10.
 
 ### D-003 Copyright notice and ownership
 
-**Decision needed.** LICENSING.md currently names the author as copyright holder. Before release, confirm this against the employment agreement and the employer's approval, and decide the affiliation shown on the papers and the repository. **Status.** Open, before release.
+**Decision needed.** LICENSING.md currently names the author as copyright holder. Before granting licenses, confirm ownership and decide the affiliation shown on the papers and the repository. Public draft access does not resolve these questions. **Status.** Open, before release.
 
 ### D-004 Profile titles, rationales and tests
 
@@ -176,7 +176,7 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 ## Open questions from the specification
 
 - [ ] Which CI system to support after GitHub Actions? The pilot will show what studios use.
-- [ ] Confirm the licenses (CC BY 4.0 for specifications, Apache 2.0 for code) with the employer.
+- [ ] Confirm the scope and holders of the intended licenses (CC BY 4.0 for specifications, Apache 2.0 for code).
 - [ ] Decide the affiliation shown on the papers and the repository (D-003).
 - [ ] Ask app stores and game platforms whether they would accept build provenance alongside uploads.
 

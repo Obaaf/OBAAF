@@ -25,4 +25,4 @@ The maintainer reviews, edits and tests changes before merging them. Contributor
 
 ## Licenses
 
-No license is granted until public release; see [LICENSING.md](LICENSING.md). After release, contributions are accepted under Apache-2.0 for code and CC BY 4.0 for documentation, with a Developer Certificate of Origin sign-off (`git commit -s`).
+The public draft does not yet grant a reuse license; see [LICENSING.md](LICENSING.md). Once the intended licenses are granted, contributions will be accepted under Apache-2.0 for code and CC BY 4.0 for documentation, with a Developer Certificate of Origin sign-off (`git commit -s`).

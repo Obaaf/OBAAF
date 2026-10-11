@@ -4,6 +4,12 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Public draft publication
+
+- Authorize public repository access and the resource site on October 10, 2026; supersede the employer-approval prerequisite for that publication (D-002).
+- Publish the resource guide and generated self-assessment with GitHub Pages, deploying from main after CI succeeds.
+- Keep copyright notices, draft validation limits, and intended licensing status explicit. No package-index release or research-paper submission is included.
+
 ### Repository validation
 
 - Pin rpds-py to 0.30.0, which supports the Python 3.10 and 3.13 CI matrix.

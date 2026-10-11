@@ -5,7 +5,7 @@ you supply and ranks suggested improvements. It does not inspect your accounts,
 verify evidence, or use an AI model to generate questions.
 
 Install OBAAF first using the [quick start](../README.md#quick-start). The commands
-below work from the OBAAF repository root. The project remains a private draft;
+below work from the OBAAF repository root. The project is a public draft;
 this walkthrough does not grant a licence or authorise distribution.
 
 ## Generate and score an answer file

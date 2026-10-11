@@ -4,7 +4,7 @@ OBAAF is a security framework, so flaws in it matter twice: in the tools themsel
 
 ## Reporting a vulnerability
 
-Please do not open a public issue. While the repository is private, write to the maintainer directly. After public release, use GitHub's private vulnerability reporting for this repository.
+Please do not open a public issue containing vulnerability details. Use GitHub's private vulnerability reporting for this repository.
 
 Include what you found, how to reproduce it, and which file, template or rule is affected. You will get an acknowledgment within five working days.
 

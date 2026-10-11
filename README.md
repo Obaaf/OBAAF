@@ -2,7 +2,7 @@
 
 OBAAF is intended to be a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. Version 1 starts with independent game studios, whose updates reach phones, PCs and consoles and whose teams rarely include security staff.
 
-> **Status: version 0.1, draft, private.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent studio pilot and broader platform validation remain pending. No license is granted yet. This repository stays private, and nothing in it is released or submitted, until the author's employer approves the release in writing. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
+> **Status: version 0.1, public draft.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent studio pilot and broader platform validation remain pending. No license is granted yet. The maintainer authorized public repository access and website publication on October 10, 2026. This is not a production release or a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
 >
 > The draft awaits maintainer review. Proposed design decisions are tracked in [DECISIONS.md](DECISIONS.md).
 
@@ -13,6 +13,7 @@ OBAAF is intended to be a free, open framework for keeping malicious code out of
 | Game-pipeline integrity profile | 28 requirements in nine control families that tailor NIST's SSDF and SLSA to game builds, each with a test and its mappings | [spec/profile.md](spec/profile.md) |
 | Agent controls | Taint-bounded authority, eight requirements (R1–R8), a three-lane architecture and a signed record of each agent run | [spec/agent-controls.md](spec/agent-controls.md) |
 | Self-assessment | 34 yes-or-no questions in four tiers that give a tier and a ranked list of fixes, on paper, in an offline form, or from the command line | [spec/self-assessment.md](spec/self-assessment.md), [offline form](assessment/obaaf-self-assessment.html) |
+| Team resource site | A public resource introducing the framework, questionnaire, workflow demonstration, and adoption steps | [Build and preview instructions](site/README.md) |
 | Reference pipeline templates | GitHub Actions workflows for four lanes: untrusted contributions, agents, approved changes and releases | [templates/github-actions](templates/github-actions/README.md) |
 | Verification tools | A pipeline checker that flags risky workflow settings; a release verifier that blocks uploads without valid provenance, approvals and agent records; and checks on an agent's signed record and proposal before anything is applied | [spec/checker-rules.md](spec/checker-rules.md), `obaaf verify release`, `obaaf verify agent-run`, `obaaf proposal check` |
 
@@ -87,7 +88,7 @@ Each functional requirement of the specification (FR1–FR12) has an offline tes
 - [CHANGELOG.md](CHANGELOG.md): changes by version
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution rules and review responsibilities
 - [SECURITY.md](SECURITY.md): how to report a vulnerability
-- [LICENSING.md](LICENSING.md): intended licenses and the release condition
+- [LICENSING.md](LICENSING.md): current licensing status and intended licenses
 
 Software project attribution: [Ofonna Nweze](https://github.com/Ofonna-N) and [Osita Sean Keluo-Udeke](https://github.com/seanudeke).
 

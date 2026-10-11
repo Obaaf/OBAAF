@@ -1,6 +1,6 @@
 ## OBAAF version 0.1 draft
 
-This pull request brings the first draft of the Open Build and Agent Assurance Framework into `main`. Merge it only after you have reviewed it. Nothing here is released or submitted until your employer approves in writing (D-002).
+This pull request brings the first draft of the Open Build and Agent Assurance Framework into `main`. Merge it only after you have reviewed it. Public draft access is authorized under D-002; research-paper submission and license grants remain separate decisions.
 
 ### What it contains
 
@@ -28,7 +28,7 @@ This pull request brings the first draft of the Open Build and Agent Assurance F
 - **Decisions.** 24 entries in `DECISIONS.md` are marked *Proposed*. Accept, change or reject each one, and date it.
 - **CODEOWNERS.** Set to `@Ofonna-N` and `@seanudeke` in `.github/CODEOWNERS`. Enable code-owner review when repository settings permit it.
 - **Open before release:** D-003 (copyright and affiliation), D-007 (predicate URIs) and D-011 (dependency hashes).
-- **Licenses.** Confirm the intended licenses with your employer.
+- **Licenses.** Confirm copyright ownership and the scope of the intended licenses before granting them.
 
 ### Known gaps in 0.1
 
