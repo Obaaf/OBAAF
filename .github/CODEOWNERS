@@ -1,3 +1,4 @@
-# Maintainers for all project files.
-# Enable required code-owner review for main when repository settings permit it.
-*                                   @Ofonna-N @seanudeke
+# Project maintainers: @Ofonna-N and @seanudeke.
+# Sean is the required review owner for all files on main, including this policy.
+# Listing both maintainers on the ownership rule would allow either approval.
+*                                   @seanudeke

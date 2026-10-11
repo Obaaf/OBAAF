@@ -1,5 +1,25 @@
 # GitHub settings for the OBAAF templates
 
+## OBAAF repository review policy
+
+Changes to OBAAF's `main` branch must go through a pull request. Sean Udeke
+(`@seanudeke`) is the required code owner for all files, including
+[CODEOWNERS](../.github/CODEOWNERS). Ofonna Nweze and Sean remain project
+maintainers; the code-owner rule identifies the mandatory reviewer.
+
+Require one approving code-owner review, dismiss approvals when new changes are
+pushed, require approval of the latest push, and resolve review conversations.
+Required CI checks must pass with the branch current. Apply protection to
+administrators too, prohibit force pushes and branch deletion, and do not grant
+review bypasses. After approval, a maintainer may merge the PR; Pages publishes
+only after the merged revision passes CI.
+
+GitHub does not let authors approve their own PRs. Sean-authored changes need a
+separately agreed review policy; do not bypass this rule to merge them.
+
+See the branch rule under repository Settings > Branches. The initial policy PR
+must receive Sean's approval before it is merged.
+
 The templates enforce what a workflow file can enforce. The rest lives in repository settings, which `obaaf check` cannot read. Set these before using the templates, and recheck them when the self-assessment asks for evidence. Menu names follow GitHub's documentation as of October 2026.
 
 ## Actions permissions
