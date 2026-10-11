@@ -27,6 +27,9 @@ def validate(output):
     for path in output.glob('*.html'):
         parser = Links()
         parser.feed(path.read_text(encoding='utf-8'))
+        if path.name == 'assessment.html':
+            # The form creates these headings from the same catalog in renderItems().
+            parser.ids.update(f"tier-{tier['id']}" for tier in render.form_data()['tiers'])
         pages[path.resolve()] = parser
     for path, parser in pages.items():
         for reference in parser.references:
