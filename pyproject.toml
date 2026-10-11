@@ -16,11 +16,9 @@ maintainers = [
   { name = "Ofonna Nweze" },
   { name = "Osita Sean Keluo-Udeke" },
 ]
-# No license is granted yet. See LICENSING.md: the intended licenses take effect
-# only at public release, after written approval.
+# Public draft; no reuse license is granted yet. See LICENSING.md.
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
-  "Private :: Do Not Upload",
   "Programming Language :: Python :: 3",
   "Topic :: Security",
   "Topic :: Software Development :: Build Tools",

@@ -1,6 +1,6 @@
 # Traceability: requirements to implementation and tests
 
-The specification's roadmap figure plans specifications, templates, the checker, the verifier and tests for FR1–FR12 in version 0.1. Each functional requirement below has an offline test module that runs in CI (`python -m unittest discover -s tests`), and, where only a real GitHub repository can show the behavior, a [live acceptance test](live-acceptance-tests.md). None of the live tests has been run yet. Gate 1 is separate: it requires the employer's written approval before anything is submitted or released ([DECISIONS.md](../DECISIONS.md), D-002).
+The specification's roadmap figure plans specifications, templates, the checker, the verifier and tests for FR1–FR12 in version 0.1. Each functional requirement below has an offline test module that runs in CI (`python -m unittest discover -s tests`), and, where only a real GitHub repository can show the behavior, a [live acceptance test](live-acceptance-tests.md). None of the live tests has been run yet. Public draft access and website publication are authorized under [DECISIONS.md](../DECISIONS.md), D-002; this does not constitute production validation or paper submission.
 
 The status column says how far version 0.1 meets each acceptance criterion. "Met offline" means the offline tests show it; "Platform behavior unconfirmed" means the templates are written to get it from GitHub, but only the live test can show that GitHub behaves that way.
 
@@ -27,7 +27,7 @@ Supporting tests: [test_docs.py](../tests/test_docs.py) checks that generated do
 
 | ID | Requirement | Status in version 0.1 |
 | --- | --- | --- |
-| NFR1 | Free and open (CC BY 4.0, Apache 2.0) | Intended; no license is granted until the employer approves release ([LICENSING.md](../LICENSING.md)) |
+| NFR1 | Free and open (CC BY 4.0, Apache 2.0) | Intended; public access does not grant a reuse license ([LICENSING.md](../LICENSING.md)) |
 | NFR2 | Usable without security staff; kappa ≥ 0.61 | Plain-language items with evidence; agreement is measured in the pilot |
 | NFR3 | Tiers 1 and 2 need no new tools | Not met for private repositories on every plan. Tier 1 needs no new tools, except that protecting release branches (item 1.6) needs a paid plan for a private repository. Tier 2 uses the free templates and tools, but on private repositories the agent and release lanes need GitHub Enterprise Cloud for artifact attestations and environment reviewers ([plan limits](github-settings.md#plan-limits)) |
 | NFR4 | Release build time rises by no more than 5% | Hypothesis; measured in the pilot |

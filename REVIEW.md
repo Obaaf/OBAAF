@@ -1,6 +1,6 @@
 # OBAAF review, 2026-10-07
 
-The repository is a private draft. Uploading it does not accept the remaining design proposals or authorize public release.
+The repository is a public draft. Publication was authorized by the maintainer on October 10, 2026; it does not accept the remaining design proposals or grant a reuse license.
 
 ## Completed
 
@@ -38,7 +38,7 @@ These are recommendations for maintainer consideration, not recorded acceptances
 
 ## Before public release
 
-- D-002/D-003: obtain written employer approval and resolve copyright and affiliation.
+- D-002: public draft publication authorized. D-003: resolve copyright and affiliation before granting licenses.
 - Confirm the intended licenses before adding license grants or package license metadata.
 - D-007: choose and adopt stable predicate URIs. Current reserved-domain URIs remain provisional.
 - D-011: choose the distribution approach and implement hash-verified dependency installation.

@@ -1,4 +1,4 @@
-"""Build the review site without deploying or copying private research sources."""
+"""Build the public resource site from its explicit asset list."""
 import argparse
 from html.parser import HTMLParser
 from pathlib import Path
