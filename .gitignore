@@ -20,3 +20,4 @@ obaaf-assessment-*.json
 # Rebuild manuscript previews from the reviewed sources
 *-preview.pdf
 *.zip
+/site/_site/

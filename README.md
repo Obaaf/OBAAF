@@ -13,6 +13,7 @@ OBAAF is intended to be a free, open framework for keeping malicious code out of
 | Game-pipeline integrity profile | 28 requirements in nine control families that tailor NIST's SSDF and SLSA to game builds, each with a test and its mappings | [spec/profile.md](spec/profile.md) |
 | Agent controls | Taint-bounded authority, eight requirements (R1–R8), a three-lane architecture and a signed record of each agent run | [spec/agent-controls.md](spec/agent-controls.md) |
 | Self-assessment | 34 yes-or-no questions in four tiers that give a tier and a ranked list of fixes, on paper, in an offline form, or from the command line | [spec/self-assessment.md](spec/self-assessment.md), [offline form](assessment/obaaf-self-assessment.html) |
+| Team resource site | A private review preview introducing the framework, questionnaire, workflow demonstration, and adoption steps | [Build and preview instructions](site/README.md) |
 | Reference pipeline templates | GitHub Actions workflows for four lanes: untrusted contributions, agents, approved changes and releases | [templates/github-actions](templates/github-actions/README.md) |
 | Verification tools | A pipeline checker that flags risky workflow settings; a release verifier that blocks uploads without valid provenance, approvals and agent records; and checks on an agent's signed record and proposal before anything is applied | [spec/checker-rules.md](spec/checker-rules.md), `obaaf verify release`, `obaaf verify agent-run`, `obaaf proposal check` |
 
