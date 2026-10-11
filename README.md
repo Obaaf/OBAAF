@@ -2,7 +2,7 @@
 
 OBAAF is intended to be a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. Version 1 starts with independent game studios, whose updates reach phones, PCs and consoles and whose teams rarely include security staff.
 
-> **Status: version 0.1, draft, private.** Nothing here has been piloted, and no license is granted yet. This repository stays private, and nothing in it is released or submitted, until the author's employer approves the release in writing. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
+> **Status: version 0.1, draft, private.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent studio pilot and broader platform validation remain pending. No license is granted yet. This repository stays private, and nothing in it is released or submitted, until the author's employer approves the release in writing. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
 >
 > The draft awaits maintainer review. Proposed design decisions are tracked in [DECISIONS.md](DECISIONS.md).
 
