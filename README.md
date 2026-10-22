@@ -88,6 +88,8 @@ Each functional requirement of the specification (FR1–FR12) has an offline tes
 - [CHANGELOG.md](CHANGELOG.md): changes by version
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution rules and review responsibilities
 - [SECURITY.md](SECURITY.md): how to report a vulnerability
+- [GOVERNANCE.md](GOVERNANCE.md): project roles, decision-making, and how to become a maintainer
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): expected conduct in the community
 - [LICENSING.md](LICENSING.md): current licensing status and intended licenses
 
 Software project attribution: [Ofonna Nweze](https://github.com/Ofonna-N) and [Osita Sean Keluo-Udeke](https://github.com/seanudeke).

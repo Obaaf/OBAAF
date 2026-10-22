@@ -1,0 +1,24 @@
+OBAAF — Open Build and Agent Assurance Framework
+Copyright 2026 Osita Sean Keluo-Udeke
+
+This product includes software and specifications developed for the Open Build
+and Agent Assurance Framework (OBAAF).
+
+Licensing is split by material (see LICENSING.md for the full statement):
+
+  - Code, templates, tools, and tests (src/, templates/, actions/, tests/) are
+    licensed under the Apache License, Version 2.0. See LICENSE.
+
+  - Specifications, guides, and documentation (spec/, docs/, and the data in
+    src/obaaf/data/) are licensed under the Creative Commons Attribution 4.0
+    International license (CC BY 4.0). See LICENSE-docs.
+
+The data files in src/obaaf/data/ are dual-covered: they are the specification
+(CC BY 4.0) and they ship inside the Python package the code uses (Apache-2.0).
+The combined SPDX license expression for the package is
+"Apache-2.0 AND CC-BY-4.0".
+
+Project contributors: Ofonna Nweze and Osita Sean Keluo-Udeke. The companion
+research papers are the independent work of Osita Sean Keluo-Udeke. The project
+does not imply endorsement by any government agency or by the research author's
+employer.

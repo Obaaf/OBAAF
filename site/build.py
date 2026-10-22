@@ -53,7 +53,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     for name in ('index.html', 'styles.css', 'main.js'):
         (output / name).write_bytes((SOURCE / name).read_bytes())
-    assessment = render.form_html(link_base='https://github.com/Ofonna-N/OBAAF/blob/main/')
+    assessment = render.form_html(link_base='https://github.com/Obaaf/OBAAF/blob/main/')
     assessment = assessment.replace('<header>',
         '<header>\n<nav aria-label="Resource site"><a href="index.html">Back to the OBAAF field guide</a></nav>', 1)
     (output / 'assessment.html').write_text(assessment, encoding='utf-8')

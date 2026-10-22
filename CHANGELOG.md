@@ -4,6 +4,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Licensing
+
+- Prepare the license grant (D-003, Proposed): Apache License 2.0 for the code, templates, tools and tests; Creative Commons Attribution 4.0 International for the specifications, guides and documentation, including the data in `src/obaaf/data/`. Add `LICENSE`, `LICENSE-docs` and `NOTICE`; set the package's SPDX expression to `Apache-2.0 AND CC-BY-4.0` with `license-files` in `pyproject.toml` (needs setuptools 77 or later, satisfied by the pinned build backend). The grant takes effect when the maintainers accept D-003 by committing these files.
+
+### Packaging and distribution
+
+- Prepare the PyPI distribution path (D-011): a release runbook and a trusted-publishing (OIDC) release workflow in [docs/releasing.md](docs/releasing.md), so a future release can be installed with `pip install obaaf`. Add `branding` to `actions/setup-obaaf` for a GitHub Marketplace listing. Defer pre-built single-file binaries. Not yet enabled: cutting a release remains a maintainer action.
+
 ### Public draft publication
 
 - Authorize public repository access and the resource site on October 10, 2026; supersede the employer-approval prerequisite for that publication (D-002).

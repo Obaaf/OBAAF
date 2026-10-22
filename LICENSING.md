@@ -1,28 +1,27 @@
 # Licensing
 
-**No license is granted yet.** Copyright (c) 2026 Osita Sean Keluo-Udeke. All rights reserved. Public access does not grant a reuse license.
+OBAAF is free and open (NFR1). Two licenses apply, by material:
 
-Project contributors: Ofonna Nweze and Osita Sean Keluo-Udeke. The companion
-research papers are authored by Osita Sean Keluo-Udeke. Software package
-attribution is recorded separately in `pyproject.toml`.
+| Material | License | Text |
+| --- | --- | --- |
+| Code, templates, tools and tests (`src/`, `templates/`, `actions/`, `tests/`) | Apache License 2.0 | [LICENSE](LICENSE) |
+| Specifications, guides and documentation (`spec/`, `docs/`, and the data in `src/obaaf/data/`) | Creative Commons Attribution 4.0 International (CC BY 4.0) | [LICENSE-docs](LICENSE-docs) |
 
-Sean led the research. Ofonna handled implementation, testing, and GitHub
-integration, with Sean contributing across the project. These contribution
-roles do not change the copyright notice or the release conditions below.
+Copyright (c) 2026 Osita Sean Keluo-Udeke.
 
-OBAAF is meant to be free and open (NFR1). The intended licenses are:
+The data in `src/obaaf/data/` is both: it is the specification (CC BY 4.0) and it ships inside the Python package the code uses (Apache-2.0). The package therefore declares the SPDX license expression `Apache-2.0 AND CC-BY-4.0`, with both texts listed as license files, in [pyproject.toml](pyproject.toml). The split is also recorded in [NOTICE](NOTICE).
 
-| Material | Intended license |
-| --- | --- |
-| Specifications, guides and documentation (`spec/`, `docs/`, the data in `src/obaaf/data/`) | Creative Commons Attribution 4.0 International (CC BY 4.0) |
-| Code, templates and tools (`src/`, `templates/`, `actions/`, `tests/`) | Apache License 2.0 |
+## Reusing OBAAF
 
-The maintainer authorized public repository access and website publication on October 10, 2026 and removed the employer-approval prerequisite for that publication (see [DECISIONS.md](DECISIONS.md), D-002). The licenses above remain intended, not granted: adding license texts and confirming their scope is a separate maintainer decision. Copyright ownership and paper affiliations are unchanged.
+- **Code (Apache-2.0).** You may use, modify and redistribute it, including commercially, provided you keep the copyright and license notices, state significant changes, and include a copy of [LICENSE](LICENSE) and the [NOTICE](NOTICE) text. The license includes an express patent grant and provides the software "as is", without warranty.
+- **Specifications and documentation (CC BY 4.0).** You may share and adapt them, including commercially, provided you credit the project — for example: *"Based on OBAAF (Open Build and Agent Assurance Framework) by Osita Sean Keluo-Udeke, CC BY 4.0"* — link to the license, and indicate if you made changes.
 
-The data in `src/obaaf/data/` is both: it is the specification, and it ships inside the Python package that the code uses. When licenses are granted, the package's license metadata should say so, for example with the SPDX expression `Apache-2.0 AND CC-BY-4.0` and a note naming which files each covers.
+Reusing a data file from `src/obaaf/data/` as part of the running tool falls under Apache-2.0; reusing its content as specification falls under CC BY 4.0. Either license is available for that content; pick the one that fits your use.
 
-Before granting the intended licenses:
+## Attribution and status
 
-1. Add `LICENSE` (Apache-2.0 text) and `LICENSE-docs` (CC BY 4.0 text) at the root, and the SPDX license expression to `pyproject.toml`, covering the data files as described above.
-2. Replace this file's first paragraph with the license notice.
-3. Record the license decision in DECISIONS.md and CHANGELOG.md.
+Project contributors: Ofonna Nweze and Osita Sean Keluo-Udeke. The companion research papers are the independent work of Osita Sean Keluo-Udeke. Software package attribution is recorded in [pyproject.toml](pyproject.toml).
+
+Sean led the research. Ofonna handled implementation, testing, and GitHub integration, with Sean contributing across the project. These contribution roles do not change the copyright notice.
+
+The maintainer authorized public repository access and website publication on October 10, 2026 ([DECISIONS.md](DECISIONS.md), D-002). The license grant on this page is tracked as [D-003](DECISIONS.md); confirming the copyright holder and the affiliation shown on the papers and the repository is the maintainers' acceptance step. The project does not imply endorsement by any government agency or by the research author's employer.

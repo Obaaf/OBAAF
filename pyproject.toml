@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,11 @@ dynamic = ["version"]
 description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools (draft)"
 readme = "README.md"
 requires-python = ">=3.10"
+# Code is Apache-2.0; the specification data under src/obaaf/data/ is also
+# CC BY 4.0 (see LICENSING.md). The package ships both, so its combined SPDX
+# expression is "Apache-2.0 AND CC-BY-4.0".
+license = "Apache-2.0 AND CC-BY-4.0"
+license-files = ["LICENSE", "LICENSE-docs"]
 authors = [
   { name = "Ofonna Nweze" },
   { name = "Osita Sean Keluo-Udeke" },
@@ -16,7 +21,6 @@ maintainers = [
   { name = "Ofonna Nweze" },
   { name = "Osita Sean Keluo-Udeke" },
 ]
-# Public draft; no reuse license is granted yet. See LICENSING.md.
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Programming Language :: Python :: 3",
