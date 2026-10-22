@@ -6,6 +6,9 @@ description: >-
   including the build backend, comes from the exact versions in
   constraints.txt; nothing is resolved at install time.
 author: Osita Sean Keluo-Udeke
+branding:
+  icon: shield
+  color: red
 inputs:
   python:
     description: Python interpreter to use (3.10 or later). Defaults to python3, then python.

@@ -22,7 +22,7 @@ and scoring rules. Answers stay in the browser and are not uploaded to a server.
 
 ## Hosting
 
-The site is hosted at https://ofonna-n.github.io/OBAAF/. GitHub Pages uses GitHub
+The site is hosted at https://obaaf.github.io/OBAAF/. GitHub Pages uses GitHub
 Actions as its source. [The deployment workflow](../.github/workflows/pages.yml)
 runs after successful CI on main, or by manual dispatch on main. It checks out the
 tested revision, builds the dedicated site directory, uploads only that directory,

@@ -10,7 +10,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | --- | --- | --- |
 | D-001 | The framework is named the Open Build and Agent Assurance Framework (OBAAF) | Accepted, 2026-10-05 |
 | D-002 | Public draft repository and resource site authorized by maintainer | Accepted, 2026-10-10; supersedes 2026-10-05 |
-| D-003 | Copyright notice and ownership | Open, before release |
+| D-003 | Copyright notice and ownership; license grant | Proposed, 2026-10-21 |
 | D-004 | Titles, rationales and tests for the 28 profile requirements | Proposed |
 | D-005 | Not-applicable answers, including item 3.4 | Proposed |
 | D-006 | How the self-assessment ranks fixes | Proposed |
@@ -51,9 +51,9 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 **Decision.** The maintainer authorized making the repository public and publishing the resource site, and stated that written employer approval is not necessary for that publication. Use the default GitHub Pages address until a custom domain is acquired. This supersedes the private-repository requirement accepted on 2026-10-05. It does not grant a license, change copyright ownership, or authorize submission of the research papers. **Status.** Accepted, 2026-10-10.
 
-### D-003 Copyright notice and ownership
+### D-003 Copyright notice and ownership; license grant
 
-**Decision needed.** LICENSING.md currently names the author as copyright holder. Before granting licenses, confirm ownership and decide the affiliation shown on the papers and the repository. Public draft access does not resolve these questions. **Status.** Open, before release.
+**Decision.** Grant the intended licenses (NFR1): Apache License 2.0 for the code, templates, tools and tests (`src/`, `templates/`, `actions/`, `tests/`); Creative Commons Attribution 4.0 International for the specifications, guides and documentation (`spec/`, `docs/`, and the data in `src/obaaf/data/`). The data files are dual-covered, so the package declares `Apache-2.0 AND CC-BY-4.0`. Copyright is held by Osita Sean Keluo-Udeke, as stated before public draft. The license texts (`LICENSE`, `LICENSE-docs`), the `NOTICE`, the `pyproject.toml` metadata and the [LICENSING.md](LICENSING.md) statement are in place. **Reason.** The licenses were always the intended ones (LICENSING.md); a studio cannot pilot or redistribute OBAAF without a granted license, so the grant is a prerequisite to the independent-studio pilot and to award and funding programs that require an OSI-approved license. **Maintainer acceptance.** Confirm the copyright holder and the affiliation shown on the papers and the repository, then accept by committing these files; change this status to Accepted with the date. Until then the texts are implemented as written but not yet accepted. **Status.** Proposed, 2026-10-21.
 
 ### D-004 Profile titles, rationales and tests
 
@@ -85,7 +85,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 ### D-011 Pinning pipeline dependencies
 
-**Decision so far.** Workflows pin every action to a full commit SHA, and `actions/setup-obaaf` installs OBAAF from the pinned commit with exact dependency versions (`constraints.txt`). **Decision needed.** Add hashes (`--require-hashes`) and decide how studios obtain OBAAF (package index or pinned action) before release. **Status.** Open, before release.
+**Decision so far.** Workflows pin every action to a full commit SHA, and `actions/setup-obaaf` installs OBAAF from the pinned commit with exact dependency versions (`constraints.txt`). **Decision needed.** Add hashes (`--require-hashes`) before release. **Prepared.** The distribution path — PyPI via OIDC trusted publishing (so `pip install obaaf`) and a GitHub Marketplace listing for `setup-obaaf` — is documented in [docs/releasing.md](docs/releasing.md); until a release is cut, teams install from the repository. Pre-built single-file binaries are deferred. **Status.** Open, before release.
 
 ### D-012 Retired
 
@@ -176,7 +176,7 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 ## Open questions from the specification
 
 - [ ] Which CI system to support after GitHub Actions? The pilot will show what studios use.
-- [ ] Confirm the scope and holders of the intended licenses (CC BY 4.0 for specifications, Apache 2.0 for code).
+- [x] Confirm the scope of the intended licenses (CC BY 4.0 for specifications, Apache 2.0 for code): granted in D-003, Proposed 2026-10-21. Confirming the copyright holder and affiliation remains the maintainers' acceptance step.
 - [ ] Decide the affiliation shown on the papers and the repository (D-003).
 - [ ] Ask app stores and game platforms whether they would accept build provenance alongside uploads.
 
