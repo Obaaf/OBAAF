@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Project status
+
+- OBAAF is no longer described as a public draft: version 0.1 is on PyPI and in active adoption with pilot teams. The website, README, CONTRIBUTING and docs say so, the README and CONTRIBUTING reflect the Apache-2.0 and CC BY 4.0 licenses already in `LICENSING.md`, and the package classifier moves from Pre-Alpha to Alpha (takes effect on PyPI with the next release).
+
 ### Checker: act on the first pilot's feedback (issue #19)
 
 - Warn, with an advisory note that does not change the result, when a repository has agent instruction files but no job is classified into the agent lane, and when a job whose name suggests agent work stays in the trusted lane. This surfaces agents launched indirectly (for example through a wrapper script) that the lane inference misses.

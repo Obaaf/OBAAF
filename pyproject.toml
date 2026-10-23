@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "obaaf"
 dynamic = ["version"]
-description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools (draft)"
+description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools"
 readme = "README.md"
 requires-python = ">=3.10"
 # Code is Apache-2.0; the specification data under src/obaaf/data/ is also
@@ -22,7 +22,7 @@ maintainers = [
   { name = "Osita Sean Keluo-Udeke" },
 ]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
   "Topic :: Security",
   "Topic :: Software Development :: Build Tools",

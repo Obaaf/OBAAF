@@ -1,6 +1,6 @@
 # Live acceptance tests
 
-The offline tests (`python -m unittest discover -s tests`) check the templates, the tools and the records without a network. Some acceptance criteria can only be shown on a real GitHub repository: that GitHub withholds secrets from a fork, that an environment waits for a reviewer, that a signature made in Actions verifies. These procedures cover them. None has been run yet. Run them in a sandbox before the templates are used for real releases, and again for each release of the templates. (Public draft access is authorized under D-002; production validation and paper submission remain separate.)
+The offline tests (`python -m unittest discover -s tests`) check the templates, the tools and the records without a network. Some acceptance criteria can only be shown on a real GitHub repository: that GitHub withholds secrets from a fork, that an environment waits for a reviewer, that a signature made in Actions verifies. These procedures cover them. None has been run yet. Run them in a sandbox before the templates are used for real releases, and again for each release of the templates.
 
 ## Setup
 

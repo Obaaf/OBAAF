@@ -471,7 +471,7 @@ def cmd_catalog_check(args) -> int:
 
 # ------------------------------------------------------------------ parser
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools (draft).")
+    p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
