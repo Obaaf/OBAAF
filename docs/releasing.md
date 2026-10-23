@@ -2,7 +2,7 @@
 
 *Runbook. Draft. Resolves part of D-011 (how studios obtain OBAAF).*
 
-Today a team installs OBAAF from the repository (`pip install git+https://github.com/Obaaf/OBAAF`). Publishing the CLI to PyPI and the `setup-obaaf` action to the GitHub Marketplace removes that friction: `pip install obaaf`, and a Marketplace listing teams can discover. Both are maintainer actions with one-time setup; this runbook has the exact steps. Neither is enabled automatically.
+OBAAF is published to PyPI, so a team installs it with `pip install obaaf`. Publishing the `setup-obaaf` action to the GitHub Marketplace would further reduce friction, giving teams a listing they can discover. This runbook records the one-time PyPI setup and how to cut each release; the Marketplace listing is a separate maintainer action, not enabled automatically.
 
 ## Before the first release
 
@@ -94,7 +94,7 @@ jobs:
           print-hash: true
 ```
 
-After the first successful publish, update the website quickstart and `README.md` from `pip install git+https://github.com/Obaaf/OBAAF` to `pip install obaaf`, and consider adding a signed Sigstore attestation of the built distributions (the release lane already signs provenance for game artifacts; the same `actions/attest` step can cover the Python distributions).
+After the first successful publish, the website quickstart and `README.md` use `pip install obaaf` (updated in this release). Consider adding a signed Sigstore attestation of the built distributions: the release lane already signs provenance for release artifacts, and the same `actions/attest` step can cover the Python distributions.
 
 ## Part B — GitHub Marketplace listing for `setup-obaaf`
 

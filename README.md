@@ -1,8 +1,8 @@
 # Open Build and Agent Assurance Framework (OBAAF)
 
-OBAAF is intended to be a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. Version 1 starts with independent game studios, whose updates reach phones, PCs and consoles and whose teams rarely include security staff.
+OBAAF is intended to be a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. It works for any team that ships software updates. The first version is shaped by the needs of small teams without dedicated security staff, independent game studios among them, whose updates reach phones, PCs and consoles.
 
-> **Status: version 0.1, public draft.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent studio pilot and broader platform validation remain pending. No license is granted yet. The maintainer authorized public repository access and website publication on October 10, 2026. This is not a production release or a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
+> **Status: version 0.1, public draft.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent pilot and broader platform validation remain pending. No license is granted yet. The maintainer authorized public repository access and website publication on October 10, 2026. This is not a production release or a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
 >
 > The draft awaits maintainer review. Proposed design decisions are tracked in [DECISIONS.md](DECISIONS.md).
 
@@ -10,7 +10,7 @@ OBAAF is intended to be a free, open framework for keeping malicious code out of
 
 | Component | What it does | Where |
 | --- | --- | --- |
-| Game-pipeline integrity profile | 28 requirements in nine control families that tailor NIST's SSDF and SLSA to game builds, each with a test and its mappings | [spec/profile.md](spec/profile.md) |
+| Build-integrity profile | 28 requirements in nine control families that tailor NIST's SSDF and SLSA to software build pipelines, with game studios as the worked example, each with a test and its mappings | [spec/profile.md](spec/profile.md) |
 | Agent controls | Taint-bounded authority, eight requirements (R1–R8), a three-lane architecture and a signed record of each agent run | [spec/agent-controls.md](spec/agent-controls.md) |
 | Self-assessment | 34 yes-or-no questions in four tiers that give a tier and a ranked list of fixes, on paper, in an offline form, or from the command line | [spec/self-assessment.md](spec/self-assessment.md), [offline form](assessment/obaaf-self-assessment.html) |
 | Team resource site | A public resource introducing the framework, questionnaire, workflow demonstration, and adoption steps | [Build and preview instructions](site/README.md) |
@@ -20,7 +20,7 @@ OBAAF is intended to be a free, open framework for keeping malicious code out of
 The profile, the agent controls and the self-assessment come from the author's two companion papers, both unpublished drafts:
 
 - **Paper 1**, [*Untrusted Text, Trusted Tokens*](papers/OBAAF-Paper1-Agent-Assurance-LaTeX/README.md): agent assurance, the source of the agent controls.
-- **Paper 2**, [*Securing the Game Build*](papers/OBAAF-Paper2-Build-Assurance-Games-LaTeX/README.md): build assurance for games, the source of the profile and the self-assessment.
+- **Paper 2**, [*Securing the Game Build*](papers/OBAAF-Paper2-Build-Assurance-Games-LaTeX/README.md): build assurance for games, the source of the profile and the self-assessment, whose controls apply to any software team.
 
 Their machine-readable form in [`src/obaaf/data/`](src/obaaf/data/) is the single source of truth: the documents in `spec/` and the offline form are generated from it.
 
@@ -50,11 +50,11 @@ flowchart LR
 OBAAF needs Python 3.10 or later.
 
 ```bash
-python -m pip install -e ".[keys]"
+pip install "obaaf[keys]"   # omit [keys] if you only need assess and check
 obaaf --help
 ```
 
-**Studios.** Start with the self-assessment. Open [the offline form](assessment/obaaf-self-assessment.html) in a browser, or:
+**Teams.** Start with the self-assessment. Open [the offline form](assessment/obaaf-self-assessment.html) in a browser, or:
 
 ```bash
 obaaf assess init --output answers.yaml   # fill in yes, no or na

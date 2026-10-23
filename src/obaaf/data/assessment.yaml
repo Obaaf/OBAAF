@@ -1,10 +1,10 @@
-# OBAAF self-assessment for studios without security staff.
+# OBAAF self-assessment for software teams without security staff.
 #
 # Source: Paper 2, section 6 and Tables 6 and 8. The `question`, `evidence`,
 # `effort` and `profile` fields reproduce Table 6. `na_when`, `fix` and
 # `short` are new in this repository (see DECISIONS.md, D-005 and D-006).
 #
-# Scoring (Paper 2, DR6): a studio reaches a tier when every item at that tier
+# Scoring (Paper 2, DR6): a team reaches a tier when every item at that tier
 # and below is answered yes. An item may be marked not applicable only when its
 # condition is absent, and then counts as satisfied.
 
@@ -37,7 +37,7 @@ items:
   - id: "1.1"
     tier: 1
     short: MFA on publishing accounts
-    question: "Does every account that can publish builds to a store require multi-factor authentication?"
+    question: "Does every account that can publish builds to a distribution channel require multi-factor authentication?"
     evidence: "Security settings of each publishing account"
     effort: L
     profile: [G6.3]
@@ -47,7 +47,7 @@ items:
     tier: 1
     short: Dedicated upload account
     question: "Do automated uploads use a dedicated build account that has only publishing permissions?"
-    evidence: "The account's permissions in the store's partner portal"
+    evidence: "The account's permissions in the distribution channel's admin console"
     effort: L
     profile: [G6.1]
     fix: ["docs/guides/F6-distribution.md#item-1-2"]
@@ -56,7 +56,7 @@ items:
     tier: 1
     short: A person sets builds live
     question: "Does setting a build live on a public channel require a person rather than an automated step?"
-    evidence: "Release procedure and store release settings"
+    evidence: "Release procedure and distribution channel settings"
     effort: L
     profile: [G6.2]
     fix: ["docs/guides/F6-distribution.md#item-1-3"]
@@ -100,7 +100,7 @@ items:
   - id: "1.8"
     tier: 1
     short: SDK and plugin list
-    question: "Do you keep a list of every third-party SDK and plugin that ships to players, with its version?"
+    question: "Do you keep a list of every third-party SDK and plugin that ships in your product, with its version?"
     evidence: "The list, matching the current build"
     effort: L
     profile: [G2.1]
@@ -173,7 +173,7 @@ items:
   - id: "2.8"
     tier: 2
     short: Scoped partner access
-    question: "Do contractors and porting partners have separate, scoped access that expires?"
+    question: "Do contractors and outside partners have separate, scoped access that expires?"
     evidence: "Access lists with expiry dates"
     effort: L
     profile: [G9.1]
@@ -191,17 +191,17 @@ items:
   - id: "2.10"
     tier: 2
     short: Updater checks signatures
-    question: "If you run your own launcher or patcher, does it verify update signatures with a key that is not stored on the update server?"
+    question: "If you run your own updater, launcher, or patcher, does it verify update signatures with a key that is not stored on the update server?"
     evidence: "Updater code or vendor documentation"
     effort: M
     profile: [G6.5]
-    na_when: "You do not run your own launcher or patcher."
+    na_when: "You do not run your own updater, launcher, or patcher."
     fix: ["docs/guides/F6-distribution.md#item-2-10"]
 
   - id: "2.11"
     tier: 2
     short: SDK behavior review
-    question: "Is each player-facing SDK reviewed for the data it collects and where it sends data, before adoption and on each update?"
+    question: "Is each third-party SDK in your product reviewed for the data it collects and where it sends data, before adoption and on each update?"
     evidence: "Review records for current SDK versions"
     effort: M
     profile: [G2.3]
@@ -229,7 +229,7 @@ items:
   - id: "3.2"
     tier: 3
     short: Automatic provenance check before upload
-    question: "Is provenance checked automatically, in a separate step, before any upload to a store?"
+    question: "Is provenance checked automatically, in a separate step, before any upload to a distribution channel?"
     evidence: "The pipeline step and its log for the latest release"
     effort: M
     profile: [G7.2, G5.2]
@@ -269,7 +269,7 @@ items:
   - id: "3.6"
     tier: 3
     short: Agents without secrets
-    question: "Do AI agents and bots triggered by public, player, or partner content run without secrets or write access to protected branches?"
+    question: "Do AI agents and bots triggered by public, user, or partner content run without secrets or write access to protected branches?"
     evidence: "Workflow permissions for each agent"
     effort: M
     profile: [G8.1]
