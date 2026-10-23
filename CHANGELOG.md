@@ -9,6 +9,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Warn, with an advisory note that does not change the result, when a repository has agent instruction files but no job is classified into the agent lane, and when a job whose name suggests agent work stays in the trusted lane. This surfaces agents launched indirectly (for example through a wrapper script) that the lane inference misses.
 - Document the existing `agents.commands` and `agents.actions` configuration, lane overrides, `OBAAF_LANE` and expiring `ignore` entries in [docs/checker-configuration.md](docs/checker-configuration.md), so an indirectly launched agent can be declared.
 - Give every checker rule a category, authority or hygiene, and report the two separately in the text summary and the SARIF output (`obaaf-category`), so hygiene findings such as digest pinning do not bury authority findings.
+- Add category gating to `--fail-on`: `--fail-on authority:medium` (also `hygiene:low`, or a bare `authority`) fails only on that category, so CI can gate on authority findings without first clearing every pinning finding. Plain `--fail-on high|medium|low|never` is unchanged.
 - Note the dynamic `runs-on` limitation in OBAAF-GHA-013 and how to record a confirmed-safe runner with an expiring ignore entry.
 - The larger items (script-aware agent detection, finding profiles for CI gating) are tracked in [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
 
