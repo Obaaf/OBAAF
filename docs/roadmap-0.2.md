@@ -11,11 +11,11 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 
 ## Planned for 0.2
 
-1. **Script-aware agent detection (high).** Best-effort scanning of scripts a workflow calls (for example `bash run-agent.sh`) for an agent CLI, so an agent launched indirectly reaches the agent lane without configuration. This cannot be sound in general, so it stays best-effort and pairs with the misclassification warning shipped here.
+1. **Script-aware agent detection (high). Shipped.** A trusted job whose `run` step calls a repository script that invokes an agent CLI is reclassified into the agent lane, so the agent controls apply without configuration. Best-effort: scripts the checker cannot read fall back to the advisory note.
 2. **Finding profiles for CI gating (high). Shipped.** `--fail-on` now accepts a category, for example `--fail-on authority:medium`, so CI can gate on authority findings without first clearing every hygiene finding. See the [checker configuration](checker-configuration.md) guide.
 3. **Dynamic `runs-on` handling (medium).** Configuration to declare known-ephemeral or fork-safe runner pools, and an `info` severity for runner expressions the checker cannot resolve, so they are not reported as hard findings.
 4. **Soften hygiene outside the release and agent lanes (medium).** Reconsider the severity of digest pinning (OBAAF-GHA-008) for non-release, non-agent jobs, informed by the pilot's finding counts.
-5. **Maturity framing in the output (medium).** Make the output say when a finding (for example the agent lane controls OBAAF-GHA-003 and OBAAF-GHA-005) calls for an architecture change rather than a one-line fix, and point to the lane templates as the path.
+5. **Maturity framing in the output (medium). Shipped.** Findings that need the agent and effect lane architecture (OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) are flagged as such in the output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
 
 ## Data wanted
 

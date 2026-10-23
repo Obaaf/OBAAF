@@ -48,6 +48,7 @@ rules:
     title: Agent job can write
     severity: high
     category: authority
+    remediation: architecture
     requirements: [G8.1]
     agent_controls: [R2, R4]
     supports: [FR8]
@@ -62,6 +63,7 @@ rules:
     title: Agent job can request cloud credentials
     severity: high
     category: authority
+    remediation: architecture
     requirements: [G8.1]
     agent_controls: [R3]
     supports: [FR7]
@@ -76,6 +78,7 @@ rules:
     title: Secret available to an agent job
     severity: high
     category: authority
+    remediation: architecture
     requirements: [G8.1]
     agent_controls: [R2, R3]
     supports: [FR7]
@@ -316,6 +319,7 @@ rules:
     title: Agent output applied without verifying its record
     severity: high
     category: authority
+    remediation: architecture
     requirements: [G8.3]
     agent_controls: [R4, R8]
     supports: [FR8, FR10]
@@ -333,6 +337,7 @@ rules:
     title: Agent output applied without an approval gate
     severity: high
     category: authority
+    remediation: architecture
     requirements: [G8.1]
     agent_controls: [R4]
     supports: [FR8]

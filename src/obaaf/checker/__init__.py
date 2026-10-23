@@ -53,6 +53,57 @@ def parse_fail_on(spec: str) -> tuple[str | None, str]:
     return (cat, sev)
 
 
+_SCRIPT_REF = re.compile(r"(?<![\w./-])((?:\./)?[\w./-]+\.(?:sh|bash))\b")
+
+
+def _script_targets(run_text: str) -> list[str]:
+    """Script file paths a run step invokes (best-effort; paths with variables are skipped)."""
+    out: list[str] = []
+    for m in _SCRIPT_REF.finditer(run_text or ""):
+        tok = m.group(1)
+        if tok.startswith("./"):
+            tok = tok[2:]
+        if tok and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _agent_via_script(job, root: Path, commands: list) -> str | None:
+    """A trusted job whose run step calls a repository script that itself invokes an agent CLI is
+    really an agent job (companion R1-R4). Only scripts readable under `root` are inspected, so this
+    is best-effort; what it cannot read (fetched or generated scripts) is covered by the lane note."""
+    if not commands:
+        return None
+    root_r = root.resolve()
+    for step in job.steps:
+        for tok in _script_targets(step.run):
+            try:
+                path = (root / tok).resolve()
+                if path != root_r and root_r not in path.parents:
+                    continue
+                if not path.is_file():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")[:200_000]
+            except OSError:
+                continue
+            if any(rx.search(text) for rx in commands):
+                return f"runs an agent in the script {tok}"
+    return None
+
+
+def _script_commands(catalog: "Catalog", config: "Config") -> list:
+    patterns = list(catalog.detection.get("agent_commands", [])) + list(config.agents.get("commands", ()) or ())
+    return [re.compile(p, re.M) for p in patterns]
+
+
+def _apply_script_detection(workflow, root: Path, commands: list) -> None:
+    for job in workflow.jobs.values():
+        if job.lane == "trusted":
+            reason = _agent_via_script(job, root, commands)
+            if reason:
+                job.lane, job.lane_reason = "agent", reason
+
+
 class ConfigError(ValueError):
     pass
 
@@ -155,6 +206,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         else:
             files = wf_mod.discover(target)
     config = config or Config.load(root)
+    script_cmds = _script_commands(catalog, config)
     findings: list[Finding] = []
     errors: list[str] = []
     rels: list[str] = []
@@ -172,6 +224,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             errors.append(f"{rel}: {workflow.error}")
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
+        _apply_script_detection(workflow, root, script_cmds)
         for job in workflow.jobs.values():
             if job.lane == "agent":
                 agent_lane_present = True
@@ -218,6 +271,8 @@ def lanes(target: Path, config: Config | None = None) -> list[tuple[str, str, st
     """(workflow, job, lane, reason) for every job, to show how the checker classified them."""
     root = target.resolve()
     config = config or Config.load(root)
+    script_root = root if root.is_dir() else root.parent
+    script_cmds = _script_commands(load(), config)
     out = []
     files = [root] if root.is_file() else wf_mod.discover(root)
     for path in files:
@@ -226,5 +281,6 @@ def lanes(target: Path, config: Config | None = None) -> list[tuple[str, str, st
         if workflow.error:
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
+        _apply_script_detection(workflow, script_root, script_cmds)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
     return out

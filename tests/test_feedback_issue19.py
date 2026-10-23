@@ -136,5 +136,63 @@ class FailOnCategoryTest(unittest.TestCase):
             self.assertIn("fail-on", err)
 
 
+class ScriptAwareAgentTest(unittest.TestCase):
+    def _repo(self, tmp, script_body, instruction="AGENTS.md", perms="contents: write"):
+        (tmp / ".github" / "workflows").mkdir(parents=True)
+        (tmp / "scripts").mkdir(exist_ok=True)
+        (tmp / "scripts" / "run-agent.sh").write_text(script_body, encoding="utf-8")
+        if instruction:
+            (tmp / instruction).write_text("# agent\n", encoding="utf-8")
+        (tmp / ".github" / "workflows" / "ci.yml").write_text(
+            "on: issue_comment\npermissions: {}\njobs:\n  triage:\n    runs-on: ubuntu-latest\n"
+            f"    permissions: {{{perms}}}\n    steps:\n      - run: bash scripts/run-agent.sh\n", encoding="utf-8")
+
+    def test_agent_in_a_wrapper_script_reaches_the_agent_lane(self):
+        with TempDir() as tmp:
+            self._repo(tmp, "#!/bin/bash\nclaude -p \"$PROMPT\"\n")
+            result = checker.check(tmp)
+            self.assertTrue(any(lane == "agent" for _, _, lane, _ in checker.lanes(tmp)))
+            self.assertIn("OBAAF-GHA-003", {f.rule for f in result.findings})  # agent controls now apply
+            self.assertEqual(result.notes, [])                                 # detected, so no fallback note
+
+    def test_a_plain_script_stays_trusted(self):
+        with TempDir() as tmp:
+            self._repo(tmp, "#!/bin/bash\nmake all\n", instruction=None)
+            result = checker.check(tmp)
+            self.assertFalse(any(lane == "agent" for _, _, lane, _ in checker.lanes(tmp)))
+            self.assertNotIn("OBAAF-GHA-003", {f.rule for f in result.findings})
+
+    def test_an_unreadable_script_falls_back_to_the_note(self):
+        with TempDir() as tmp:
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / "AGENTS.md").write_text("# agent\n", encoding="utf-8")
+            (tmp / ".github" / "workflows" / "ci.yml").write_text(
+                "on: issue_comment\npermissions: {}\njobs:\n  triage:\n    runs-on: ubuntu-latest\n"
+                "    permissions: {contents: read}\n    steps:\n      - run: bash /opt/vendor/run-agent.sh\n",
+                encoding="utf-8")
+            result = checker.check(tmp)
+            self.assertFalse(any(lane == "agent" for _, _, lane, _ in checker.lanes(tmp)))
+            self.assertTrue(any("no workflow job was classified into the agent lane" in n for n in result.notes))
+
+
+class MaturityFramingTest(unittest.TestCase):
+    def test_architecture_rules_are_marked_and_pinning_is_not(self):
+        rules = load().rules
+        for rid in ("OBAAF-GHA-003", "OBAAF-GHA-005", "OBAAF-GHA-021"):
+            self.assertEqual(rules[rid].get("remediation"), "architecture")
+        self.assertIsNone(rules["OBAAF-GHA-008"].get("remediation"))
+
+    def test_output_flags_an_architecture_change(self):
+        wf = ("on: issue_comment\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+              "    permissions: {contents: write}\n    steps:\n"
+              f"      - uses: anthropics/claude-code-action@{SHA}\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf, encoding="utf-8")
+            self.assertIn("Architecture:", report.to_text(checker.check(path)))
+            data = json.loads(report.to_json(checker.check(path)))
+            self.assertTrue(any(f["remediation"] == "architecture" for f in data["findings"]))
+
+
 if __name__ == "__main__":
     unittest.main()

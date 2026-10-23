@@ -202,6 +202,8 @@ class Catalog:
                     out.append(f"{rule_id}: missing {key}")
             if rule.get("category") not in ("authority", "hygiene"):
                 out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
+            if rule.get("remediation") not in (None, "config", "architecture"):
+                out.append(f"{rule_id}: remediation must be 'config' or 'architecture', found {rule.get('remediation')!r}")
 
         # Mappings between rules and requirements must agree in both directions.
         for gid, req in self.requirements.items():

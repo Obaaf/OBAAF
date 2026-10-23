@@ -22,6 +22,10 @@ def _category(catalog: Catalog, rule_id: str) -> str:
     return cat if cat in ("authority", "hygiene") else "authority"
 
 
+def _remediation(catalog: Catalog, rule_id: str) -> str:
+    return catalog.rules[rule_id].get("remediation") or "config"
+
+
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True) -> str:
     catalog = catalog or load()
     lines = []
@@ -41,6 +45,9 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+        if _remediation(catalog, f.rule) == "architecture":
+            lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
+                         "one-line change. See templates/github-actions/.")
     suppressed = [f for f in result.findings if f.suppressed]
     cats = {"authority": {"high": 0, "medium": 0, "low": 0}, "hygiene": {"high": 0, "medium": 0, "low": 0}}
     for f in active:
@@ -74,6 +81,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "title": catalog.rules[f.rule]["title"],
                 "severity": f.severity,
                 "category": _category(catalog, f.rule),
+                "remediation": _remediation(catalog, f.rule),
                 "path": f.path,
                 "line": f.line,
                 "job": f.job,
@@ -113,7 +121,7 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
             },
             "defaultConfiguration": {"level": SARIF_LEVEL[rule["severity"]]},
             "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[rule["severity"]],
-                           "obaaf-category": cat},
+                           "obaaf-category": cat, "obaaf-remediation": _remediation(catalog, rid)},
         })
     results = []
     for f in result.findings:
