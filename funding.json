@@ -1,62 +1,29 @@
 {
-  "version": "v1.0.0",
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
   "entity": {
     "type": "individual",
     "role": "maintainer",
     "name": "Osita Sean Keluo-Udeke",
-    "email": "REPLACE_WITH_CONTACT_EMAIL",
+    "email": "seankudeke@gmail.com",
     "description": "Maintainer of OBAAF (Open Build and Agent Assurance Framework), an open framework and toolchain for build-pipeline and AI-agent assurance.",
-    "webpageUrl": {
-      "url": "https://www.obaaf.com"
-    }
+    "webpageUrl": { "url": "https://www.obaaf.com" }
   },
-  "projects": [
-    {
-      "guid": "obaaf",
-      "name": "OBAAF",
-      "description": "An open framework and toolchain for build-pipeline and AI-agent assurance: bound the authority of AI agents in CI/CD, cryptographically attest every agent run, and catch workflow prompt injection. Includes a specification (R1-R8), a CLI (assess, check, attest, verify), reference GitHub Actions templates, and companion research papers.",
-      "webpageUrl": {
-        "url": "https://www.obaaf.com"
-      },
-      "repositoryUrl": {
-        "url": "https://github.com/Obaaf/OBAAF"
-      },
-      "licenses": [
-        "spdx:Apache-2.0",
-        "spdx:CC-BY-4.0"
-      ],
-      "tags": [
-        "security",
-        "software-supply-chain",
-        "ci-cd",
-        "ai-agents",
-        "attestation",
-        "devsecops"
-      ]
-    }
-  ],
+  "projects": [{
+    "guid": "obaaf",
+    "name": "OBAAF",
+    "description": "An open framework and toolchain for build-pipeline and AI-agent assurance: bound the authority of AI agents in CI/CD, cryptographically attest every agent run, and catch workflow prompt injection.",
+    "webpageUrl": { "url": "https://www.obaaf.com" },
+    "repositoryUrl": { "url": "https://github.com/Obaaf/OBAAF" },
+    "licenses": ["spdx:Apache-2.0", "spdx:CC-BY-4.0"],
+    "tags": ["security", "software-supply-chain", "ci-cd", "ai-agents", "attestation", "devsecops"]
+  }],
   "funding": {
     "channels": [
-      {
-        "guid": "github-sponsors",
-        "type": "payment-provider",
-        "address": "REPLACE_WITH_GITHUB_SPONSORS_URL",
-        "description": "GitHub Sponsors"
-      }
+      { "guid": "github-sponsors", "type": "payment-provider", "address": "YOUR_GITHUB_SPONSORS_URL", "description": "GitHub Sponsors" }
     ],
     "plans": [
-      {
-        "guid": "pilot-and-maintenance",
-        "status": "active",
-        "name": "Support OBAAF",
-        "description": "General support for maintenance, the independent-studio pilot, and moving the framework toward a 1.0 release.",
-        "amount": 0,
-        "currency": "USD",
-        "frequency": "one-time",
-        "channels": [
-          "github-sponsors"
-        ]
-      }
+      { "guid": "support", "status": "active", "name": "Support OBAAF", "description": "General support for maintenance and the independent-studio pilot.", "amount": 0, "currency": "USD", "frequency": "one-time", "channels": ["github-sponsors"] }
     ],
     "history": []
   }
