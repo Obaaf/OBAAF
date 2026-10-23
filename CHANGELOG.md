@@ -15,7 +15,9 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Give every checker rule a category, authority or hygiene, and report the two separately in the text summary and the SARIF output (`obaaf-category`), so hygiene findings such as digest pinning do not bury authority findings.
 - Add category gating to `--fail-on`: `--fail-on authority:medium` (also `hygiene:low`, or a bare `authority`) fails only on that category, so CI can gate on authority findings without first clearing every pinning finding. Plain `--fail-on high|medium|low|never` is unchanged.
 - Note the dynamic `runs-on` limitation in OBAAF-GHA-013 and how to record a confirmed-safe runner with an expiring ignore entry.
-- The larger items (script-aware agent detection, finding profiles for CI gating) are tracked in [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+- Detect agents launched through a repository script: a trusted job whose `run` step calls a repo script (for example `bash run-agent.sh`) that itself invokes an agent CLI is reclassified into the agent lane, so the agent controls apply. Best-effort, so scripts the checker cannot read still fall back to the advisory note.
+- Flag findings that need an architecture change rather than a one-line fix (the agent and effect lane controls OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) in the text output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
+- The remaining larger items (dynamic `runs-on` configuration, softening hygiene severities) are tracked in [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
 
 ### Licensing
 

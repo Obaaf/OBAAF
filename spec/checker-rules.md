@@ -61,6 +61,8 @@ A job that runs an AI agent holds write permissions, or does not declare its per
 
 **Fix.** Give the agent job `permissions: {contents: read}` (plus other read permissions it needs) and apply its proposals in a separate effect job behind a protected environment.
 
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
+
 ## OBAAF-GHA-004
 
 **Agent job can request cloud credentials** (high). Requirements: G8.1, R3. Supports: FR7.
@@ -69,6 +71,8 @@ A job that runs an AI agent has `id-token: write`, so the agent can request an O
 
 **Fix.** Remove `id-token: write` from the agent job. Sign the agent-run record in a separate job that the agent cannot influence.
 
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
+
 ## OBAAF-GHA-005
 
 **Secret available to an agent job** (high). Requirements: G8.1, R2, R3. Supports: FR7.
@@ -76,6 +80,8 @@ A job that runs an AI agent has `id-token: write`, so the agent can request an O
 A job that runs an AI agent references a secret, inherits secrets, or uses an environment whose secrets it receives. Prompt injection can make the agent disclose any secret in its environment.
 
 **Fix.** Keep the model credential in an inference proxy outside the job (see docs/inference-proxy.md) and pass no secrets to the agent job.
+
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
 
 ## OBAAF-GHA-006
 
@@ -205,6 +211,8 @@ A workflow started by another workflow's run downloads that run's output and can
 
 **Fix.** Verify the agent-run record with `obaaf verify agent-run` and check the proposal with `obaaf proposal check --repo .` before applying it, in the job that applies it or in a job it needs whose failure stops it (no `if: always()`), and let a failure stop the job (see obaaf-agent-apply.yml).
 
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
+
 ## OBAAF-GHA-022
 
 **Agent output applied without an approval gate** (high). Requirements: G8.1, R4. Supports: FR8.
@@ -212,6 +220,8 @@ A workflow started by another workflow's run downloads that run's output and can
 A job applies agent output with write permissions, but neither it nor a job it needs references an environment, so no person other than the requester has to approve the change.
 
 **Fix.** Reference an environment with required reviewers and self-review prevention on the job that applies agent proposals, or on a job it needs without `if: always()`.
+
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
 
 ## OBAAF-GHA-023
 

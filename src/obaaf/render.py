@@ -264,6 +264,9 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
         out += [f"## {rid}", "", f"**{rule['title']}** ({rule['severity']}). Requirements: {refs}. "
                 f"Supports: {', '.join(rule.get('supports', [])) or '-'}.", "", _clean(rule["description"]), "",
                 f"**Fix.** {_clean(rule['fix'])}", ""]
+        if rule.get("remediation") == "architecture":
+            out += ["**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. "
+                    "See the [lane templates](../templates/github-actions/README.md).", ""]
     if test_set:
         out += ["## Test set", "",
                 "Each workflow below models a documented attack pattern. The checker must report every expected rule "
