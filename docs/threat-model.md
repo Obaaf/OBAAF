@@ -1,6 +1,6 @@
 # Threat modeling autonomous AI agents in CI/CD pipelines
 
-*An OBAAF white paper. Draft version 0.1.*
+*An OBAAF white paper. Version 0.1.*
 
 This paper states the threat model behind OBAAF's agent controls in a self-contained form, for a security working group, a conference audience, or a studio deciding whether the risk is real for them. It condenses the argument of the companion paper *Untrusted Text, Trusted Tokens* (Paper 1) and the machine-readable model in `src/obaaf/data/`. The controls it refers to are specified in full in [the agent controls](../spec/agent-controls.md) and placed in the pipeline in [the architecture](architecture.md).
 

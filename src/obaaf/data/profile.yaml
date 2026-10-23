@@ -9,7 +9,7 @@
 
 id: obaaf-game-pipeline-profile
 version: 0.1.0
-status: draft
+status: released
 source: "Paper 2, Table 4"
 
 attack_paths:
