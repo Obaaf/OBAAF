@@ -6,34 +6,36 @@
 
 `obaaf check` reads GitHub Actions workflow files, CODEOWNERS and agent instruction files, and reports settings that open a documented attack path. Each finding names the profile requirement and agent control it threatens, and the fix. It runs locally and sends nothing over the network.
 
-| Rule | Severity | What it finds | Requirements |
-| --- | --- | --- | --- |
-| [OBAAF-GHA-001](#obaaf-gha-001) | high | Secret available to a workflow started by untrusted input | G3.4, G8.1, G9.1 |
-| [OBAAF-GHA-002](#obaaf-gha-002) | high | Untrusted code checked out in a privileged workflow | G3.1, G9.1 |
-| [OBAAF-GHA-003](#obaaf-gha-003) | high | Agent job can write | G8.1, R2, R4 |
-| [OBAAF-GHA-004](#obaaf-gha-004) | high | Agent job can request cloud credentials | G8.1, R3 |
-| [OBAAF-GHA-005](#obaaf-gha-005) | high | Secret available to an agent job | G8.1, R2, R3 |
-| [OBAAF-GHA-006](#obaaf-gha-006) | high | Release job can read a shared cache | G4.1, G4.2, R7 |
-| [OBAAF-GHA-007](#obaaf-gha-007) | high | Low-trust workflow can write the default-branch cache | G4.1, R7 |
-| [OBAAF-GHA-008](#obaaf-gha-008) | medium | Action or container not pinned to a full digest | G2.1, R6 |
-| [OBAAF-GHA-009](#obaaf-gha-009) | medium | Token permissions not declared | G3.4 |
-| [OBAAF-GHA-010](#obaaf-gha-010) | high | Untrusted event text expanded inside a script | G8.1, G3.1, R1 |
-| [OBAAF-GHA-011](#obaaf-gha-011) | medium | Checkout leaves the job token on disk | G8.1, G3.4, R7 |
-| [OBAAF-GHA-012](#obaaf-gha-012) | high | Agent reads instructions from the change under review | G8.2, R5 |
-| [OBAAF-GHA-013](#obaaf-gha-013) | high | Self-hosted runner used for untrusted work | G3.1, G3.2, R7 |
-| [OBAAF-GHA-014](#obaaf-gha-014) | medium | Release job not behind a protected environment | G6.2 |
-| [OBAAF-GHA-015](#obaaf-gha-015) | high | Release workflow started by untrusted input | G3.1 |
-| [OBAAF-GHA-016](#obaaf-gha-016) | high | Upload without a provenance check | G7.2, G5.2, R8 |
-| [OBAAF-GHA-017](#obaaf-gha-017) | medium | Release builds without provenance | G7.1 |
-| [OBAAF-GHA-018](#obaaf-gha-018) | high | Signing key available to build steps | G5.1, G3.4 |
-| [OBAAF-GHA-019](#obaaf-gha-019) | high | Unsafe pull-request checkout explicitly allowed | G3.1, G9.1 |
-| [OBAAF-GHA-020](#obaaf-gha-020) | low | Agent job without an egress restriction | G8.1, R7 |
-| [OBAAF-GHA-021](#obaaf-gha-021) | high | Agent output applied without verifying its record | G8.3, R4, R8 |
-| [OBAAF-GHA-022](#obaaf-gha-022) | high | Agent output applied without an approval gate | G8.1, R4 |
-| [OBAAF-GHA-023](#obaaf-gha-023) | high | Template placeholder left in a workflow | - |
-| [OBAAF-REPO-001](#obaaf-repo-001) | medium | Workflow files have no code owner | G1.1, G1.2, G8.2, R5 |
-| [OBAAF-REPO-002](#obaaf-repo-002) | medium | Agent instruction files have no code owner | G8.2, R5 |
-| [OBAAF-INS-001](#obaaf-ins-001) | high | Hidden characters in an agent instruction file | G8.2, R5 |
+Each rule is either an **authority** finding (who or what can change, build, release or sign, and the controls that bound an agent's authority) or a **hygiene** finding (pinning and hardening). The checker summary and the SARIF output report the two separately, so authority findings are not buried under hygiene ones. Declaring agent entry points, lane overrides and expiring ignores is described in [checker configuration](../docs/checker-configuration.md).
+
+| Rule | Severity | Category | What it finds | Requirements |
+| --- | --- | --- | --- | --- |
+| [OBAAF-GHA-001](#obaaf-gha-001) | high | authority | Secret available to a workflow started by untrusted input | G3.4, G8.1, G9.1 |
+| [OBAAF-GHA-002](#obaaf-gha-002) | high | authority | Untrusted code checked out in a privileged workflow | G3.1, G9.1 |
+| [OBAAF-GHA-003](#obaaf-gha-003) | high | authority | Agent job can write | G8.1, R2, R4 |
+| [OBAAF-GHA-004](#obaaf-gha-004) | high | authority | Agent job can request cloud credentials | G8.1, R3 |
+| [OBAAF-GHA-005](#obaaf-gha-005) | high | authority | Secret available to an agent job | G8.1, R2, R3 |
+| [OBAAF-GHA-006](#obaaf-gha-006) | high | authority | Release job can read a shared cache | G4.1, G4.2, R7 |
+| [OBAAF-GHA-007](#obaaf-gha-007) | high | authority | Low-trust workflow can write the default-branch cache | G4.1, R7 |
+| [OBAAF-GHA-008](#obaaf-gha-008) | medium | hygiene | Action or container not pinned to a full digest | G2.1, R6 |
+| [OBAAF-GHA-009](#obaaf-gha-009) | medium | authority | Token permissions not declared | G3.4 |
+| [OBAAF-GHA-010](#obaaf-gha-010) | high | authority | Untrusted event text expanded inside a script | G8.1, G3.1, R1 |
+| [OBAAF-GHA-011](#obaaf-gha-011) | medium | authority | Checkout leaves the job token on disk | G8.1, G3.4, R7 |
+| [OBAAF-GHA-012](#obaaf-gha-012) | high | authority | Agent reads instructions from the change under review | G8.2, R5 |
+| [OBAAF-GHA-013](#obaaf-gha-013) | high | authority | Self-hosted runner used for untrusted work | G3.1, G3.2, R7 |
+| [OBAAF-GHA-014](#obaaf-gha-014) | medium | authority | Release job not behind a protected environment | G6.2 |
+| [OBAAF-GHA-015](#obaaf-gha-015) | high | authority | Release workflow started by untrusted input | G3.1 |
+| [OBAAF-GHA-016](#obaaf-gha-016) | high | authority | Upload without a provenance check | G7.2, G5.2, R8 |
+| [OBAAF-GHA-017](#obaaf-gha-017) | medium | authority | Release builds without provenance | G7.1 |
+| [OBAAF-GHA-018](#obaaf-gha-018) | high | authority | Signing key available to build steps | G5.1, G3.4 |
+| [OBAAF-GHA-019](#obaaf-gha-019) | high | authority | Unsafe pull-request checkout explicitly allowed | G3.1, G9.1 |
+| [OBAAF-GHA-020](#obaaf-gha-020) | low | hygiene | Agent job without an egress restriction | G8.1, R7 |
+| [OBAAF-GHA-021](#obaaf-gha-021) | high | authority | Agent output applied without verifying its record | G8.3, R4, R8 |
+| [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
+| [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
+| [OBAAF-REPO-001](#obaaf-repo-001) | medium | authority | Workflow files have no code owner | G1.1, G1.2, G8.2, R5 |
+| [OBAAF-REPO-002](#obaaf-repo-002) | medium | authority | Agent instruction files have no code owner | G8.2, R5 |
+| [OBAAF-INS-001](#obaaf-ins-001) | high | authority | Hidden characters in an agent instruction file | G8.2, R5 |
 
 ## OBAAF-GHA-001
 
@@ -135,7 +137,7 @@ The agent job checks out the pull request's version of the repository, so instru
 
 **Self-hosted runner used for untrusted work** (high). Requirements: G3.1, G3.2, R7. Supports: FR3, FR4.
 
-A job that pull requests, outside events or an agent can drive runs on a self-hosted runner. Unless the runner is ephemeral, code from that job can persist on the host and tamper with later builds, as in the PyTorch case. Runner labels that are not standard GitHub-hosted labels (custom labels, larger runners, labels from expressions) are reported at medium, because the checker cannot tell whether they are self-hosted.
+A job that pull requests, outside events or an agent can drive runs on a self-hosted runner. Unless the runner is ephemeral, code from that job can persist on the host and tamper with later builds, as in the PyTorch case. Runner labels that are not standard GitHub-hosted labels (custom labels, larger runners, labels from expressions) are reported at medium, because the checker cannot tell whether they are self-hosted. A `runs-on` value that resolves at run time (for example an expression that selects between a GitHub-hosted and a self-hosted runner) cannot be evaluated here; if you confirm the resolved runner is GitHub-hosted or ephemeral, record that with an expiring `ignore` entry (see the checker configuration guide).
 
 **Fix.** Run untrusted and agent jobs on GitHub-hosted or ephemeral runners, and keep persistent self-hosted runners for the release lane only.
 

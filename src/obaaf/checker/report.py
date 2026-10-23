@@ -17,6 +17,11 @@ def _requirements(rule: dict) -> str:
     return ", ".join(refs) if refs else "-"
 
 
+def _category(catalog: Catalog, rule_id: str) -> str:
+    cat = catalog.rules[rule_id].get("category")
+    return cat if cat in ("authority", "hygiene") else "authority"
+
+
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True) -> str:
     catalog = catalog or load()
     lines = []
@@ -37,12 +42,22 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
     suppressed = [f for f in result.findings if f.suppressed]
-    counts = {s: sum(1 for f in active if f.severity == s) for s in ("high", "medium", "low")}
+    cats = {"authority": {"high": 0, "medium": 0, "low": 0}, "hygiene": {"high": 0, "medium": 0, "low": 0}}
+    for f in active:
+        cats[_category(catalog, f.rule)][f.severity] += 1
+    a, h = cats["authority"], cats["hygiene"]
     lines.append("")
-    lines.append(f"{len(result.files)} workflow file(s) checked: {counts['high']} high, {counts['medium']} medium, "
-                 f"{counts['low']} low" + (f"; {len(suppressed)} ignored by configuration" if suppressed else "") + ".")
+    lines.append(f"{len(result.files)} workflow file(s) checked.")
+    lines.append(f"Authority findings: {a['high']} high, {a['medium']} medium, {a['low']} low.")
+    lines.append(f"Hygiene findings: {h['high']} high, {h['medium']} medium, {h['low']} low."
+                 + (f" {len(suppressed)} ignored by configuration." if suppressed else ""))
     for f in suppressed:
         lines.append(f"  ignored: {f.rule} {f.path}:{f.line} - {f.suppressed}")
+    if result.notes:
+        lines.append("")
+        lines.append("Notes (advisory; they do not affect the result):")
+        for note in result.notes:
+            lines.append(f"  - {note}")
     return "\n".join(lines).lstrip("\n") + "\n"
 
 
@@ -58,6 +73,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "rule": f.rule,
                 "title": catalog.rules[f.rule]["title"],
                 "severity": f.severity,
+                "category": _category(catalog, f.rule),
                 "path": f.path,
                 "line": f.line,
                 "job": f.job,
@@ -70,6 +86,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
             }
             for f in result.findings
         ],
+        "notes": list(result.notes),
     }
     return json.dumps(payload, indent=2) + "\n"
 
@@ -82,7 +99,9 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
     rules = []
     for rid in used:
         rule = catalog.rules[rid]
-        tags = ["security", "supply-chain"] + list(rule.get("requirements", [])) + list(rule.get("agent_controls", []))
+        cat = _category(catalog, rid)
+        tags = [f"obaaf-{cat}", "security", "supply-chain"] + list(rule.get("requirements", [])) \
+            + list(rule.get("agent_controls", []))
         rules.append({
             "id": rid,
             "name": rid.replace("-", ""),
@@ -93,7 +112,8 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "markdown": f"**Fix:** {' '.join(rule['fix'].split())}\n\n**Requirements:** {_requirements(rule)}",
             },
             "defaultConfiguration": {"level": SARIF_LEVEL[rule["severity"]]},
-            "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[rule["severity"]]},
+            "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[rule["severity"]],
+                           "obaaf-category": cat},
         })
     results = []
     for f in result.findings:

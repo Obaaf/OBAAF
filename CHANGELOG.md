@@ -4,6 +4,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Checker: act on the first pilot's feedback (issue #19)
+
+- Warn, with an advisory note that does not change the result, when a repository has agent instruction files but no job is classified into the agent lane, and when a job whose name suggests agent work stays in the trusted lane. This surfaces agents launched indirectly (for example through a wrapper script) that the lane inference misses.
+- Document the existing `agents.commands` and `agents.actions` configuration, lane overrides, `OBAAF_LANE` and expiring `ignore` entries in [docs/checker-configuration.md](docs/checker-configuration.md), so an indirectly launched agent can be declared.
+- Give every checker rule a category, authority or hygiene, and report the two separately in the text summary and the SARIF output (`obaaf-category`), so hygiene findings such as digest pinning do not bury authority findings.
+- Note the dynamic `runs-on` limitation in OBAAF-GHA-013 and how to record a confirmed-safe runner with an expiring ignore entry.
+- The larger items (script-aware agent detection, finding profiles for CI gating) are tracked in [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+
 ### Licensing
 
 - Prepare the license grant (D-003, Proposed): Apache License 2.0 for the code, templates, tools and tests; Creative Commons Attribution 4.0 International for the specifications, guides and documentation, including the data in `src/obaaf/data/`. Add `LICENSE`, `LICENSE-docs` and `NOTICE`; set the package's SPDX expression to `Apache-2.0 AND CC-BY-4.0` with `license-files` in `pyproject.toml` (needs setuptools 77 or later, satisfied by the pinned build backend). The grant takes effect when the maintainers accept D-003 by committing these files.

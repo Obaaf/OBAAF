@@ -14,6 +14,7 @@ rules:
   - id: OBAAF-GHA-001
     title: Secret available to a workflow started by untrusted input
     severity: high
+    category: authority
     requirements: [G3.4, G8.1, G9.1]
     supports: [FR3]
     description: >-
@@ -31,6 +32,7 @@ rules:
   - id: OBAAF-GHA-002
     title: Untrusted code checked out in a privileged workflow
     severity: high
+    category: authority
     requirements: [G3.1, G9.1]
     supports: [FR3]
     description: >-
@@ -45,6 +47,7 @@ rules:
   - id: OBAAF-GHA-003
     title: Agent job can write
     severity: high
+    category: authority
     requirements: [G8.1]
     agent_controls: [R2, R4]
     supports: [FR8]
@@ -58,6 +61,7 @@ rules:
   - id: OBAAF-GHA-004
     title: Agent job can request cloud credentials
     severity: high
+    category: authority
     requirements: [G8.1]
     agent_controls: [R3]
     supports: [FR7]
@@ -71,6 +75,7 @@ rules:
   - id: OBAAF-GHA-005
     title: Secret available to an agent job
     severity: high
+    category: authority
     requirements: [G8.1]
     agent_controls: [R2, R3]
     supports: [FR7]
@@ -84,6 +89,7 @@ rules:
   - id: OBAAF-GHA-006
     title: Release job can read a shared cache
     severity: high
+    category: authority
     requirements: [G4.1, G4.2]
     agent_controls: [R7]
     supports: [FR4]
@@ -99,6 +105,7 @@ rules:
   - id: OBAAF-GHA-007
     title: Low-trust workflow can write the default-branch cache
     severity: high
+    category: authority
     requirements: [G4.1]
     agent_controls: [R7]
     supports: [FR4]
@@ -117,6 +124,7 @@ rules:
   - id: OBAAF-GHA-008
     title: Action or container not pinned to a full digest
     severity: medium
+    category: hygiene
     requirements: [G2.1]
     agent_controls: [R6]
     supports: [FR10, FR12]
@@ -132,6 +140,7 @@ rules:
   - id: OBAAF-GHA-009
     title: Token permissions not declared
     severity: medium
+    category: authority
     requirements: [G3.4]
     supports: [FR3, FR8]
     description: >-
@@ -144,6 +153,7 @@ rules:
   - id: OBAAF-GHA-010
     title: Untrusted event text expanded inside a script
     severity: high
+    category: authority
     requirements: [G8.1, G3.1]
     agent_controls: [R1]
     supports: [FR3]
@@ -159,6 +169,7 @@ rules:
   - id: OBAAF-GHA-011
     title: Checkout leaves the job token on disk
     severity: medium
+    category: authority
     requirements: [G8.1, G3.4]
     agent_controls: [R7]
     supports: [FR7]
@@ -171,6 +182,7 @@ rules:
   - id: OBAAF-GHA-012
     title: Agent reads instructions from the change under review
     severity: high
+    category: authority
     requirements: [G8.2]
     agent_controls: [R5]
     supports: [FR9]
@@ -186,6 +198,7 @@ rules:
   - id: OBAAF-GHA-013
     title: Self-hosted runner used for untrusted work
     severity: high
+    category: authority
     requirements: [G3.1, G3.2]
     agent_controls: [R7]
     supports: [FR3, FR4]
@@ -194,7 +207,10 @@ rules:
       Unless the runner is ephemeral, code from that job can persist on the host and tamper with later
       builds, as in the PyTorch case. Runner labels that are not standard GitHub-hosted labels (custom
       labels, larger runners, labels from expressions) are reported at medium, because the checker
-      cannot tell whether they are self-hosted.
+      cannot tell whether they are self-hosted. A `runs-on` value that resolves at run time (for
+      example an expression that selects between a GitHub-hosted and a self-hosted runner) cannot be
+      evaluated here; if you confirm the resolved runner is GitHub-hosted or ephemeral, record that
+      with an expiring `ignore` entry (see the checker configuration guide).
     fix: >-
       Run untrusted and agent jobs on GitHub-hosted or ephemeral runners, and keep persistent
       self-hosted runners for the release lane only.
@@ -202,6 +218,7 @@ rules:
   - id: OBAAF-GHA-014
     title: Release job not behind a protected environment
     severity: medium
+    category: authority
     requirements: [G6.2]
     supports: [FR6]
     description: >-
@@ -214,6 +231,7 @@ rules:
   - id: OBAAF-GHA-015
     title: Release workflow started by untrusted input
     severity: high
+    category: authority
     requirements: [G3.1]
     supports: [FR4]
     description: >-
@@ -226,6 +244,7 @@ rules:
   - id: OBAAF-GHA-016
     title: Upload without a provenance check
     severity: high
+    category: authority
     requirements: [G7.2, G5.2]
     agent_controls: [R8]
     supports: [FR6]
@@ -241,6 +260,7 @@ rules:
   - id: OBAAF-GHA-017
     title: Release builds without provenance
     severity: medium
+    category: authority
     requirements: [G7.1]
     supports: [FR5]
     description: >-
@@ -253,6 +273,7 @@ rules:
   - id: OBAAF-GHA-018
     title: Signing key available to build steps
     severity: high
+    category: authority
     requirements: [G5.1, G3.4]
     supports: [FR11]
     description: >-
@@ -265,6 +286,7 @@ rules:
   - id: OBAAF-GHA-019
     title: Unsafe pull-request checkout explicitly allowed
     severity: high
+    category: authority
     requirements: [G3.1, G9.1]
     supports: [FR3]
     description: >-
@@ -276,6 +298,7 @@ rules:
   - id: OBAAF-GHA-020
     title: Agent job without an egress restriction
     severity: low
+    category: hygiene
     requirements: [G8.1]
     agent_controls: [R7]
     supports: [FR7]
@@ -292,6 +315,7 @@ rules:
   - id: OBAAF-GHA-021
     title: Agent output applied without verifying its record
     severity: high
+    category: authority
     requirements: [G8.3]
     agent_controls: [R4, R8]
     supports: [FR8, FR10]
@@ -308,6 +332,7 @@ rules:
   - id: OBAAF-GHA-022
     title: Agent output applied without an approval gate
     severity: high
+    category: authority
     requirements: [G8.1]
     agent_controls: [R4]
     supports: [FR8]
@@ -321,6 +346,7 @@ rules:
   - id: OBAAF-GHA-023
     title: Template placeholder left in a workflow
     severity: high
+    category: authority
     requirements: []
     supports: [FR12]
     description: >-
@@ -333,6 +359,7 @@ rules:
   - id: OBAAF-REPO-001
     title: Workflow files have no code owner
     severity: medium
+    category: authority
     requirements: [G1.1, G1.2, G8.2]
     agent_controls: [R5]
     supports: [FR9]
@@ -346,6 +373,7 @@ rules:
   - id: OBAAF-REPO-002
     title: Agent instruction files have no code owner
     severity: medium
+    category: authority
     requirements: [G8.2]
     agent_controls: [R5]
     supports: [FR9]
@@ -359,6 +387,7 @@ rules:
   - id: OBAAF-INS-001
     title: Hidden characters in an agent instruction file
     severity: high
+    category: authority
     requirements: [G8.2]
     agent_controls: [R5]
     supports: [FR9]

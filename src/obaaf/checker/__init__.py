@@ -16,12 +16,17 @@ from pathlib import Path
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
+from obaaf.checker import repo as repo_checks
 from obaaf.checker import rules as rules_mod
 from obaaf.checker import workflow as wf_mod
 from obaaf.checker.rules import Finding
 
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
+# Words in a job id or name that suggest it runs an AI agent, used only to warn
+# when such a job was left in the trusted lane (never to classify it).
+_AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|cline|\bllm\b|\bai[-_ ]|autofix|auto[- ]fix",
+                         re.I)
 
 
 class ConfigError(ValueError):
@@ -72,6 +77,7 @@ class CheckResult:
     files: list[str]
     errors: list[str]
     config: Config
+    notes: list[str] = field(default_factory=list)
 
     def active(self) -> list[Finding]:
         return [f for f in self.findings if not f.suppressed]
@@ -113,6 +119,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     findings: list[Finding] = []
     errors: list[str] = []
     rels: list[str] = []
+    agent_lane_present = False
+    suspect_jobs: list[tuple[str, str]] = []
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
@@ -125,13 +133,46 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             errors.append(f"{rel}: {workflow.error}")
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
+        for job in workflow.jobs.values():
+            if job.lane == "agent":
+                agent_lane_present = True
+            elif job.lane == "trusted" and _AGENT_HINT.search(f"{job.id} {job.name}"):
+                suspect_jobs.append((rel, job.id))
         findings.extend(rules_mod.WorkflowRules(workflow, catalog).run())
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
     if is_repo:
         findings.extend(rules_mod.repo_findings(root, rels, catalog))
     _apply_ignores(findings, config, today or date.today())
     findings.sort(key=Finding.sort_key)
-    return CheckResult(findings=findings, files=rels, errors=errors, config=config)
+    notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+    return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes)
+
+
+def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present: bool,
+                suspect_jobs: list[tuple[str, str]]) -> list[str]:
+    """Advisory notes (never findings, never affect the exit code): surface agents the lane
+    inference may have missed, so the agent controls are not silently skipped."""
+    notes: list[str] = []
+    if agent_lane_present:
+        return notes
+    if is_repo:
+        instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []))
+        if instruction_files:
+            shown = ", ".join(instruction_files[:3]) + (", ..." if len(instruction_files) > 3 else "")
+            notes.append(
+                f"{len(instruction_files)} agent instruction file(s) are present ({shown}) but no workflow job was "
+                "classified into the agent lane, so the agent controls did not run on any job. If an agent runs "
+                "indirectly, for example through a wrapper script like 'bash run-agent.sh', declare its command in "
+                "agents.commands in .github/obaaf.yml, or set OBAAF_LANE: agent on the job. See "
+                "docs/checker-configuration.md.")
+    if suspect_jobs:
+        shown = "; ".join(f"{w} job '{j}'" for w, j in suspect_jobs[:5])
+        more = f", and {len(suspect_jobs) - 5} more" if len(suspect_jobs) > 5 else ""
+        notes.append(
+            f"{len(suspect_jobs)} job(s) have a name that suggests agent work but stayed in the trusted lane "
+            f"({shown}{more}). If any runs an AI agent, declare it with agents.commands or OBAAF_LANE so the agent "
+            "controls apply.")
+    return notes
 
 
 def lanes(target: Path, config: Config | None = None) -> list[tuple[str, str, str, str]]:
