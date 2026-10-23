@@ -1,6 +1,6 @@
 # Roadmap to version 0.2
 
-Version 0.1 is a public draft. The first external pilot ([issue #19](https://github.com/Obaaf/OBAAF/issues/19)) ran `obaaf check` on a production repository with dozens of workflows, self-hosted runners, and an LLM agent driven through a shell script, and reported that the checker is a useful advisory audit but not yet a reliable repository-wide gate. This roadmap turns that feedback into the 0.2 plan. The items under "Done in this change" shipped in the commit that added this file.
+Version 0.1 is the first release, now in active adoption. The first external pilot ([issue #19](https://github.com/Obaaf/OBAAF/issues/19)) ran `obaaf check` on a production repository with dozens of workflows, self-hosted runners, and an LLM agent driven through a shell script, and reported that the checker is a useful advisory audit but not yet a reliable repository-wide gate. This roadmap turns that feedback into the 0.2 plan. The items under "Done in this change" shipped in the commit that added this file.
 
 ## Done in this change
 

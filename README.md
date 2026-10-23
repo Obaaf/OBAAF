@@ -1,10 +1,10 @@
 # Open Build and Agent Assurance Framework (OBAAF)
 
-OBAAF is intended to be a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. It works for any team that ships software updates. The first version is shaped by the needs of small teams without dedicated security staff, independent game studios among them, whose updates reach phones, PCs and consoles.
+OBAAF is a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. It works for any team that ships software updates. The first version is shaped by the needs of small teams without dedicated security staff, independent game studios among them, whose updates reach phones, PCs and consoles.
 
-> **Status: version 0.1, public draft.** The checker has been exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md); an independent pilot and broader platform validation remain pending. No license is granted yet. The maintainer authorized public repository access and website publication on October 10, 2026. This is not a production release or a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
+> **Status: version 0.1, in active adoption.** OBAAF 0.1.0 is on PyPI (`pip install obaaf`) and in use with pilot teams. The first external pilot ran the checker on a production repository; its feedback is tracked in [issue #19](https://github.com/Obaaf/OBAAF/issues/19) and shapes the [0.2 roadmap](docs/roadmap-0.2.md). The checker was also exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md). Broader platform validation continues, and formats may still change before 1.0. The code is licensed under Apache-2.0 and the specifications and documentation under CC BY 4.0. This is not a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
 >
-> The draft awaits maintainer review. Proposed design decisions are tracked in [DECISIONS.md](DECISIONS.md).
+> Design decisions, including those still proposed, are tracked in [DECISIONS.md](DECISIONS.md).
 
 ## What is here
 

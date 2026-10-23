@@ -1,6 +1,6 @@
 # Traceability: requirements to implementation and tests
 
-The specification's roadmap figure plans specifications, templates, the checker, the verifier and tests for FR1–FR12 in version 0.1. Each functional requirement below has an offline test module that runs in CI (`python -m unittest discover -s tests`), and, where only a real GitHub repository can show the behavior, a [live acceptance test](live-acceptance-tests.md). None of the live tests has been run yet. Public draft access and website publication are authorized under [DECISIONS.md](../DECISIONS.md), D-002; this does not constitute production validation or paper submission.
+The specification's roadmap figure plans specifications, templates, the checker, the verifier and tests for FR1–FR12 in version 0.1. Each functional requirement below has an offline test module that runs in CI (`python -m unittest discover -s tests`), and, where only a real GitHub repository can show the behavior, a [live acceptance test](live-acceptance-tests.md). None of the live tests has been run yet. Passing the offline tests is not production validation.
 
 The status column says how far version 0.1 meets each acceptance criterion. "Met offline" means the offline tests show it; "Platform behavior unconfirmed" means the templates are written to get it from GitHub, but only the live test can show that GitHub behaves that way.
 

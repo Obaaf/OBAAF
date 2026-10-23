@@ -165,7 +165,7 @@ The crosswalk below is added by this paper, to **OWASP Top 10 for LLM Applicatio
 3. **Adopt the lanes.** Install the reference templates and make the agreed checks block merges and releases.
 4. **Verify.** Require signed provenance, approvals and agent records before a build is published (`obaaf verify`).
 
-See [the adoption guide](adoption-guide.md) and [the architecture](architecture.md). OBAAF is a public draft; an independent-studio pilot and broader platform validation remain pending, and pilot teams and reviewers are welcome — see [the project README](../README.md).
+See [the adoption guide](adoption-guide.md) and [the architecture](architecture.md). OBAAF is in active adoption with pilot teams; broader platform validation continues, and more pilot teams and reviewers are welcome — see [the project README](../README.md).
 
 ## 13. Known gaps
 
