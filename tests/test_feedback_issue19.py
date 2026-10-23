@@ -7,7 +7,7 @@ the former.
 import json
 import unittest
 
-from helpers import RISKY, ROOT, TempDir
+from helpers import RISKY, ROOT, TempDir, run_cli
 
 from obaaf import checker
 from obaaf.catalog import load
@@ -99,6 +99,41 @@ class ConfigurationGuideTest(unittest.TestCase):
     def test_configuration_guide_exists_and_is_linked(self):
         self.assertTrue((ROOT / "docs" / "checker-configuration.md").is_file())
         self.assertIn("docs/checker-configuration.md", (ROOT / "spec" / "checker-rules.md").read_text())
+
+
+class FailOnCategoryTest(unittest.TestCase):
+    # GHA-001 (authority, high), GHA-008 (hygiene, medium), GHA-011 (authority, medium).
+    WF = ("on: issue_comment\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+          "    permissions: {contents: read}\n    steps:\n      - uses: actions/checkout@v4\n"
+          "      - run: ./deploy.sh\n        env: {TOKEN: '${{ secrets.DEPLOY }}'}\n")
+
+    def _exit(self, tmp, spec):
+        path = tmp / "wf.yml"
+        path.write_text(self.WF, encoding="utf-8")
+        return run_cli("check", path, "--fail-on", spec)[0]
+
+    def test_authority_gate_ignores_the_pinning_noise(self):
+        with TempDir() as tmp:
+            self.assertEqual(self._exit(tmp, "authority:high"), 1)   # the real problem fails the gate
+            self.assertEqual(self._exit(tmp, "hygiene:high"), 0)     # pinning noise alone does not
+
+    def test_category_bare_and_never_forms(self):
+        with TempDir() as tmp:
+            self.assertEqual(self._exit(tmp, "hygiene:medium"), 1)
+            self.assertEqual(self._exit(tmp, "authority"), 1)
+            self.assertEqual(self._exit(tmp, "never"), 0)
+
+    def test_plain_severity_is_unchanged(self):
+        with TempDir() as tmp:
+            self.assertEqual(self._exit(tmp, "high"), 1)
+
+    def test_invalid_fail_on_is_a_usage_error(self):
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(self.WF, encoding="utf-8")
+            code, _, err = run_cli("check", path, "--fail-on", "bogus")
+            self.assertEqual(code, 2)
+            self.assertIn("fail-on", err)
 
 
 if __name__ == "__main__":

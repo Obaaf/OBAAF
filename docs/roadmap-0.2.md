@@ -12,7 +12,7 @@ Version 0.1 is a public draft. The first external pilot ([issue #19](https://git
 ## Planned for 0.2
 
 1. **Script-aware agent detection (high).** Best-effort scanning of scripts a workflow calls (for example `bash run-agent.sh`) for an agent CLI, so an agent launched indirectly reaches the agent lane without configuration. This cannot be sound in general, so it stays best-effort and pairs with the misclassification warning shipped here.
-2. **Finding profiles for CI gating (high).** A way to gate CI on authority findings without first clearing every hygiene finding, for example `--fail-on authority:medium`, building on the categories shipped here.
+2. **Finding profiles for CI gating (high). Shipped.** `--fail-on` now accepts a category, for example `--fail-on authority:medium`, so CI can gate on authority findings without first clearing every hygiene finding. See the [checker configuration](checker-configuration.md) guide.
 3. **Dynamic `runs-on` handling (medium).** Configuration to declare known-ephemeral or fork-safe runner pools, and an `info` severity for runner expressions the checker cannot resolve, so they are not reported as hard findings.
 4. **Soften hygiene outside the release and agent lanes (medium).** Reconsider the severity of digest pinning (OBAAF-GHA-008) for non-release, non-agent jobs, informed by the pilot's finding counts.
 5. **Maturity framing in the output (medium).** Make the output say when a finding (for example the agent lane controls OBAAF-GHA-003 and OBAAF-GHA-005) calls for an architecture change rather than a one-line fix, and point to the lane templates as the path.

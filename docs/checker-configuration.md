@@ -57,6 +57,14 @@ Every rule is one of two categories, reported separately in the summary and in t
 - **authority**: who or what can change, build, release or sign, and the controls that bound an agent's authority. These are the findings to gate on first.
 - **hygiene**: pinning and hardening. Today these are `OBAAF-GHA-008` (pin actions and images to a digest) and `OBAAF-GHA-020` (restrict agent egress). They matter, but they should not bury the authority findings, and a pilot does not need to clear every one to be a success.
 
+Gate CI on one category with `--fail-on`:
+
+```bash
+obaaf check . --fail-on authority:medium   # fail only on authority findings at medium or above
+```
+
+`--fail-on` also accepts a plain severity (`high`, `medium`, `low`) or `never`. A bare category (`authority` or `hygiene`) means that category at low severity and above.
+
 ## When a finding does not apply
 
 Suppress a finding you have reviewed with an expiring `ignore` entry. Every entry needs a rule, a path, a reason, and an `until` date, and the path may not match everything:

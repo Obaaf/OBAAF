@@ -81,6 +81,7 @@ def cmd_assess_form(args) -> int:
 # ------------------------------------------------------------------ check
 def cmd_check(args) -> int:
     from obaaf import checker
+    from obaaf.catalog import load
     from obaaf.checker import report
 
     target = Path(args.path)
@@ -96,6 +97,11 @@ def cmd_check(args) -> int:
     if not target.exists():
         print(f"error: {target} not found", file=sys.stderr)
         return EXIT_USAGE
+    try:
+        checker.parse_fail_on(args.fail_on)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     result = checker.check(target, config=config)
     if args.format == "json":
         text = report.to_json(result)
@@ -106,7 +112,7 @@ def cmd_check(args) -> int:
     _write(text, args.output)
     if result.errors:
         return EXIT_FAIL
-    if args.fail_on != "never" and result.at_or_above(args.fail_on):
+    if result.gating(args.fail_on, load()):
         return EXIT_FAIL
     return EXIT_OK
 
@@ -492,7 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("path", nargs="?", default=".", help="repository root (default) or one workflow file")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
-    x.add_argument("--fail-on", choices=("high", "medium", "low", "never"), default="medium")
+    x.add_argument("--fail-on", default="medium",
+                   help="fail on findings at or above a severity (high, medium, low), or never. "
+                        "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true", help="omit fix text in text output")

@@ -29,6 +29,30 @@ _AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|clin
                          re.I)
 
 
+def parse_fail_on(spec: str) -> tuple[str | None, str]:
+    """Parse a --fail-on value into (category, severity).
+
+    Accepts 'never'; a bare severity ('high', 'medium' or 'low'); a category
+    ('authority' or 'hygiene'), meaning that category at 'low' and above; or
+    '<category>:<severity>'. Raises ValueError on anything else.
+    """
+    spec = str(spec).strip()
+    if spec == "never":
+        return (None, "never")
+    if ":" in spec:
+        cat, _, sev = spec.partition(":")
+    elif spec in ("authority", "hygiene"):
+        cat, sev = spec, "low"
+    else:
+        cat, sev = "", spec
+    cat = cat or None
+    if cat is not None and cat not in ("authority", "hygiene"):
+        raise ValueError(f"--fail-on category must be 'authority' or 'hygiene', not {cat!r}")
+    if sev not in ("high", "medium", "low"):
+        raise ValueError(f"--fail-on must be high, medium, low, never, or <category>:<severity>, not {spec!r}")
+    return (cat, sev)
+
+
 class ConfigError(ValueError):
     pass
 
@@ -85,6 +109,21 @@ class CheckResult:
     def at_or_above(self, severity: str) -> list[Finding]:
         threshold = SEVERITY_ORDER[severity]
         return [f for f in self.active() if SEVERITY_ORDER[f.severity] >= threshold]
+
+    def gating(self, spec: str, catalog: Catalog) -> list[Finding]:
+        """Active findings that make `--fail-on spec` fail (empty means it passes)."""
+        category, severity = parse_fail_on(spec)
+        if severity == "never":
+            return []
+        threshold = SEVERITY_ORDER[severity]
+        out = []
+        for f in self.active():
+            if SEVERITY_ORDER[f.severity] < threshold:
+                continue
+            if category is not None and (catalog.rules[f.rule].get("category") or "authority") != category:
+                continue
+            out.append(f)
+        return out
 
 
 def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None:
