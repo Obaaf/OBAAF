@@ -5,7 +5,7 @@ This pull request brings the first draft of the Open Build and Agent Assurance F
 ### What it contains
 
 - **Specifications as data** (`src/obaaf/data/`), generated into `spec/`:
-  - the game-pipeline integrity profile (28 requirements, Paper 2);
+  - the build-integrity profile (28 requirements, Paper 2);
   - the self-assessment (34 items in four tiers);
   - the agent controls R1–R8 (Paper 1).
 - **Self-assessment tools.** `obaaf assess` scores answers, and an offline HTML form makes no network requests.

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OBAAF. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow semantic versioning: drafts are numbered 0.x, and version 1.0 follows the studio pilot.
+All notable changes to OBAAF. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow semantic versioning: drafts are numbered 0.x, and version 1.0 follows the first pilot.
 
 ## [Unreleased]
 
@@ -10,13 +10,13 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Packaging and distribution
 
-- Prepare the PyPI distribution path (D-011): a release runbook and a trusted-publishing (OIDC) release workflow in [docs/releasing.md](docs/releasing.md), so a future release can be installed with `pip install obaaf`. Add `branding` to `actions/setup-obaaf` for a GitHub Marketplace listing. Defer pre-built single-file binaries. Not yet enabled: cutting a release remains a maintainer action.
+- Publish OBAAF to PyPI (D-011): version 0.1.0 is installable with `pip install obaaf`, built and published by a trusted-publishing (OIDC) release workflow ([docs/releasing.md](docs/releasing.md)). Add `branding` to `actions/setup-obaaf` for a future GitHub Marketplace listing. Defer pre-built single-file binaries.
 
 ### Public draft publication
 
 - Authorize public repository access and the resource site on October 10, 2026; supersede the employer-approval prerequisite for that publication (D-002).
 - Publish the resource guide and generated self-assessment with GitHub Pages, deploying from main after CI succeeds.
-- Keep copyright notices, draft validation limits, and intended licensing status explicit. No package-index release or research-paper submission is included.
+- Keep copyright notices, draft validation limits, and intended licensing status explicit. No research-paper submission is included.
 
 ### Repository validation
 
@@ -26,7 +26,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 ### Added
 
 - Version 0.1 draft of all five components, built from the two companion papers and the product specification:
-  - the game-pipeline integrity profile: 28 requirements in nine families, each with a rationale, a pass-or-fail test, evidence and SSDF and SLSA mappings (FR1);
+  - the build-integrity profile: 28 requirements in nine families, each with a rationale, a pass-or-fail test, evidence and SSDF and SLSA mappings (FR1);
   - the agent controls R1–R8 with their traceability, GitHub realization and the agent-run record's fields;
   - the self-assessment: 34 items in four tiers, an offline scorer with ranked fixes, a printable checklist and an offline HTML form that cannot make network requests (FR2);
   - GitHub Actions templates for the untrusted, agent, effect and release lanes, and a pipeline-check workflow (FR3–FR11);

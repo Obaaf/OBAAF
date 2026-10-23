@@ -2,7 +2,7 @@
 
 `obaaf docs build` writes:
 
-    spec/profile.md            the game-pipeline integrity profile (FR1)
+    spec/profile.md            the build-integrity profile (FR1)
     spec/agent-controls.md     the agent controls R1–R8
     spec/self-assessment.md    the printable self-assessment checklist
     spec/checker-rules.md      the checker's rules and its test set (FR12)
@@ -65,11 +65,14 @@ def _addresses(req: dict) -> str:
 def profile_md(catalog: Catalog | None = None) -> str:
     c = catalog or load()
     p = c.profile
-    out = ["# Game-pipeline integrity profile", "", GENERATED, "", DRAFT_NOTE, "",
+    out = ["# Build-integrity profile", "", GENERATED, "", DRAFT_NOTE, "",
            f"Version {p['version']} ({p['status']}). Source: {p['source']} (*Securing the Game Build*). The profile "
-           "tailors NIST's Secure Software Development Framework (SSDF) and SLSA to game build "
-           "pipelines: 28 requirements in nine control families, each guarding one step on the path from studio to "
-           "player. Each requirement has a test that passes or fails, the evidence to inspect, and its mappings.", "",
+           "tailors NIST's Secure Software Development Framework (SSDF) and SLSA to software build and release "
+           "pipelines: 28 requirements in nine control families, each guarding one step on the path from commit to "
+           "user. Developed with independent game studios and grounded in their pipelines, the control families "
+           "apply to any team that builds and ships software; a few requirements name game-specific cases and are "
+           "marked where they do not apply. Each requirement has a test that passes or fails, the evidence to "
+           "inspect, and its mappings.", "",
            "The requirement statements, the attack paths and properties each addresses, and the SSDF and SLSA "
            "mappings are quoted from the paper's Table 4. The titles, rationales, tests and evidence are new drafts "
            "written for this repository; they await the author's review ([DECISIONS.md](../DECISIONS.md), D-004).",
@@ -188,8 +191,8 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
     s = c.assessment
     effort = s["effort"]
     out = ["# Self-assessment checklist", "", GENERATED, "", DRAFT_NOTE, "",
-           f"Version {s['version']} ({s['status']}). Source: {s['source']} (*Securing the Game Build*). For a studio "
-           "without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named "
+           f"Version {s['version']} ({s['status']}). Source: {s['source']} (*Securing the Game Build*). For a software "
+           "team without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named "
            "beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that "
            "the pilot will test.", "",
            "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An item "

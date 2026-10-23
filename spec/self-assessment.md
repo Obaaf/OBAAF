@@ -4,7 +4,7 @@
 
 *Draft version 0.1. Pending maintainer review.*
 
-Version 0.1.0 (draft). Source: Paper 2, Table 6 (*Securing the Game Build*). For a studio without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that the pilot will test.
+Version 0.1.0 (draft). Source: Paper 2, Table 6 (*Securing the Game Build*). For a software team without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that the pilot will test.
 
 **How scoring works.** You reach a tier when every item at that tier and below is answered yes. An item may be marked not applicable (N/A) only when its condition is absent, as noted beside it; N/A counts as yes. A tier describes controls in place, not a guarantee of security.
 
@@ -16,14 +16,14 @@ Establishes who and what can publish or sign.
 
 | ID | Question | Evidence a second person can check | Effort | Profile | Answer |
 | --- | --- | --- | --- | --- | --- |
-| 1.1 | Does every account that can publish builds to a store require multi-factor authentication? | Security settings of each publishing account | Hours | G6.3 | ☐ Yes ☐ No |
-| 1.2 | Do automated uploads use a dedicated build account that has only publishing permissions? | The account's permissions in the store's partner portal | Hours | G6.1 | ☐ Yes ☐ No |
-| 1.3 | Does setting a build live on a public channel require a person rather than an automated step? | Release procedure and store release settings | Hours | G6.2 | ☐ Yes ☐ No |
+| 1.1 | Does every account that can publish builds to a distribution channel require multi-factor authentication? | Security settings of each publishing account | Hours | G6.3 | ☐ Yes ☐ No |
+| 1.2 | Do automated uploads use a dedicated build account that has only publishing permissions? | The account's permissions in the distribution channel's admin console | Hours | G6.1 | ☐ Yes ☐ No |
+| 1.3 | Does setting a build live on a public channel require a person rather than an automated step? | Release procedure and distribution channel settings | Hours | G6.2 | ☐ Yes ☐ No |
 | 1.4 | Do you keep a list of every machine that builds or signs release builds, with an owner for each? | The list, updated within the last 90 days | Hours | G3.1 | ☐ Yes ☐ No |
 | 1.5 | Do you know where every signing key and store upload credential is kept, and who can use it? | A key inventory naming location and authorized users | Hours | G5.1, G5.3 | ☐ Yes ☐ No |
 | 1.6 | Are release branches or streams protected so that changes need review? | Branch or stream protection settings | Hours | G1.1 | ☐ Yes ☐ No |
 | 1.7 | Does every person, including contractors, use an individual source-control account? | User list with no shared accounts | Hours | G1.3, G9.1 | ☐ Yes ☐ No |
-| 1.8 | Do you keep a list of every third-party SDK and plugin that ships to players, with its version? | The list, matching the current build | Hours | G2.1 | ☐ Yes ☐ No |
+| 1.8 | Do you keep a list of every third-party SDK and plugin that ships in your product, with its version? | The list, matching the current build | Hours | G2.1 | ☐ Yes ☐ No |
 
 ## Tier 2: Controlled
 
@@ -38,10 +38,10 @@ Separates release builds from untrusted work and removes standing credentials.
 | 2.5 | Are third-party asset packages and plugins first opened in an isolated environment with automatic script execution turned off? | Intake procedure and settings of the quarantine machine | Days | G2.2 | ☐ Yes ☐ No |
 | 2.6 | Does the build check recorded digests for vendored binaries and SDKs? | Manifest file and the build step that checks it | Days | G2.1 | ☐ Yes ☐ No |
 | 2.7 | Do release builds use caches that untrusted builds and developer workstations cannot write? | Cache access permissions | Days | G4.1 | ☐ Yes ☐ No |
-| 2.8 | Do contractors and porting partners have separate, scoped access that expires? | Access lists with expiry dates | Hours | G9.1 | ☐ Yes ☐ No |
+| 2.8 | Do contractors and outside partners have separate, scoped access that expires? | Access lists with expiry dates | Hours | G9.1 | ☐ Yes ☐ No |
 | 2.9 | Do you have a written plan to revoke signing certificates and rotate upload credentials? | The plan, with named owners | Hours | G5.3 | ☐ Yes ☐ No |
-| 2.10 | If you run your own launcher or patcher, does it verify update signatures with a key that is not stored on the update server? *N/A only if: You do not run your own launcher or patcher.* | Updater code or vendor documentation | Days | G6.5 | ☐ Yes ☐ No ☐ N/A |
-| 2.11 | Is each player-facing SDK reviewed for the data it collects and where it sends data, before adoption and on each update? | Review records for current SDK versions | Days | G2.3 | ☐ Yes ☐ No |
+| 2.10 | If you run your own updater, launcher, or patcher, does it verify update signatures with a key that is not stored on the update server? *N/A only if: You do not run your own updater, launcher, or patcher.* | Updater code or vendor documentation | Days | G6.5 | ☐ Yes ☐ No ☐ N/A |
+| 2.11 | Is each third-party SDK in your product reviewed for the data it collects and where it sends data, before adoption and on each update? | Review records for current SDK versions | Days | G2.3 | ☐ Yes ☐ No |
 | 2.12 | Are you alerted whenever a build is set live or publishing permissions change? | Alert configuration and a recent alert | Hours | G6.3 | ☐ Yes ☐ No |
 
 ## Tier 3: Verified
@@ -51,11 +51,11 @@ Produces and checks provenance and isolates builds.
 | ID | Question | Evidence a second person can check | Effort | Profile | Answer |
 | --- | --- | --- | --- | --- | --- |
 | 3.1 | Does every release build produce signed provenance listing source revision, asset revision, manifest digest, SDK versions, and builder? | Provenance for the latest release | Weeks | G7.1 | ☐ Yes ☐ No |
-| 3.2 | Is provenance checked automatically, in a separate step, before any upload to a store? | The pipeline step and its log for the latest release | Days | G7.2, G5.2 | ☐ Yes ☐ No |
+| 3.2 | Is provenance checked automatically, in a separate step, before any upload to a distribution channel? | The pipeline step and its log for the latest release | Days | G7.2, G5.2 | ☐ Yes ☐ No |
 | 3.3 | Do release builds for targets that can build in fresh containers or virtual machines always do so? *N/A only if: None of your release targets can build in a fresh container or virtual machine.* | Build-agent configuration for each target | Weeks | G3.2, Tier A | ☐ Yes ☐ No ☐ N/A |
 | 3.4 | Are persistent build hosts reimaged from a versioned image on a fixed schedule and after any suspected exposure? *N/A only if: You have no persistent build hosts for release builds.* | Reimage log | Days | G3.2, Tier B | ☐ Yes ☐ No ☐ N/A |
 | 3.5 | Is outbound network traffic from release build hosts limited to an approved list? | Firewall or proxy rules | Days | G3.3 | ☐ Yes ☐ No |
-| 3.6 | Do AI agents and bots triggered by public, player, or partner content run without secrets or write access to protected branches? *N/A only if: You use no AI agents.* | Workflow permissions for each agent | Days | G8.1 | ☐ Yes ☐ No ☐ N/A |
+| 3.6 | Do AI agents and bots triggered by public, user, or partner content run without secrets or write access to protected branches? *N/A only if: You use no AI agents.* | Workflow permissions for each agent | Days | G8.1 | ☐ Yes ☐ No ☐ N/A |
 | 3.7 | Are agent instruction files, and the workflows that invoke agents, protected by code-owner review? *N/A only if: You use no AI agents.* | Protection rules on those paths | Hours | G8.2 | ☐ Yes ☐ No ☐ N/A |
 | 3.8 | Are live updates rolled out in stages, with a tested rollback? | Rollout configuration; record of a rollback test | Days | G6.4 | ☐ Yes ☐ No |
 | 3.9 | Are released artifacts, symbols, and provenance archived read-only? | Archive permissions | Hours | G7.3 | ☐ Yes ☐ No |
