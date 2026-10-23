@@ -200,6 +200,8 @@ class Catalog:
             for key in ("title", "description", "fix"):
                 if not str(rule.get(key, "")).strip():
                     out.append(f"{rule_id}: missing {key}")
+            if rule.get("category") not in ("authority", "hygiene"):
+                out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
 
         # Mappings between rules and requirements must agree in both directions.
         for gid, req in self.requirements.items():

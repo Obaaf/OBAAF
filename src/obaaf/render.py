@@ -248,10 +248,16 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
            "`obaaf check` reads GitHub Actions workflow files, CODEOWNERS and agent instruction files, and reports "
            "settings that open a documented attack path. Each finding names the profile requirement and agent "
            "control it threatens, and the fix. It runs locally and sends nothing over the network.", "",
-           "| Rule | Severity | What it finds | Requirements |", "| --- | --- | --- | --- |"]
+           "Each rule is either an **authority** finding (who or what can change, build, release or sign, and the "
+           "controls that bound an agent's authority) or a **hygiene** finding (pinning and hardening). The checker "
+           "summary and the SARIF output report the two separately, so authority findings are not buried under "
+           "hygiene ones. Declaring agent entry points, lane overrides and expiring ignores is described in "
+           "[checker configuration](../docs/checker-configuration.md).", "",
+           "| Rule | Severity | Category | What it finds | Requirements |", "| --- | --- | --- | --- | --- |"]
     for rid, rule in c.rules.items():
         refs = ", ".join(list(rule.get("requirements", [])) + list(rule.get("agent_controls", []))) or "-"
-        out.append(f"| [{rid}](#{anchor(rid)}) | {rule['severity']} | {rule['title']} | {refs} |")
+        out.append(f"| [{rid}](#{anchor(rid)}) | {rule['severity']} | {rule.get('category', 'authority')} | "
+                   f"{rule['title']} | {refs} |")
     out.append("")
     for rid, rule in c.rules.items():
         refs = ", ".join(list(rule.get("requirements", [])) + list(rule.get("agent_controls", []))) or "-"
