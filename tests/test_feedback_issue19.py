@@ -155,6 +155,18 @@ class ScriptAwareAgentTest(unittest.TestCase):
             self.assertIn("OBAAF-GHA-003", {f.rule for f in result.findings})  # agent controls now apply
             self.assertEqual(result.notes, [])                                 # detected, so no fallback note
 
+    def test_a_repo_script_copied_to_a_temporary_directory_is_detected(self):
+        with TempDir() as tmp:
+            self._repo(tmp, '#!/bin/bash\nopencode run "$PROMPT"\n')
+            path = tmp / '.github/workflows/ci.yml'
+            path.write_text(path.read_text(encoding='utf-8').replace(
+                'run: bash scripts/run-agent.sh',
+                'run: |\n          SNAPSHOT=$(mktemp -d)\n'
+                '          cp -r scripts "$SNAPSHOT/scripts"\n'
+                '          bash "${SNAPSHOT}/scripts/run-agent.sh"'), encoding='utf-8')
+            self.assertEqual(checker.lanes(tmp)[0][2], 'agent')
+            self.assertIn('OBAAF-GHA-003', {f.rule for f in checker.check(tmp).active()})
+
     def test_a_plain_script_stays_trusted(self):
         with TempDir() as tmp:
             self._repo(tmp, "#!/bin/bash\nmake all\n", instruction=None)

@@ -373,7 +373,12 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-008
     def unpinned(self, job: Job) -> None:
-        severity = "high" if job.lane in ("release", "agent", "effect") else "medium"
+        permissions = job.permissions
+        privileged = (not permissions or not permissions.declared or permissions.write_scopes()
+                      or permissions.oidc or job.secret_names()
+                      or job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS)
+        severity = ("high" if job.lane in ("release", "agent", "effect") else
+                    "medium" if privileged else "low")
         refs = [(s, s.uses, s.line) for s in job.steps if s.uses]
         if job.reusable and not job.reusable.startswith("./"):
             refs.append((None, job.reusable, job.line))
@@ -431,9 +436,16 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-013", job.line, f"Job '{job.id}' runs on a self-hosted runner ({labels}) and {why}.",
                          job)
             else:
-                self.add("OBAAF-GHA-013", job.line,
-                         f"Job '{job.id}' runs on {labels}, which are not standard GitHub-hosted labels, and {why}. "
-                         "If this is a self-hosted runner, it must be ephemeral.", job, severity="medium")
+                if job.mixed_runner_expression:
+                    self.add("OBAAF-GHA-013", job.line,
+                             f"Job '{job.id}' selects between hosted and self-hosted runners at runtime and {why}. "
+                             "The checker cannot prove which runner receives untrusted work. Review the selector "
+                             "and pool isolation; this informational finding does not certify it as safe.",
+                             job, severity="info")
+                else:
+                    self.add("OBAAF-GHA-013", job.line,
+                             f"Job '{job.id}' runs on {labels}, which are not standard GitHub-hosted labels, and {why}. "
+                             "If this is a self-hosted runner, it must be ephemeral.", job, severity="medium")
 
     # -------------------------------------------------------------- GHA-018
     def signing_keys(self, job: Job) -> None:

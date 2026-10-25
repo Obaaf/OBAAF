@@ -33,7 +33,7 @@ Tier 2 separates release builds from untrusted work and removes standing credent
 
 **Check your plan first.** For a private repository, the release and agent templates need GitHub Enterprise Cloud: artifact attestations, and required reviewers on environments, are not available for private repositories on the Free, Pro or Team plans. On those plans, a public repository works, or you can use the tools with `signing: keys` and your own pipeline; see the [plan limits](github-settings.md#plan-limits). The untrusted-lane template and the checker work on every plan.
 
-1. Run `obaaf check` on your repository and fix what it reports. It names the requirement and the fix for each finding.
+1. Run `obaaf check . --fail-on never` and review the findings. If you use agents, first run `obaaf check . --lanes` and verify their classification. Agent authority controls can require a separate proposal and effect lane, not just workflow edits. The [configuration guide](checker-configuration.md) explains declarations and the unreleased `--fail-on authority:medium` gate; PyPI 0.1.0 does not have that category gate.
 2. Install the templates: `obaaf templates install --dest . --obaaf-repo OWNER/obaaf --obaaf-sha <commit> --repository YOU/GAME`.
 3. Apply the [GitHub settings](github-settings.md): rulesets, environments, fork-PR approvals, CODEOWNERS.
 4. Create the binary manifest ([2.6](guides/F2-intake.md#item-2-6)).

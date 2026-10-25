@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -21,7 +22,7 @@ from obaaf.checker import rules as rules_mod
 from obaaf.checker import workflow as wf_mod
 from obaaf.checker.rules import Finding
 
-SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
+SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
 # Words in a job id or name that suggest it runs an AI agent, used only to warn
 # when such a job was left in the trusted lane (never to classify it).
@@ -68,6 +69,72 @@ def _script_targets(run_text: str) -> list[str]:
     return out
 
 
+def _copied_script_targets(run_text: str, root: Path) -> list[str]:
+    """Map simple cp snapshots back to repository sources, without reading the destination.
+
+    Variable names are symbolic: ${SNAPSHOT}/a and $SNAPSHOT/a name the same
+    destination. No shell commands, substitutions or workflow expressions execute.
+    Copy aliases are scoped to one run step; computed sources are not followed.
+    """
+    aliases: dict[str, Path] = {}
+    targets: list[str] = []
+    root = root.resolve()
+
+    def normalize(value: str) -> str:
+        return re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}', r'$\1', value).rstrip('/')
+
+    def source(value: str) -> Path | None:
+        value = normalize(value)
+        candidates = [path / value[len(alias):].lstrip('/') for alias, path in aliases.items()
+                      if value == alias or value.startswith(alias + '/')]
+        if '$' not in value:
+            candidates.append(root / value)
+        for path in candidates:
+            try:
+                path = path.resolve()
+                if root in path.parents and path.exists():
+                    return path
+            except (OSError, RuntimeError):
+                continue
+        return None
+
+    for line in run_text.splitlines():
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=';&|')
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        commands: list[list[str]] = [[]]
+        for token in tokens:
+            if token in (';', '&&', '||', '&', '|'):
+                commands.append([])
+            else:
+                commands[-1].append(token)
+        for command in commands:
+            if not command:
+                continue
+            if command[0] == 'cp':
+                args = [arg for arg in command[1:] if not arg.startswith('-')]
+                if len(args) == 2:
+                    original = source(args[0])
+                    destination = normalize(args[1])
+                    if original and destination:
+                        aliases[destination] = original
+                        # cp into an existing directory nests the source basename.
+                        aliases[destination + '/' + original.name] = original
+                continue
+            if command[0] not in ('bash', 'sh', 'source', '.', 'exec', 'timeout', 'env') \
+                    and not command[0].endswith(('.sh', '.bash')):
+                continue
+            for token in command:
+                if token.endswith(('.sh', '.bash')):
+                    original = source(token)
+                    if original and original.is_file():
+                        targets.append(original.relative_to(root).as_posix())
+    return targets
+
+
 def _agent_via_script(job, root: Path, commands: list) -> str | None:
     """A trusted job whose run step calls a repository script that itself invokes an agent CLI is
     really an agent job (companion R1-R4). Only scripts readable under `root` are inspected, so this
@@ -76,15 +143,16 @@ def _agent_via_script(job, root: Path, commands: list) -> str | None:
         return None
     root_r = root.resolve()
     for step in job.steps:
-        for tok in _script_targets(step.run):
+        for tok in _script_targets(step.run) + _copied_script_targets(step.run, root_r):
             try:
                 path = (root / tok).resolve()
                 if path != root_r and root_r not in path.parents:
                     continue
                 if not path.is_file():
                     continue
-                text = path.read_text(encoding="utf-8", errors="replace")[:200_000]
-            except OSError:
+                with path.open(encoding="utf-8", errors="replace") as script:
+                    text = script.read(200_000)
+            except (OSError, RuntimeError):
                 continue
             if any(rx.search(text) for rx in commands):
                 return f"runs an agent in the script {tok}"

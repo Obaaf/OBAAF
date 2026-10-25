@@ -133,8 +133,10 @@ rules:
     supports: [FR10, FR12]
     description: >-
       A third-party action, reusable workflow or container image is referenced by a tag or branch,
-      which its publisher, or anyone who compromises the publisher, can move. Release and agent jobs
-      are reported at high severity.
+      which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs
+      are reported at high severity. Ordinary jobs with explicitly limited token permissions,
+      no secrets and no privileged outside trigger are reported at low severity. Other jobs
+      remain medium: missing token permissions must not silently downgrade a privileged job.
     fix: >-
       Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep
       the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot
@@ -209,11 +211,13 @@ rules:
       A job that pull requests, outside events or an agent can drive runs on a self-hosted runner.
       Unless the runner is ephemeral, code from that job can persist on the host and tamper with later
       builds, as in the PyTorch case. Runner labels that are not standard GitHub-hosted labels (custom
-      labels, larger runners, labels from expressions) are reported at medium, because the checker
-      cannot tell whether they are self-hosted. A `runs-on` value that resolves at run time (for
-      example an expression that selects between a GitHub-hosted and a self-hosted runner) cannot be
-      evaluated here; if you confirm the resolved runner is GitHub-hosted or ephemeral, record that
-      with an expiring `ignore` entry (see the checker configuration guide).
+      labels, larger runners, unresolved inputs) are reported at medium, because the checker
+      cannot tell whether they are self-hosted. An unresolved runtime expression explicitly
+      mentioning both a standard hosted label and self-hosted alternatives is informational:
+      it needs review, but does not prove an unsafe runner was selected. Literal matrices that
+      include a self-hosted pool still produce a high finding. If you verify the selector and
+      runner lifecycle, record the evidence in a job-scoped, expiring `ignore` entry (see the
+      checker configuration guide). A declaration is not verification of runtime isolation.
     fix: >-
       Run untrusted and agent jobs on GitHub-hosted or ephemeral runners, and keep persistent
       self-hosted runners for the release lane only.

@@ -6,10 +6,10 @@ import json
 
 from obaaf import __version__
 from obaaf.catalog import Catalog, load
-from obaaf.checker import CheckResult
+from obaaf.checker import CheckResult, SEVERITY_ORDER
 
-SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note"}
-SECURITY_SEVERITY = {"high": "8.0", "medium": "5.0", "low": "2.0"}
+SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
+SECURITY_SEVERITY = {"high": "8.0", "medium": "5.0", "low": "2.0", "info": "0.0"}
 
 
 def _requirements(rule: dict) -> str:
@@ -49,7 +49,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
                          "one-line change. See templates/github-actions/.")
     suppressed = [f for f in result.findings if f.suppressed]
-    cats = {"authority": {"high": 0, "medium": 0, "low": 0}, "hygiene": {"high": 0, "medium": 0, "low": 0}}
+    cats = {cat: {severity: 0 for severity in SARIF_LEVEL} for cat in ("authority", "hygiene")}
     for f in active:
         cats[_category(catalog, f.rule)][f.severity] += 1
     a, h = cats["authority"], cats["hygiene"]
@@ -58,6 +58,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
     lines.append(f"Authority findings: {a['high']} high, {a['medium']} medium, {a['low']} low.")
     lines.append(f"Hygiene findings: {h['high']} high, {h['medium']} medium, {h['low']} low."
                  + (f" {len(suppressed)} ignored by configuration." if suppressed else ""))
+    if a['info'] or h['info']:
+        lines.append(f"Informational findings (not gated): {a['info']} authority, {h['info']} hygiene.")
     for f in suppressed:
         lines.append(f"  ignored: {f.rule} {f.path}:{f.line} - {f.suppressed}")
     if result.notes:
@@ -107,6 +109,8 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
     rules = []
     for rid in used:
         rule = catalog.rules[rid]
+        severity = max((f.severity for f in result.findings if f.rule == rid),
+                       key=SEVERITY_ORDER.__getitem__)
         cat = _category(catalog, rid)
         tags = [f"obaaf-{cat}", "security", "supply-chain"] + list(rule.get("requirements", [])) \
             + list(rule.get("agent_controls", []))
@@ -119,8 +123,8 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "text": "Fix: " + " ".join(rule["fix"].split()),
                 "markdown": f"**Fix:** {' '.join(rule['fix'].split())}\n\n**Requirements:** {_requirements(rule)}",
             },
-            "defaultConfiguration": {"level": SARIF_LEVEL[rule["severity"]]},
-            "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[rule["severity"]],
+            "defaultConfiguration": {"level": SARIF_LEVEL[severity]},
+            "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[severity],
                            "obaaf-category": cat, "obaaf-remediation": _remediation(catalog, rid)},
         })
     results = []
