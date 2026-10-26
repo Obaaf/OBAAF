@@ -36,7 +36,6 @@ informational, and that informational findings are never gated. These are unit
 tests on synthetic workflows, not pilot validation. Issue #19 stays open until a
 pilot confirms the new severities on a real repository.
 
-These changes are not on PyPI. The configuration guide documents commit-pinned
-source installation for pilots; publishing a new version remains a separate step.
+These changes ship in OBAAF 0.2.0 on PyPI (`pip install obaaf==0.2.0`).
 
 The pilot offered anonymized finding counts by rule. Those counts will tune rule severities and the authority and hygiene split, and will inform item 4.

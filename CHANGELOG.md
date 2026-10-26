@@ -4,6 +4,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-26
+
 ### Attestation formats (breaking)
 
 - Move the predicate type URIs from the reserved `obaaf.example` domain to the project's domain (D-007): `https://www.obaaf.com/attestation/agent-run/v0.1`, `.../agent-approval/v0.1`, `.../build-record/v0.1`, and the generic SLSA build type `https://www.obaaf.com/buildtypes/generic/v0.1`. The JSON Schemas' `$id` values move with them. The site now publishes a page at each type URI and each schema at its `$id`.
@@ -34,7 +36,9 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Trace simple same-step copies of repository scripts to temporary locations back to their repository source for agent detection. This never executes shell code or reads outside the repository; complex shell flow and generated scripts remain unsupported.
 - Report mixed hosted/self-hosted runtime selectors as informational uncertainty, retaining high findings for known self-hosted matrices and medium findings for other unknown runner labels or inputs.
 - Lower GHA-008 to low only for ordinary jobs with explicitly limited permissions, no referenced secrets and no privileged outside trigger. Agent, release and effect jobs remain high; other jobs remain medium. SARIF rule metadata reflects the severities actually reported.
-- Update first-adoption guidance with lane inspection and a commit-pinned path for trying unreleased code. These changes are not yet published to PyPI. Regression tests cover the runner and severity changes; pilot validation is pending. See [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+- Update first-adoption guidance with lane inspection and a commit-pinned path for trying unreleased code. Regression tests cover the runner and severity changes; pilot validation is pending. See [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+
+## [0.1.0] - 2026-10-22
 
 ### Licensing
 

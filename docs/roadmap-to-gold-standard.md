@@ -42,7 +42,7 @@ Look at what became durable standards — SLSA, Sigstore, in-toto, SSDF, the OWA
 | A crisp, implementable spec others can build to | Strong — R1–R8, JSON schemas, a conformance checker | — |
 | Interoperability with the ecosystem | Strong — in-toto, SLSA, Sigstore, SSDF | — |
 | Independent validation | Partial — papers (in review), incident mapping | Live tests not run; no external audit yet |
-| A reference implementation | Strong — the CLI, templates, tests | Not yet on PyPI/Marketplace (prepared) |
+| A reference implementation | Strong — the CLI, templates, tests | On PyPI since 0.1.0; Marketplace listing prepared |
 | Demonstrated adoption, with names | **Weak** — zero public adopters | The pilot is the seed; needs case studies |
 | **Neutral governance** | **Weak** — a two-person project | The single biggest structural gap |
 | A forcing function / timing | Strong — the agent-in-CI wave, EU CRA, SSDF attestation | Needs to be connected explicitly |

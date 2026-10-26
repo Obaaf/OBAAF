@@ -7,7 +7,7 @@ OBAAF is published to PyPI, so a team installs it with `pip install obaaf`. Publ
 ## Before the first release
 
 - **License.** The license files (`LICENSE`, `LICENSE-docs`, `NOTICE`; see [LICENSING.md](../LICENSING.md)) must be in place; a package without a license should not go to PyPI.
-- **Version.** `src/obaaf/__init__.py` holds `__version__`. It is `0.1.0`, the version on PyPI. Set it to the next release version (for example `0.2.0`) in the commit you tag, and back to a `.devN` afterwards. PyPI refuses to overwrite a version, so each release needs a new number.
+- **Version.** `src/obaaf/__init__.py` holds `__version__`. It is `0.2.0`, the version this release publishes. Set it to the next release version (for example `0.3.0`) in the commit you tag, and back to a `.devN` afterwards. PyPI refuses to overwrite a version, so each release needs a new number.
 - **Predicate type URIs (D-007).** Settled in 0.2: the in-toto predicate types and the generic build type live under `https://www.obaaf.com/`, and the site publishes a page at each type URI and each JSON Schema at its `$id`. A changed format gets a new version and a new URI.
 - **Decide the scope.** The classifiers mark OBAAF as Alpha (`Development Status :: 3 - Alpha`): it is in active adoption, but it is 0.x and its formats may still change. Update the classifier when that changes.
 
@@ -22,7 +22,7 @@ Trusted publishing lets GitHub Actions publish to PyPI using a short-lived OIDC 
 2. In the GitHub repository, create an **Environment** named `pypi` (Settings → Environments) and add a required reviewer. This is the human gate before any upload.
 3. Add the workflow below as `.github/workflows/release-pypi.yml`, and **pin the publish action to an exact commit SHA** (R6) — replace the zeros with the SHA of a `pypa/gh-action-pypi-publish` release. The repository's own CI checker (`obaaf check`) will fail on an unpinned action or a left-over placeholder, which is the intended guard.
 
-**Cut a release:** set the version, commit, and push a protected `v0.1.0` tag (or run the workflow by hand). The build job builds an sdist and a wheel with the hash-pinned backend and smoke-tests the wheel; the attest job signs their provenance; the publish job verifies that provenance and uploads them from the `pypi` environment after the reviewer approves.
+**Cut a release:** set the version, commit, and push a protected `v0.2.0` tag (or run the workflow by hand). The build job builds an sdist and a wheel with the hash-pinned backend and smoke-tests the wheel; the attest job signs their provenance; the publish job verifies that provenance and uploads them from the `pypi` environment after the reviewer approves.
 
 ```yaml
 # .github/workflows/release-pypi.yml
