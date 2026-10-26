@@ -1,8 +1,20 @@
-# OBAAF binary manifest sources (G2.1). List every vendored binary, SDK, engine
-# build and plugin. Create the manifest with:
+# OBAAF binary manifest sources (G2.1).
+#
+# Option A — you vendor binaries, SDKs, engine builds or plugins. List every one,
+# create the manifest, and commit both files:
 #   obaaf manifest create --components obaaf-sources.yaml --out obaaf-manifest.json
-# and commit both files. Builds then fail on any unrecorded change:
+# Builds then fail on any unrecorded change:
 #   obaaf manifest check --manifest obaaf-manifest.json
+#
+# Option B — you vendor no binaries (for example a pure source/Python project).
+# Declare that instead of listing components. The claim is written into the
+# manifest as vendoredBinaries: none; check does not scan the tree for binaries.
+# When you later add a vendored component, replace this with Option A in the same
+# reviewed change. Set build_record.require_sdks: false in .github/obaaf-policy.yaml
+# so `obaaf verify release` accepts an empty SDK list.
+#
+# vendored_binaries: none
+#
 components:
   - id: example-engine-plugin
     name: Example engine plugin

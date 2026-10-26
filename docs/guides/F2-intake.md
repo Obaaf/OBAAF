@@ -11,7 +11,7 @@ This is draft guidance for OBAAF version 0.1. The studio pilot will test and rev
 
 **Do this.**
 
-- List every third-party SDK and plugin that ships to players: name, version, where it came from, and who owns updating it.
+- List every third-party SDK and plugin that ships to players: name, version, where it came from, and who owns updating it. If you ship none, keep that as an explicit reviewed claim (`vendored_binaries: none` in `obaaf-sources.yaml`) rather than omitting the list.
 - Keep the list in version control. The OBAAF manifest source file, `obaaf-sources.yaml`, can be this list (see item 2.6 and [the example](../../templates/github-actions/obaaf-sources.example.yaml)).
 - Check the list against the current build before each release.
 
@@ -39,9 +39,9 @@ This is draft guidance for OBAAF version 0.1. The studio pilot will test and rev
 
 **Do this.**
 
-1. Declare your vendored components (engine builds, SDKs, plugins, other binaries) in `obaaf-sources.yaml`, with the paths each one occupies.
+1. Declare your vendored components (engine builds, SDKs, plugins, other binaries) in `obaaf-sources.yaml`, with the paths each one occupies. If the project vendors none, write `vendored_binaries: none` instead of a components list. That claim is not a filesystem scan: `manifest check` only confirms the committed empty claim; adding a real vendored binary later means switching to a components list in the same reviewed change.
 2. Create the manifest: `obaaf manifest create --components obaaf-sources.yaml --out obaaf-manifest.json`, review it, and commit both files.
-3. Add `obaaf manifest check --manifest obaaf-manifest.json` to every build. The [untrusted](../../templates/github-actions/workflows/obaaf-untrusted-ci.yml) and [release](../../templates/github-actions/workflows/obaaf-release.yml) templates already do.
+3. Add `obaaf manifest check --manifest obaaf-manifest.json` to every build (pass `--sources obaaf-sources.yaml` so a sources edit cannot drift from the committed JSON). The [untrusted](../../templates/github-actions/workflows/obaaf-untrusted-ci.yml) and [release](../../templates/github-actions/workflows/obaaf-release.yml) templates already run the digest check. Projects with `vendored_binaries: none` should set `build_record.require_sdks: false` in the release policy so verification accepts an empty SDK list.
 4. When you update a component on purpose, regenerate the manifest in the same reviewed change.
 
 **Keep as evidence.** The manifest file and the build step that checks it.

@@ -6,6 +6,16 @@ a changed file or a missing file under a tracked path. Symbolic links are
 recorded with their targets, so replacing a file with a link, or retargeting a
 link, is a change too.
 
+Projects that vendor no binaries declare that in the sources file instead of
+listing components:
+
+    vendored_binaries: none
+
+That claim is written into the manifest as `vendoredBinaries: "none"` with empty
+`components` and `entries`, so the build-record digest binds it. `check` does
+not scan the tree for undeclared binaries; switching from none to real
+components is a reviewed change to the sources file and a regenerated manifest.
+
 Components are declared in a small YAML file, for example:
 
     components:
@@ -29,13 +39,34 @@ from obaaf.attest.common import RecordError, now, sha256_bytes, sha256_file, wri
 
 FORMAT = "obaaf-manifest/v0.1"
 KINDS = {"sdk", "engine", "plugin", "middleware", "binary", "asset-pack", "tool"}
+VENDORED_NONE = "none"
+# JSON field that binds an empty (no-vendored-binaries) claim into the digest.
+VENDORED_FIELD = "vendoredBinaries"
 
 
-def load_components(path: str | Path) -> list[dict]:
+def load_sources(path: str | Path) -> tuple[list[dict], bool]:
+    """Return (components, vendored_none) from an obaaf-sources.yaml file.
+
+    Either a non-empty `components` list, or `vendored_binaries: none` (with
+    components absent or empty). The two are mutually exclusive.
+    """
     data = yamlutil.load_file(path) or {}
-    components = data.get("components") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise RecordError(f"{path}: expected a mapping with 'components' or vendored_binaries: none")
+    vendored = data.get("vendored_binaries")
+    components = data.get("components")
+    if vendored is not None:
+        if vendored != VENDORED_NONE:
+            raise RecordError(f"{path}: vendored_binaries must be {VENDORED_NONE!r}, not {vendored!r}")
+        if components is None:
+            return [], True
+        if not isinstance(components, list):
+            raise RecordError(f"{path}: 'components' must be a list when present")
+        if components:
+            raise RecordError(f"{path}: vendored_binaries: none cannot be combined with components")
+        return [], True
     if not isinstance(components, list) or not components:
-        raise RecordError(f"{path}: expected a 'components' list")
+        raise RecordError(f"{path}: declare components or set vendored_binaries: none")
     seen = set()
     for comp in components:
         for key in ("id", "name", "version", "source", "kind", "paths"):
@@ -47,6 +78,14 @@ def load_components(path: str | Path) -> list[dict]:
             raise RecordError(f"{path}: duplicate component id {comp['id']}")
         seen.add(comp["id"])
         comp["version"] = str(comp["version"])
+    return components, False
+
+
+def load_components(path: str | Path) -> list[dict]:
+    """Components from a sources file. Raises if the file declares vendored_binaries: none."""
+    components, none = load_sources(path)
+    if none:
+        raise RecordError(f"{path}: vendored_binaries: none (no components)")
     return components
 
 
@@ -73,9 +112,40 @@ def _tracked_files(root: Path, components: list[dict]) -> dict[str, str]:
     return owned
 
 
+def validate_manifest(manifest: dict, *, path: str | Path | None = None) -> None:
+    """Fail closed on empty manifests that lack the none claim, and on inconsistent claims."""
+    where = f"{path}: " if path else ""
+    components = manifest.get("components")
+    entries = manifest.get("entries")
+    if not isinstance(components, list) or not isinstance(entries, list):
+        raise RecordError(f"{where}manifest must have list 'components' and 'entries'")
+    claim = manifest.get(VENDORED_FIELD)
+    empty = len(components) == 0 and len(entries) == 0
+    if claim == VENDORED_NONE:
+        if not empty:
+            raise RecordError(f"{where}{VENDORED_FIELD}: none requires empty components and entries")
+        return
+    if claim is not None:
+        raise RecordError(f"{where}unknown {VENDORED_FIELD} value {claim!r}")
+    if empty:
+        raise RecordError(
+            f"{where}empty components and entries require {VENDORED_FIELD}: {VENDORED_NONE!r}"
+        )
+    if not components:
+        raise RecordError(f"{where}entries without components require {VENDORED_FIELD}: {VENDORED_NONE!r}")
+
+
 def create(root: str | Path, components_file: str | Path) -> dict:
     root = Path(root)
-    components = load_components(components_file)
+    components, none = load_sources(components_file)
+    if none:
+        return {
+            "format": FORMAT,
+            "createdAt": now(),
+            VENDORED_FIELD: VENDORED_NONE,
+            "components": [],
+            "entries": [],
+        }
     owned = _tracked_files(root, components)
     empty = [c["id"] for c in components if c["id"] not in owned.values()]
     if empty:
@@ -103,11 +173,20 @@ def load(path: str | Path) -> dict:
     manifest = json.loads(Path(path).read_text(encoding="utf-8"))
     if manifest.get("format") != FORMAT:
         raise RecordError(f"{path}: not an OBAAF manifest ({manifest.get('format')!r})")
+    validate_manifest(manifest, path=path)
     return manifest
 
 
 def check(root: str | Path, manifest: dict) -> list[str]:
-    """Differences between the files on disk and the manifest (empty when they match)."""
+    """Differences between the files on disk and the manifest (empty when they match).
+
+    For `vendoredBinaries: none`, there are no tracked paths: the reviewed claim is
+    the check. `check` does not re-read obaaf-sources.yaml; regenerating the
+    manifest after editing sources is what binds a new declaration.
+    """
+    validate_manifest(manifest)
+    if manifest.get(VENDORED_FIELD) == VENDORED_NONE:
+        return []
     root = Path(root)
     recorded = {e["path"]: e for e in manifest["entries"]}
     current = _tracked_files(root, manifest["components"])
@@ -127,6 +206,36 @@ def check(root: str | Path, manifest: dict) -> list[str]:
                             f"{expected['symlink']!r}")
         elif actual["sha256"] != expected["sha256"]:
             problems.append(f"changed: {rel} has sha256 {actual['sha256']}, the manifest records {expected['sha256']}")
+    return problems
+
+
+def is_none_claim(manifest: dict) -> bool:
+    return manifest.get(VENDORED_FIELD) == VENDORED_NONE
+
+
+def sources_match(sources_file: str | Path, manifest: dict) -> list[str]:
+    """Differences between a sources file and a loaded manifest (empty when they agree).
+
+    `check` does not call this: digest checks stay against disk. Pass the sources file
+    explicitly (CLI `--sources`) so a reviewed none claim cannot stay green after the
+    sources file gains components without regenerating the JSON.
+    """
+    validate_manifest(manifest)
+    components, none = load_sources(sources_file)
+    problems = []
+    if none:
+        if not is_none_claim(manifest):
+            problems.append("sources declare vendored_binaries: none but the manifest does not")
+        return problems
+    if is_none_claim(manifest):
+        problems.append("manifest declares vendoredBinaries: none but sources list components")
+        return problems
+    source_ids = [c["id"] for c in components]
+    manifest_ids = [c["id"] for c in manifest["components"]]
+    if source_ids != manifest_ids:
+        problems.append(
+            f"component ids differ: sources have {source_ids}, manifest has {manifest_ids}"
+        )
     return problems
 
 

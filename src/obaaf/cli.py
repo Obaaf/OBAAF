@@ -166,7 +166,11 @@ def cmd_manifest_create(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAIL
     manifest.write(data, args.out)
-    print(f"manifest: {len(data['entries'])} file(s) in {len(data['components'])} component(s) written to {args.out}")
+    if manifest.is_none_claim(data):
+        print(f"manifest: vendoredBinaries: none; 0 file(s) in 0 component(s) written to {args.out}")
+    else:
+        print(f"manifest: {len(data['entries'])} file(s) in {len(data['components'])} component(s) "
+              f"written to {args.out}")
     return EXIT_OK
 
 
@@ -175,17 +179,23 @@ def cmd_manifest_check(args) -> int:
     from obaaf.attest.common import RecordError
 
     try:
-        problems = manifest.check(args.root, manifest.load(args.manifest))
+        data = manifest.load(args.manifest)
+        problems = manifest.check(args.root, data)
+        if args.sources:
+            problems += manifest.sources_match(args.sources, data)
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAIL
     if problems:
-        print(f"Manifest check FAILED: {len(problems)} unrecorded change(s) (G2.1)")
+        print(f"Manifest check FAILED: {len(problems)} problem(s) (G2.1)")
         for problem in problems:
             print(f"  {problem}")
         print("If the change is intended, review it and regenerate the manifest with 'obaaf manifest create'.")
         return EXIT_FAIL
-    print("Manifest check passed: every tracked file matches its recorded digest.")
+    if manifest.is_none_claim(data):
+        print("Manifest check passed: vendoredBinaries: none (no tracked paths).")
+    else:
+        print("Manifest check passed: every tracked file matches its recorded digest.")
     return EXIT_OK
 
 
@@ -529,6 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
     x = m.add_parser("check")
     x.add_argument("--manifest", required=True)
     x.add_argument("--root", default=".")
+    x.add_argument("--sources", help="obaaf-sources.yaml; fail if its declaration drifts from the manifest")
     x.set_defaults(func=cmd_manifest_check)
 
     # proposal

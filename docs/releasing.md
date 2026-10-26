@@ -128,6 +128,8 @@ jobs:
 
 After the first successful publish, the website quickstart and `README.md` use `pip install obaaf` (updated in this release). From 0.2, the release follows OBAAF's own release lane for provenance: a separate `attest` job, which runs no build code and holds no PyPI identity, signs SLSA provenance for every built file through GitHub's Sigstore, and the `publish` job uploads nothing until `gh attestation verify` confirms that provenance for each file, signed by this workflow for this ref on a GitHub-hosted runner. Anyone can check a downloaded file the same way: `gh attestation verify obaaf-0.2.0-py3-none-any.whl --repo Obaaf/OBAAF`.
 
+From the empty-manifest work (D-033), the `build` job checks the repository's `vendored_binaries: none` claim and writes the unsigned build-record predicate; the `attest` job signs that predicate and SLSA provenance without installing the candidate wheel; `publish` runs `gh attestation verify` for both predicate types (signature, subject, signer, type — not predicate-body policy). Full `obaaf verify release` remains a later dogfood step.
+
 ## Part B — GitHub Marketplace listing for `setup-obaaf`
 
 The composite action in [`actions/setup-obaaf`](../actions/setup-obaaf/action.yml) installs the pinned toolchain in any runner. A Marketplace listing makes it discoverable.

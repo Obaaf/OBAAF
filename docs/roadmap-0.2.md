@@ -22,7 +22,8 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 
 ## Found while releasing OBAAF with its own controls
 
-OBAAF's release does not yet write an OBAAF build record or run `obaaf verify release` on itself. `obaaf attest build-record` requires a binary manifest, and a manifest requires at least one vendored component, so a project that vendors no binaries, such as OBAAF itself and many teams outside games, cannot produce a build record. Planned for 0.3: let a project declare that it vendors no binaries, then release OBAAF through the full release lane and `obaaf verify release`.
+- **Empty / no-vendored-binaries manifest. Shipped.** `vendored_binaries: none` produces a valid empty manifest; OBAAF's repository commits that declaration; the PyPI release signs a build record and verifies it with `gh attestation verify` alongside SLSA provenance.
+- **Full `obaaf verify release` on OBAAF itself. Still planned.** That needs a committed release policy (`require_sdks: false`, agent baseline, environment approvals wired to the publish job) without forcing a rewrite of `release-pypi.yml` into the template lane split. Track for a later 0.2.x or 0.3 cut.
 
 ## Data wanted
 
