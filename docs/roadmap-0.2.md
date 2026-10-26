@@ -16,6 +16,13 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 3. **Dynamic `runs-on` handling (medium). Implemented, with regression tests; pilot validation pending.** Unresolved selectors that explicitly name both hosted and self-hosted alternatives are informational. Known self-hosted matrices remain high and other unknown labels or inputs remain medium. Reviewed pools can use exact-job, expiring exceptions with evidence; a declaration does not verify runtime isolation.
 4. **Soften hygiene outside the release and agent lanes (medium). Implemented, with regression tests; pilot validation pending.** GHA-008 is low for ordinary jobs only with explicitly limited token permissions, no referenced secrets, and no privileged outside trigger. Agent, release and effect jobs stay high; other jobs stay medium.
 5. **Maturity framing in the output (medium). Shipped.** Findings that need the agent and effect lane architecture (OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) are flagged as such in the output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
+6. **Predicate type URIs under the project's domain (D-007). Shipped.** The agent-run, approval and build-record types and the generic build type live under `https://www.obaaf.com/`, and each resolves to a page describing its format. Breaking for records signed with the 0.1 URIs.
+7. **Hash-pinned install (D-011). Shipped.** `setup-obaaf` and the PyPI release install every dependency by SHA-256 from a generated `requirements.txt`; CI checks it against PyPI and on Linux, macOS and Windows.
+8. **Signed provenance for OBAAF's own release. Shipped.** The PyPI release signs SLSA provenance in a separate job and uploads nothing until `gh attestation verify` passes for every file.
+
+## Found while releasing OBAAF with its own controls
+
+OBAAF's release does not yet write an OBAAF build record or run `obaaf verify release` on itself. `obaaf attest build-record` requires a binary manifest, and a manifest requires at least one vendored component, so a project that vendors no binaries, such as OBAAF itself and many teams outside games, cannot produce a build record. Planned for 0.3: let a project declare that it vendors no binaries, then release OBAAF through the full release lane and `obaaf verify release`.
 
 ## Data wanted
 

@@ -12,6 +12,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 ### Supply chain of OBAAF itself
 
 - Install OBAAF's dependencies by hash (D-011): `setup-obaaf` and the PyPI release now install from `actions/setup-obaaf/requirements.txt` with `--require-hashes`, wheels only. `scripts/lock_setup_obaaf.py` generates that file from `constraints.txt` with PyPI's SHA-256 for every file; CI checks it against PyPI and runs the action on Linux, macOS and Windows.
+- Sign SLSA provenance for OBAAF's own PyPI release in a separate `attest` job, and verify it with `gh attestation verify` before uploading. Check a downloaded file with `gh attestation verify <file> --repo Obaaf/OBAAF`.
 
 ### Papers
 
