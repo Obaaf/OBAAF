@@ -90,7 +90,39 @@ jobs:
           "$RUNNER_TEMP/clean/bin/obaaf" check "$GITHUB_WORKSPACE/tests/fixtures/workflows/risky/pwn-request.yml" --fail-on never
 
   setup-action:
-    # The composite action the templates use, run from this checkout.
+    # The composite action the templates use, run from this checkout on every
+    # hosted operating system, so the hash-pinned requirements cover each one (D-011).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The documented way to use the action on any hosted OS: a known Python first.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up OBAAF with the action
+        uses: ./actions/setup-obaaf
+
+      - name: Use it
+        shell: bash
+        run: |
+          obaaf --version
+          obaaf check tests/fixtures/workflows/risky/pwn-request.yml --fail-on never
+          python -c "import cryptography" 2>/dev/null || "$(dirname "$(command -v obaaf)")/python" -c "import cryptography"
+
+  dependency-lock:
+    # requirements.txt must hold PyPI's SHA-256 for every file of every version in
+    # constraints.txt (D-011).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -99,14 +131,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up OBAAF with the action
-        uses: ./actions/setup-obaaf
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
 
-      - name: Use it
-        run: |
-          obaaf --version
-          obaaf check tests/fixtures/workflows/risky/pwn-request.yml --fail-on never
-          python -c "import cryptography" 2>/dev/null || "$(dirname "$(command -v obaaf)")/python" -c "import cryptography"
+      - name: Check the hash-pinned requirements against PyPI
+        id: lock
+        run: python scripts/lock_setup_obaaf.py --check
+
+      # When the check fails, write the file it expected and attach it to the run, so a
+      # maintainer without PyPI access can review it, download it and commit it.
+      - name: Write the expected requirements.txt
+        if: failure() && steps.lock.outcome == 'failure'
+        run: python scripts/lock_setup_obaaf.py
+
+      - name: Attach the expected requirements.txt to this run
+        if: failure() && steps.lock.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: setup-obaaf-requirements
+          path: actions/setup-obaaf/requirements.txt
+          if-no-files-found: error
+          retention-days: 7
 
   actionlint:
     runs-on: ubuntu-latest

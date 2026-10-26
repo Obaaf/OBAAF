@@ -4,6 +4,18 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-26
+
+### Attestation formats (breaking)
+
+- Move the predicate type URIs from the reserved `obaaf.example` domain to the project's domain (D-007): `https://www.obaaf.com/attestation/agent-run/v0.1`, `.../agent-approval/v0.1`, `.../build-record/v0.1`, and the generic SLSA build type `https://www.obaaf.com/buildtypes/generic/v0.1`. The JSON Schemas' `$id` values move with them. The site now publishes a page at each type URI and each schema at its `$id`.
+- Records signed with the 0.1 URIs do not verify under this version. Sign new records with the updated templates.
+
+### Supply chain of OBAAF itself
+
+- Install OBAAF's dependencies by hash (D-011): `setup-obaaf` and the PyPI release now install from `actions/setup-obaaf/requirements.txt` with `--require-hashes`, wheels only. `scripts/lock_setup_obaaf.py` generates that file from `constraints.txt` with PyPI's SHA-256 for every file; CI checks it against PyPI and runs the action on Linux, macOS and Windows.
+- Sign SLSA provenance for OBAAF's own PyPI release in a separate `attest` job, and verify it with `gh attestation verify` before uploading. Check a downloaded file with `gh attestation verify <file> --repo Obaaf/OBAAF`.
+
 ### Papers
 
 - Both companion papers have DOIs on Zenodo: Paper 1, *Untrusted Text, Trusted Tokens*, [10.5281/zenodo.23622566](https://doi.org/10.5281/zenodo.23622566); Paper 2, *Securing the Game Build*, [10.5281/zenodo.23622802](https://doi.org/10.5281/zenodo.23622802). The website, README, generated spec headers, threat model and paper READMEs link to them, and a `CITATION.cff` lists them so GitHub offers a citation.
@@ -24,7 +36,9 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Trace simple same-step copies of repository scripts to temporary locations back to their repository source for agent detection. This never executes shell code or reads outside the repository; complex shell flow and generated scripts remain unsupported.
 - Report mixed hosted/self-hosted runtime selectors as informational uncertainty, retaining high findings for known self-hosted matrices and medium findings for other unknown runner labels or inputs.
 - Lower GHA-008 to low only for ordinary jobs with explicitly limited permissions, no referenced secrets and no privileged outside trigger. Agent, release and effect jobs remain high; other jobs remain medium. SARIF rule metadata reflects the severities actually reported.
-- Update first-adoption guidance with lane inspection and a commit-pinned path for trying unreleased code. These changes are not yet published to PyPI. Regression tests cover the runner and severity changes; pilot validation is pending. See [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+- Update first-adoption guidance with lane inspection and a commit-pinned path for trying unreleased code. Regression tests cover the runner and severity changes; pilot validation is pending. See [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+
+## [0.1.0] - 2026-10-22
 
 ### Licensing
 

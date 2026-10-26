@@ -3,15 +3,19 @@ description: >-
   Install the OBAAF command-line tools from this action's own source, so the
   version used is exactly the commit the workflow pins (R6). Installs into a
   virtual environment under RUNNER_TEMP and adds it to PATH. Every dependency,
-  including the build backend, comes from the exact versions in
-  constraints.txt; nothing is resolved at install time.
+  including the build backend, is installed from requirements.txt by exact
+  version and SHA-256 hash, as wheels only; nothing is resolved at install time.
 author: Osita Sean Keluo-Udeke
 branding:
   icon: shield
   color: red
 inputs:
   python:
-    description: Python interpreter to use (3.10 or later). Defaults to python3, then python.
+    description: >-
+      Python interpreter to use (3.10 or later). Defaults to the first of python3
+      and python that runs and is 3.10 or later. On macOS and Windows runners, run
+      actions/setup-python first: their default interpreters may not match the
+      prebuilt wheels the hash-pinned install accepts.
     required: false
     default: ""
 runs:
@@ -23,8 +27,20 @@ runs:
         OBAAF_PYTHON: ${{ inputs.python }}
       run: |
         set -euo pipefail
+        supported() { "$1" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' >/dev/null 2>&1; }
         py="${OBAAF_PYTHON:-}"
-        if [ -z "$py" ]; then py=$(command -v python3 || command -v python); fi
+        if [ -z "$py" ]; then
+          # Try each name rather than trusting the first match: on Windows, python3 can be
+          # a store placeholder, and a runner's system python3 can be older than 3.10.
+          for candidate in python3 python; do
+            if command -v "$candidate" >/dev/null 2>&1 && supported "$candidate"; then py="$candidate"; break; fi
+          done
+        fi
+        if [ -z "$py" ] || ! supported "$py"; then
+          echo "::error::setup-obaaf needs Python 3.10 or later. Run actions/setup-python first, or pass the python input."
+          exit 1
+        fi
+        echo "Using $("$py" -c 'import platform, sys; print(sys.executable, platform.python_version(), platform.machine())')"
         venv="$RUNNER_TEMP/obaaf-venv"
         "$py" -m venv "$venv"
         if [ -d "$venv/Scripts" ]; then bin="$venv/Scripts"; else bin="$venv/bin"; fi
@@ -32,7 +48,7 @@ runs:
         # itself, built with that backend (no isolated build environment that would fetch an
         # unpinned setuptools), and a check that every declared dependency is present.
         "$bin/python" -m pip install --quiet --disable-pip-version-check --only-binary=:all: \
-          --constraint "$GITHUB_ACTION_PATH/constraints.txt" setuptools PyYAML jsonschema cryptography
+          --require-hashes --requirement "$GITHUB_ACTION_PATH/requirements.txt"
         "$bin/python" -m pip install --quiet --disable-pip-version-check --no-build-isolation --no-deps \
           "$GITHUB_ACTION_PATH/../.."
         "$bin/python" -m pip check

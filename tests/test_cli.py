@@ -54,7 +54,9 @@ class CliTest(unittest.TestCase):
     def test_composite_action_installs_from_its_own_source(self):
         action = (ROOT / "actions" / "setup-obaaf" / "action.yml").read_text()
         self.assertIn('"$GITHUB_ACTION_PATH/../.."', action)
-        self.assertIn("constraints.txt", action)
+        # Dependencies come from the hash-pinned list generated from constraints.txt (D-011).
+        self.assertIn("requirements.txt", action)
+        self.assertIn("--require-hashes", action)
         # No isolated build environment, which would fetch whatever setuptools is newest.
         self.assertIn("--no-build-isolation", action)
         self.assertIn("pip check", action)

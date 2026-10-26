@@ -42,7 +42,7 @@ Look at what became durable standards — SLSA, Sigstore, in-toto, SSDF, the OWA
 | A crisp, implementable spec others can build to | Strong — R1–R8, JSON schemas, a conformance checker | — |
 | Interoperability with the ecosystem | Strong — in-toto, SLSA, Sigstore, SSDF | — |
 | Independent validation | Partial — papers (in review), incident mapping | Live tests not run; no external audit yet |
-| A reference implementation | Strong — the CLI, templates, tests | Not yet on PyPI/Marketplace (prepared) |
+| A reference implementation | Strong — the CLI, templates, tests | On PyPI since 0.1.0; Marketplace listing prepared |
 | Demonstrated adoption, with names | **Weak** — zero public adopters | The pilot is the seed; needs case studies |
 | **Neutral governance** | **Weak** — a two-person project | The single biggest structural gap |
 | A forcing function / timing | Strong — the agent-in-CI wave, EU CRA, SSDF attestation | Needs to be connected explicitly |
@@ -69,7 +69,7 @@ Turn claims into evidence.
 ### Phase 2 — Standardization and governance (3–9 months)
 The gold-standard inflection.
 - **Submit the agent-run predicate to the OpenSSF** (draft ready) and engage in-toto/SLSA so it is *referenced, not forked*.
-- **Resolve the predicate namespace** (D-007): a neutral domain/URI, not `obaaf.example`.
+- **Resolve the predicate namespace** (D-007): done in 0.2; the types live under `https://www.obaaf.com/` and resolve to format pages.
 - **Recruit two or three outside contributors**; open a lightweight RFC process.
 - **Explore contributing the spec to a neutral body** (OpenSSF sandbox / a working-group deliverable). Yes, this means ceding sole control — that is the price of "standard," and it is worth paying.
 - *Outcome:* OBAAF becomes "the agent-run predicate," stewarded beyond its authors.

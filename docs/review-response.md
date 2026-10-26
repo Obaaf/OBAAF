@@ -53,7 +53,7 @@ The point is not that the reviewer is careless. It is that the website was writt
 | Micro-sandboxing (Firecracker / gVisor / eBPF) | **Genuine gap — don't build own** | R7 is declared, not hard-enforced (D-020, traceability); use existing ephemeral runners / network policy, not bespoke microVM infra |
 | Inference proxy (model credential + budget) | **Genuine gap — planned** | specified; D-020 schedules the reference proxy for v0.2 |
 | Model pinning by digest | **Genuine gap** | FR10; hosted models expose no stable hash yet |
-| Predicate type URIs (`obaaf.org/attestation/v2`) | **Known** | repo uses provisional `obaaf.example/attestation/agent-run/v0.1` pending a domain (D-007) |
+| Predicate type URIs (`obaaf.org/attestation/v2`) | **Resolved in 0.2** | types live under `https://www.obaaf.com/attestation/<type>/v0.1`, each resolving to a page that describes the format (D-007) |
 | OpenSSF working-group submission | **Do** | high value, low cost; the white paper is the submission artifact |
 | Black Hat Arsenal / Briefings; DEF CON; RSA Sandbox; Pwnie | **Selective** | see §5 |
 | Advisory board / vendor-neutral governance | **Later** | right idea; hard to recruit for a two-person pre-pilot project |
@@ -71,7 +71,7 @@ Drawn from the review's valid points *and* the project's own open decisions, ord
 
 1. **Adopt the license** (prepared in this change; D-003). One commit unblocks studio adoption, OSS-security funding, and OSI-license award criteria.
 2. **Publish the threat-model white paper** (added) and **submit to the OpenSSF** supply-chain integrity / AI working groups. Highest-value recognition step; no entity required.
-3. **Finalize predicate type URIs** (D-007): acquire a domain, replace the provisional `obaaf.example` URIs before any "released" attestation. Small, unblocks a released format.
+3. **Finalize predicate type URIs** (D-007): acquire a domain, replace the provisional `obaaf.example` URIs before any "released" attestation. Small, unblocks a released format. **Done in 0.2:** the types live under `https://www.obaaf.com/`.
 4. **Run the live acceptance tests** (LAT-01…11) on a sandbox repository. Converts "specified" claims (fork pull requests denied secrets, egress, approvals) into "demonstrated." High evidence value; moderate effort.
 5. **Land the independent-studio pilot.** The single highest-impact item for adoption, for a funding case, and for any petition — it turns a framework into demonstrated impact.
 6. **Egress enforcement (R7):** document and template a concrete reference — self-hosted ephemeral runner with a network policy, or a runtime egress monitor — rather than a bespoke microVM stack.

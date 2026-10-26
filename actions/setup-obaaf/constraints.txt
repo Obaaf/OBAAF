@@ -1,6 +1,6 @@
 # Exact versions of OBAAF's dependencies for pipeline use (R6), including the
-# build backend. Hashes will be added before the first public release
-# (DECISIONS.md, D-011).
+# build backend. Edit versions here, then run scripts/lock_setup_obaaf.py to write
+# requirements.txt with the SHA-256 of every file (DECISIONS.md, D-011).
 setuptools==80.10.2
 PyYAML==6.0.3
 jsonschema==4.26.0

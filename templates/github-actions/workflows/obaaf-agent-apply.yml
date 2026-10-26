@@ -142,7 +142,7 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/obaaf-proposal/*
-          predicate-type: https://obaaf.example/attestation/agent-approval/v0.1
+          predicate-type: https://www.obaaf.com/attestation/agent-approval/v0.1
           predicate-path: ${{ runner.temp }}/approval.json
 
       - name: Write the agent record that travels with the change (G8.3)
