@@ -17,7 +17,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Note the dynamic `runs-on` limitation in OBAAF-GHA-013 and how to record a confirmed-safe runner with an expiring ignore entry.
 - Detect agents launched through a repository script: a trusted job whose `run` step calls a repo script (for example `bash run-agent.sh`) that itself invokes an agent CLI is reclassified into the agent lane, so the agent controls apply. Best-effort, so scripts the checker cannot read still fall back to the advisory note.
 - Flag findings that need an architecture change rather than a one-line fix (the agent and effect lane controls OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) in the text output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
-- The remaining larger items (dynamic `runs-on` configuration, softening hygiene severities) are tracked in [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
+- Trace simple same-step copies of repository scripts to temporary locations back to their repository source for agent detection. This never executes shell code or reads outside the repository; complex shell flow and generated scripts remain unsupported.
+- Report mixed hosted/self-hosted runtime selectors as informational uncertainty, retaining high findings for known self-hosted matrices and medium findings for other unknown runner labels or inputs.
+- Lower GHA-008 to low only for ordinary jobs with explicitly limited permissions, no referenced secrets and no privileged outside trigger. Agent, release and effect jobs remain high; other jobs remain medium. SARIF rule metadata reflects the severities actually reported.
+- Update first-adoption guidance with lane inspection and a commit-pinned path for trying unreleased code. These changes are not yet published to PyPI. Further test work and regression validation are deferred; see [docs/roadmap-0.2.md](docs/roadmap-0.2.md).
 
 ### Licensing
 

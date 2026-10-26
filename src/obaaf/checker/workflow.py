@@ -342,6 +342,19 @@ class Job:
         return "github-hosted"
 
     @property
+    def mixed_runner_expression(self) -> bool:
+        """A runtime selector mentioning both hosted and self-hosted alternatives.
+
+        This is uncertainty, not proof that a fork-safe selector is correct. Literal
+        matrices are handled by runner_kind and retain findings for known pools.
+        """
+        if self.runner_label_sets() is not None or self.self_hosted:
+            return False
+        labels = ' '.join(self.runs_on).lower()
+        return ('${{' in labels and 'self-hosted' in labels
+                and re.search(r"['\"](?:ubuntu|windows|macos)-[a-z0-9.-]+['\"]", labels) is not None)
+
+    @property
     def reusable(self) -> str | None:
         value = self.raw.get("uses")
         return str(value) if value else None

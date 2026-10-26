@@ -70,6 +70,13 @@ obaaf check path/to/your/repository
 obaaf templates install --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
 ```
 
+If a pipeline uses AI agents, run `obaaf check path/to/your/repository --lanes`
+and confirm that their jobs are classified as `agent`. Wrapper detection is
+best-effort. Start in reporting mode, review findings, then agree what should
+block changes. See [checker configuration](docs/checker-configuration.md) for
+agent declarations, category gates, and how to pilot unreleased changes that
+are not yet in the PyPI package.
+
 **Reviewers.** Read [the architecture](docs/architecture.md), [the decisions log](DECISIONS.md), and [how each requirement is tested](docs/traceability.md).
 
 ## Tests
