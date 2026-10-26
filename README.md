@@ -1,6 +1,6 @@
 # Open Build and Agent Assurance Framework (OBAAF)
 
-OBAAF is a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. It works for any team that ships software updates. The first version is shaped by the needs of small teams without dedicated security staff, independent game studios among them, whose updates reach phones, PCs and consoles.
+OBAAF is a free, open framework for keeping malicious code out of the software updates people install. It secures the build pipelines that produce those updates, and the AI agents now connected to them. It works for any team that ships software updates. Its checker reads GitHub Actions workflows and, as an advisory auditor, Jenkinsfiles; the specification and self-assessment name no CI product. The first version is shaped by the needs of small teams without dedicated security staff, independent game studios among them, whose updates reach phones, PCs and consoles.
 
 > **Status: version 0.2, in active adoption.** OBAAF 0.2.0 is on PyPI (`pip install obaaf`) and in use with pilot teams. The first external pilot ran the checker on a production repository; its feedback is tracked in [issue #19](https://github.com/Obaaf/OBAAF/issues/19) and shapes the [0.2 roadmap](docs/roadmap-0.2.md). The checker was also exercised in a [limited GitHub Actions demonstration](docs/checker-demonstration.md). Broader platform validation continues, and formats may still change before 1.0. The code is licensed under Apache-2.0 and the specifications and documentation under CC BY 4.0. This is not a research-paper submission. The specifications and tools are built only from public standards and public documentation. See [LICENSING.md](LICENSING.md).
 >
@@ -63,7 +63,7 @@ obaaf assess score answers.yaml           # your tier and what to fix first
 
 Your answers never leave your machine. Then follow [the adoption guide](docs/adoption-guide.md).
 
-**Build engineers.** Check your workflows, then install the templates:
+**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles, then install the templates (GitHub Actions; for Jenkins, see [Jenkins](docs/jenkins.md)):
 
 ```bash
 obaaf check path/to/your/repository

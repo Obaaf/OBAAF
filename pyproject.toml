@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "obaaf"
 dynamic = ["version"]
-description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools"
+description = "Open Build and Agent Assurance Framework: build-pipeline and AI-agent assurance tools for GitHub Actions and Jenkins"
 readme = "README.md"
 requires-python = ">=3.10"
 # Code is Apache-2.0; the specification data under src/obaaf/data/ is also

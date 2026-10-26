@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Platform scope
+
+- The website, README, adoption guide, glossary, traceability and package description now say that `obaaf check` reads GitHub Actions workflows and, as an advisory auditor, Jenkinsfiles. The templates, `setup-obaaf` and keyless signing remain GitHub Actions only. The site's quickstart runs `obaaf check .`, which covers both.
+
 ### Added
 
 - Projects that vendor no binaries can declare `vendored_binaries: none` in `obaaf-sources.yaml`. `obaaf manifest create` writes an empty `obaaf-manifest/v0.1` with `vendoredBinaries: "none"` so the build-record digest binds the claim; empty `components` without that declaration still fails closed (D-033). Set `build_record.require_sdks: false` in the release policy so `obaaf verify release` accepts an empty SDK list.
