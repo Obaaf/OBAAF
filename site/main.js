@@ -63,10 +63,11 @@ document.querySelectorAll("[data-revision]").forEach(button => button.addEventLi
   for (const [id, value] of [["demo-label", state.label], ["demo-code", state.code], ["demo-description", state.description], ["audit-status", state.audit], ["merge-status", state.merge], ["demo-rule", state.rule], ["demo-execution-label", state.executionLabel], ["demo-execution-status", state.execution], ["demo-gate-label", state.gateLabel]]) document.getElementById(id).textContent = value;
   document.getElementById("demo-execution-status").className = state.execution === "PASS" ? "pass" : "";
   document.getElementById("demo-caption").replaceChildren(document.createTextNode(state.caption + " "));
+  const agent = button.dataset.revision.startsWith("agent");
   const record = document.createElement("a");
-  record.href = "https://github.com/Obaaf/OBAAF/blob/main/docs/agent-checker-demonstration.md";
-  record.textContent = "Read the agent audit record";
-  document.getElementById("demo-caption").append(record);
+  record.href = "https://github.com/Obaaf/OBAAF/blob/main/docs/" + (agent ? "agent-checker-demonstration.md" : "checker-demonstration.md");
+  record.textContent = agent ? "Read the agent audit record" : "Read the build audit record";
+  document.getElementById("demo-caption").append(record, ".");
   document.getElementById("audit-status").className = state.audit === "PASS" ? "pass" : "fail";
   document.getElementById("demo-run").href = state.link;
   document.getElementById("demo-run").textContent = state.linkText;
