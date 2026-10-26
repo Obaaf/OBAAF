@@ -56,9 +56,9 @@ Tier 3 produces and checks provenance and isolates builds.
 
 Tier 4 adds two-person control and independent verification: two approvers ([4.1](guides/F1-source-and-assets.md#item-4-1)), independent rebuilds ([4.2](guides/F4-caches.md#item-4-2)), two-person set-live ([4.3](guides/F6-distribution.md#item-4-3)), release-lane derived data ([4.4](guides/F4-caches.md#item-4-4)) and verified agent records ([4.5](guides/F8-agents.md#item-4-5)).
 
-## If you do not use Git and GitHub Actions
+## If you do not use GitHub Actions
 
-The profile and the self-assessment are tool-neutral. The templates are not, yet: a second CI system follows for version 1.0, chosen from what pilot studios use. Meanwhile, the tools work on any CI system that runs Python:
+The profile and the self-assessment are tool-neutral. `obaaf check` also reads Jenkinsfiles, as an advisory auditor: it reports what a Jenkinsfile shows and lists what only the controller can show as unknown ([Jenkins](jenkins.md)). The templates are GitHub Actions only, for now; Jenkins job templates and enforcement are planned (see [what is not built yet](jenkins.md#what-is-not-built-yet)). Meanwhile, the tools work on any CI system that runs Python:
 
 - `obaaf manifest`, `obaaf attest slsa` and `obaaf attest build-record` produce the records.
 - A key held in a key service signs them.

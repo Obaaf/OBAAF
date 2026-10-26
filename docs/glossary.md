@@ -36,6 +36,7 @@ Plain-language meanings of the terms the guides and specifications use. The firs
 | Proposal bundle | What an agent may produce: a patch, comment text, or label changes. A separate job applies it after approval |
 | Agent record | The file committed with an agent-authored change, holding the proposal and its signed agent-run and approval records |
 | GitHub Actions | GitHub's CI system. A **workflow** file defines **jobs**, each made of **steps**, which run on a **runner** |
+| Jenkins | A self-hosted CI server. A **Jenkinsfile** defines a pipeline of **stages**, which run on **agents** that a **controller** schedules. `obaaf check` reads Jenkinsfiles as an advisory auditor ([Jenkins](jenkins.md)) |
 | Runner | The machine that runs a job. GitHub-hosted runners are new for every job; self-hosted runners are your own machines and keep state unless set up as ephemeral |
 | Fork | A copy of a repository under another account. Pull requests from forks get no secrets and a read-only token by default |
 | Default branch | The repository's main branch, usually `main`, which GitHub uses for workflows started by issues, comments and other workflows |
