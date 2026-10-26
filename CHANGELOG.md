@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Papers
+
+- Both companion papers have DOIs on Zenodo: Paper 1, *Untrusted Text, Trusted Tokens*, [10.5281/zenodo.23622566](https://doi.org/10.5281/zenodo.23622566); Paper 2, *Securing the Game Build*, [10.5281/zenodo.23622802](https://doi.org/10.5281/zenodo.23622802). The website, README, generated spec headers, threat model and paper READMEs link to them, and a `CITATION.cff` lists them so GitHub offers a citation.
+
 ### Project status
 
 - OBAAF is no longer described as a public draft: version 0.1 is on PyPI and in active adoption with pilot teams. The website, README, CONTRIBUTING and docs say so, the README and CONTRIBUTING reflect the Apache-2.0 and CC BY 4.0 licenses already in `LICENSING.md`, and the package classifier moves from Pre-Alpha to Alpha (takes effect on PyPI with the next release).

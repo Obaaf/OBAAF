@@ -4,7 +4,7 @@
 
 *Version 0.1, in active adoption with pilot teams. It may change in version 0.2 based on pilot feedback; open design decisions are tracked in [DECISIONS.md](../DECISIONS.md).*
 
-Version 0.1.0 (released). Source: Paper 1, sections 5–7 (*Untrusted Text, Trusted Tokens*). These controls let a team connect AI agents to its build pipeline without lending them the pipeline's authority. They are not specific to games.
+Version 0.1.0 (released). Source: Paper 1, sections 5–7 ([*Untrusted Text, Trusted Tokens*](https://doi.org/10.5281/zenodo.23622566)). These controls let a team connect AI agents to its build pipeline without lending them the pipeline's authority. They are not specific to games.
 
 ## The principle: taint-bounded authority
 

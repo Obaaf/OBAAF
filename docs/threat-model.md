@@ -180,7 +180,7 @@ These are design boundaries, not surprises; naming them is part of the model.
 
 ## 14. References
 
-- Companion paper: *Untrusted Text, Trusted Tokens* — agent assurance (the source of R1–R8). See `papers/`.
+- Companion papers: [*Untrusted Text, Trusted Tokens*](https://doi.org/10.5281/zenodo.23622566) — agent assurance (the source of R1–R8); [*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802) — the build-integrity profile and self-assessment. LaTeX sources are in `papers/`.
 - [The agent controls](../spec/agent-controls.md) · [The architecture](architecture.md) · [Attestation formats](attestations.md)
 - NIST SP 800-218 (SSDF): https://doi.org/10.6028/NIST.SP.800-218
 - SLSA v1.2: https://slsa.dev/spec/v1.2/

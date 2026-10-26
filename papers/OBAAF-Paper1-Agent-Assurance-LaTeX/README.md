@@ -1,5 +1,7 @@
 # Untrusted Text, Trusted Tokens: Bounding the Authority of AI Agents in Software Build Pipelines
 
+DOI: [10.5281/zenodo.23622566](https://doi.org/10.5281/zenodo.23622566) (Zenodo).
+
 LaTeX source for submission to ACM Digital Threats: Research and Practice (DTRAP), in ACM's acmart template
 (acmsmall, review mode with line numbers). Part of the Open Build and Agent Assurance
 Framework (OBAAF).
