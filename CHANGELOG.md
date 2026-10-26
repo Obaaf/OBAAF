@@ -11,7 +11,11 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 ### Added
 
 - Projects that vendor no binaries can declare `vendored_binaries: none` in `obaaf-sources.yaml`. `obaaf manifest create` writes an empty `obaaf-manifest/v0.1` with `vendoredBinaries: "none"` so the build-record digest binds the claim; empty `components` without that declaration still fails closed (D-033). Set `build_record.require_sdks: false` in the release policy so `obaaf verify release` accepts an empty SDK list.
-- OBAAF's own repository commits that empty declaration and, on PyPI release, checks the manifest, signs an OBAAF build record beside SLSA provenance, and verifies both predicate types with `gh attestation verify` before upload.
+- OBAAF's own repository commits that empty declaration and, on PyPI release, checks the manifest, signs an OBAAF build record beside SLSA provenance, and runs `obaaf verify release` (provenance body, build record, environment approvals, agent history) before upload.
+
+### Changed
+
+- PyPI publish dogfoods FR6: `.github/obaaf-policy.yaml` (`require_sdks: false`, environment `pypi`, `runner_environments: [github-hosted]`); the publish job checks out the default branch, installs the reviewed CLI via `./actions/setup-obaaf`, and replaces the `gh attestation verify` type-only loop with `obaaf verify release`. Residual vs the template lane: no `workflow_run` split and no pre-approval summary job.
 
 ### Jenkins (advisory)
 

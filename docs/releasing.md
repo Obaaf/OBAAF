@@ -20,115 +20,11 @@ Trusted publishing lets GitHub Actions publish to PyPI using a short-lived OIDC 
 1. Create the project on PyPI. The simplest path is a first manual upload, or configure a "pending" trusted publisher before the first run:
    PyPI → your account → *Publishing* → *Add a pending publisher* with: PyPI Project Name `obaaf`, Owner `Obaaf`, Repository `OBAAF`, Workflow name `release-pypi.yml`, Environment `pypi`.
 2. In the GitHub repository, create an **Environment** named `pypi` (Settings → Environments) and add a required reviewer. This is the human gate before any upload.
-3. Add the workflow below as `.github/workflows/release-pypi.yml`, and **pin the publish action to an exact commit SHA** (R6) — replace the zeros with the SHA of a `pypa/gh-action-pypi-publish` release. The repository's own CI checker (`obaaf check`) will fail on an unpinned action or a left-over placeholder, which is the intended guard.
+3. Keep [`.github/workflows/release-pypi.yml`](../.github/workflows/release-pypi.yml) and [`.github/obaaf-policy.yaml`](../.github/obaaf-policy.yaml) on the default branch. Pin every action to a full commit SHA (R6); `obaaf check` fails on placeholders.
 
-**Cut a release:** set the version, commit, and push a protected `v0.2.0` tag (or run the workflow by hand). The build job builds an sdist and a wheel with the hash-pinned backend and smoke-tests the wheel; the attest job signs their provenance; the publish job verifies that provenance and uploads them from the `pypi` environment after the reviewer approves.
+**Cut a release:** set the version, commit to `main`, and push a protected `v*` tag whose commit is on `main`. Prefer a tag push over `workflow_dispatch`: the policy's `source_refs` are `refs/tags/v*`, so a dispatch from a branch fails `obaaf verify release` after the `pypi` approval. For TestPyPI, dispatch **from the tag ref** and set the repository-url input. Configure the `pypi` environment with required reviewers, prevent self-review, and allow `v*` tag deployments so `approver_not_actor` means something. Residual vs the template release lane: this workflow does not set `cache-mode: none` (GitHub-hosted runners still start clean each job).
 
-```yaml
-# .github/workflows/release-pypi.yml
-# Publish OBAAF to PyPI with trusted publishing (OIDC) — no stored API token.
-name: Release to PyPI
-
-on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      repository-url:
-        description: "Index (blank = PyPI; https://test.pypi.org/legacy/ for TestPyPI)"
-        required: false
-        default: ""
-
-permissions: {}
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      # Build with the pinned setuptools backend directly (PEP 517): no build
-      # isolation, no extra dependency resolved at build time (R6).
-      - name: Build sdist and wheel
-        run: |
-          set -euo pipefail
-          python -m pip install --require-hashes --only-binary=:all: --requirement actions/setup-obaaf/requirements.txt
-          rm -rf dist && mkdir -p dist
-          python -c "import setuptools.build_meta as b; print(b.build_sdist('dist'))"
-          python -c "import setuptools.build_meta as b; print(b.build_wheel('dist'))"
-      - name: Smoke-test the wheel
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/clean"
-          "$RUNNER_TEMP/clean/bin/python" -m pip install --require-hashes --only-binary=:all: --requirement actions/setup-obaaf/requirements.txt
-          "$RUNNER_TEMP/clean/bin/python" -m pip install --no-deps dist/obaaf-*.whl
-          "$RUNNER_TEMP/clean/bin/python" -m pip check
-          "$RUNNER_TEMP/clean/bin/obaaf" --version
-          "$RUNNER_TEMP/clean/bin/obaaf" catalog
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with: { name: obaaf-dist, path: dist, if-no-files-found: error, retention-days: 7 }
-
-  attest:
-    # Signs SLSA provenance for the built files in a job that runs no build code and
-    # holds no PyPI identity (G7.1, FR11). OBAAF's own release follows its release lane.
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      id-token: write       # sign through GitHub's Sigstore; no long-lived signing key
-      attestations: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: obaaf-dist, path: dist }
-      - name: Sign SLSA provenance for the release files (G7.1)
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/*
-
-  publish:
-    needs: [build, attest]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: pypi
-      url: https://pypi.org/project/obaaf/
-    permissions:
-      id-token: write   # OIDC identity for trusted publishing; no stored token
-      attestations: read  # read the provenance the attest job signed
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { name: obaaf-dist, path: dist }
-      - name: Verify provenance before uploading (G7.1)
-        # Uploads nothing unless every file has provenance signed by this workflow, for
-        # this ref, on a GitHub-hosted runner.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for file in dist/*; do
-            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-pypi.yml" \
-              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
-          done
-      # PIN THIS before enabling (R6): replace the zeros with the exact commit SHA
-      # of a pypa/gh-action-pypi-publish release, e.g. `@<sha> # vX.Y.Z`.
-      - uses: pypa/gh-action-pypi-publish@0000000000000000000000000000000000000000 # pin to a release SHA
-        with:
-          packages-dir: dist
-          repository-url: ${{ github.event.inputs.repository-url }}
-          print-hash: true
-```
-
-After the first successful publish, the website quickstart and `README.md` use `pip install obaaf` (updated in this release). From 0.2, the release follows OBAAF's own release lane for provenance: a separate `attest` job, which runs no build code and holds no PyPI identity, signs SLSA provenance for every built file through GitHub's Sigstore, and the `publish` job uploads nothing until `gh attestation verify` confirms that provenance for each file, signed by this workflow for this ref on a GitHub-hosted runner. Anyone can check a downloaded file the same way: `gh attestation verify obaaf-0.2.0-py3-none-any.whl --repo Obaaf/OBAAF`.
-
-From the empty-manifest work (D-033), the `build` job checks the repository's `vendored_binaries: none` claim and writes the unsigned build-record predicate; the `attest` job signs that predicate and SLSA provenance without installing the candidate wheel; `publish` runs `gh attestation verify` for both predicate types (signature, subject, signer, type — not predicate-body policy). Full `obaaf verify release` remains a later dogfood step.
+The live workflow: `build` builds and smoke-tests the wheel, checks `vendored_binaries: none`, and writes the unsigned build-record predicate; `attest` signs SLSA provenance and that build record with no package install (FR11); `publish` checks out the protected default branch (`fetch-depth: 0`), installs the reviewed CLI with `./actions/setup-obaaf` (never the candidate wheel), reads the run's environment approvals, and runs `obaaf verify release` against `.github/obaaf-policy.yaml` before uploading. That check covers provenance body, build record, `pypi` approvals (approver ≠ actor), github-hosted runners, and agent history. It is dogfood FR6, not full template-lane parity: there is no `workflow_run` publish half and no pre-approval summary job. Anyone can still inspect attestations with `gh attestation verify <file> --repo Obaaf/OBAAF`. After the first release that passes this gate, set `agents.since` in the policy to that commit's full SHA.
 
 ## Part B — GitHub Marketplace listing for `setup-obaaf`
 
