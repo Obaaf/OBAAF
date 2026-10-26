@@ -93,6 +93,18 @@ class InstallPathsTest(unittest.TestCase):
         self.assertIn("name: setup-obaaf-requirements", text)
         self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", text)
 
+    def test_ci_sets_up_python_before_the_action(self):
+        import yaml
+        ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        uses = [s.get("uses", "") for s in ci["jobs"]["setup-action"]["steps"]]
+        python = next(i for i, u in enumerate(uses) if u.startswith("actions/setup-python@"))
+        self.assertLess(python, uses.index("./actions/setup-obaaf"))
+
+    def test_action_refuses_an_unsupported_python(self):
+        text = (SETUP / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("sys.version_info < (3, 10)", text)
+        self.assertIn("::error::setup-obaaf needs Python 3.10 or later", text)
+
 
 if __name__ == "__main__":
     unittest.main()
