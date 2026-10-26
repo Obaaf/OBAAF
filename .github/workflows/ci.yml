@@ -131,7 +131,23 @@ jobs:
           python-version: "3.13"
 
       - name: Check the hash-pinned requirements against PyPI
+        id: lock
         run: python scripts/lock_setup_obaaf.py --check
+
+      # When the check fails, write the file it expected and attach it to the run, so a
+      # maintainer without PyPI access can review it, download it and commit it.
+      - name: Write the expected requirements.txt
+        if: failure() && steps.lock.outcome == 'failure'
+        run: python scripts/lock_setup_obaaf.py
+
+      - name: Attach the expected requirements.txt to this run
+        if: failure() && steps.lock.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: setup-obaaf-requirements
+          path: actions/setup-obaaf/requirements.txt
+          if-no-files-found: error
+          retention-days: 7
 
   actionlint:
     runs-on: ubuntu-latest

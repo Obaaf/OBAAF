@@ -83,7 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         current = LOCK.read_text(encoding="utf-8") if LOCK.is_file() else ""
         if current != text:
             print(f"{LOCK.relative_to(ROOT)} does not match constraints.txt and PyPI. "
-                  "Run: python scripts/lock_setup_obaaf.py", file=sys.stderr)
+                  "Run: python scripts/lock_setup_obaaf.py, or download the setup-obaaf-requirements "
+                  "artifact from this CI run and commit it to actions/setup-obaaf/.", file=sys.stderr)
             return 1
         print(f"{LOCK.relative_to(ROOT)} matches constraints.txt and PyPI.")
         return 0

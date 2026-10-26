@@ -89,6 +89,8 @@ class InstallPathsTest(unittest.TestCase):
     def test_ci_checks_the_lock_and_runs_the_action_on_every_os(self):
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("python scripts/lock_setup_obaaf.py --check", text)
+        # A failed check attaches the expected file, so it can be committed without PyPI access.
+        self.assertIn("name: setup-obaaf-requirements", text)
         self.assertIn("os: [ubuntu-latest, macos-latest, windows-latest]", text)
 
 
