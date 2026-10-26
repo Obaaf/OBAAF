@@ -14,7 +14,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-004 | Titles, rationales and tests for the 28 profile requirements | Proposed |
 | D-005 | Not-applicable answers, including item 3.4 | Proposed |
 | D-006 | How the self-assessment ranks fixes | Proposed |
-| D-007 | Provisional predicate type URIs | Open, before release |
+| D-007 | Predicate type URIs | Accepted, 2026-10-26 |
 | D-008 | Mapping GitHub repository roles to trust levels | Proposed |
 | D-009 | Approvals recorded in a second attestation | Proposed |
 | D-010 | Agent records travel with the change | Proposed |
@@ -67,9 +67,9 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 **Decision.** Open items are ranked by tier (lowest first), then effort (hours, days, weeks), then the number of documented compromises the item would have prevented, then the number it would have detected or limited (Paper 2, Table 7), then item number. **Reason.** DR3 (prioritized by documented attack paths) and DR4 (effort-aware). The Python scorer and the offline form implement the same rule, and a test checks they agree. **Status.** Proposed.
 
-### D-007 Provisional predicate type URIs
+### D-007 Predicate type URIs
 
-**Decision.** OBAAF's in-toto predicate types use the reserved `.example` domain, for example `https://obaaf.example/attestation/agent-run/v0.1`, defined once in `src/obaaf/predicates.py` and used in the templates. **Reason.** A type URI should be under a namespace the project controls; the project has none yet, and a reserved domain cannot collide with anyone's. **Decision needed.** Register a domain or settle on the public repository's URL before public release; changing the URIs then is a breaking change, acceptable before 1.0. **Status.** Open, before release.
+**Decision.** OBAAF's in-toto predicate types and its generic SLSA build type live under `https://www.obaaf.com/`, the project's own domain, for example `https://www.obaaf.com/attestation/agent-run/v0.1`. They are defined once in `src/obaaf/predicates.py` and used in the templates. Each type URI resolves to a page that describes its format, and each JSON Schema's `$id` resolves to the schema; `site/build.py` publishes both. A changed format gets a new version and a new URI, and published pages stay as they are. **Reason.** A type URI should be under a namespace the project controls and should lead a reader to the format it names. `www.obaaf.com` is the site's canonical host, so the URIs resolve without depending on a redirect. Version 0.1 used the reserved `obaaf.example` domain until the project had a domain. **Consequence.** Breaking, which is acceptable before 1.0: records signed with the 0.1 URIs do not verify under 0.2 and must be signed again with the 0.2 templates. **Status.** Accepted, 2026-10-26 (previously Open, before release).
 
 ### D-008 Trust levels for GitHub roles
 

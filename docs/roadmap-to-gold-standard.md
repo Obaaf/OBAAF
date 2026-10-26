@@ -69,7 +69,7 @@ Turn claims into evidence.
 ### Phase 2 — Standardization and governance (3–9 months)
 The gold-standard inflection.
 - **Submit the agent-run predicate to the OpenSSF** (draft ready) and engage in-toto/SLSA so it is *referenced, not forked*.
-- **Resolve the predicate namespace** (D-007): a neutral domain/URI, not `obaaf.example`.
+- **Resolve the predicate namespace** (D-007): done in 0.2; the types live under `https://www.obaaf.com/` and resolve to format pages.
 - **Recruit two or three outside contributors**; open a lightweight RFC process.
 - **Explore contributing the spec to a neutral body** (OpenSSF sandbox / a working-group deliverable). Yes, this means ceding sole control — that is the price of "standard," and it is worth paying.
 - *Outcome:* OBAAF becomes "the agent-run predicate," stewarded beyond its authors.

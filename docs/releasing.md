@@ -8,7 +8,7 @@ OBAAF is published to PyPI, so a team installs it with `pip install obaaf`. Publ
 
 - **License.** The license files (`LICENSE`, `LICENSE-docs`, `NOTICE`; see [LICENSING.md](../LICENSING.md)) must be in place; a package without a license should not go to PyPI.
 - **Version.** `src/obaaf/__init__.py` holds `__version__`. It is `0.1.0`, the version on PyPI. Set it to the next release version (for example `0.2.0`) in the commit you tag, and back to a `.devN` afterwards. PyPI refuses to overwrite a version, so each release needs a new number.
-- **Predicate type URIs (D-007).** The in-toto predicate URIs use the reserved `obaaf.example` domain. They do not block a `0.1.0` tool release, but decide them before any attestation format is called stable.
+- **Predicate type URIs (D-007).** Settled in 0.2: the in-toto predicate types and the generic build type live under `https://www.obaaf.com/`, and the site publishes a page at each type URI and each JSON Schema at its `$id`. A changed format gets a new version and a new URI.
 - **Decide the scope.** The classifiers mark OBAAF as Alpha (`Development Status :: 3 - Alpha`): it is in active adoption, but it is 0.x and its formats may still change. Update the classifier when that changes.
 
 ## Part A — PyPI with trusted publishing (no stored token)

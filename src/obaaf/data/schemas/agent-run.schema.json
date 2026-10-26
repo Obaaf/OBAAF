@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://obaaf.example/schemas/agent-run/v0.1.json",
+  "$id": "https://www.obaaf.com/schemas/agent-run/v0.1.json",
   "title": "OBAAF agent-run predicate, version 0.1 (draft)",
   "description": "Predicate of the in-toto statement that records one agent run (Paper 1, Table 3; R8, FR10). The statement's subjects are the files of the proposal bundle. Every field except `trace` is produced by a job the agent cannot influence.",
   "type": "object",

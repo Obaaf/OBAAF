@@ -5,11 +5,11 @@ OBAAF writes four kinds of record. Each signed record is an [in-toto statement](
 | Record | Predicate type | Subjects | Written by | Signed by |
 | --- | --- | --- | --- | --- |
 | SLSA provenance | `https://slsa.dev/provenance/v1` | release artifacts | GitHub's attest-build-provenance action (or `obaaf attest slsa` elsewhere) | release lane attest job |
-| Build record | `https://obaaf.example/attestation/build-record/v0.1` | release artifacts | `obaaf attest build-record` | release lane attest job |
-| Agent-run record | `https://obaaf.example/attestation/agent-run/v0.1` | proposal bundle files | `obaaf attest agent-run` | agent lane attest job |
-| Approval record | `https://obaaf.example/attestation/agent-approval/v0.1` | proposal bundle files | `obaaf attest approval` | effect lane, `approve` job |
+| Build record | [`https://www.obaaf.com/attestation/build-record/v0.1`](https://www.obaaf.com/attestation/build-record/v0.1) | release artifacts | `obaaf attest build-record` | release lane attest job |
+| Agent-run record | [`https://www.obaaf.com/attestation/agent-run/v0.1`](https://www.obaaf.com/attestation/agent-run/v0.1) | proposal bundle files | `obaaf attest agent-run` | agent lane attest job |
+| Approval record | [`https://www.obaaf.com/attestation/agent-approval/v0.1`](https://www.obaaf.com/attestation/agent-approval/v0.1) | proposal bundle files | `obaaf attest approval` | effect lane, `approve` job |
 
-The `obaaf.example` URIs are provisional and will change before public release (DECISIONS.md, D-007). In the GitHub Actions templates, every attestation is signed through GitHub's Sigstore with the signing workflow's identity, in a job that runs no build or agent code, using a certificate issued for that job; no long-lived signing key exists for attestations (FR11). Studios on other CI systems can sign the same predicates as DSSE envelopes with a key held in a key service and verify them with `signing: keys`.
+Each OBAAF type URI resolves to a page describing its format, and each schema's `$id` resolves to the schema (DECISIONS.md, D-007). OBAAF 0.1 used provisional `obaaf.example` URIs; records signed with them do not verify under 0.2 or later. In the GitHub Actions templates, every attestation is signed through GitHub's Sigstore with the signing workflow's identity, in a job that runs no build or agent code, using a certificate issued for that job; no long-lived signing key exists for attestations (FR11). Studios on other CI systems can sign the same predicates as DSSE envelopes with a key held in a key service and verify them with `signing: keys`.
 
 ## The snapshot (R1)
 

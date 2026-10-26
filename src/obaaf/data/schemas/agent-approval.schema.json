@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://obaaf.example/schemas/agent-approval/v0.1.json",
+  "$id": "https://www.obaaf.com/schemas/agent-approval/v0.1.json",
   "title": "OBAAF agent-approval predicate, version 0.1 (draft)",
   "description": "Predicate of the in-toto statement, signed by the effect lane, that records who approved applying an agent's proposal (Paper 1, Table 3, Approvals; R4, R8). Its subjects are the same proposal-bundle files as the agent-run attestation.",
   "type": "object",

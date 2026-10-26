@@ -16,6 +16,7 @@ from obaaf.attest import manifest as manifest_mod
 from obaaf.attest import snapshot as snapshot_mod
 from obaaf.attest.common import RecordError, ci_run, files_under, now, obaaf_version, sha256_file, subjects_for
 from obaaf.checker import workflow as wf_mod
+from obaaf.predicates import GENERIC_BUILD_TYPE
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -254,7 +255,6 @@ def build_record_predicate(artifacts: list[str | Path], *, source_revision: str,
 
 
 # ------------------------------------------------------------- SLSA provenance
-GENERIC_BUILD_TYPE = "https://obaaf.example/buildtypes/generic/v0.1"
 
 
 def slsa_provenance_predicate(*, builder_id: str, repository_uri: str, source_revision: str, source_ref: str = "",
