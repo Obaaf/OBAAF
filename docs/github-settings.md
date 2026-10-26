@@ -66,7 +66,7 @@ Some controls depend on the GitHub plan and the repository's visibility. The det
 
 - `obaaf attest approval` refuses to sign without an approval in the `obaaf-agent-apply` environment, and the attest steps cannot sign at all.
 - What does work on every plan: the self-assessment, `obaaf check`, the untrusted-lane template, the binary manifest, and the pipeline check.
-- For releases on those plans, sign the provenance and build record as DSSE envelopes with a key held in a cloud key service, set `signing: keys` in the policy, and run `obaaf verify release` before your upload. Version 0.1 has no template for this path.
+- For releases on those plans, sign the provenance and build record as DSSE envelopes with a key held in a cloud key service, set `signing: keys` in the policy, and run `obaaf verify release` before your upload. `obaaf dsse prepare` and `obaaf dsse assemble` wrap the key service; the Jenkins release templates show the whole path ([Jenkins](jenkins.md#signing-with-a-key-service)).
 - Without environment reviewers there are no approvals for the verifier to count, so `release.min_approvals` must be 0, or every release is blocked. The person's approval then has to come from the store: automation uploads only to a test or beta channel, and a person sets the build live there (item 1.3). Record this in the policy file with a comment, and answer items 4.3 and 3.2 from what is actually enforced.
 - For agents on those plans, keep agents that read outside content out of private repositories until a merge-review mode for the effect lane exists (DECISIONS.md, D-023).
 

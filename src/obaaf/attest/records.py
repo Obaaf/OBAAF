@@ -236,12 +236,15 @@ def build_record_predicate(artifacts: list[str | Path], *, source_revision: str,
     for name, version in extra_sdks or []:
         sdks.append({"name": name, "version": version, "reportedBy": "build job"})
     run = ci_run()
+    # On GitHub Actions the source comes from the platform's run context. On Jenkins it comes from the
+    # release job's command line (the template resolves it from the protected tag), so say that.
+    reporter = "Jenkins release job" if run.get("platform") == "jenkins" else "platform"
     predicate = {
         "obaafVersion": obaaf_version(),
         "source": {"repository": repository or run.get("repository", ""), "revision": source_revision,
-                   "ref": source_ref, "reportedBy": "platform"},
+                   "ref": source_ref, "reportedBy": reporter},
         "assets": {"revision": asset_revision, "system": asset_system,
-                   "reportedBy": "platform" if asset_system == "git" and asset_revision == source_revision else "build job"},
+                   "reportedBy": reporter if asset_system == "git" and asset_revision == source_revision else "build job"},
         "manifest": {"digest": {"sha256": sha256_file(manifest_path)}, "entries": len(manifest["entries"]),
                      "components": len(manifest["components"]), "reportedBy": "attestation job"},
         "sdks": sdks,
