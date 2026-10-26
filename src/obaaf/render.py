@@ -67,7 +67,7 @@ def profile_md(catalog: Catalog | None = None) -> str:
     c = catalog or load()
     p = c.profile
     out = ["# Build-integrity profile", "", GENERATED, "", DRAFT_NOTE, "",
-           f"Version {p['version']} ({p['status']}). Source: {p['source']} (*Securing the Game Build*). The profile "
+           f"Version {p['version']} ({p['status']}). Source: {p['source']} ([*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802)). The profile "
            "tailors NIST's Secure Software Development Framework (SSDF) and SLSA to software build and release "
            "pipelines: 28 requirements in nine control families, each guarding one step on the path from commit to "
            "user. Developed with independent game studios and grounded in their pipelines, the control families "
@@ -124,7 +124,7 @@ def agent_controls_md(catalog: Catalog | None = None) -> str:
     c = catalog or load()
     a = c.controls
     out = ["# Agent controls", "", GENERATED, "", DRAFT_NOTE, "",
-           f"Version {a['version']} ({a['status']}). Source: {a['source']} (*Untrusted Text, Trusted Tokens*). "
+           f"Version {a['version']} ({a['status']}). Source: {a['source']} ([*Untrusted Text, Trusted Tokens*](https://doi.org/10.5281/zenodo.23622566)). "
            "These controls let a team connect AI agents to its build pipeline without lending them "
            "the pipeline's authority. They are not specific to games.", "",
            f"## The principle: {a['principle']['name'].lower()}", "", _clean(a["principle"]["statement"]), "",
@@ -192,7 +192,7 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
     s = c.assessment
     effort = s["effort"]
     out = ["# Self-assessment checklist", "", GENERATED, "", DRAFT_NOTE, "",
-           f"Version {s['version']} ({s['status']}). Source: {s['source']} (*Securing the Game Build*). For a software "
+           f"Version {s['version']} ({s['status']}). Source: {s['source']} ([*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802)). For a software "
            "team without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named "
            "beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that "
            "the pilot will test.", "",

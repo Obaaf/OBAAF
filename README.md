@@ -17,10 +17,10 @@ OBAAF is a free, open framework for keeping malicious code out of the software u
 | Reference pipeline templates | GitHub Actions workflows for four lanes: untrusted contributions, agents, approved changes and releases | [templates/github-actions](templates/github-actions/README.md) |
 | Verification tools | A pipeline checker that flags risky workflow settings; a release verifier that blocks uploads without valid provenance, approvals and agent records; and checks on an agent's signed record and proposal before anything is applied | [spec/checker-rules.md](spec/checker-rules.md), `obaaf verify release`, `obaaf verify agent-run`, `obaaf proposal check` |
 
-The profile, the agent controls and the self-assessment come from the author's two companion papers, both unpublished drafts:
+The profile, the agent controls and the self-assessment come from the author's two companion papers, both available on Zenodo with DOIs:
 
-- **Paper 1**, [*Untrusted Text, Trusted Tokens*](papers/OBAAF-Paper1-Agent-Assurance-LaTeX/README.md): agent assurance, the source of the agent controls.
-- **Paper 2**, [*Securing the Game Build*](papers/OBAAF-Paper2-Build-Assurance-Games-LaTeX/README.md): build assurance for games, the source of the profile and the self-assessment, whose controls apply to any software team.
+- **Paper 1**, [*Untrusted Text, Trusted Tokens*](https://doi.org/10.5281/zenodo.23622566) (DOI [10.5281/zenodo.23622566](https://doi.org/10.5281/zenodo.23622566)): agent assurance, the source of the agent controls. [LaTeX source](papers/OBAAF-Paper1-Agent-Assurance-LaTeX/README.md).
+- **Paper 2**, [*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802) (DOI [10.5281/zenodo.23622802](https://doi.org/10.5281/zenodo.23622802)): build assurance for games, the source of the profile and the self-assessment, whose controls apply to any software team. [LaTeX source](papers/OBAAF-Paper2-Build-Assurance-Games-LaTeX/README.md).
 
 Their machine-readable form in [`src/obaaf/data/`](src/obaaf/data/) is the single source of truth: the documents in `spec/` and the offline form are generated from it.
 

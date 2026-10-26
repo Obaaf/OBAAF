@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use OBAAF, please cite the software and the companion papers listed under references."
+title: "Open Build and Agent Assurance Framework (OBAAF)"
+type: software
+authors:
+  - given-names: Ofonna
+    family-names: Nweze
+  - given-names: Osita Sean
+    family-names: Keluo-Udeke
+version: 0.1.0
+license: Apache-2.0
+repository-code: "https://github.com/Obaaf/OBAAF"
+references:
+  - type: generic
+    title: "Untrusted Text, Trusted Tokens: Bounding the Authority of AI Agents in Software Build Pipelines"
+    authors:
+      - given-names: Osita Sean
+        family-names: Keluo-Udeke
+    doi: 10.5281/zenodo.23622566
+    publisher:
+      name: Zenodo
+  - type: generic
+    title: "Securing the Game Build: A Sector Profile of SSDF and SLSA and a Self-Assessment Model for Independent Studios"
+    authors:
+      - given-names: Osita Sean
+        family-names: Keluo-Udeke
+    doi: 10.5281/zenodo.23622802
+    publisher:
+      name: Zenodo

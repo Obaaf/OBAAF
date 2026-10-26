@@ -1,5 +1,7 @@
 # Securing the Game Build: A Sector Profile of SSDF and SLSA and a Self-Assessment Model for Independent Studios
 
+DOI: [10.5281/zenodo.23622802](https://doi.org/10.5281/zenodo.23622802) (Zenodo).
+
 LaTeX source for submission to ACM Digital Threats: Research and Practice (DTRAP), in ACM's acmart template
 (acmsmall, review mode with line numbers). Part of the Open Build and Agent Assurance
 Framework (OBAAF).
