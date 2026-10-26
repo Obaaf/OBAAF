@@ -18,7 +18,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-008 | Mapping GitHub repository roles to trust levels | Proposed |
 | D-009 | Approvals recorded in a second attestation | Proposed |
 | D-010 | Agent records travel with the change | Proposed |
-| D-011 | How pipeline dependencies are pinned | Open, before release |
+| D-011 | How pipeline dependencies are pinned | Accepted, 2026-10-26 |
 | D-012 | Retired | Retired, 2026-10-07 |
 | D-013 | Implementation language and dependencies | Proposed |
 | D-014 | GitHub Actions first | Accepted, 2026-10-05 |
@@ -85,7 +85,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 ### D-011 Pinning pipeline dependencies
 
-**Decision so far.** Workflows pin every action to a full commit SHA, and `actions/setup-obaaf` installs OBAAF from the pinned commit with exact dependency versions (`constraints.txt`). **Decision needed.** Add hashes (`--require-hashes`) before release. **Prepared.** The distribution path — PyPI via OIDC trusted publishing (so `pip install obaaf`) and a GitHub Marketplace listing for `setup-obaaf` — is documented in [docs/releasing.md](docs/releasing.md); until a release is cut, teams install from the repository. Pre-built single-file binaries are deferred. **Status.** Open, before release.
+**Decision.** Workflows pin every action to a full commit SHA. `actions/setup-obaaf` and the PyPI release workflow install every dependency, including the build backend, from `actions/setup-obaaf/requirements.txt` by exact version and SHA-256 hash, as wheels only (`--require-hashes --only-binary=:all:`). That file lists the hash of every file PyPI publishes for each version, so one list serves every operating system and Python version. It is generated from `constraints.txt` by `scripts/lock_setup_obaaf.py`, and CI checks it against PyPI and runs the action on Linux, macOS and Windows. The project's own test and site jobs install OBAAF in editable mode, which pip's hash-checking mode does not support, so they keep the exact versions in `constraints.txt`. **Distribution.** PyPI via OIDC trusted publishing (`pip install obaaf`), documented in [docs/releasing.md](docs/releasing.md). A GitHub Marketplace listing for `setup-obaaf` is documented there; pre-built single-file binaries remain deferred. **Status.** Accepted, 2026-10-26 (previously Open, before release).
 
 ### D-012 Retired
 

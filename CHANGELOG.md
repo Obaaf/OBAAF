@@ -9,6 +9,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Move the predicate type URIs from the reserved `obaaf.example` domain to the project's domain (D-007): `https://www.obaaf.com/attestation/agent-run/v0.1`, `.../agent-approval/v0.1`, `.../build-record/v0.1`, and the generic SLSA build type `https://www.obaaf.com/buildtypes/generic/v0.1`. The JSON Schemas' `$id` values move with them. The site now publishes a page at each type URI and each schema at its `$id`.
 - Records signed with the 0.1 URIs do not verify under this version. Sign new records with the updated templates.
 
+### Supply chain of OBAAF itself
+
+- Install OBAAF's dependencies by hash (D-011): `setup-obaaf` and the PyPI release now install from `actions/setup-obaaf/requirements.txt` with `--require-hashes`, wheels only. `scripts/lock_setup_obaaf.py` generates that file from `constraints.txt` with PyPI's SHA-256 for every file; CI checks it against PyPI and runs the action on Linux, macOS and Windows.
+
 ### Papers
 
 - Both companion papers have DOIs on Zenodo: Paper 1, *Untrusted Text, Trusted Tokens*, [10.5281/zenodo.23622566](https://doi.org/10.5281/zenodo.23622566); Paper 2, *Securing the Game Build*, [10.5281/zenodo.23622802](https://doi.org/10.5281/zenodo.23622802). The website, README, generated spec headers, threat model and paper READMEs link to them, and a `CITATION.cff` lists them so GitHub offers a citation.

@@ -59,7 +59,7 @@ jobs:
       - name: Build sdist and wheel
         run: |
           set -euo pipefail
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
+          python -m pip install --require-hashes --only-binary=:all: --requirement actions/setup-obaaf/requirements.txt
           rm -rf dist && mkdir -p dist
           python -c "import setuptools.build_meta as b; print(b.build_sdist('dist'))"
           python -c "import setuptools.build_meta as b; print(b.build_wheel('dist'))"
@@ -67,7 +67,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/clean"
-          "$RUNNER_TEMP/clean/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt dist/obaaf-*.whl
+          "$RUNNER_TEMP/clean/bin/python" -m pip install --require-hashes --only-binary=:all: --requirement actions/setup-obaaf/requirements.txt
+          "$RUNNER_TEMP/clean/bin/python" -m pip install --no-deps dist/obaaf-*.whl
+          "$RUNNER_TEMP/clean/bin/python" -m pip check
           "$RUNNER_TEMP/clean/bin/obaaf" --version
           "$RUNNER_TEMP/clean/bin/obaaf" catalog
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

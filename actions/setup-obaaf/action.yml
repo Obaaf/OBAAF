@@ -3,8 +3,8 @@ description: >-
   Install the OBAAF command-line tools from this action's own source, so the
   version used is exactly the commit the workflow pins (R6). Installs into a
   virtual environment under RUNNER_TEMP and adds it to PATH. Every dependency,
-  including the build backend, comes from the exact versions in
-  constraints.txt; nothing is resolved at install time.
+  including the build backend, is installed from requirements.txt by exact
+  version and SHA-256 hash, as wheels only; nothing is resolved at install time.
 author: Osita Sean Keluo-Udeke
 branding:
   icon: shield
@@ -32,7 +32,7 @@ runs:
         # itself, built with that backend (no isolated build environment that would fetch an
         # unpinned setuptools), and a check that every declared dependency is present.
         "$bin/python" -m pip install --quiet --disable-pip-version-check --only-binary=:all: \
-          --constraint "$GITHUB_ACTION_PATH/constraints.txt" setuptools PyYAML jsonschema cryptography
+          --require-hashes --requirement "$GITHUB_ACTION_PATH/requirements.txt"
         "$bin/python" -m pip install --quiet --disable-pip-version-check --no-build-isolation --no-deps \
           "$GITHUB_ACTION_PATH/../.."
         "$bin/python" -m pip check
