@@ -1,21 +1,23 @@
 // OBAAF release lane on Jenkins, publish half (G5.1, G6.1, G6.2, G7.1, G7.2, G8.3; FR5, FR6, FR11).
 // See docs/jenkins.md.
 //
-// Configure this as its own Pipeline job named obaaf-release-publish (not a multibranch project),
-// with "Pipeline script from SCM" reading this file from your protected default branch. The build
-// job (obaaf-release-build.Jenkinsfile) starts it for each release tag. It:
-//   resolve   checks out the default branch, resolves the tag to a commit through your SCM, and
-//             copies the artifacts of exactly that build
+// Configure this as its own Pipeline job (not a multibranch project) in a folder that holds only
+// this job, with "Pipeline script from SCM" reading this file from your protected default branch.
+// The tag build (obaaf-release-build.Jenkinsfile) starts it. It takes no parameters: the build that
+// started it is the only build whose artifacts it will ship. It:
+//   resolve   finds that build from its own start cause, resolves the tag to a commit through your
+//             SCM, and copies that build's artifacts
 //   sign      writes SLSA provenance and the OBAAF build record, and signs both with a key held in a
 //             key service, so no step can read the private key (FR11)
 //   verify    checks the release before anyone is asked to approve it
 //   approve   waits for a named release manager
 //   publish   checks everything again, now including who approved, then uploads
 //
-// Keep this job's credentials in a folder that holds only this job, run it on agents that run
-// nothing else, and do not grant Run/Replay on it: Jenkins enforces the boundary, and the checks
-// below only hold while this file is the one that runs. Edit the marked lines, and keep the public
-// key and the policy in .obaaf/ on the default branch.
+// Jenkins enforces the boundary, and the checks below only hold while this file is the one that
+// runs: keep this job's credentials in its folder, run it on agents that run nothing else (labels
+// do not restrict which jobs use an agent; see docs/jenkins.md), and grant Run/Replay and
+// Job/Configure on it to nobody. Edit the marked lines, and keep the public key and the policy in
+// .obaaf/ on the default branch.
 pipeline {
   agent { label 'obaaf-release' }
   options {
@@ -23,41 +25,65 @@ pipeline {
     skipDefaultCheckout()
     timeout(time: 3, unit: 'DAYS')
   }
-  parameters {
-    string(name: 'RELEASE_JOB', description: 'Full name of the build job that built the release')
-    string(name: 'RELEASE_BUILD', description: 'Its build number')
-    string(name: 'RELEASE_BUILD_URL', description: 'Its build URL on this controller')
-    string(name: 'RELEASE_TAG', description: 'The release tag')
-  }
   environment {
     OBAAF_URL = 'https://github.com/Obaaf/OBAAF.git'
     OBAAF_REVISION = '0000000000000000000000000000000000000000'   // EDIT: the OBAAF release commit you reviewed
-    SIGNING_KEY = 'alias/obaaf-release'                            // EDIT: the key service key that signs records
-    AWS_REGION = 'us-east-1'                                       // EDIT
+    RELEASE_PROJECT = 'releases/game-tags'   // EDIT: full name of the tag-only project; same as release.jenkins_project
+    RELEASE_BRANCH = 'main'                  // EDIT: same as release.branch in the policy
+    SIGNING_KEY = 'alias/obaaf-release'      // EDIT: the key service key that signs records
+    AWS_REGION = 'us-east-1'                 // EDIT
   }
   stages {
     stage('Resolve') {
-      when { not { changeRequest() } }
+      when { not { changeRequest() } }   // a guard if this is ever set up as a multibranch job
       steps {
+        script {
+          // Nothing here comes from parameters or from the person who started the build.
+          if (!currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').isEmpty()) {
+            error('start this job from a release tag build, not by hand')
+          }
+          def started = currentBuild.getBuildCauses('org.jenkinsci.plugins.workflow.support.steps.build.BuildUpstreamCause')
+          if (started.size() != 1) {
+            error('this build must be started by exactly one release tag build')
+          }
+          String project = started[0].get('upstreamProject')
+          if (!env.JENKINS_URL || !project.startsWith(env.RELEASE_PROJECT + '/')) {
+            error("the release build ${project} is not a tag build of ${env.RELEASE_PROJECT}")
+          }
+          env.RELEASE_JOB = project
+          env.RELEASE_BUILD = String.valueOf(started[0].get('upstreamBuild'))
+          env.RELEASE_TAG = project.substring(env.RELEASE_PROJECT.length() + 1)
+          env.RELEASE_BUILD_URL = env.JENKINS_URL + started[0].get('upstreamUrl') + env.RELEASE_BUILD + '/'
+        }
         checkout scm
-        sh '''
-          set -eu
-          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
-            echo "error: unexpected release tag" >&2; exit 2
-          fi
-          case "$RELEASE_BUILD_URL" in
-            "$JENKINS_URL"*) ;;
-            *) echo "error: the release build is not on this controller" >&2; exit 2 ;;
-          esac
-          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch -q --unshallow --no-tags origin; fi
-          git fetch -q --force --no-tags origin "+refs/heads/main:refs/remotes/origin/main" \
-            "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          git rev-parse "refs/tags/$RELEASE_TAG^{commit}" > release-sha.txt
-          git show "$(cat release-sha.txt):obaaf-manifest.json" > release-manifest.json
-          rm -rf dist attestations && mkdir attestations
-        '''
-        copyArtifacts(projectName: params.RELEASE_JOB, selector: specific(params.RELEASE_BUILD), filter: 'dist/**',
+        // EDIT: a credential that can read the repository, for the tag and the release branch.
+        withCredentials([gitUsernamePassword(credentialsId: 'obaaf-scm-read')]) {
+          sh '''
+            set -eu
+            case "$RELEASE_TAG" in
+              ""|-*|*[!0-9A-Za-z._-]*) echo "error: unexpected release tag" >&2; exit 2 ;;
+            esac
+            if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch -q --unshallow --no-tags origin; fi
+            git fetch -q --force --no-tags origin "+refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH" \
+              "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            git rev-parse "refs/tags/$RELEASE_TAG^{commit}" > release-sha.txt
+            git show "$(cat release-sha.txt):obaaf-manifest.json" > release-manifest.json
+            rm -rf dist attestations && mkdir attestations
+          '''
+        }
+        copyArtifacts(projectName: '/' + env.RELEASE_JOB, selector: specific(env.RELEASE_BUILD), filter: 'dist/**',
                       fingerprintArtifacts: true)
+        // The controller records why each build started, who approved this one, and which commit the
+        // Git plugin checked out. EDIT: a read-only API token for a Jenkins user that can read both jobs.
+        withCredentials([usernamePassword(credentialsId: 'obaaf-jenkins-reader', usernameVariable: 'READER',
+                                          passwordVariable: 'READER_TOKEN')]) {
+          sh '''
+            set -eu
+            tree='url,number,actions[_class,userId,lastBuiltRevision[SHA1],causes[_class,userId,shortDescription,upstreamProject,upstreamBuild,upstreamUrl]]'
+            curl -fsS --user "$READER:$READER_TOKEN" -G --data-urlencode "tree=$tree" "${RELEASE_BUILD_URL}api/json" \
+              -o release-run.json
+          '''
+        }
         installObaaf()
       }
     }
@@ -72,14 +98,14 @@ pipeline {
             export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
             rev="$(cat release-sha.txt)"
             origin="$(git remote get-url origin)"
-            obaaf attest slsa --artifact dist --builder-id "${JENKINS_URL}job/obaaf-release-publish/" \
+            obaaf attest slsa --artifact dist --builder-id "$JOB_URL" \
               --repository-uri "$origin" --source-revision "$rev" --source-ref "refs/tags/$RELEASE_TAG" \
               --invocation-id "$BUILD_URL" --out attestations/slsa.json --statement-out attestations/slsa.statement.json
             # EDIT: --tier B for persistent release-only build hosts, A for a fresh pod per build. If your
             # assets live outside Git (for example Perforce), pass that revision and system.
             obaaf attest build-record --artifact dist --source-revision "$rev" --source-ref "refs/tags/$RELEASE_TAG" \
               --repository "$origin" --asset-revision "$rev" --asset-system git --manifest release-manifest.json \
-              --builder-id "${JENKINS_URL}job/obaaf-release-publish/" --tier B \
+              --builder-id "$JOB_URL" --tier B \
               --out attestations/build-record.json --statement-out attestations/build-record.statement.json
             for record in slsa build-record; do
               obaaf dsse prepare --statement "attestations/$record.statement.json" \
@@ -105,14 +131,15 @@ pipeline {
           export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
           obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
             --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
-            --repo-dir . --source-revision "$(cat release-sha.txt)" --pre-approval
+            --release-run release-run.json --repo-dir . --source-revision "$(cat release-sha.txt)" --pre-approval
         '''
       }
     }
     stage('Approve') {
       when { not { changeRequest() } }
       steps {
-        // EDIT: the group whose members may approve releases. Keep whoever creates release tags out of it.
+        // EDIT: the group whose members may approve releases; list the same people in release.approvers,
+        // because Jenkins administrators can approve any input step. Keep tag creators out of both.
         input message: 'Publish this release? The verification result is in the log above.',
               id: 'release', submitter: 'release-managers'
       }
@@ -121,21 +148,18 @@ pipeline {
       when { not { changeRequest() } }
       environment { OBAAF_LANE = 'release' }
       steps {
-        // The controller records who approved this build (ApproverAction) and who started each build.
-        // EDIT: a read-only API token for a Jenkins user that can read both jobs.
         withCredentials([usernamePassword(credentialsId: 'obaaf-jenkins-reader', usernameVariable: 'READER',
                                           passwordVariable: 'READER_TOKEN')]) {
           sh '''
             set -eu
-            tree='url,number,actions[_class,userId,causes[_class,userId,shortDescription]]'
+            tree='url,number,actions[_class,userId,lastBuiltRevision[SHA1],causes[_class,userId,shortDescription,upstreamProject,upstreamBuild,upstreamUrl]]'
             curl -fsS --user "$READER:$READER_TOKEN" -G --data-urlencode "tree=$tree" "${BUILD_URL}api/json" \
               -o publish-run.json
-            curl -fsS --user "$READER:$READER_TOKEN" -G --data-urlencode "tree=$tree" "${RELEASE_BUILD_URL}api/json" \
-              -o release-run.json
           '''
         }
         // FR6: stop here unless provenance, the build record, the approvals and every agent record verify
-        // against the policy. An approval by whoever started either build does not count.
+        // against the policy, and the artifacts came from the tag build that started this one. An
+        // approval by whoever started either build does not count.
         sh '''
           set -eu
           export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"

@@ -21,11 +21,17 @@ build_record:
 release:
   # The released commit must be on this protected branch.
   branch: main
+  # Full name of the multibranch project that discovers tags only. The publish build must be
+  # started by the build of the release tag in this project, and the artifacts must come from it.
+  jenkins_project: releases/game-tags
   # Distinct people who approved the publish build's input steps, none of whom started the publish
   # build or the build that produced the artifacts. Jenkins does not record who created a tag:
   # keep tag creators out of the input step's submitter group.
   min_approvals: 1           # Tier 4 (item 4.3): 2, with two input steps or two approvers
   approver_not_actor: true
+  # Only these people's approvals count. Jenkins administrators can approve any input step,
+  # whatever its submitter says, so list the release managers here too.
+  approvers: [release-manager-1, release-manager-2]
 
 agents:
   # Agent-authored commits are checked on every release. The Jenkins agent lane is not built yet,

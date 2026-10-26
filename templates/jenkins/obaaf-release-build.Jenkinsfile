@@ -1,23 +1,28 @@
 // OBAAF release lane on Jenkins, build half (G3.1 to G3.4, G4.1, G4.2; FR4). See docs/jenkins.md.
 //
-// Use this as the Jenkinsfile of the multibranch project that builds your repository, with tag
-// discovery on. For a protected tag it builds the release with no credentials at all, keeps the
-// artifacts, and starts the publish job (obaaf-release-publish.Jenkinsfile), which signs, verifies,
-// waits for a person to approve and uploads. Branches and pull requests skip every stage.
+// Use this as the Jenkinsfile of a multibranch project that discovers tags only (no branches, no
+// pull requests), separate from the project that builds branches and pull requests. Name that
+// project in release.jenkins_project: the publish job ships only artifacts of a build in it, so a
+// branch whose name looks like a tag cannot stand in for one. For a tag, this builds the release
+// with no credentials at all, keeps the artifacts, and starts the publish job
+// (obaaf-release-publish.Jenkinsfile), which signs, verifies, waits for a person to approve and
+// uploads.
 //
-// Signing and upload credentials must never be visible to this project: credentials scoped to a
-// multibranch project reach every branch and pull request it builds. They belong to the publish job.
+// Jenkins discovers tags but does not build them on its own: add the "Build tags" strategy (Basic
+// Branch Build Strategies plugin), or start each tag build by hand (that person then cannot approve
+// the release). Signing and upload credentials must never be visible to this project: credentials
+// scoped to a multibranch project reach every build it runs. They belong to the publish job.
 //
-// Before use: set OBAAF_REVISION, edit the marked lines, protect tags matching v* in your SCM so only
-// maintainers can create them, and give the build an agent label that runs release builds only.
+// Before use: set OBAAF_REVISION, edit the marked lines, and protect tags matching v* in your SCM so
+// only maintainers can create them.
 pipeline {
   agent none
   options {
     disableConcurrentBuilds()
     skipDefaultCheckout()
     timeout(time: 2, unit: 'HOURS')
-    // The publish job copies the artifacts of exactly this build.
-    copyArtifactPermission('obaaf-release-publish')
+    // EDIT: the publish job's full name, with a leading slash. It may copy this build's artifacts.
+    copyArtifactPermission('/releases/obaaf-release-publish')
   }
   environment {
     OBAAF_URL = 'https://github.com/Obaaf/OBAAF.git'
@@ -25,9 +30,14 @@ pipeline {
   }
   stages {
     stage('Build') {
-      when { buildingTag() }
-      // Tier B: persistent hosts that run release builds only. For Tier A, build in a fresh pod per
-      // build (agent { kubernetes { ... } }) and pass --tier A in the publish job.
+      when {
+        beforeAgent true
+        buildingTag()
+      }
+      // EDIT: Tier B, persistent hosts that run release builds only. A label does not stop other jobs
+      // from using these hosts: restrict them to this project on the controller (docs/jenkins.md). For
+      // Tier A, build in a fresh pod per build (agent { kubernetes { ... } }) and pass --tier A in
+      // the publish job.
       agent { label 'obaaf-release-build' }
       steps {
         checkout scm
@@ -46,12 +56,8 @@ pipeline {
     stage('Hand over to the publish job') {
       when { buildingTag() }
       steps {
-        build job: 'obaaf-release-publish', wait: false, parameters: [
-          string(name: 'RELEASE_JOB', value: env.JOB_NAME),
-          string(name: 'RELEASE_BUILD', value: env.BUILD_NUMBER),
-          string(name: 'RELEASE_BUILD_URL', value: env.BUILD_URL),
-          string(name: 'RELEASE_TAG', value: env.TAG_NAME)
-        ]
+        // The publish job finds this build from its start cause, so nothing is passed to it.
+        build job: '/releases/obaaf-release-publish', wait: false   // EDIT: the same full name as above
       }
     }
   }

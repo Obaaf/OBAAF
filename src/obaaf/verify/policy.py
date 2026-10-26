@@ -40,6 +40,8 @@ class Policy:
     effect_identities: list = field(default_factory=lambda: ["obaaf-effect-lane"])
     require_exact_diff: bool = True
     allow_self_hosted_agents: bool = False
+    approvers: list = field(default_factory=list)   # if set, only these people's approvals count
+    jenkins_project: str = ""                       # Jenkins: full name of the multibranch project that builds tags
     base_dir: Path = Path(".")
 
     @classmethod
@@ -81,6 +83,8 @@ class Policy:
             effect_identities=[str(i) for i in agents.get("effect_identities") or ["obaaf-effect-lane"]],
             require_exact_diff=bool(agents.get("require_exact_diff", True)),
             allow_self_hosted_agents=bool(agents.get("allow_self_hosted_runners", False)),
+            approvers=[str(a) for a in release.get("approvers") or []],
+            jenkins_project=str(release.get("jenkins_project") or "").strip("/"),
             base_dir=Path(path).parent,
         )
         if policy.signing == "sigstore" and not policy.source_refs:

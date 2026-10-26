@@ -170,7 +170,7 @@ def _ecdsa_der(signature: bytes, key: Any) -> bytes:
     if not isinstance(key, ec.EllipticCurvePublicKey):
         return signature
     size = (key.curve.key_size + 7) // 8
-    if len(signature) == 2 * size and signature[:1] != b"\x30":
+    if len(signature) == 2 * size:      # may also be valid DER: assemble tries the bytes as given first
         r = int.from_bytes(signature[:size], "big")
         s = int.from_bytes(signature[size:], "big")
         return encode_dss_signature(r, s)

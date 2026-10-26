@@ -110,6 +110,17 @@ class VerifierBlocksTest(unittest.TestCase):
             self.assertFalse(decision.ok)
             self.assertTrue(any("rerunner started or re-ran" in w for w in decision.warnings))
 
+    def test_only_listed_approvers_count_when_the_policy_lists_them(self):
+        with TempDir() as tmp:
+            r = build_release(tmp)
+            text = r.policy.read_text()
+            r.policy.write_text(text.replace("release: {", "release: {approvers: [someone-else], ", 1))
+            decision = verify(r)
+            self.assertFalse(decision.ok)
+            self.assertTrue(any("not in release.approvers" in w for w in decision.warnings), decision.warnings)
+            r.policy.write_text(text.replace("release: {", "release: {approvers: [Approver], ", 1))
+            self.assertTrue(verify(r).ok)
+
     def test_agent_commit_without_a_record_blocks(self):
         with TempDir() as tmp:
             r = build_release(tmp, agent_commit="missing")
