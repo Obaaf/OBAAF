@@ -40,6 +40,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-030 | Checker strictness | Proposed |
 | D-031 | Code signing of game binaries is deferred | Proposed |
 | D-032 | Contributions after release: DCO sign-off and security acknowledgment time | Proposed |
+| D-033 | Empty binary manifest for projects that vendor no binaries | Accepted, 2026-10-26 |
 
 ---
 
@@ -86,6 +87,10 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 ### D-011 Pinning pipeline dependencies
 
 **Decision.** Workflows pin every action to a full commit SHA. `actions/setup-obaaf` and the PyPI release workflow install every dependency, including the build backend, from `actions/setup-obaaf/requirements.txt` by exact version and SHA-256 hash, as wheels only (`--require-hashes --only-binary=:all:`). That file lists the hash of every file PyPI publishes for each version, so one list serves every operating system and Python version. It is generated from `constraints.txt` by `scripts/lock_setup_obaaf.py`. CI checks it against PyPI, attaches the expected file to the run when it is out of date, and runs the action on Linux, macOS and Windows. The project's own test and site jobs install OBAAF in editable mode, which pip's hash-checking mode does not support, so they keep the exact versions in `constraints.txt`. **Distribution.** PyPI via OIDC trusted publishing (`pip install obaaf`), documented in [docs/releasing.md](docs/releasing.md). A GitHub Marketplace listing for `setup-obaaf` is documented there; pre-built single-file binaries remain deferred. **Status.** Accepted, 2026-10-26 (previously Open, before release).
+
+### D-033 Empty binary manifest
+
+**Decision.** A project that vendors no binaries declares `vendored_binaries: none` in `obaaf-sources.yaml` (components absent or empty). `obaaf manifest create` writes `format: obaaf-manifest/v0.1` with `vendoredBinaries: "none"`, `components: []` and `entries: []`, so the build-record digest binds the claim. Bare empty `components` without that declaration is rejected. `manifest check` validates the JSON claim and emptiness; it does not re-read the sources file or scan the tree for undeclared binaries. Release policies for such projects set `build_record.require_sdks: false`. An empty claim answers assessment items 1.8 and 2.6 as yes with evidence (the reviewed declaration), not as N/A (D-005 unchanged). **Reason.** G2.1 and FR5 assume a manifest; many non-game projects (including OBAAF) have no vendored binaries and could not previously produce a build record. **Status.** Accepted, 2026-10-26.
 
 ### D-012 Retired
 

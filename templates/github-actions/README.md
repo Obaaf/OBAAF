@@ -28,7 +28,7 @@ Then:
 1. Copy [CODEOWNERS.example](CODEOWNERS.example) to `.github/CODEOWNERS` and replace the team names.
 2. Apply [the repository settings](../../docs/github-settings.md): rulesets, the `v*` tag ruleset, the `obaaf-agent-apply` and `release` environments, and the fork pull-request settings. Check the [plan limits](../../docs/github-settings.md#plan-limits): for a private repository, the agent and release lanes need GitHub Enterprise Cloud.
 3. Edit the build step in `obaaf-release.yml` (and the asset revision if your assets are not in Git), the upload step in `obaaf-publish.yml`, and the build step in `obaaf-untrusted-ci.yml`.
-4. Declare your vendored components in `obaaf-sources.yaml` and create the manifest: `obaaf manifest create --components obaaf-sources.yaml --out obaaf-manifest.json`.
+4. Declare your vendored components in `obaaf-sources.yaml` (or `vendored_binaries: none` if you vendor nothing) and create the manifest: `obaaf manifest create --components obaaf-sources.yaml --out obaaf-manifest.json`. With none, set `build_record.require_sdks: false` in `.github/obaaf-policy.yaml`.
 5. If you use agents: replace `.github/obaaf/agent.sh` with your agent, following the contract in its comments, and set up the [inference proxy](../../docs/inference-proxy.md). Set the repository variables `OBAAF_MODEL_ENDPOINT` and `OBAAF_ALLOWED_LABELS`.
 6. Run `obaaf check .` and fix anything it reports.
 7. Copy [dependabot.yml.example](dependabot.yml.example) to `.github/dependabot.yml` so pinned SHAs stay current.

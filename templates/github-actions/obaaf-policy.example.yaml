@@ -17,6 +17,9 @@ provenance:
 
 build_record:
   allowed_tiers: [A, B]      # use [A] to require SLSA Build Level 3 isolation for every target
+  # true: every build record must list at least one SDK/engine/plugin/middleware from
+  # the binary manifest. Set false when the project declares vendored_binaries: none
+  # (no vendored binaries; see obaaf-sources.example.yaml).
   require_sdks: true
 
 release:
