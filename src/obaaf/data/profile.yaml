@@ -79,7 +79,7 @@ families:
           (3) build hosts read their build configuration only from version control. Sample the three
           most recent changes to these files and check each was approved by a non-author.
         evidence: "Protection rules on build-definition paths; a sample of recent changes; host configuration."
-        checks: [OBAAF-REPO-001]
+        checks: [OBAAF-REPO-001, OBAAF-JEN-004]
 
       - id: G1.3
         title: Attribute every change
@@ -122,7 +122,7 @@ families:
           source, version, and digest. On a scratch branch, change one byte of a covered file without
           updating the manifest. Pass if the build fails.
         evidence: "The manifest file and the build step that checks it."
-        checks: [OBAAF-GHA-008]
+        checks: [OBAAF-GHA-008, OBAAF-JEN-008]
         tools: ["obaaf manifest create", "obaaf manifest check"]
 
       - id: G2.2
@@ -189,7 +189,7 @@ families:
           builds accept no jobs triggered by pull requests, forks, partners, or agents, and that
           interactive logins to them are disabled. Pass if both hold.
         evidence: "Build-agent pool configuration and access settings."
-        checks: [OBAAF-GHA-013, OBAAF-GHA-015, OBAAF-GHA-002, OBAAF-GHA-010, OBAAF-GHA-019]
+        checks: [OBAAF-GHA-013, OBAAF-GHA-015, OBAAF-GHA-002, OBAAF-GHA-010, OBAAF-GHA-019, OBAAF-JEN-002, OBAAF-JEN-004, OBAAF-JEN-009, OBAAF-JEN-015]
 
       - id: G3.2
         title: Use tiered isolation
@@ -211,7 +211,7 @@ families:
           dedicated to the release lane and that the reimage log shows a reimage within the scheduled
           interval. Pass if every target meets its tier.
         evidence: "Build records naming the tier; build-agent configuration; the reimage log."
-        checks: [OBAAF-GHA-013]
+        checks: [OBAAF-GHA-013, OBAAF-JEN-002, OBAAF-JEN-006]
         tools: ["obaaf attest build-record --tier"]
 
       - id: G3.3
@@ -231,7 +231,7 @@ families:
           connection to a destination that is not on the list. Pass if the rules allow only package
           mirrors, platform upload endpoints, and the provenance service, and the test connection fails.
         evidence: "Firewall or proxy rules; the result of the test connection."
-        checks: []
+        checks: [OBAAF-JEN-007]
 
       - id: G3.4
         title: Keep no standing secrets on build hosts
@@ -250,7 +250,7 @@ families:
           or long-lived tokens are stored on build hosts, and every such credential is issued per job
           and expires, or is used only through a signing service.
         evidence: "Credential configuration; inspection of hosts for stored credentials."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-009, OBAAF-GHA-011, OBAAF-GHA-018]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-009, OBAAF-GHA-011, OBAAF-GHA-018, OBAAF-JEN-001, OBAAF-JEN-013, OBAAF-JEN-014]
 
   - id: F4
     title: Derived data and caches
@@ -293,7 +293,7 @@ families:
           Inspect the release build configuration. Pass if release builds either regenerate derived
           data from scratch or read only content-addressed entries written by the release lane.
         evidence: "Cache configuration for release builds."
-        checks: [OBAAF-GHA-006]
+        checks: [OBAAF-GHA-006, OBAAF-JEN-010]
 
       - id: G4.3
         title: Check code artifacts by independent rebuild
@@ -336,7 +336,7 @@ families:
           device, a cloud key service, or platform-managed signing, and that the service logs each use.
           Pass if no key exists as an exportable file and the log shows the most recent use.
         evidence: "Key inventory; key-service configuration; the usage log."
-        checks: [OBAAF-GHA-018]
+        checks: [OBAAF-GHA-018, OBAAF-JEN-014]
 
       - id: G5.2
         title: Sign only artifacts with release-lane provenance
@@ -353,7 +353,7 @@ families:
           Submit an artifact built outside the release lane to the signing step. Pass if the step
           refuses to sign it.
         evidence: "The signing step's configuration and the refusal in its log."
-        checks: [OBAAF-GHA-016]
+        checks: [OBAAF-GHA-016, OBAAF-JEN-012]
         tools: ["obaaf verify release"]
 
       - id: G5.3
@@ -414,7 +414,7 @@ families:
           live on a public channel; at Tier 4, pass only if two different people must confirm on every
           path that can set a build live, including the store's own interface.
         evidence: "Release procedure; store release settings; approval records."
-        checks: [OBAAF-GHA-014]
+        checks: [OBAAF-GHA-014, OBAAF-JEN-005]
 
       - id: G6.3
         title: MFA and alerts on publishing accounts
@@ -511,7 +511,7 @@ families:
           Confirm a separate pipeline step verifies provenance against policy before every upload. Run
           the release with an artifact that lacks provenance. Pass if the upload is blocked.
         evidence: "The pipeline step and its log for the latest release."
-        checks: [OBAAF-GHA-016]
+        checks: [OBAAF-GHA-016, OBAAF-JEN-010, OBAAF-JEN-011, OBAAF-JEN-012]
         tools: ["obaaf verify release"]
 
       - id: G7.3
@@ -555,7 +555,7 @@ families:
           write access to protected branches, and that a separate approved job applies its proposals.
           Pass if all hold.
         evidence: "Workflow permissions for each agent."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022, OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-009]
 
       - id: G8.2
         title: Protect agent instructions as code
@@ -574,7 +574,7 @@ families:
           review, are scanned for hidden characters, and are loaded from the protected base branch
           rather than from the change under review. Pass if all three hold.
         evidence: "Protection rules on those paths; the scan result; the agent workflow."
-        checks: [OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001, OBAAF-GHA-012]
+        checks: [OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001, OBAAF-GHA-012, OBAAF-JEN-004]
 
       - id: G8.3
         title: Attest agent runs and verify them before release
@@ -616,4 +616,4 @@ families:
           work needs, each with an expiry date, and their contributions are built only in the untrusted
           lane until reviewed.
         evidence: "Access lists with expiry dates; the pipeline lane used for partner contributions."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-019]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-019, OBAAF-JEN-001, OBAAF-JEN-015]

@@ -9,6 +9,13 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Projects that vendor no binaries can declare `vendored_binaries: none` in `obaaf-sources.yaml`. `obaaf manifest create` writes an empty `obaaf-manifest/v0.1` with `vendoredBinaries: "none"` so the build-record digest binds the claim; empty `components` without that declaration still fails closed (D-033). Set `build_record.require_sdks: false` in the release policy so `obaaf verify release` accepts an empty SDK list.
 - OBAAF's own repository commits that empty declaration and, on PyPI release, checks the manifest, signs an OBAAF build record beside SLSA provenance, and verifies both predicate types with `gh attestation verify` before upload.
 
+### Jenkins (advisory)
+
+- `obaaf check` now reads Jenkinsfiles (`Jenkinsfile`, `Jenkinsfile.<name>`, `Jenkinsfile-<name>`, `<name>.jenkinsfile`, and globs in `jenkins.files`) alongside workflows, or alone with `--platform jenkins`. A syntax-only parser reads the Groovy without running any of it (D-033). Fifteen rules, OBAAF-JEN-001 to OBAAF-JEN-015, cover credentials that change requests or an agent can reach, builds on the controller and shared agents, agent stages that push or publish, pipeline code from unapproved revisions, approvals, host access from containers and pods, agent egress, unpinned images, libraries and agent CLIs, Groovy-interpolated untrusted text and secrets, moving artifact references, publishing after a failed check, missing release verification, signing keys, and webhook tokens in the file. Each maps to profile requirements and agent controls in the catalog.
+- Every Jenkinsfile gets a coverage result per rule (pass, fail, ignored, unknown, not applicable) in text and JSON output, with the reason for each unknown. Controller settings and shared-library code are reported as unknown, never as a pass, and the report states that exit 0 is not a conformance decision (D-035). See [docs/jenkins.md](docs/jenkins.md).
+- New configuration: `jenkins.files`, `jenkins.exclude` and `agents.steps`; lane overrides and ignore entries take a Jenkins stage as `file#stage` and `job: <stage>`. `--lanes` lists Jenkins stages.
+- OBAAF-REPO-001 also covers Jenkinsfiles, and is retitled "CI definition files have no code owner".
+
 ### Checker
 
 - `obaaf check .github/workflows`, the form the website quickstart shows, checked zero files and passed, because discovery expected a repository root. The checker now accepts a repository root, its `.github` directory or its `.github/workflows` directory, and keeps repository-relative paths. When nothing is found, `obaaf check` exits 2 and says nothing was checked, instead of passing.

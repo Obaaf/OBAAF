@@ -95,7 +95,7 @@ def cmd_check(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     if args.lanes:
-        for wf, job, lane, reason in checker.lanes(target, config):
+        for wf, job, lane, reason in checker.lanes(target, config, platform=args.platform):
             print(f"{wf}#{job}: {lane} ({reason})")
         return EXIT_OK
     if not target.exists():
@@ -106,11 +106,14 @@ def cmd_check(args) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    result = checker.check(target, config=config)
+    result = checker.check(target, config=config, platform=args.platform)
     if not result.files and not result.errors:
         # Checking nothing must not look like a pass (an empty or mistyped path).
-        print(f"error: no CI definitions found under {target}: nothing was checked. Point obaaf check at a "
-              "repository root, its .github/workflows directory, or a single workflow file.", file=sys.stderr)
+        kinds = {"github": "GitHub Actions workflows", "jenkins": "Jenkinsfiles"}.get(
+            args.platform, "GitHub Actions workflows or Jenkinsfiles")
+        print(f"error: no CI definitions found under {target} ({kinds}): nothing was checked. Point obaaf check at "
+              "a repository root, its .github/workflows directory, a single workflow file, or a Jenkinsfile.",
+              file=sys.stderr)
         return EXIT_USAGE
     if args.format == "json":
         text = report.to_json(result)
@@ -513,8 +516,14 @@ def build_parser() -> argparse.ArgumentParser:
     x.set_defaults(func=cmd_assess_form)
 
     # check
-    x = sub.add_parser("check", help="check workflow files and repository settings for risky pipeline settings")
-    x.add_argument("path", nargs="?", default=".", help="repository root (default) or one workflow file")
+    x = sub.add_parser("check", help="check workflow files, Jenkinsfiles and repository settings for risky "
+                                    "pipeline settings")
+    x.add_argument("path", nargs="?", default=".",
+                   help="repository root (default), its .github/workflows directory, one workflow file or one "
+                        "Jenkinsfile")
+    x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto",
+                   help="which CI definitions to check: auto (GitHub Actions workflows and Jenkinsfiles), github "
+                        "or jenkins. Jenkins results are advisory (see docs/jenkins.md).")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
     x.add_argument("--fail-on", default="medium",

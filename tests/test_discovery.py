@@ -46,7 +46,8 @@ class LocateTest(unittest.TestCase):
             self.assertEqual(result.files, [".github/workflows/ci.yml"])
 
     def test_this_repository_from_its_workflows_directory(self):
-        by_root = checker.check(ROOT).files
+        # The root also finds Jenkinsfiles (templates/jenkins); the workflows directory finds workflows only.
+        by_root = checker.check(ROOT).workflow_files
         by_dir = checker.check(ROOT / ".github" / "workflows").files
         self.assertTrue(by_root)
         self.assertEqual(by_root, by_dir)

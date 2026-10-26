@@ -106,7 +106,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Protection rules on build-definition paths; a sample of recent changes; host configuration.
 
-**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering; PW.7: Review and/or Analyze Human-Readable Code to Identify Vulnerabilities and Verify Compliance with Security Requirements · SLSA or other (Table 4): Source L4, for the build definition · SLSA v1.2 requirements: Source L4: two-party review · Assessment items: 2.2 · Checker rules: `OBAAF-REPO-001`
+**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering; PW.7: Review and/or Analyze Human-Readable Code to Identify Vulnerabilities and Verify Compliance with Security Requirements · SLSA or other (Table 4): Source L4, for the build definition · SLSA v1.2 requirements: Source L4: two-party review · Assessment items: 2.2 · Checker rules: `OBAAF-REPO-001`, `OBAAF-JEN-004`
 
 ### G1.3 Attribute every change
 
@@ -136,7 +136,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** The manifest file and the build step that checks it.
 
-**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
+**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
 
 ### G2.2 Quarantine third-party assets and plugins
 
@@ -180,7 +180,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Build-agent pool configuration and access settings.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, isolation · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 1.4, 2.1 · Checker rules: `OBAAF-GHA-013`, `OBAAF-GHA-015`, `OBAAF-GHA-002`, `OBAAF-GHA-010`, `OBAAF-GHA-019`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, isolation · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 1.4, 2.1 · Checker rules: `OBAAF-GHA-013`, `OBAAF-GHA-015`, `OBAAF-GHA-002`, `OBAAF-GHA-010`, `OBAAF-GHA-019`, `OBAAF-JEN-002`, `OBAAF-JEN-004`, `OBAAF-JEN-009`, `OBAAF-JEN-015`
 
 ### G3.2 Use tiered isolation
 
@@ -194,7 +194,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Build records naming the tier; build-agent configuration; the reimage log.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, for Tier A · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 3.3, 3.4 · Checker rules: `OBAAF-GHA-013` · Tools: `obaaf attest build-record --tier`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, for Tier A · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 3.3, 3.4 · Checker rules: `OBAAF-GHA-013`, `OBAAF-JEN-002`, `OBAAF-JEN-006` · Tools: `obaaf attest build-record --tier`
 
 ### G3.3 Restrict egress from release hosts
 
@@ -208,7 +208,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Firewall or proxy rules; the result of the test connection.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 3.5
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 3.5 · Checker rules: `OBAAF-JEN-007`
 
 ### G3.4 Keep no standing secrets on build hosts
 
@@ -222,7 +222,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Credential configuration; inspection of hosts for stored credentials.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, unforgeable provenance · SLSA v1.2 requirements: Build L3: signing material inaccessible to build steps (unforgeable provenance) · Assessment items: 2.4 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-009`, `OBAAF-GHA-011`, `OBAAF-GHA-018`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, unforgeable provenance · SLSA v1.2 requirements: Build L3: signing material inaccessible to build steps (unforgeable provenance) · Assessment items: 2.4 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-009`, `OBAAF-GHA-011`, `OBAAF-GHA-018`, `OBAAF-JEN-001`, `OBAAF-JEN-013`, `OBAAF-JEN-014`
 
 ## F4 Derived data and caches
 
@@ -252,7 +252,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Cache configuration for release builds.
 
-**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering · SLSA or other (Table 4): Build L3, cache integrity · SLSA v1.2 requirements: Build L3: cache integrity · Assessment items: 4.4 · Checker rules: `OBAAF-GHA-006`
+**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering · SLSA or other (Table 4): Build L3, cache integrity · SLSA v1.2 requirements: Build L3: cache integrity · Assessment items: 4.4 · Checker rules: `OBAAF-GHA-006`, `OBAAF-JEN-010`
 
 ### G4.3 Check code artifacts by independent rebuild
 
@@ -282,7 +282,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Key inventory; key-service configuration; the usage log.
 
-**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · Assessment items: 1.5, 2.3 · Checker rules: `OBAAF-GHA-018`
+**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · Assessment items: 1.5, 2.3 · Checker rules: `OBAAF-GHA-018`, `OBAAF-JEN-014`
 
 ### G5.2 Sign only artifacts with release-lane provenance
 
@@ -296,7 +296,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** The signing step's configuration and the refusal in its log.
 
-**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · SLSA or other (Table 4): Build L2–L3 · SLSA v1.2 requirements: Build L2: hosted build platform; signed provenance · Assessment items: 3.2 · Checker rules: `OBAAF-GHA-016` · Tools: `obaaf verify release`
+**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · SLSA or other (Table 4): Build L2–L3 · SLSA v1.2 requirements: Build L2: hosted build platform; signed provenance · Assessment items: 3.2 · Checker rules: `OBAAF-GHA-016`, `OBAAF-JEN-012` · Tools: `obaaf verify release`
 
 ### G5.3 Plan revocation and rotation
 
@@ -340,7 +340,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Release procedure; store release settings; approval records.
 
-**Maps to.** SSDF: PS.4 (draft 1.2): Ensure Software Updates Are Robust and Reliable · SLSA or other (Table 4): Analogous to Source L4 · Assessment items: 1.3, 4.3 · Checker rules: `OBAAF-GHA-014`
+**Maps to.** SSDF: PS.4 (draft 1.2): Ensure Software Updates Are Robust and Reliable · SLSA or other (Table 4): Analogous to Source L4 · Assessment items: 1.3, 4.3 · Checker rules: `OBAAF-GHA-014`, `OBAAF-JEN-005`
 
 ### G6.3 MFA and alerts on publishing accounts
 
@@ -412,7 +412,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** The pipeline step and its log for the latest release.
 
-**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · SLSA or other (Table 4): Build-track verification · SLSA v1.2 requirements: Build track: verification of artifacts against provenance · Assessment items: 3.2 · Checker rules: `OBAAF-GHA-016` · Tools: `obaaf verify release`
+**Maps to.** SSDF: PS.2: Provide a Mechanism for Verifying Software Release Integrity · SLSA or other (Table 4): Build-track verification · SLSA v1.2 requirements: Build track: verification of artifacts against provenance · Assessment items: 3.2 · Checker rules: `OBAAF-GHA-016`, `OBAAF-JEN-010`, `OBAAF-JEN-011`, `OBAAF-JEN-012` · Tools: `obaaf verify release`
 
 ### G7.3 Archive releases read-only
 
@@ -442,7 +442,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Workflow permissions for each agent.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`, `OBAAF-JEN-001`, `OBAAF-JEN-003`, `OBAAF-JEN-007`, `OBAAF-JEN-009`
 
 ### G8.2 Protect agent instructions as code
 
@@ -456,7 +456,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Protection rules on those paths; the scan result; the agent workflow.
 
-**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering · SLSA or other (Table 4): Source L3 · SLSA v1.2 requirements: Source L3: continuous technical controls · Agent controls: R5 · Assessment items: 3.7 · Checker rules: `OBAAF-REPO-001`, `OBAAF-REPO-002`, `OBAAF-INS-001`, `OBAAF-GHA-012`
+**Maps to.** SSDF: PS.1: Protect All Forms of Code from Unauthorized Access and Tampering · SLSA or other (Table 4): Source L3 · SLSA v1.2 requirements: Source L3: continuous technical controls · Agent controls: R5 · Assessment items: 3.7 · Checker rules: `OBAAF-REPO-001`, `OBAAF-REPO-002`, `OBAAF-INS-001`, `OBAAF-GHA-012`, `OBAAF-JEN-004`
 
 ### G8.3 Attest agent runs and verify them before release
 
@@ -486,4 +486,4 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Access lists with expiry dates; the pipeline lane used for partner contributions.
 
-**Maps to.** SSDF: PO.2: Implement Roles and Responsibilities; PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 1.7, 2.8 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-002`, `OBAAF-GHA-019`
+**Maps to.** SSDF: PO.2: Implement Roles and Responsibilities; PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 1.7, 2.8 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-002`, `OBAAF-GHA-019`, `OBAAF-JEN-001`, `OBAAF-JEN-015`

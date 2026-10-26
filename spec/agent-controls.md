@@ -65,7 +65,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Trust labels for content an automated actor reads.
 
-**In this repository.** Tools: `obaaf snapshot` · Templates: `obaaf-agent-propose.yml: snapshot job` · Checker rules: `OBAAF-GHA-010`
+**In this repository.** Tools: `obaaf snapshot` · Templates: `obaaf-agent-propose.yml: snapshot job` · Checker rules: `OBAAF-GHA-010`, `OBAAF-JEN-009`
 
 ### R2 Derive authority from labels
 
@@ -79,7 +79,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Labels determine permissions.
 
-**In this repository.** Templates: `obaaf-agent-propose.yml: agent job permissions` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-005`
+**In this repository.** Templates: `obaaf-agent-propose.yml: agent job permissions` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-005`, `OBAAF-JEN-001`, `OBAAF-JEN-003`
 
 ### R3 Give each invocation its own short-lived identity
 
@@ -93,7 +93,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** A distinct identity per agent invocation.
 
-**In this repository.** Docs: `docs/inference-proxy.md` · Checker rules: `OBAAF-GHA-004`, `OBAAF-GHA-005`
+**In this repository.** Docs: `docs/inference-proxy.md` · Checker rules: `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-JEN-001`
 
 ### R4 Separate proposals from effects
 
@@ -107,7 +107,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Approval of agent proposals by someone other than the requester.
 
-**In this repository.** Tools: `obaaf proposal check`, `obaaf attest approval` · Templates: `obaaf-agent-apply.yml` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-021`, `OBAAF-GHA-022`
+**In this repository.** Tools: `obaaf proposal check`, `obaaf attest approval` · Templates: `obaaf-agent-apply.yml` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-021`, `OBAAF-GHA-022`, `OBAAF-JEN-003`, `OBAAF-JEN-005`
 
 ### R5 Protect the instruction plane
 
@@ -121,7 +121,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Agent instruction files treated as code.
 
-**In this repository.** Tools: `obaaf check (instruction-file scan)`, `obaaf proposal check` · Templates: `CODEOWNERS.example`, `obaaf-agent-propose.yml: instructions from the base branch` · Checker rules: `OBAAF-INS-001`, `OBAAF-REPO-001`, `OBAAF-REPO-002`, `OBAAF-GHA-012`
+**In this repository.** Tools: `obaaf check (instruction-file scan)`, `obaaf proposal check` · Templates: `CODEOWNERS.example`, `obaaf-agent-propose.yml: instructions from the base branch` · Checker rules: `OBAAF-INS-001`, `OBAAF-REPO-001`, `OBAAF-REPO-002`, `OBAAF-GHA-012`, `OBAAF-JEN-004`
 
 ### R6 Verify tools and models as supply chain inputs
 
@@ -135,7 +135,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Tool descriptions treated as untrusted input.
 
-**In this repository.** Checker rules: `OBAAF-GHA-008`
+**In this repository.** Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008`
 
 ### R7 Isolate the run and constrain egress
 
@@ -149,7 +149,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Default-deny egress for agents.
 
-**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`
+**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`, `OBAAF-JEN-002`, `OBAAF-JEN-006`, `OBAAF-JEN-007`
 
 ### R8 Attest every agent run
 
@@ -163,7 +163,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** An agent-run predicate.
 
-**In this repository.** Tools: `obaaf attest agent-run`, `obaaf verify agent-run`, `obaaf attest approval`, `obaaf verify release` · Templates: `obaaf-agent-propose.yml: attest job`, `obaaf-agent-apply.yml`, `obaaf-publish.yml: verify jobs` · Schemas: `agent-run.schema.json`, `agent-approval.schema.json` · Checker rules: `OBAAF-GHA-016`, `OBAAF-GHA-021`
+**In this repository.** Tools: `obaaf attest agent-run`, `obaaf verify agent-run`, `obaaf attest approval`, `obaaf verify release` · Templates: `obaaf-agent-propose.yml: attest job`, `obaaf-agent-apply.yml`, `obaaf-publish.yml: verify jobs` · Schemas: `agent-run.schema.json`, `agent-approval.schema.json` · Checker rules: `OBAAF-GHA-016`, `OBAAF-GHA-021`, `OBAAF-JEN-012`
 
 ## The agent-run record
 

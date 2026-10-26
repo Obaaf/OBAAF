@@ -250,9 +250,12 @@ def _label(link: str) -> str:
 def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None = None) -> str:
     c = catalog or load()
     out = ["# Pipeline checker rules", "", GENERATED, "", DRAFT_NOTE, "",
-           "`obaaf check` reads GitHub Actions workflow files, CODEOWNERS and agent instruction files, and reports "
-           "settings that open a documented attack path. Each finding names the profile requirement and agent "
-           "control it threatens, and the fix. It runs locally and sends nothing over the network.", "",
+           "`obaaf check` reads GitHub Actions workflow files, Jenkinsfiles, CODEOWNERS and agent instruction files, "
+           "and reports settings that open a documented attack path. Each finding names the profile requirement and "
+           "agent control it threatens, and the fix. It runs locally and sends nothing over the network.", "",
+           "The OBAAF-JEN rules are advisory: they read a Jenkinsfile without running it, and report what only the "
+           "controller can show (authorization, build authorization, agents, library trust, Replay, network policy) "
+           "as coverage unknowns rather than passes. See [Jenkins](../docs/jenkins.md).", "",
            "Each rule is either an **authority** finding (who or what can change, build, release or sign, and the "
            "controls that bound an agent's authority) or a **hygiene** finding (pinning and hardening). The checker "
            "summary and the SARIF output report the two separately, so authority findings are not buried under "
@@ -274,9 +277,10 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
                     "See the [lane templates](../templates/github-actions/README.md).", ""]
     if test_set:
         out += ["## Test set", "",
-                "Each workflow below models a documented attack pattern. The checker must report every expected rule "
-                "for it (FR12); `tests/test_fr12_checker.py` enforces this.", "",
-                "| Test workflow | Models | Expected rules |", "| --- | --- | --- |"]
+                "Each workflow or Jenkins pipeline below models a documented attack pattern. The checker must report "
+                "every expected rule for it (FR12); `tests/test_fr12_checker.py` and `tests/test_jenkins_rules.py` "
+                "enforce this.", "",
+                "| Test file | Models | Expected rules |", "| --- | --- | --- |"]
         for case in test_set:
             out.append(f"| `{case['file']}` | {case['models']} | {', '.join(case['expect'])} |")
         out.append("")
@@ -284,13 +288,19 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
 
 
 def read_test_set(fixtures_dir: Path) -> list[dict]:
+    """Test cases in a fixtures directory: workflows (*.yml, `# obaaf-expect:`) or Jenkins pipelines
+    (*.groovy, `// obaaf-expect:`). Paths are given from the repository root."""
     cases = []
-    for path in sorted(fixtures_dir.glob("*.yml")):
+    try:
+        base = fixtures_dir.resolve().relative_to(Path(__file__).resolve().parents[2]).as_posix()
+    except ValueError:
+        base = f"tests/fixtures/{fixtures_dir.parent.name}/{fixtures_dir.name}"
+    for path in sorted(list(fixtures_dir.glob("*.yml")) + list(fixtures_dir.glob("*.groovy"))):
         text = path.read_text(encoding="utf-8")
-        expect = re.search(r"^# obaaf-expect:\s*(.+)$", text, re.M)
-        models = re.search(r"^# obaaf-models:\s*(.+)$", text, re.M)
+        expect = re.search(r"^(?:#|//) obaaf-expect:\s*(.+)$", text, re.M)
+        models = re.search(r"^(?:#|//) obaaf-models:\s*(.+)$", text, re.M)
         if expect:
-            cases.append({"file": f"tests/fixtures/workflows/risky/{path.name}",
+            cases.append({"file": f"{base}/{path.name}",
                           "expect": expect.group(1).split(), "models": models.group(1).strip() if models else ""})
     return cases
 
@@ -335,7 +345,8 @@ def form_html(catalog: Catalog | None = None, link_base: str = "../") -> str:
 # ---------------------------------------------------------------- build
 def outputs(root: Path, catalog: Catalog | None = None) -> dict[Path, str]:
     c = catalog or load()
-    test_set = read_test_set(root / "tests" / "fixtures" / "workflows" / "risky")
+    test_set = read_test_set(root / "tests" / "fixtures" / "workflows" / "risky") + \
+        read_test_set(root / "tests" / "fixtures" / "jenkins" / "risky")
     return {
         root / "spec" / "profile.md": profile_md(c),
         root / "spec" / "agent-controls.md": agent_controls_md(c),
