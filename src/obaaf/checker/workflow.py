@@ -598,3 +598,20 @@ def discover(root: Path) -> list[Path]:
     if not wf_dir.is_dir():
         return []
     return sorted(p for p in wf_dir.iterdir() if p.suffix in (".yml", ".yaml") and p.is_file())
+
+
+def locate(target: Path) -> tuple[Path, list[Path]]:
+    """The repository root and workflow files for a directory a user points `obaaf check` at.
+
+    Accepts a repository root or its `.github/workflows` directory itself (the form the
+    quickstart once showed), so pointing at the workflows directory no longer checks zero
+    files and passes. The root stays the repository root, so CODEOWNERS and instruction
+    files are still found and paths read `.github/workflows/<file>`.
+    """
+    target = target.resolve()
+    if target.name == "workflows" and target.parent.name == ".github" and not (target / ".github").exists():
+        root = target.parent.parent
+        return root, discover(root)
+    if target.name == ".github" and (target / "workflows").is_dir():
+        return target.parent, discover(target.parent)
+    return target, discover(target)

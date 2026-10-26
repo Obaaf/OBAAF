@@ -272,7 +272,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         if target.is_file():
             files, root, is_repo = [target], target.parent, False
         else:
-            files = wf_mod.discover(target)
+            root, files = wf_mod.locate(target)
     config = config or Config.load(root)
     script_cmds = _script_commands(catalog, config)
     findings: list[Finding] = []
@@ -338,11 +338,14 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
 def lanes(target: Path, config: Config | None = None) -> list[tuple[str, str, str, str]]:
     """(workflow, job, lane, reason) for every job, to show how the checker classified them."""
     root = target.resolve()
+    if root.is_file():
+        files = [root]
+    else:
+        root, files = wf_mod.locate(root)
     config = config or Config.load(root)
     script_root = root if root.is_dir() else root.parent
     script_cmds = _script_commands(load(), config)
     out = []
-    files = [root] if root.is_file() else wf_mod.discover(root)
     for path in files:
         rel = path.name if root.is_file() else path.relative_to(root).as_posix()
         workflow = wf_mod.parse(rel, path.read_text(encoding="utf-8", errors="replace"))

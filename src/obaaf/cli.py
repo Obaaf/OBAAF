@@ -85,8 +85,12 @@ def cmd_check(args) -> int:
     from obaaf.checker import report
 
     target = Path(args.path)
+    base = target.parent if target.is_file() else target
+    if target.is_dir():
+        from obaaf.checker import workflow as wf_mod
+        base, _ = wf_mod.locate(target)
     try:
-        config = checker.Config.load(target if target.is_dir() else target.parent, args.config)
+        config = checker.Config.load(base, args.config)
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -103,6 +107,11 @@ def cmd_check(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     result = checker.check(target, config=config)
+    if not result.files and not result.errors:
+        # Checking nothing must not look like a pass (an empty or mistyped path).
+        print(f"error: no CI definitions found under {target}: nothing was checked. Point obaaf check at a "
+              "repository root, its .github/workflows directory, or a single workflow file.", file=sys.stderr)
+        return EXIT_USAGE
     if args.format == "json":
         text = report.to_json(result)
     elif args.format == "sarif":

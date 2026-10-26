@@ -9,6 +9,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Projects that vendor no binaries can declare `vendored_binaries: none` in `obaaf-sources.yaml`. `obaaf manifest create` writes an empty `obaaf-manifest/v0.1` with `vendoredBinaries: "none"` so the build-record digest binds the claim; empty `components` without that declaration still fails closed (D-033). Set `build_record.require_sdks: false` in the release policy so `obaaf verify release` accepts an empty SDK list.
 - OBAAF's own repository commits that empty declaration and, on PyPI release, checks the manifest, signs an OBAAF build record beside SLSA provenance, and verifies both predicate types with `gh attestation verify` before upload.
 
+### Checker
+
+- `obaaf check .github/workflows`, the form the website quickstart shows, checked zero files and passed, because discovery expected a repository root. The checker now accepts a repository root, its `.github` directory or its `.github/workflows` directory, and keeps repository-relative paths. When nothing is found, `obaaf check` exits 2 and says nothing was checked, instead of passing.
+
 ## [0.2.0] - 2026-10-26
 
 ### Attestation formats (breaking)
