@@ -17,10 +17,10 @@ from pathlib import Path
 from obaaf.catalog import Catalog
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
-    CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, SHELL_STEPS, Binding, Pipeline, StepUse,
-    chain_name, first_arg, literal, named_arg, shell_script, untrusted_source,
+    CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline, StepUse,
+    chain_name, first_arg, literal, named_arg, shell_script, source_texts, untrusted_source,
 )
-from obaaf.checker.jenkins.parser import Binary, Call, ListLit, Prop, Str, path_of
+from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Prop, Str, path_of
 from obaaf.checker.rules import Finding
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
@@ -34,7 +34,6 @@ FAILURE_PATHS = {"always", "changed", "regression", "aborted", "failure", "unsta
                  "catch/finally"}
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}\b")
-GIT_PUSH = re.compile(r"(^|[\s;&|(])git\s+push\b|(^|[\s;&|(])gh\s+pr\s+merge\b", re.M)
 CHECKSUM_VERIFY = re.compile(r"(^|[\s;&|(])(sha256sum|sha512sum|shasum)\b[^\n]*\s(-c|--check)\b"
                              r"|(^|[\s;&|(])cosign\s+verify|(^|[\s;&|(])obaaf\s+verify\b", re.M)
 INSTALLER = re.compile(r"\b(npm|pnpm|yarn|bun|npx|bunx|pip3?|pipx|uv|uvx)\b")
@@ -121,20 +120,67 @@ def stage_label(stage: tuple) -> str:
 
 def script_parts(node) -> tuple[str, list, bool]:
     """(text, interpolated expressions, dynamic) of a script argument. Groovy concatenation
-    (`"make " + env.X`) counts as interpolation. dynamic: some text comes from a variable or call."""
+    (`"make " + env.X`) counts as interpolation, and so does any value a computed script reads
+    (String.format('...', env.X)). dynamic: some text comes from a variable or call. Iterative."""
     if node is None:
         return "", [], True
-    if isinstance(node, Str):
-        return node.text(), list(node.exprs), False
-    if isinstance(node, Binary) and node.op == "+":
-        a, b = script_parts(node.left), script_parts(node.right)
-        return a[0] + b[0], a[1] + b[1], a[2] or b[2]
-    if isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args:
-        return script_parts(node.callee.target)     # """...""".stripIndent().trim()
-    p = path_of(node)
-    if p:
-        return "${" + p + "}", [p], True
-    return "", [], True
+    texts: list[str] = []
+    exprs: list = []
+    dynamic = False
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, Str):
+            texts.append(n.text())
+            exprs += n.exprs
+        elif isinstance(n, Binary) and n.op == "+":
+            stack += [n.right, n.left]
+        elif isinstance(n, Call) and isinstance(n.callee, Prop) and not n.args and \
+                n.callee.name in ("stripIndent", "trim", "stripMargin", "toString", "replaceAll", "denormalize"):
+            stack.append(n.callee.target)        # """...""".stripIndent().trim()
+        else:
+            p = path_of(n)
+            texts.append("${" + (p or "...") + "}")
+            exprs += [p] if p else source_texts(n)
+            dynamic = True
+    return "".join(texts), exprs, dynamic
+
+
+def step_arg(call: Call, key: str):
+    """A step argument given by name, or inside a map passed as the only argument: sh([script: ..])."""
+    value = named_arg(call, key)
+    if value is None and call.args and isinstance(call.args[0], MapLit):
+        for k, v in call.args[0].entries:
+            if k == key:
+                return v
+    return value
+
+
+def base_stage(stage: tuple) -> tuple:
+    """A stage without its post blocks: ('Build', 'post success') -> ('Build',)."""
+    out = list(stage)
+    while out and out[-1].startswith("post "):
+        out.pop()
+    return tuple(out)
+
+
+def concurrent(a, b) -> bool:
+    """Whether two steps are in different branches of the same parallel block."""
+    for x, y in zip(a.branch, b.branch):
+        if x[0] == y[0] and x[1] != y[1]:
+            return True
+        if x != y:
+            return False
+    return False
+
+
+def _last_command(script: str, start: int) -> bool:
+    """Whether nothing but blank lines and comments follows position `start`'s line in the script."""
+    end = script.find("\n", start)
+    if end == -1:
+        return True
+    rest = [ln.strip() for ln in script[end + 1:].splitlines()]
+    return all(not ln or ln.startswith(("#", "REM ", "::")) for ln in rest)
 
 
 class JenkinsRules:
@@ -152,21 +198,38 @@ class JenkinsRules:
         self.upload_cmds = [re.compile(x, re.M) for x in list(self.detection.get("upload_commands", []))
                             + list(self.detection.get("jenkins_upload_commands", []))]
         self.upload_steps = set(self.detection.get("jenkins_upload_steps", []))
+        self.verify_cmds = [re.compile(x, re.M) for x in self.detection.get("verify_commands", [])]
+        self.release_verify = [re.compile(x) for x in self.detection.get("release_verify_commands", [])]
+        self.packages = [(pkg, re.compile(r"(?<![\w@/-])" + re.escape(pkg) + r"(?P<ver>(@|==|===)[^\s;&|'\"]+)?"
+                                          r"(?=[\s;&|'\"]|$)")) for pkg in self.detection.get("agent_packages", [])]
         self.lane_overrides = lane_overrides or {}
         self.findings: list[Finding] = []
         self.unknowns: list[Unknown] = []
         self.applicable: set[str] = set()
         self.infos: list[Info] = []
+        self._seen: set = set()
+        self._files: dict = {}
+        self.by_agent: dict[int, list[Info]] = {}
+        self.by_stage: dict[tuple, list[Info]] = {}
+        self.publishing_stages: set = set()
 
     # ------------------------------------------------------------------ plumbing
     def add(self, rule: str, line: int, message: str, stage: tuple | None = None, severity: str | None = None,
             step: str | None = None) -> None:
+        key = (rule, line, message)
+        if key in self._seen:      # a method of the file expanded at several calls
+            return
+        self._seen.add(key)
         self.findings.append(Finding(rule=rule, severity=severity or self.catalog.rules[rule]["severity"],
                                      path=self.path, line=line or 1, message=message,
                                      job=stage_label(stage) if stage is not None else None, step=step,
                                      scope="stage"))
 
     def unknown(self, rule: str, line: int, reason: str) -> None:
+        key = (rule, line, reason)
+        if key in self._seen:
+            return
+        self._seen.add(key)
         self.unknowns.append(Unknown(rule, line or 1, reason))
 
     def run(self) -> tuple[list[Finding], list[Unknown], set[str]]:
@@ -199,7 +262,7 @@ class JenkinsRules:
             if name in SHELL_STEPS:
                 info.shell = True
                 info.script, info.exprs, info.dynamic = script_parts(shell_script(call))
-                if _truthy(named_arg(call, "returnStatus")):
+                if _truthy(step_arg(call, "returnStatus")):
                     info.swallowed = "returnStatus: true"
             if use.ctx.swallowed:
                 info.swallowed = use.ctx.swallowed
@@ -227,6 +290,13 @@ class JenkinsRules:
                 info.ai = "the stage is declared an agent lane"
             if lane == "release" and info.shell and not info.publish:
                 info.publish = "the stage is declared a release lane"
+        # Indexes, so no rule compares every step with every agent or stage.
+        for info in self.infos:
+            if info.ctx.agent is not None:
+                self.by_agent.setdefault(id(info.ctx.agent), []).append(info)
+            self.by_stage.setdefault(info.ctx.stage, []).append(info)
+            if info.publish:
+                self.publishing_stages.add(info.ctx.stage)
 
     def lane_of(self, ctx) -> str | None:
         label = stage_label(ctx.stage)
@@ -267,20 +337,40 @@ class JenkinsRules:
         return None
 
     def _verify(self, info: Info) -> str | None:
+        """'full' or 'provenance' for a verification step; info.swallowed says why one cannot stop the
+        build: `|| ...`, a pipe without pipefail, `set +e`, or a later command when the script does not
+        stop at the first failure (a #! line without -e, bat, powershell)."""
         if not info.shell or not info.script:
             return None
         text = info.script
-        if re.search(r"(^|[\n;&])\s*set\s+\+e\b", text):
-            return None
         kind = None
-        for pattern in self.detection.get("verify_commands", []):
-            for m in re.finditer(pattern, text, re.M):
+        errexit = info.use.name == "sh" and not text.lstrip().startswith("#!")
+        if info.use.name == "sh" and text.lstrip().startswith("#!"):
+            first = text.lstrip().splitlines()[0]
+            errexit = bool(re.search(r"\s-[a-z]*e", first))
+        if re.search(r"(^|[\n;&])\s*set\s+(-[a-z]*e|-o\s+errexit)\b", text):
+            errexit = True
+        pipefail = bool(re.search(r"set\s+(-[a-z]*o\s+pipefail|-o\s+pipefail)", text))
+        for pattern in self.verify_cmds:
+            for m in pattern.finditer(text):
                 end = text.find("\n", m.end())
                 rest = text[m.end(): None if end == -1 else end]
-                if "||" in rest or re.search(r"(?<![&])&\s*$", rest):
-                    info.swallowed = info.swallowed or "|| after the command"
+                before = text[: m.start()]
+                why = None
+                if re.search(r"(^|[\n;&])\s*set\s+\+e\b", before):
+                    why = "set +e before the command"
+                elif "||" in rest or re.search(r"(?<![&])&\s*$", rest):
+                    why = "|| or & after the command"
+                elif re.search(r"(?<![|])\|(?![|])", rest) and not pipefail:
+                    why = "a pipe without pipefail: the step's status is the last command's"
+                elif not errexit and not _last_command(text, m.start()):
+                    why = (f"the {info.use.name} script does not stop at a failed command, and more commands "
+                           "follow it")
+                if why:
+                    info.swallowed = info.swallowed or why
+                    kind = kind or "swallowed"
                     continue
-                if any(re.match(r, text[m.start():]) for r in self.detection.get("release_verify_commands", [])):
+                if any(r.match(text, m.start()) for r in self.release_verify):
                     return "full"
                 kind = "provenance"
         return kind
@@ -299,25 +389,36 @@ class JenkinsRules:
     def _read(self, rel: str) -> str | None:
         if self.root is None:
             return None
+        if rel in self._files:
+            return self._files[rel]
+        self._files[rel] = None
         try:
             root = self.root.resolve()
             path = (self.root / rel).resolve()
             if root not in path.parents or not path.is_file():
                 return None
             with path.open(encoding="utf-8", errors="replace") as fh:
-                return fh.read(200_000)
+                self._files[rel] = fh.read(200_000)
         except (OSError, RuntimeError):
             return None
+        return self._files[rel]
 
     # ------------------------------------------------------------------ helpers
     def stages(self) -> dict:
-        out: dict[tuple, list[Info]] = {}
-        for info in self.infos:
-            out.setdefault(info.ctx.stage, []).append(info)
-        return out
+        return self.by_stage
 
     def stage_publishes(self, stage: tuple) -> bool:
-        return any(i.publish for i in self.infos if i.ctx.stage == stage)
+        return stage in self.publishing_stages
+
+    def under(self, agent) -> list:
+        return self.by_agent.get(id(agent), [])
+
+    def gates(self, check: Info, target: Info) -> bool:
+        """Whether a check step can stop `target`: it runs before it, its failure stops the build, it
+        is not in a failure path or a sibling parallel branch, and every condition that could skip the
+        check also guards the target."""
+        return (check.index < target.index and not check.swallowed and check.ctx.post not in FAILURE_PATHS
+                and not concurrent(check.ctx, target.ctx) and set(check.ctx.guards) <= set(target.ctx.guards))
 
     def bindings(self) -> dict[Binding, list[Info]]:
         out: dict[Binding, list[Info]] = {}
@@ -428,7 +529,7 @@ class JenkinsRules:
         floating = []
         labels: dict[str, list] = {}
         for agent, ctx in self.p.agents:
-            under = [i for i in self.infos if i.ctx.agent is agent]
+            under = self.under(agent)
             label = (agent.label or "").strip().lower()
             if label in CONTROLLER_LABELS:
                 risky = [i for i in under if i.ai or i.ctx.cr in (CR_YES, CR_POSSIBLE)]
@@ -474,12 +575,18 @@ class JenkinsRules:
 
     # ------------------------------------------------------------------ JEN-003
     def agent_effects(self) -> None:
-        for stage, infos in self.stages().items():
+        # A stage and its own post blocks share a workspace.
+        groups: dict[tuple, list[Info]] = {}
+        for info in self.infos:
+            groups.setdefault(base_stage(info.ctx.stage), []).append(info)
+        for stage, infos in groups.items():
             ai = [i for i in infos if i.ai]
             if not ai:
                 continue
             self.applicable.add("OBAAF-JEN-003")
             for info in infos:
+                if info.ai and not (info.push or info.trigger or info.publish):
+                    continue
                 effect = ("pushes to the repository" if info.push else
                           f"starts job {info.trigger} (as SYSTEM unless build authorization is configured)"
                           if info.trigger else f"publishes ({info.publish})" if info.publish else None)
@@ -575,13 +682,10 @@ class JenkinsRules:
             problems: list[str] = []
             if agent.args:
                 problems += [label for rx, label in DOCKER_HOST_ARGS if rx.search(agent.args)]
-            pod = agent.yaml
-            if agent.yaml_file:
-                pod = self._read(agent.yaml_file)
-                if pod is None:
-                    self.unknown("OBAAF-JEN-006", agent.line,
-                                 f"pod definition {agent.yaml_file} is not in the repository checkout")
-            under = [i for i in self.infos if i.ctx.agent is agent]
+                if "${" in agent.args:
+                    self.unknown("OBAAF-JEN-006", agent.line, "docker run options are computed at run time")
+            pod = self.pod_spec(agent, "OBAAF-JEN-006")
+            under = self.under(agent)
             if pod:
                 problems += [label for rx, label in POD_HOST_SETTINGS if rx.search(pod)]
                 account = re.search(r"^\s*serviceAccount(?:Name)?:\s*['\"]?([\w.-]+)", pod, re.M)
@@ -592,8 +696,9 @@ class JenkinsRules:
                 elif any(i.ai for i in under) and not re.search(r"automountServiceAccountToken:\s*false", pod):
                     problems.append("the namespace's service account token, mounted by default")
             if agent.inherit:
+                shown = f"'{agent.inherit}'" if agent.inherit != "?" else "computed at run time"
                 self.unknown("OBAAF-JEN-006", agent.line,
-                             f"pod template '{agent.inherit}' is defined on the controller, not in the repository")
+                             f"pod template {shown} is defined on the controller, not in the repository")
             if not problems:
                 continue
             risky = [i for i in under if i.ai or i.ctx.cr in (CR_YES, CR_POSSIBLE)]
@@ -603,6 +708,26 @@ class JenkinsRules:
                      "the container can then reach the host and other builds on it"
                      + (", and change requests or an AI agent can steer that code." if risky else "."),
                      ctx.stage, severity="high" if risky or not under else "medium")
+
+    def pod_spec(self, agent, rule: str) -> str | None:
+        """The pod YAML of a Kubernetes agent: inline, from a variable assigned a literal in this file, or
+        from a file in the repository. Anything else is reported as unknown for `rule`."""
+        if agent.yaml:
+            return agent.yaml
+        if agent.yaml_ref is not None:
+            lit = self.p.literals.get(agent.yaml_ref) if agent.yaml_ref else None
+            if lit is not None:
+                return lit.text()
+            self.unknown(rule, agent.line, "the pod spec is computed at run time"
+                         + (f" ({agent.yaml_ref})" if agent.yaml_ref else " (for example libraryResource)"))
+            return None
+        if agent.yaml_file:
+            text = self._read(agent.yaml_file) if agent.yaml_file != "?" else None
+            if text is None:
+                self.unknown(rule, agent.line, f"pod definition {agent.yaml_file if agent.yaml_file != '?' else ''}"
+                             " is not in the repository checkout".replace("  ", " "))
+            return text
+        return None
 
     # ------------------------------------------------------------------ JEN-007
     def agent_egress(self) -> None:
@@ -628,13 +753,14 @@ class JenkinsRules:
             return "low"
 
         for agent, ctx in self.p.agents:
-            under = [i for i in self.infos if i.ctx.agent is agent]
+            under = self.under(agent)
             refs = []
-            if agent.image:
+            if agent.image and not agent.from_step:      # step images are checked with the step below
                 refs.append((agent.image, agent.line, agent.image_dynamic))
             refs += [(img, line, "${" in img) for img, line in agent.images]
-            if agent.yaml:
-                refs += [(m.group(1), agent.line, "${" in m.group(1)) for m in POD_IMAGE.finditer(agent.yaml)]
+            pod = self.pod_spec(agent, "OBAAF-JEN-008") if agent.kind == "kubernetes" else None
+            if pod:
+                refs += [(m.group(1), agent.line, "${" in m.group(1)) for m in POD_IMAGE.finditer(pod)]
             for ref, line, dynamic in refs:
                 self.applicable.add("OBAAF-JEN-008")
                 if dynamic:
@@ -644,9 +770,9 @@ class JenkinsRules:
                              f"Image '{ref}' for stage '{stage_label(ctx.stage)}' is not pinned to a sha256 digest.",
                              ctx.stage, severity=severity_for(under))
         for info in self.infos:
-            if info.use.name.startswith("docker.image") or info.use.name == "withDockerContainer":
+            if info.use.name == "docker.image" or info.use.name == "withDockerContainer":
                 call = info.use.call
-                node = first_arg(call) if info.use.name.startswith("docker.image") else (
+                node = first_arg(call) if info.use.name == "docker.image" else (
                     named_arg(call, "image") or first_arg(call))
                 ref = literal(node)
                 if node is None:
@@ -655,7 +781,7 @@ class JenkinsRules:
                 if ref is None:
                     self.unknown("OBAAF-JEN-008", info.line, "an image reference is computed at run time")
                 elif not DIGEST.search(ref):
-                    users = [i for i in self.infos if i.ctx.stage == info.ctx.stage]
+                    users = self.by_stage.get(info.ctx.stage, [])
                     self.add("OBAAF-JEN-008", info.line,
                              f"Image '{ref}' in stage '{stage_label(info.ctx.stage)}' is not pinned to a sha256 digest.",
                              info.ctx.stage, severity=severity_for(users))
@@ -671,9 +797,8 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", lib.line,
                          f"Library '{lib.name}' is loaded at '{lib.version}', a branch or tag that can move.", None,
                          severity="medium")
-        packages = list(self.detection.get("agent_packages", []))
         for info in self.infos:
-            if not info.shell:
+            if not info.shell or not INSTALLER.search(info.script) and "curl" not in info.script:
                 continue
             for line_text in info.script.splitlines():
                 if AGENT_INSTALL_SCRIPT.search(line_text):
@@ -682,9 +807,10 @@ class JenkinsRules:
                              "An agent CLI is installed by piping a downloaded script into a shell, which installs "
                              "whatever version the script fetches.", info.ctx.stage, severity="high")
                     continue
-                for pkg in packages:
-                    for m in re.finditer(r"(?<![\w@/-])" + re.escape(pkg) + r"(?P<ver>(@|==|===)[^\s;&|'\"]+)?"
-                                         r"(?=[\s;&|'\"]|$)", line_text):
+                for pkg, rx in self.packages:
+                    if pkg not in line_text:
+                        continue
+                    for m in rx.finditer(line_text):
                         if not INSTALLER.search(line_text[: m.start()]):
                             continue
                         self.applicable.add("OBAAF-JEN-008")
@@ -706,13 +832,14 @@ class JenkinsRules:
                              f"The {name} step in stage '{stage_label(info.ctx.stage)}' builds its script with Groovy "
                              f"interpolation of {source[0]}. The value becomes part of the command before the shell "
                              "runs, so it can run commands of its own.", info.ctx.stage, severity=source[1])
-                elif info.dynamic and any(e.split(".")[0] in self.p.method_params for e in info.exprs):
+                elif any(e.split(".")[0] in self.p.method_params for e in info.exprs if e):
+                    # A method nothing in this file calls: its callers, and what they pass, are elsewhere.
                     self.unknown("OBAAF-JEN-009", info.line,
-                                 f"the {name} step at line {info.line} runs a script passed in by a method's caller")
+                                 f"the {name} step at line {info.line} uses a value passed in by a method's caller "
+                                 "outside this file")
             elif name in ("load", "evaluate"):
                 arg = first_arg(info.use.call)
-                source = untrusted_source(list(arg.exprs) if isinstance(arg, Str) else (
-                    [path_of(arg)] if path_of(arg) else []), self.p)
+                source = untrusted_source(source_texts(arg), self.p) if arg is not None else None
                 if source:
                     self.add("OBAAF-JEN-009", info.line,
                              f"{name} at line {info.line} takes Groovy {('code' if name == 'evaluate' else 'from a path')} "
@@ -754,7 +881,7 @@ class JenkinsRules:
                 if sel not in ("specific", "upstream"):
                     self.unknown("OBAAF-JEN-010", info.line, f"copyArtifacts selector {sel or 'computed'} not understood")
                 continue
-            later = [i for i in self.infos if i.index > info.index and i.ctx.stage == info.ctx.stage]
+            later = [i for i in self.by_stage.get(info.ctx.stage, []) if i.index > info.index]
             if any(i.shell and CHECKSUM_VERIFY.search(i.script) for i in later):
                 continue
             project = literal(named_arg(call, "projectName")) or "another job"
@@ -780,13 +907,25 @@ class JenkinsRules:
                          f"The step at line {info.line} publishes ({info.publish}) in {where}, which runs when the "
                          "build failed, was aborted or is unstable, so it can publish after a check failed or was "
                          "skipped.", info.ctx.stage, severity="high")
-        first = publishes[0]
-        swallowed = [i for i in self.infos if i.index < first.index and i.swallowed and (
-            i.verify or (i.shell and CHECKSUM_VERIFY.search(i.script)))]
-        for info in swallowed:
-            self.add("OBAAF-JEN-011", info.line,
-                     f"The check at line {info.line} cannot stop the publish at line {first.line}: its failure is "
-                     f"ignored ({info.swallowed}).", info.ctx.stage, severity="high")
+        checks = [i for i in self.infos if i.verify or (i.shell and CHECKSUM_VERIFY.search(i.script))]
+        for check in checks:
+            if check.ctx.post in FAILURE_PATHS:
+                continue
+            later = [p for p in publishes if p.index > check.index or concurrent(check.ctx, p.ctx)]
+            target = next((p for p in later if not self.gates(check, p)), None)
+            if target is None:
+                continue
+            if check.swallowed:
+                why = f"its failure is ignored ({check.swallowed})"
+            elif concurrent(check.ctx, target.ctx):
+                why = "it runs in a parallel branch beside the publish, not before it"
+            else:
+                extra = [g for g in check.ctx.guards if g not in target.ctx.guards]
+                why = (f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the publish, "
+                       "so it can be skipped" if extra else "it does not run before the publish")
+            self.add("OBAAF-JEN-011", check.line,
+                     f"The check at line {check.line} cannot stop the publish at line {target.line}: {why}.",
+                     check.ctx.stage, severity="high")
 
     # ------------------------------------------------------------------ JEN-012
     def provenance_check(self) -> None:
@@ -794,10 +933,14 @@ class JenkinsRules:
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-012")
-        first = publishes[0]
-        kinds = {i.verify for i in self.infos
-                 if i.index < first.index and i.verify and not i.swallowed and i.ctx.post not in FAILURE_PATHS}
-        if "full" in kinds:
+        checks = [i for i in self.infos if i.verify in ("full", "provenance")]
+        first, kinds = None, set()
+        for publish in publishes:
+            found = {c.verify for c in checks if self.gates(c, publish)}
+            if "full" not in found:
+                first, kinds = publish, found
+                break
+        if first is None:
             return
         if "provenance" in kinds:
             self.add("OBAAF-JEN-012", first.line,

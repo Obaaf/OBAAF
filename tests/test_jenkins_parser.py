@@ -48,9 +48,12 @@ pipeline { agent any; stages { stage('a') { steps { sh 'true' } } } }
 
     def test_the_parser_imports_no_code_execution_facility(self):
         import inspect
+        import re
         source = inspect.getsource(lexer) + inspect.getsource(parser)
-        for forbidden in ("eval(", "exec(", "subprocess", "compile(", "__import__", "socket", "urllib"):
+        for forbidden in ("eval(", "exec(", "subprocess", "__import__", "socket", "urllib", "importlib"):
             self.assertNotIn(forbidden, source)
+        # The builtin compile(), not re.compile.
+        self.assertIsNone(re.search(r"(?<![.\w])compile\(", source))
 
 
 class LimitsTest(unittest.TestCase):

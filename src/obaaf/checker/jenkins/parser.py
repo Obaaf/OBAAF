@@ -158,6 +158,7 @@ class Loop(Node):
 class Try(Node):
     body: Block
     handlers: list   # Blocks for catch and finally
+    kinds: list = field(default_factory=list)   # "catch" or "finally", one per handler
 
 
 @dataclass
@@ -169,6 +170,7 @@ class Switch(Node):
 @dataclass
 class Return(Node):
     value: Node | None
+    throw: bool = field(default=False, kw_only=True)   # a throw statement, not a return
 
 
 @dataclass
@@ -198,13 +200,15 @@ class Annotated(Node):
 
 
 def path_of(node) -> str | None:
-    """`env.CHANGE_TITLE` for Name/Prop chains; None for anything else."""
-    if isinstance(node, Name):
-        return node.name
-    if isinstance(node, Prop):
-        base = path_of(node.target)
-        return f"{base}.{node.name}" if base else None
-    return None
+    """`env.CHANGE_TITLE` for Name/Prop chains; None for anything else. Iterative: chains can be long."""
+    parts = []
+    while isinstance(node, Prop):
+        parts.append(node.name)
+        node = node.target
+    if not isinstance(node, Name):
+        return None
+    parts.append(node.name)
+    return ".".join(reversed(parts))
 
 
 def callee_name(call: Call) -> str | None:
@@ -396,13 +400,20 @@ class Parser:
         t = self.tok
         if not (t.value[:1].isupper() or t.value in _PRIMITIVES):
             return False
+        last = len(self.toks) - 1
+
+        def at(j: int) -> Tok:        # the token at j, or the final eof token past the end
+            return self.toks[min(j, last)]
+
         j = self.i + 1
-        while self.toks[j].kind == "op" and self.toks[j].value == "." and self.toks[j + 1].kind == "ident":
+        while at(j).kind == "op" and at(j).value == "." and at(j + 1).kind == "ident":
             j += 2
-        if self.toks[j].kind == "op" and self.toks[j].value == "<":
-            depth = 0
-            while j < len(self.toks) - 1:
-                v = self.toks[j]
+        if at(j).kind == "op" and at(j).value == "<":
+            # A generic type argument list is short and stays on one line; give up early otherwise,
+            # so `a < b; a < b; ...` cannot make this lookahead quadratic.
+            depth, start = 0, j
+            while True:
+                v = at(j)
                 if v.kind == "op" and v.value == "<":
                     depth += 1
                 elif v.kind == "op" and v.value in (">", ">>", ">>>"):
@@ -410,12 +421,13 @@ class Parser:
                     if depth <= 0:
                         j += 1
                         break
-                elif v.kind in ("nl", "eof"):
+                elif v.kind in ("nl", "eof") or (v.kind == "op" and v.value in (";", "{", "}", "(", ")", "=")) \
+                        or j - start > 64:
                     return False
                 j += 1
-        while self.toks[j].kind == "op" and self.toks[j].value == "[" and self.toks[j + 1].value == "]":
+        while at(j).kind == "op" and at(j).value == "[" and at(j + 1).value == "]":
             j += 2
-        nxt, after = self.toks[j], self.toks[j + 1]
+        nxt, after = at(j), at(j + 1)
         return nxt.kind == "ident" and (after.kind in ("nl", "eof") or after.value in ("=", "(", ";", "}"))
 
     def skip_type(self) -> None:
@@ -567,7 +579,7 @@ class Parser:
             return Loop(header, body, line=t.line, col=t.col)
         if kw == "try":
             body = self.block()
-            handlers = []
+            handlers, kinds = [], []
             while True:
                 save = self.i
                 self.skip_nl()
@@ -575,13 +587,15 @@ class Parser:
                     self.advance()
                     self.paren_header()
                     handlers.append(self.block())
+                    kinds.append("catch")
                 elif self.at("ident", "finally"):
                     self.advance()
                     handlers.append(self.block())
+                    kinds.append("finally")
                 else:
                     self.i = save
                     break
-            return Try(body, handlers, line=t.line, col=t.col)
+            return Try(body, handlers, kinds, line=t.line, col=t.col)
         if kw == "switch":
             header = self.paren_header()
             subject = header[0] if header else Opaque("switch", line=t.line, col=t.col)
@@ -623,7 +637,7 @@ class Parser:
             value = None
             if not (self.tok.kind in ("nl", "eof") or self.at_op(";", "}")):
                 value = self.value()
-            return Return(value, line=t.line, col=t.col)
+            return Return(value, line=t.line, col=t.col, throw=kw == "throw")
         if kw in ("break", "continue"):
             if self.tok.kind == "ident":
                 self.advance()

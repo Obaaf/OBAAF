@@ -82,10 +82,18 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
     if parsed.error:
         result.error = parsed.error
         return result
-    pipeline = model_mod.build(parsed.tree)
+    try:
+        pipeline = model_mod.build(parsed.tree)
+        engine = rules_mod.JenkinsRules(rel, pipeline, catalog, root, extra_agents, lane_overrides)
+        findings, unknowns, applicable = engine.run()
+    except RecursionError:
+        result.error = "not analyzed: the pipeline is nested too deeply to model"
+        return result
+    except Exception as exc:     # fail closed: one file the model cannot handle must not stop the others
+        result.error = f"not analyzed: internal error while modelling the pipeline ({type(exc).__name__})"
+        return result
     result.kind = pipeline.kind
-    engine = rules_mod.JenkinsRules(rel, pipeline, catalog, root, extra_agents, lane_overrides)
-    result.findings, result.unknowns, result.applicable = engine.run()
+    result.findings, result.unknowns, result.applicable = findings, unknowns, applicable
     stages: dict[tuple, list] = {}
     for info in engine.infos:
         stages.setdefault(info.ctx.stage, []).append(info)

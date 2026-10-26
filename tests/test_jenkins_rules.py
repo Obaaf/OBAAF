@@ -122,8 +122,20 @@ pipeline {
       steps { sh 'expr' }
     }
     stage('g') {
-      when { expression { env.BRANCH_NAME.startsWith('rel') } }
+      when { expression { isRelease(env.BRANCH_NAME) } }
       steps { sh 'unknown' }
+    }
+    stage('g2') {
+      when { expression { env.BRANCH_NAME.startsWith('rel') } }
+      steps { sh 'startswith' }
+    }
+    stage('i') {
+      when { not { changeRequest author: 'dependabot[bot]' } }
+      steps { sh 'notbot' }
+    }
+    stage('j') {
+      when { branch pattern: 'main|PR-\\\\d+', comparator: 'REGEXP' }
+      steps { sh 'regexp' }
     }
     stage('h') {
       when { buildingTag() }
@@ -134,6 +146,7 @@ pipeline {
 """
         self.assertEqual(self.cr_of(text), {"pr": "yes", "main": "no", "notpr": "no", "either": "yes",
                                             "any": "possible", "expr": "possible", "unknown": "unknown",
+                                            "startswith": "no", "notbot": "possible", "regexp": "yes",
                                             "tag": "no"})
 
     def test_scripted_conditions_and_local_methods(self):
@@ -395,3 +408,141 @@ class CoverageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    """Bypasses and crashes found by an adversarial review of the first version (2026-10)."""
+
+    def test_computed_parallel_branches_are_read(self):
+        text = """
+def platforms = ['linux', 'windows']
+node('linux') {
+  parallel platforms.collectEntries { p ->
+    [(p): { withCredentials([string(credentialsId: 't', variable: 'T')]) { sh "./build.sh ${env.CHANGE_TITLE}" } }]
+  }
+}"""
+        found = rules(text)
+        self.assertIn("OBAAF-JEN-001", found)
+        self.assertEqual(found.get("OBAAF-JEN-009"), "high")
+        self.assertTrue(jenkins.summary(analyze("node { parallel generateBranches(['a']) }"))["unknowns"])
+
+    def test_methods_get_the_callers_context(self):
+        helpers = """
+def runBuild() { sh './gradlew build' }
+def upload() { sh 'aws s3 cp out s3://r/' }
+def runAgent() { sh 'claude -p "fix the tests"' }
+def notify(String msg) { sh "echo ${msg}" }
+"""
+        self.assertIn("OBAAF-JEN-001", rules(helpers + "node { withCredentials([string(credentialsId: 't', "
+                                                       "variable: 'T')]) { runBuild() } }"))
+        post = helpers + "pipeline { agent any\n stages { stage('b') { steps { sh 'make' } } }\n" \
+                         " post { always { upload() } } }"
+        self.assertIn("OBAAF-JEN-011", rules(post))
+        self.assertIn("OBAAF-JEN-003", rules(helpers + "node { stage('fix') { runAgent()\n sh 'git push' } }"))
+        self.assertEqual(rules(helpers + "node { notify(env.CHANGE_TITLE) }").get("OBAAF-JEN-009"), "high")
+
+    def test_checks_that_cannot_stop_the_publish(self):
+        verify = "obaaf verify release --policy p --artifacts a"
+        weak = {
+            "try/catch": f"try {{ sh '{verify}' }} catch (err) {{ echo 'failed' }}\nsh 'npm publish'",
+            "pipe": f"sh '{verify} 2>&1 | tee v.log'\nsh 'npm publish'",
+            "shebang": f"sh '''#!/bin/bash\n{verify}\necho done\n'''\nsh 'npm publish'",
+            "bat": f"bat '''{verify}\necho done\n'''\nbat 'npm publish'",
+            "map returnStatus": f"sh([script: '{verify}', returnStatus: true])\nsh 'npm publish'",
+        }
+        for label, steps in weak.items():
+            found = rules(f"node {{\n{steps}\n}}")
+            self.assertEqual(found.get("OBAAF-JEN-012"), "high", label)
+            self.assertIn("OBAAF-JEN-011", found, label)
+        strong = {
+            "rethrow": f"try {{ sh '{verify}' }} catch (err) {{ error 'verification failed' }}\nsh 'npm publish'",
+            "pipefail": f"sh 'set -o pipefail; {verify} | tee v.log'\nsh 'npm publish'",
+            "shebang -e": f"sh '''#!/bin/bash -e\n{verify}\necho done\n'''\nsh 'npm publish'",
+        }
+        for label, steps in strong.items():
+            self.assertNotIn("OBAAF-JEN-012", rules(f"node {{\n{steps}\n}}"), label)
+
+    def test_parallel_and_conditional_checks_do_not_gate(self):
+        verify = "sh 'obaaf verify release --policy p --artifacts a'"
+        parallel = f"""
+pipeline {{ agent any
+  stages {{ stage('r') {{ parallel {{
+    stage('Verify') {{ steps {{ {verify} }} }}
+    stage('Publish') {{ steps {{ sh 'npm publish' }} }}
+  }} }} }} }}"""
+        self.assertEqual(rules(parallel).get("OBAAF-JEN-012"), "high")
+        skippable = f"""
+pipeline {{ agent any
+  stages {{
+    stage('Verify') {{
+      when {{ expression {{ !params.SKIP_VERIFY }} }}
+      steps {{ {verify} }}
+    }}
+    stage('Publish') {{ steps {{ sh 'npm publish' }} }}
+  }} }}"""
+        self.assertEqual(rules(skippable).get("OBAAF-JEN-012"), "high")
+        same_guard = skippable.replace("expression { !params.SKIP_VERIFY }", "branch 'main'").replace(
+            "stage('Publish') {", "stage('Publish') {\n      when { branch 'main' }")
+        self.assertNotIn("OBAAF-JEN-012", rules(same_guard))
+
+    def test_taint_through_ordinary_groovy(self):
+        cases = ["def t = env.CHANGE_TITLE.trim()", "def t = env.CHANGE_TITLE ?: 'none'",
+                 "def t = env['CHANGE_TITLE']", "def t = env.getProperty('CHANGE_BRANCH')",
+                 "def m = [title: env.CHANGE_TITLE]\n def t = m", "def t = 'echo ' + env.CHANGE_TITLE",
+                 "def t = String.format('%s', env.CHANGE_TITLE)",
+                 "def t = sh(script: 'git --no-pager log -1 --pretty=%B', returnStdout: true)",
+                 "def t = sh(script: 'git log -1 --format=\"%h %s\"', returnStdout: true)"]
+        for case in cases:
+            self.assertEqual(rules(f'node {{ {case}\n sh "echo ${{t}}" }}').get("OBAAF-JEN-009"), "high", case)
+        self.assertEqual(rules("node { sh String.format('echo %s', env.CHANGE_TITLE) }").get("OBAAF-JEN-009"), "high")
+
+    def test_more_credential_wrappers(self):
+        for wrapper in ("docker.withRegistry(REGISTRY, REGISTRY_CREDS)",
+                        "withVault(configuration: [vaultCredentialId: 'v'], vaultSecrets: [])",
+                        "wrap([$class: 'VaultBuildWrapper', vaultSecrets: []])", "withAWS(role: 'deployer')"):
+            self.assertIn("OBAAF-JEN-001", rules(f"node {{ {wrapper} {{ sh './gradlew test' }} }}"), wrapper)
+
+    def test_inputs_that_crashed(self):
+        for text in ("X", "node { sh 'x'" + " + 'x'" * 1200 + " }"):
+            result = analyze(text)
+            self.assertIsNone(result.error)
+
+    def test_many_agents_are_linear(self):
+        import time
+        start = time.monotonic()
+        result = analyze("node('n0') { sh 'make' }\n" * 4000)
+        self.assertIsNone(result.error)
+        self.assertLess(time.monotonic() - start, 10)
+
+    def test_pod_specs_in_variables_and_resources(self):
+        pod = "def podYaml = '''\nspec:\n  containers:\n  - name: a\n    image: x\n    securityContext:\n" \
+              "      privileged: true\n'''\n"
+        agent = "pipeline { agent { kubernetes { yaml %s } }\n stages { stage('a') { steps { sh 'make' } } } }"
+        self.assertIn("OBAAF-JEN-006", rules(pod + agent % "podYaml"))
+        self.assertEqual(status(agent % "libraryResource('pods/dind.yaml')", "OBAAF-JEN-006"), "unknown")
+
+    def test_agent_stage_effects_in_post_and_git_options(self):
+        post = """
+pipeline { agent any
+  stages { stage('fix') {
+    steps { sh 'claude -p "fix"' }
+    post { success { sh 'git push origin HEAD' } }
+  } } }"""
+        self.assertIn("OBAAF-JEN-003", rules(post))
+        self.assertIn("OBAAF-JEN-003", rules(declarative("sh 'claude -p fix'\nsh 'git -C \"$WORKSPACE\" push'")))
+        flags = declarative("withCredentials([string(credentialsId: 'k', variable: 'K')]) "
+                            "{ sh 'claude --dangerously-skip-permissions -p \"review\"' }")
+        self.assertEqual(rules(flags).get("OBAAF-JEN-001"), "high")
+
+    def test_map_form_webhook_trigger(self):
+        text = """
+properties([pipelineTriggers([[$class: 'GenericTrigger', token: 'deploy-hook-4f1c2a',
+  genericVariables: [[key: 'pr_title', value: '$.pull_request.title']]]])])
+node { sh "echo Building ${pr_title}" }"""
+        found = rules(text)
+        self.assertIn("OBAAF-JEN-015", found)
+        self.assertEqual(found.get("OBAAF-JEN-009"), "high")
+
+    def test_inside_options_are_not_an_image(self):
+        text = f"node {{ docker.image('maven@sha256:{'0' * 64}').inside('-u root -v $HOME/.m2:/root/.m2') {{ sh 'mvn' }} }}"
+        self.assertNotIn("OBAAF-JEN-008", rules(text))

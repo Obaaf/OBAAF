@@ -15,6 +15,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Every Jenkinsfile gets a coverage result per rule (pass, fail, ignored, unknown, not applicable) in text and JSON output, with the reason for each unknown. Controller settings and shared-library code are reported as unknown, never as a pass, and the report states that exit 0 is not a conformance decision (D-035). See [docs/jenkins.md](docs/jenkins.md).
 - New configuration: `jenkins.files`, `jenkins.exclude` and `agents.steps`; lane overrides and ignore entries take a Jenkins stage as `file#stage` and `job: <stage>`. `--lanes` lists Jenkins stages.
 - OBAAF-REPO-001 also covers Jenkinsfiles, and is retitled "CI definition files have no code owner".
+- Agent CLI patterns accept options before the prompt flag or subcommand (`claude --model x -p ...`, `codex -m o3 exec`). This also applies to workflows, where such jobs were previously left out of the agent lane.
 
 ### Checker
 

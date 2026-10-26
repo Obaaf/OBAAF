@@ -62,7 +62,9 @@ classes, resolves `@Grab`, runs AST transforms or evaluates an expression, so no
 Jenkinsfile runs. Files over 1 MiB, more than 400,000 tokens, nesting deeper than 64 levels, or a
 parse taking more than 10 seconds are reported as not analyzed. It makes no network requests, and
 reads only the Jenkinsfile and files it names inside the repository (repository scripts, to find
-agents; a pod `yamlFile`).
+agents; a pod `yamlFile`). Modelling and the rules are linear in the size of the file; a 1 MiB
+pipeline takes a few seconds. A file the model cannot handle is reported as not analyzed, and the
+other files are still checked.
 
 It finds Jenkinsfiles at any depth up to six directories: `Jenkinsfile`, `Jenkinsfile.<name>`,
 `Jenkinsfile-<name>` and `<name>.jenkinsfile`. Other files, such as `ci/*.groovy`, are added with
@@ -78,13 +80,25 @@ kubernetes with inline `yaml` or a `yamlFile` in the repository), `environment` 
 Credential scope follows nesting: a pipeline-wide `environment` reaches every stage.
 
 **Scripted Pipeline.** `node`, `stage`, `if` and `else`, `try`, `catch` and `finally`, `switch`,
-loops, `parallel` maps assigned in the file, `docker.image(...).inside`, `withDockerContainer`,
-`podTemplate` and `container`, and methods defined in the file.
+loops, `parallel` (maps, lists and computed expressions such as `collectEntries`),
+`docker.image(...).inside`, `withDockerContainer`, `podTemplate` and `container`. A method the file
+defines and calls is read where it is called, so its steps get the caller's stage, credentials, post
+condition and conditions, and its arguments flow into its parameters. A method the file defines but
+never calls (a shared-library step) is read as reachable from anywhere.
+
+**Verification that can stop a publish.** A check counts only when it runs before the publish, its
+failure stops the build, and it cannot be skipped while the publish still runs. It does not count
+inside `catchError`, `warnError` or a `catch` block that does not throw again; with `returnStatus`;
+followed by `||`, `&` or a pipe without `pipefail`; in a `#!` script without `-e`, a `bat` or a
+`powershell` script when more commands follow it; in a parallel branch beside the publish; or under
+a `when` or `if` that does not also guard the publish.
 
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
-`sshagent`, `withSonarQubeEnv`, `docker.withRegistry`, `configFileProvider`, and any wrapper step
-that takes `credentialsId` or `credentials` (`withAWS`, `withKubeConfig`, `withDockerRegistry`,
-`withVault`, `withMaven`). File and key-file bindings hold a path, not the secret.
+`sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
+`configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
+credentials by design (`withAWS`, including `role:`, `withVault`, `withKubeConfig`,
+`withDockerRegistry` and others), and any step that names a credential ID at any depth of its
+arguments. File and key-file bindings hold a path, not the secret.
 
 **Who can reach a stage.** For each step the checker decides whether a change request (a pull or
 merge request in a multibranch or organization-folder job) can reach it:
@@ -101,10 +115,11 @@ credential bound where a change request can reach it is available to the change'
 take the Jenkinsfile itself from the target branch for untrusted changes, but the workspace, the
 build scripts and the tests are still the change's own.
 
-**Untrusted values.** Groovy interpolation (`"${...}"`) or concatenation of a change request's
-title, source branch or author name; build parameters; branch and tag names; GitLab and GitHub
-Pull Request Builder variables; values a webhook trigger reads from the request; and commit text
-read with `git log` or `git show`, directly or through a variable assigned from them.
+**Untrusted values.** Groovy interpolation (`"${...}"`), concatenation or `String.format` of a
+change request's title, source branch or author name; build parameters; branch and tag names; GitLab
+and GitHub Pull Request Builder variables; values a webhook trigger reads from the request; and
+commit text read with `git log` or `git show`. They are followed through variables, `env['X']`,
+`env.getProperty('X')`, method calls such as `.trim()`, `?:`, maps, lists and method parameters.
 
 **AI agents.** An agent CLI in a shell step (the patterns in `src/obaaf/data/detection.yaml`), a
 repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and commands declared
@@ -182,7 +197,11 @@ pipeline files: the Declarative Pipeline plugin's test resources, the Jenkins pr
 Kubernetes plugin examples and shared pipeline library, and the Jenkinsfiles of several large open
 source projects. All 512 parsed, with 7 statements recorded as not analyzed (4 deliberately invalid
 test files and 3 Groovy constructors), in about one second in total. That run is how the rules'
-precision was tuned; it is not a claim about any project's security.
+precision was tuned; it is not a claim about any project's security. An adversarial review then
+found 13 ways to get a silent pass or a crash (computed parallel branches, methods called from
+credential scopes and post blocks, checks that cannot stop a publish, taint through ordinary Groovy,
+filtered `changeRequest` conditions, more credential wrappers, computed pod specs, map-form
+triggers, and a quadratic step); each is fixed and has a regression test.
 
 ## What is not built yet
 

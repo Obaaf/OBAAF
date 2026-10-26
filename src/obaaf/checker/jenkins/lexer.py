@@ -8,6 +8,7 @@ expressions as text, which is what the rules need to see what reaches a shell.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 
@@ -48,6 +49,9 @@ OPERATORS = sorted("""
 >>>= <<= >>= **= ..< ... ?. *. .& .@ === !== == != <= >= <=> && || ++ -- += -= *= /= %= &= |= ^= -> ?: << >> >>> ** ==~ =~ !=~ .. ::
 { } ( ) [ ] , ; : . ? + - * / % < > = ! & | ^ ~ @
 """.split(), key=len, reverse=True)
+_OPS_BY_FIRST: dict = {}
+for _op in OPERATORS:
+    _OPS_BY_FIRST.setdefault(_op[0], []).append(_op)     # longest first, as in OPERATORS
 
 # After these tokens a '/' starts a slashy string (a regular expression); otherwise it divides.
 _SLASHY_AFTER_OPS = {"(", "[", ",", "=", "==", "!=", "=~", "==~", "~", ":", "?", "&&", "||", "!", "{", ";",
@@ -55,6 +59,9 @@ _SLASHY_AFTER_OPS = {"(", "[", ",", "=", "==", "!=", "=~", "==~", "~", ":", "?",
 _SLASHY_AFTER_WORDS = {"return", "in", "case", "assert", "else"}
 _IDENT_START = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$")
 _IDENT_PART = _IDENT_START | set("0123456789")
+_IDENT_RUN = re.compile(r"[A-Za-z0-9_$]*")
+_STRING_SPECIAL = set("\\$\n")
+_ORDINARY_RUN = re.compile(r"[^\\$\n]*")
 
 
 class Lexer:
@@ -76,12 +83,12 @@ class Lexer:
 
     def _advance(self, n: int = 1) -> str:
         out = self.src[self.pos:self.pos + n]
-        for ch in out:
-            if ch == "\n":
-                self.line += 1
-                self.col = 1
-            else:
-                self.col += 1
+        newlines = out.count("\n")
+        if newlines:
+            self.line += newlines
+            self.col = len(out) - out.rfind("\n")
+        else:
+            self.col += len(out)
         self.pos += n
         return out
 
@@ -163,14 +170,14 @@ class Lexer:
             if ch in _IDENT_START:
                 line, col = self.line, self.col
                 start = self.pos
-                while self.pos < len(src) and src[self.pos] in _IDENT_PART:
-                    self._advance()
+                end = _IDENT_RUN.match(src, start).end()
+                self._advance(end - start)
                 self._emit("ident", src[start:self.pos], line, col)
                 continue
             if ch.isdigit():
                 self._number()
                 continue
-            for op in OPERATORS:
+            for op in _OPS_BY_FIRST.get(ch, ()):
                 if src.startswith(op, self.pos):
                     line, col = self.line, self.col
                     self._advance(len(op))
@@ -325,6 +332,13 @@ class Lexer:
                 self._advance(len(quote))
                 break
             ch = src[self.pos]
+            if ch not in _STRING_SPECIAL and ch != quote[0]:
+                # Copy the run of ordinary characters at once.
+                run_end = _ORDINARY_RUN.match(src, self.pos).end()
+                stop = src.find(quote[0], self.pos, run_end)
+                run_end = run_end if stop == -1 else stop
+                buf.append(self._advance(max(run_end - self.pos, 1)))
+                continue
             if ch == "\n" and single_line:
                 raise LexError("unterminated string", line, col)
             if ch == "\\":

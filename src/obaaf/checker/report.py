@@ -92,7 +92,7 @@ def _jenkins_coverage_text(result: CheckResult) -> list[str]:
         kind = summary["kind"] or "not analyzed"
         lines.append(f"  {path} ({kind}, {summary['digest'][:19]}...): {shown}")
         if summary["error"]:
-            lines.append(f"    not analyzed: {summary['error']}")
+            lines.append(f"    {summary['error']}")
             continue
         general = summary["unknowns"]
         if general:
