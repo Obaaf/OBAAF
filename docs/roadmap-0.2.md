@@ -13,8 +13,8 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 
 1. **Script-aware agent detection (high). Shipped.** A trusted job whose `run` step calls a repository script that invokes an agent CLI is reclassified into the agent lane, so the agent controls apply without configuration. Best-effort: scripts the checker cannot read fall back to the advisory note.
 2. **Finding profiles for CI gating (high). Shipped.** `--fail-on` now accepts a category, for example `--fail-on authority:medium`, so CI can gate on authority findings without first clearing every hygiene finding. See the [checker configuration](checker-configuration.md) guide.
-3. **Dynamic `runs-on` handling (medium). Implemented; validation deferred.** Unresolved selectors that explicitly name both hosted and self-hosted alternatives are informational. Known self-hosted matrices remain high and other unknown labels or inputs remain medium. Reviewed pools can use exact-job, expiring exceptions with evidence; a declaration does not verify runtime isolation.
-4. **Soften hygiene outside the release and agent lanes (medium). Implemented; validation deferred.** GHA-008 is low for ordinary jobs only with explicitly limited token permissions, no referenced secrets, and no privileged outside trigger. Agent, release and effect jobs stay high; other jobs stay medium.
+3. **Dynamic `runs-on` handling (medium). Implemented, with regression tests; pilot validation pending.** Unresolved selectors that explicitly name both hosted and self-hosted alternatives are informational. Known self-hosted matrices remain high and other unknown labels or inputs remain medium. Reviewed pools can use exact-job, expiring exceptions with evidence; a declaration does not verify runtime isolation.
+4. **Soften hygiene outside the release and agent lanes (medium). Implemented, with regression tests; pilot validation pending.** GHA-008 is low for ordinary jobs only with explicitly limited token permissions, no referenced secrets, and no privileged outside trigger. Agent, release and effect jobs stay high; other jobs stay medium.
 5. **Maturity framing in the output (medium). Shipped.** Findings that need the agent and effect lane architecture (OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) are flagged as such in the output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
 
 ## Data wanted
@@ -22,9 +22,12 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 The follow-up copied-wrapper gap has an implementation for simple `cp` snapshots
 inside a single `run:` block. It reads only the repository source. Arbitrary
 shell data flow and external or generated scripts still require agent declarations.
-One copied-wrapper regression check passed before further test work was deferred
-at the maintainer's request. Runner/severity changes and broader regression checks
-remain unvalidated. Issue #19 stays open until review and validation are complete.
+One copied-wrapper regression check covers the wrapper change.
+`tests/test_severity_regressions.py` covers the runner and severity changes: where
+GHA-008 drops to low, where it must stay medium or high, which runner selectors are
+informational, and that informational findings are never gated. These are unit
+tests on synthetic workflows, not pilot validation. Issue #19 stays open until a
+pilot confirms the new severities on a real repository.
 
 These changes are not on PyPI. The configuration guide documents commit-pinned
 source installation for pilots; publishing a new version remains a separate step.
