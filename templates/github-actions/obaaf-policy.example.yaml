@@ -14,6 +14,10 @@ provenance:
   # source_refs is required: which refs may produce a release is this policy's main decision.
   signer_workflow: OWNER/REPO/.github/workflows/obaaf-release.yml
   source_refs: ["refs/tags/v*"]
+  # Optional. When set, Sigstore certificates must name one of these runner environments
+  # (for example github-hosted). Use this when replacing `gh attestation verify
+  # --deny-self-hosted-runners` with `obaaf verify release`.
+  # runner_environments: ["github-hosted"]
 
 build_record:
   allowed_tiers: [A, B]      # use [A] to require SLSA Build Level 3 isolation for every target

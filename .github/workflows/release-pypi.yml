@@ -83,38 +83,50 @@ jobs:
           predicate-type: https://www.obaaf.com/attestation/build-record/v0.1
           predicate-path: attest/build-record.json
   publish:
+    # Dogfood FR6: after the pypi environment is approved, verify provenance body,
+    # build record, approvals and agent history with `obaaf verify release`, then
+    # upload. Policy and the verifier come from the default branch tip, not the tag
+    # tree. Residual vs the template lane: no workflow_run split and no pre-approval
+    # summary job — the upload gate is still fail-closed.
     needs: [build, attest]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/project/obaaf/
     permissions:
-      id-token: write   # OIDC identity for trusted publishing; no stored token
-      attestations: read  # read the provenance and build record the attest job signed
+      contents: read        # default-branch policy, history, setup-obaaf sources
+      actions: read         # approvals API for this run
+      attestations: read    # Sigstore attestations for verify
+      id-token: write       # OIDC identity for trusted publishing; no stored token
     steps:
+      - name: Check out the protected default branch with history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Set up OBAAF from the default branch (FR11)
+        # Reviewed tools verify the candidate. Never install dist/obaaf-*.whl here.
+        uses: ./actions/setup-obaaf
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: obaaf-dist, path: dist }
-      - name: Verify provenance and build-record signatures before uploading (G7.1)
-        # Uploads nothing unless every file has SLSA provenance and an OBAAF build-record
-        # attestation signed by this workflow, for this ref, on a GitHub-hosted runner.
-        # This checks signature, subject, signer, and predicate type — not the predicate
-        # body. Full `obaaf verify release` remains a later dogfood step.
+      - name: Read who approved this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$RUNNER_TEMP/approvals.json"
+      - name: Verify the release before uploading (FR6)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          workflow="$GITHUB_REPOSITORY/.github/workflows/release-pypi.yml"
-          for file in dist/*; do
-            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$workflow" --source-ref "$GITHUB_REF" \
-              --deny-self-hosted-runners \
-              --predicate-type https://slsa.dev/provenance/v1
-            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$workflow" --source-ref "$GITHUB_REF" \
-              --deny-self-hosted-runners \
-              --predicate-type https://www.obaaf.com/attestation/build-record/v0.1
-          done
+          obaaf verify release --policy .github/obaaf-policy.yaml --artifacts dist \
+            --approvals "$RUNNER_TEMP/approvals.json" \
+            --actor "$GITHUB_ACTOR" --actor "$GITHUB_TRIGGERING_ACTOR" \
+            --repo-dir . --source-revision "$GITHUB_SHA"
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist

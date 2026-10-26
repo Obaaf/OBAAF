@@ -1,0 +1,39 @@
+# OBAAF release policy for this repository. Read by `obaaf verify release` in
+# release-pypi.yml from the protected default branch (not from the tag tree).
+# Whoever can edit this file decides what may ship; CODEOWNERS covers it.
+format: obaaf-policy/v0.1
+repository: Obaaf/OBAAF
+
+signing: sigstore
+
+provenance:
+  # Only this workflow, on these refs, may sign release provenance and build records.
+  signer_workflow: Obaaf/OBAAF/.github/workflows/release-pypi.yml
+  source_refs: ["refs/tags/v*"]
+  # Replaces --deny-self-hosted-runners on the former gh attestation verify loop.
+  runner_environments: ["github-hosted"]
+
+build_record:
+  allowed_tiers: [A, B]
+  # OBAAF vendors no binaries (vendored_binaries: none).
+  require_sdks: false
+
+release:
+  branch: main
+  environments: [pypi]
+  min_approvals: 1
+  approver_not_actor: true
+
+agents:
+  check: true
+  # Bootstrap: omit since so the first full-verify release scans reachable history.
+  # After that release succeeds, set since to that commit's full SHA in a reviewed change
+  # (D-025). Do not set since to v0.2.0: that tag only ran signature-type checks.
+  # since: "0123456789abcdef0123456789abcdef01234567"
+  records_dir: .obaaf/records
+  propose_workflow: Obaaf/OBAAF/.github/workflows/obaaf-agent-propose.yml
+  apply_workflow: Obaaf/OBAAF/.github/workflows/obaaf-agent-apply.yml
+  source_ref: refs/heads/main
+  effect_identities: ["obaaf-effect-lane"]
+  require_exact_diff: true
+  allow_self_hosted_runners: false

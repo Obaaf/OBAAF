@@ -18,12 +18,12 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 5. **Maturity framing in the output (medium). Shipped.** Findings that need the agent and effect lane architecture (OBAAF-GHA-003, GHA-004, GHA-005, GHA-021 and GHA-022) are flagged as such in the output and as `obaaf-remediation` in JSON and SARIF, pointing to the lane templates.
 6. **Predicate type URIs under the project's domain (D-007). Shipped.** The agent-run, approval and build-record types and the generic build type live under `https://www.obaaf.com/`, and each resolves to a page describing its format. Breaking for records signed with the 0.1 URIs.
 7. **Hash-pinned install (D-011). Shipped.** `setup-obaaf` and the PyPI release install every dependency by SHA-256 from a generated `requirements.txt`; CI checks it against PyPI and on Linux, macOS and Windows.
-8. **Signed provenance for OBAAF's own release. Shipped.** The PyPI release signs SLSA provenance in a separate job and uploads nothing until `gh attestation verify` passes for every file.
+8. **Signed provenance and full release verify for OBAAF's own release. Shipped.** The PyPI release signs SLSA provenance and an OBAAF build record in a separate attest job, then uploads nothing until `obaaf verify release` passes (policy body, approvals, agent history, github-hosted runners).
 
 ## Found while releasing OBAAF with its own controls
 
-- **Empty / no-vendored-binaries manifest. Shipped.** `vendored_binaries: none` produces a valid empty manifest; OBAAF's repository commits that declaration; the PyPI release signs a build record and verifies it with `gh attestation verify` alongside SLSA provenance.
-- **Full `obaaf verify release` on OBAAF itself. Still planned.** That needs a committed release policy (`require_sdks: false`, agent baseline, environment approvals wired to the publish job) without forcing a rewrite of `release-pypi.yml` into the template lane split. Track for a later 0.2.x or 0.3 cut.
+- **Empty / no-vendored-binaries manifest. Shipped.** `vendored_binaries: none` produces a valid empty manifest; OBAAF's repository commits that declaration; the PyPI release signs a build record.
+- **Full `obaaf verify release` on OBAAF itself. Shipped (dogfood).** `.github/obaaf-policy.yaml` and the publish job run `obaaf verify release` after the `pypi` environment approval, with tools and policy from the default branch. Residual: no `workflow_run` lane split and no pre-approval summary job; after the first green release, set `agents.since` to that commit (D-025).
 
 ## Data wanted
 
