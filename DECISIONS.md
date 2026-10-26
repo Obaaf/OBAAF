@@ -41,6 +41,9 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-031 | Code signing of game binaries is deferred | Proposed |
 | D-032 | Contributions after release: DCO sign-off and security acknowledgment time | Proposed |
 | D-033 | Empty binary manifest for projects that vendor no binaries | Accepted, 2026-10-26 |
+| D-034 | Jenkinsfiles are read by a syntax-only parser in Python | Proposed |
+| D-035 | The Jenkins adapter sits beside the workflow checker | Proposed |
+| D-036 | Jenkins results are advisory, and unknowns are coverage, not findings | Proposed |
 
 ---
 
@@ -176,15 +179,15 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 
 **Decision.** After public release, contributions need a Developer Certificate of Origin sign-off (`git commit -s`), and security reports get an acknowledgment within five working days (SECURITY.md). **Reason.** The DCO is a light-weight, common way to record the right to contribute; five working days is achievable for one maintainer. **Status.** Proposed.
 
-### D-033 Jenkinsfiles are read by a syntax-only parser in Python
+### D-034 Jenkinsfiles are read by a syntax-only parser in Python
 
 **Decision.** `obaaf check` reads Jenkinsfiles with its own Groovy tokenizer and parser, written in Python, instead of the pinned JVM syntax helper the Jenkins integration design proposed. It never compiles, loads classes or evaluates expressions, and stops at 1 MiB, 400,000 tokens, 64 levels of nesting or 10 seconds per file. **Reason.** The design's requirement is that analysis runs no Groovy and has bounded failure; a JVM helper meets it only with a separately packaged runtime, image digest and dependency review, while the Python parser ships inside the existing package and has no dependencies. It is a structural reader for the constructs Jenkins pipelines use, not a full Groovy grammar: statements it cannot read are recorded as not analyzed and make the file's coverage unknown. The Declarative linter of a disposable controller remains the right compatibility oracle for the fixtures. **Consequence.** Groovy syntax the parser does not know lowers coverage instead of crashing; the parser was run over 512 public pipeline files with no file-level failure. **Status.** Proposed.
 
-### D-034 The Jenkins adapter sits beside the workflow checker
+### D-035 The Jenkins adapter sits beside the workflow checker
 
 **Decision.** The Jenkins rules live in `src/obaaf/checker/jenkins/` and share the catalog, findings, ignores, reports and CLI with the workflow checker, without first extracting platform-neutral contracts under `src/obaaf/ci/`. **Reason.** Extracting contracts first would touch every workflow rule before any Jenkins rule exists, and the design itself requires that GitHub Actions behavior be preserved; adding beside it leaves the 26 workflow and repository rules and their tests unchanged. **Consequence.** The contracts (CiContext, PipelineModel and the rest) are extracted when the evidence and admission phases need a shared model. **Status.** Proposed.
 
-### D-035 Jenkins results are advisory, and unknowns are coverage, not findings
+### D-036 Jenkins results are advisory, and unknowns are coverage, not findings
 
 **Decision.** The OBAAF-JEN rules report what a Jenkinsfile shows. What only the controller can show (authorization, build authorization, agent placement, library trust and version overrides, Replay, credential scopes, network policy), and code the file does not contain (shared-library steps, `load`, generated parallel branches), is reported as a coverage unknown per rule, never as a pass. Unknowns do not change the exit status in advisory mode; the report says that exit 0 is not a conformance decision. Generic file transfer (`scp`, `rsync`, `sshPublisher`, `ftpPublisher`) is not treated as publishing. **Reason.** The design requires that missing evidence never appear as an empty finding list, and that enforcement come only with authenticated controller evidence. Counting generic transfer as publishing produced high findings on pipelines that only copy test reports. **Consequence.** A clean Jenkins report means nothing was found in the file. Enforcement, controller inventory and signed Jenkins run evidence are later phases. **Status.** Proposed.
 

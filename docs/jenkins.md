@@ -205,7 +205,7 @@ triggers, and a quadratic step); each is fixed and has a regression test.
 
 ## What is not built yet
 
-The Jenkins integration is staged (D-033 to D-035 in [DECISIONS.md](../DECISIONS.md)). This release
+The Jenkins integration is staged (D-034 to D-036 in [DECISIONS.md](../DECISIONS.md)). This release
 is the advisory auditor. Not yet built:
 
 - controller inventory (an exported, signed snapshot of security, agent, library and job settings)
