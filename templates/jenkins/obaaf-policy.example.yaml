@@ -1,0 +1,35 @@
+# OBAAF release policy for Jenkins, read by `obaaf verify release` in obaaf-release-publish.Jenkinsfile.
+# Copy to .obaaf/policy.yaml on your default branch, with the signing key's public key at
+# .obaaf/keys/release.pub.pem, and replace OWNER/REPO. Protect both with code owners: whoever can edit
+# them decides what may ship. The publish job reads them from the default branch.
+format: obaaf-policy/v0.1
+repository: OWNER/REPO
+
+# Jenkins has no identity that the public Sigstore service accepts for a job, so records are DSSE
+# envelopes signed with a key held in a key service (AWS KMS, Google Cloud KMS, Azure Key Vault) or a
+# hardware module. Paths are relative to this file.
+signing: keys
+keys:
+  provenance: [keys/release.pub.pem]
+  build_record: [keys/release.pub.pem]
+
+build_record:
+  # The tier comes from the publish job's --tier: it is declared, not observed (docs/jenkins.md).
+  allowed_tiers: [A, B]      # use [A] to require a fresh pod or machine for every release build
+  require_sdks: true
+
+release:
+  # The released commit must be on this protected branch.
+  branch: main
+  # Distinct people who approved the publish build's input steps, none of whom started the publish
+  # build or the build that produced the artifacts. Jenkins does not record who created a tag:
+  # keep tag creators out of the input step's submitter group.
+  min_approvals: 1           # Tier 4 (item 4.3): 2, with two input steps or two approvers
+  approver_not_actor: true
+
+agents:
+  # Agent-authored commits are checked on every release. The Jenkins agent lane is not built yet,
+  # so OBAAF agent records come from the GitHub Actions lane, if you use it.
+  check: true
+  records_dir: .obaaf/records
+  effect_identities: ["obaaf-effect-lane"]

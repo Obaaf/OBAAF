@@ -119,7 +119,7 @@ def sign_envelope(statement: dict, private_key: Any, key_id: str = "") -> dict:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
-    payload = json.dumps(statement, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload = canonical_payload(statement)
     message = pae(IN_TOTO_PAYLOAD_TYPE, payload)
     if isinstance(private_key, ed25519.Ed25519PrivateKey):
         signature = private_key.sign(message)
@@ -133,3 +133,62 @@ def sign_envelope(statement: dict, private_key: Any, key_id: str = "") -> dict:
         "payload": base64.b64encode(payload).decode("ascii"),
         "signatures": [{"keyid": key_id, "sig": base64.b64encode(signature).decode("ascii")}],
     }
+
+
+# ------------------------------------------------------------- signing through a key service
+# A pipeline signs with a key it cannot read: a cloud key service or a hardware module signs
+# the bytes, and OBAAF builds the envelope around the signature. `prepare` writes what to sign;
+# `assemble` checks the returned signature against the public key before writing the envelope,
+# so a wrong key or a corrupted signature fails in the pipeline, not at release time.
+
+def canonical_payload(statement: dict) -> bytes:
+    """The exact payload bytes OBAAF signs for a statement (also used by sign_envelope)."""
+    return json.dumps(statement, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def to_sign(statement: dict) -> bytes:
+    """The DSSE pre-authentication encoding: the bytes a key service signs."""
+    return pae(IN_TOTO_PAYLOAD_TYPE, canonical_payload(statement))
+
+
+def _decode_signature_file(data: bytes) -> bytes:
+    """Signatures arrive as raw bytes, or as base64 text (`aws kms sign --output text`)."""
+    text = data.strip()
+    if text and all(c in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=-_\r\n" for c in text):
+        try:
+            return _b64decode(text.decode("ascii"))
+        except SignatureError:
+            pass
+    return data
+
+
+def _ecdsa_der(signature: bytes, key: Any) -> bytes:
+    """Accept an ECDSA signature as DER or as raw r||s (IEEE P1363, which some key services return)."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        return signature
+    size = (key.curve.key_size + 7) // 8
+    if len(signature) == 2 * size and signature[:1] != b"\x30":
+        r = int.from_bytes(signature[:size], "big")
+        s = int.from_bytes(signature[size:], "big")
+        return encode_dss_signature(r, s)
+    return signature
+
+
+def assemble(statement: dict, signature: bytes, public_key: PublicKey) -> dict:
+    """A DSSE envelope for `statement` with a signature made elsewhere; raises SignatureError unless
+    the signature verifies with `public_key`."""
+    payload = canonical_payload(statement)
+    message = pae(IN_TOTO_PAYLOAD_TYPE, payload)
+    raw = _decode_signature_file(signature)
+    for candidate in (raw, _ecdsa_der(raw, public_key.key)):
+        if public_key.verify(candidate, message):
+            return {
+                "payloadType": IN_TOTO_PAYLOAD_TYPE,
+                "payload": base64.b64encode(payload).decode("ascii"),
+                "signatures": [{"keyid": public_key.key_id, "sig": base64.b64encode(candidate).decode("ascii")}],
+            }
+    raise SignatureError(f"the signature does not verify with {public_key.source}: wrong key, wrong algorithm, "
+                         "or a statement that changed after it was prepared")

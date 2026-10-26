@@ -1,9 +1,16 @@
 # Jenkins
 
-`obaaf check` reads Jenkinsfiles as well as GitHub Actions workflows. For Jenkins it is an
-**advisory auditor**: it reports what a Jenkinsfile shows, and it says plainly what a Jenkinsfile
-cannot show. It does not enforce anything, sign anything, or talk to a Jenkins controller. Those
-come later (see [What is not built yet](#what-is-not-built-yet)).
+OBAAF runs on Jenkins in two parts:
+
+- `obaaf check` reads Jenkinsfiles as well as GitHub Actions workflows. For Jenkins it is an
+  **advisory auditor**: it reports what a Jenkinsfile shows, and it says plainly what a Jenkinsfile
+  cannot show.
+- The **release lane** ([below](#the-release-lane-on-jenkins)) builds from a protected tag, signs
+  SLSA provenance and the OBAAF build record with a key held in a key service, and blocks the
+  upload unless `obaaf verify release` passes and a named person approves.
+
+The agent and effect lanes, controller inventory and enforcement are not built for Jenkins yet
+(see [What is not built yet](#what-is-not-built-yet)).
 
 ```sh
 obaaf check .                        # workflows and Jenkinsfiles in the repository
@@ -203,15 +210,98 @@ credential scopes and post blocks, checks that cannot stop a publish, taint thro
 filtered `changeRequest` conditions, more credential wrappers, computed pod specs, map-form
 triggers, and a quadratic step); each is fixed and has a regression test.
 
+## The release lane on Jenkins
+
+The same rule as on GitHub Actions: no provenance, no upload. Two templates in
+[`templates/jenkins/`](../templates/jenkins/README.md) split the work so that signing and upload
+credentials never reach code a branch or pull request can change:
+
+| Job | Where it runs | What it does | Credentials |
+| --- | --- | --- | --- |
+| `obaaf-release-build.Jenkinsfile` | your multibranch project, for tags only | builds the release, keeps `dist/`, starts the publish job | none |
+| `obaaf-release-publish.Jenkinsfile` | its own Pipeline job, read from the protected default branch | resolves the tag through your SCM, copies exactly that build's artifacts, writes and signs the records, verifies, waits for approval, verifies again with the approvals, uploads | signing, controller read, upload |
+
+The split matters on Jenkins in a way it does not on GitHub Actions: credentials scoped to a
+multibranch project reach every branch and pull request it builds, and a pipeline runs whatever
+Jenkinsfile its branch carries. So the build job holds nothing, and everything that can sign or
+publish lives in a job whose definition comes only from the default branch.
+
+### Signing with a key service
+
+Jenkins has no identity for a job that the public Sigstore service accepts, so the publish job signs
+DSSE envelopes with a key in a key service, and the policy sets `signing: keys` (the verifier has
+supported that mode since 0.1; this is its first template). Two commands wrap the key service, so
+the private key never leaves it and no OBAAF code needs cloud libraries:
+
+```sh
+obaaf attest build-record ... --statement-out build-record.statement.json
+obaaf dsse prepare --statement build-record.statement.json --out build-record.to-sign --digest-out build-record.digest
+aws kms sign --key-id alias/obaaf-release --message fileb://build-record.digest --message-type DIGEST \
+  --signing-algorithm ECDSA_SHA_256 --query Signature --output text > build-record.sig
+obaaf dsse assemble --statement build-record.statement.json --signature build-record.sig \
+  --public-key .obaaf/keys/release.pub.pem --out build-record.dsse.json
+```
+
+`prepare` writes the exact bytes DSSE signs (and their digest, for services that sign a digest).
+`assemble` takes the signature as raw bytes or base64, DER or raw r||s, checks it against the public
+key, and only then writes the envelope, so a wrong key or a changed statement fails in the build,
+not at release time. Google Cloud KMS (`gcloud kms asymmetric-sign --input-file ... --digest-algorithm
+sha256`) and Azure Key Vault (`az keyvault key sign`, which returns r||s) work the same way. Use an
+ECDSA P-256 key (P-384 with `--digest sha384`), or RSA.
+
+To set it up: create the key (in AWS, key spec `ECC_NIST_P256`, usage `SIGN_VERIFY`), export its public
+key to `.obaaf/keys/release.pub.pem` on the default branch (`aws kms get-public-key ... --output text |
+base64 -d | openssl pkey -pubin -inform DER -outform PEM`), give the publish job a credential that can
+call only `kms:Sign` on that key, and copy
+[`obaaf-policy.example.yaml`](../templates/jenkins/obaaf-policy.example.yaml) to `.obaaf/policy.yaml`.
+
+### Approvals Jenkins records
+
+The publish job's `input` step names a submitter group. When someone approves it, the Pipeline:
+Input Step plugin records an `ApproverAction` with their user ID on the build, and every build
+records why it started (`CauseAction`). The publish job reads both builds' JSON from the controller
+(`BUILD_URL/api/json`) with a read-only API token and passes them to `obaaf verify release
+--approvals publish-run.json --release-run release-run.json`. The verifier then:
+
+- counts distinct approvers, and does not count anyone who started either build;
+- blocks a build that is a Replay (which can run an edited Jenkinsfile) or was restarted from a
+  stage (which skips the stages before it);
+- checks, as on GitHub, the signatures, the artifact digests, the build record, the release
+  commit's place on the protected branch, and agent records.
+
+### What this does not prove
+
+Be precise about what the Jenkins release lane rests on, because some of it is controller
+configuration the files cannot show:
+
+- **The publish job's definition.** The checks hold only while the publish job runs this file from
+  the default branch. Do not grant Run/Replay or Configure on it to people who can push branches; the
+  verifier blocks a Replay it can see, but a replayed script could also edit that check.
+- **Who holds the signing credential.** Keep it in a folder that contains only the publish job,
+  and run that job on agents that run nothing else. On EKS, an IAM role for the agent pod's service
+  account is better than a stored credential.
+- **Where the build ran.** The tier in the build record comes from the publish job's `--tier`: it
+  is declared, not observed. The artifacts are trusted as the output of the tag build that Jenkins
+  names; the commit is resolved through your SCM's protected tag, not taken from that build.
+- **Who created the tag.** Jenkins does not record it, so keep tag creators out of the approver group.
+- **Run identity.** Fields such as `BUILD_URL` in the records come from the build's own environment
+  and say so (`"reportedBy": "build process environment (self-reported)"`); they locate a build, they
+  do not authenticate it.
+
+These templates were checked with OBAAF's own Jenkins rules and the signing and verification path is
+tested end to end with a simulated key service; they have not yet run on a live controller.
+
 ## What is not built yet
 
-The Jenkins integration is staged (D-034 to D-036 in [DECISIONS.md](../DECISIONS.md)). This release
-is the advisory auditor. Not yet built:
+The Jenkins integration is staged (D-034 to D-037 in [DECISIONS.md](../DECISIONS.md)). Built: the
+advisory auditor and the release lane. Not yet built:
 
+- the agent and effect lanes: a snapshot of Jenkins triggers, agent-run records whose authority
+  comes from the Jenkinsfile model and controller facts, approval records for agent changes, and the
+  AI workload as a separate Kubernetes Job behind the inference proxy;
 - controller inventory (an exported, signed snapshot of security, agent, library and job settings)
   that would turn many unknowns into passes or findings;
 - shared-library analysis at a verified revision;
-- enforcement: admission checks before agent, effect and release jobs, signed Jenkins run
-  evidence, and Jenkins job templates for the agent and effect lanes.
+- signed Jenkins run evidence from the controller, so run identity stops being self-reported.
 
 Until then, treat a clean Jenkins report as "nothing found in the file", not as assurance.

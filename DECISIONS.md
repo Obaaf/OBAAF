@@ -44,6 +44,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-034 | Jenkinsfiles are read by a syntax-only parser in Python | Proposed |
 | D-035 | The Jenkins adapter sits beside the workflow checker | Proposed |
 | D-036 | Jenkins results are advisory, and unknowns are coverage, not findings | Proposed |
+| D-037 | The Jenkins release lane signs with a key service and reads approvals from the controller | Proposed |
 
 ---
 
@@ -190,6 +191,10 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 ### D-036 Jenkins results are advisory, and unknowns are coverage, not findings
 
 **Decision.** The OBAAF-JEN rules report what a Jenkinsfile shows. What only the controller can show (authorization, build authorization, agent placement, library trust and version overrides, Replay, credential scopes, network policy), and code the file does not contain (shared-library steps, `load`, generated parallel branches), is reported as a coverage unknown per rule, never as a pass. Unknowns do not change the exit status in advisory mode; the report says that exit 0 is not a conformance decision. Generic file transfer (`scp`, `rsync`, `sshPublisher`, `ftpPublisher`) is not treated as publishing. **Reason.** The design requires that missing evidence never appear as an empty finding list, and that enforcement come only with authenticated controller evidence. Counting generic transfer as publishing produced high findings on pipelines that only copy test reports. **Consequence.** A clean Jenkins report means nothing was found in the file. Enforcement, controller inventory and signed Jenkins run evidence are later phases. **Status.** Proposed.
+
+### D-037 The Jenkins release lane signs with a key service and reads approvals from the controller
+
+**Decision.** On Jenkins, the release lane is two jobs: a build job in the repository's multibranch project that builds tags with no credentials, and a publish job, read only from the default branch, that resolves the tag through the SCM, copies exactly that build's artifacts, signs SLSA provenance and the build record as DSSE envelopes through a key service (`obaaf dsse prepare` and `assemble`), and runs `obaaf verify release` before and after a named approver. The verifier reads Jenkins approvals from the publishing build's JSON (`ApproverAction`, `CauseAction`), does not count whoever started either build, and blocks Replays and stage restarts. Run identity in Jenkins records comes from the build's environment and is marked self-reported. **Reason.** Jenkins has no per-job identity the public Sigstore service accepts; credentials scoped to a multibranch project reach every branch and pull request; and the controller, not the pipeline, is where approvals are recorded. **Consequence.** The lane's guarantees depend on controller settings OBAAF cannot see yet (who may Replay or configure the publish job, credential scope, agent use); docs/jenkins.md lists them. Signed controller evidence comes with the inventory phase. **Status.** Proposed.
 
 ---
 

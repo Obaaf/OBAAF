@@ -80,8 +80,10 @@ def validate_predicate(predicate_type: str, predicate: dict) -> list[str]:
 
 
 def ci_run() -> dict:
-    """Facts about the current GitHub Actions run, from the runner's environment."""
+    """Facts about the current CI run, from the process environment (GitHub Actions or Jenkins)."""
     env = os.environ
+    if env.get("GITHUB_ACTIONS") != "true" and env.get("JENKINS_URL") and env.get("BUILD_URL"):
+        return jenkins_run(env)
     server = env.get("GITHUB_SERVER_URL", "https://github.com")
     repo = env.get("GITHUB_REPOSITORY", "")
     run_id = env.get("GITHUB_RUN_ID", "")
@@ -97,6 +99,32 @@ def ci_run() -> dict:
         "actor": env.get("GITHUB_ACTOR", ""),
         "triggeringActor": env.get("GITHUB_TRIGGERING_ACTOR", ""),
         "runnerEnvironment": env.get("RUNNER_ENVIRONMENT", ""),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def jenkins_run(env) -> dict:
+    """Facts about a Jenkins build, from the variables Jenkins sets for it.
+
+    The build's own process sets these values, so they are a locator, not proof of which
+    controller, job or build produced a record: a step in the build could change them. The
+    record says so in `reportedBy` (Jenkins design, section 9). The source revision and the
+    signing key, not these fields, are what the release verifier relies on.
+    """
+    out = {
+        "platform": "jenkins",
+        "controller": env.get("JENKINS_URL", ""),
+        "repository": env.get("GIT_URL", ""),
+        "job": env.get("JOB_NAME", ""),
+        "runId": env.get("BUILD_NUMBER", ""),
+        "url": env.get("BUILD_URL", ""),
+        "workflowRef": env.get("JOB_NAME", ""),
+        "branch": env.get("BRANCH_NAME", ""),
+        "tag": env.get("TAG_NAME", ""),
+        "changeId": env.get("CHANGE_ID", ""),
+        "node": env.get("NODE_NAME", ""),
+        "actor": env.get("BUILD_USER_ID", ""),
+        "reportedBy": "build process environment (self-reported)",
     }
     return {k: v for k, v in out.items() if v}
 

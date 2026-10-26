@@ -19,6 +19,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - Every Jenkinsfile gets a coverage result per rule (pass, fail, ignored, unknown, not applicable) in text and JSON output, with the reason for each unknown. Controller settings and shared-library code are reported as unknown, never as a pass, and the report states that exit 0 is not a conformance decision (D-036). See [docs/jenkins.md](docs/jenkins.md).
 - New configuration: `jenkins.files`, `jenkins.exclude` and `agents.steps`; lane overrides and ignore entries take a Jenkins stage as `file#stage` and `job: <stage>`. `--lanes` lists Jenkins stages.
 - OBAAF-REPO-001 also covers Jenkinsfiles, and is retitled "CI definition files have no code owner".
+- Release lane on Jenkins (D-037): `templates/jenkins/obaaf-release-build.Jenkinsfile` builds a protected tag with no credentials; `obaaf-release-publish.Jenkinsfile`, a separate job read from the default branch, signs SLSA provenance and the build record through a key service, verifies, waits for a named approver and verifies again before uploading. A `signing: keys` policy example is included.
+- `obaaf dsse prepare` and `obaaf dsse assemble` sign records with a key that stays in a key service: `prepare` writes the bytes (or digest) to sign, `assemble` accepts the service's signature (raw or base64, DER or r||s), checks it against the public key and writes the DSSE envelope.
+- `obaaf verify release` reads Jenkins approvals: `--approvals` takes the publishing build's JSON from the controller (approvers from the input step), `--release-run` the JSON of the build that produced the artifacts. Whoever started either build cannot approve, and Replays and stage restarts are blocked.
+- Records written in a Jenkins build name it in `run` (controller, job, build URL), marked as self-reported, and the build record says its source came from the Jenkins release job.
 - Agent CLI patterns accept options before the prompt flag or subcommand (`claude --model x -p ...`, `codex -m o3 exec`). This also applies to workflows, where such jobs were previously left out of the agent lane.
 
 ### Checker
