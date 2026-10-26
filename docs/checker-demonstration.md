@@ -3,6 +3,15 @@
 This is a limited demonstration on `Ofonna-N/netflix-clone-2`, not an independent
 studio pilot or a validation of the complete OBAAF framework.
 
+## Version note
+
+The audit ran OBAAF 0.1 (the commit named below), which rated the unpinned action
+OBAAF-GHA-008 at medium, so the medium gate blocked it. From 0.2, an unpinned action in an
+ordinary job with explicitly read-only permissions, no secrets and no privileged outside
+trigger is rated low and does not fail a medium gate; release, agent and effect jobs stay
+high. This workflow's job is read-only with no secrets, so 0.2 would report the same
+finding at low severity. Use `--fail-on low` to keep blocking it.
+
 ## What was tested
 
 The application workflow installs dependencies, checks TypeScript, and builds

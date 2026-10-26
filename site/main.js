@@ -12,7 +12,7 @@ const revisions = {
     "executionLabel": "Application type check + build",
     "execution": "PASS",
     "gateLabel": "Merge gate",
-    "caption": "Pinning selects exact code; it does not prove that code is safe. Both build-demo reports include one documented exception for the trusted auditor's private-access key, expiring January 9, 2027. This was not a full framework or studio validation."
+    "caption": "Pinning selects exact code; it does not prove that code is safe. Both build-demo reports include one documented exception for the trusted auditor's private-access key, expiring January 9, 2027. Audited with OBAAF 0.1, which rated this unpinned action medium. From 0.2, an unpinned action in a read-only job with no secrets and no privileged trigger is rated low and does not fail a medium gate; release, agent and effect jobs stay high. This was not a full framework or studio validation."
   },
   "fix": {
     "label": "AN EXACT CODE REVISION",
@@ -26,7 +26,7 @@ const revisions = {
     "executionLabel": "Application type check + build",
     "execution": "PASS",
     "gateLabel": "Merge gate",
-    "caption": "Pinning selects exact code; it does not prove that code is safe. Both build-demo reports include one documented exception for the trusted auditor's private-access key, expiring January 9, 2027. This was not a full framework or studio validation."
+    "caption": "Pinning selects exact code; it does not prove that code is safe. Both build-demo reports include one documented exception for the trusted auditor's private-access key, expiring January 9, 2027. Audited with OBAAF 0.1, which rated this unpinned action medium. From 0.2, an unpinned action in a read-only job with no secrets and no privileged trigger is rated low and does not fail a medium gate; release, agent and effect jobs stay high. This was not a full framework or studio validation."
   },
   "agentRisk": {
     "label": "OVER-SCOPED AGENT AUTHORITY",
