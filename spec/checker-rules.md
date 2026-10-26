@@ -4,7 +4,9 @@
 
 *Generated for OBAAF 0.2, in active adoption with pilot teams. The content may change in OBAAF 0.3 based on pilot feedback; open design decisions are tracked in [DECISIONS.md](../DECISIONS.md).*
 
-`obaaf check` reads GitHub Actions workflow files, CODEOWNERS and agent instruction files, and reports settings that open a documented attack path. Each finding names the profile requirement and agent control it threatens, and the fix. It runs locally and sends nothing over the network.
+`obaaf check` reads GitHub Actions workflow files, Jenkinsfiles, CODEOWNERS and agent instruction files, and reports settings that open a documented attack path. Each finding names the profile requirement and agent control it threatens, and the fix. It runs locally and sends nothing over the network.
+
+The OBAAF-JEN rules are advisory: they read a Jenkinsfile without running it, and report what only the controller can show (authorization, build authorization, agents, library trust, Replay, network policy) as coverage unknowns rather than passes. See [Jenkins](../docs/jenkins.md).
 
 Each rule is either an **authority** finding (who or what can change, build, release or sign, and the controls that bound an agent's authority) or a **hygiene** finding (pinning and hardening). The checker summary and the SARIF output report the two separately, so authority findings are not buried under hygiene ones. Declaring agent entry points, lane overrides and expiring ignores is described in [checker configuration](../docs/checker-configuration.md).
 
@@ -33,7 +35,22 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-021](#obaaf-gha-021) | high | authority | Agent output applied without verifying its record | G8.3, R4, R8 |
 | [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
-| [OBAAF-REPO-001](#obaaf-repo-001) | medium | authority | Workflow files have no code owner | G1.1, G1.2, G8.2, R5 |
+| [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
+| [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
+| [OBAAF-JEN-003](#obaaf-jen-003) | high | authority | AI agent stage can push, start jobs or publish | G8.1, R2, R4 |
+| [OBAAF-JEN-004](#obaaf-jen-004) | high | authority | Pipeline code from an unapproved revision | G1.2, G3.1, G8.2, R5 |
+| [OBAAF-JEN-005](#obaaf-jen-005) | medium | authority | Release without an approval by a named person | G6.2, R4 |
+| [OBAAF-JEN-006](#obaaf-jen-006) | high | authority | Build container or pod can reach the host | G3.2, R7 |
+| [OBAAF-JEN-007](#obaaf-jen-007) | low | hygiene | AI agent stage without an egress restriction | G3.3, G8.1, R7 |
+| [OBAAF-JEN-008](#obaaf-jen-008) | medium | hygiene | Image, library or agent CLI not pinned | G2.1, R6 |
+| [OBAAF-JEN-009](#obaaf-jen-009) | high | authority | Untrusted text interpolated into a command | G3.1, G8.1, R1 |
+| [OBAAF-JEN-010](#obaaf-jen-010) | high | authority | Artifact from another build used by a moving reference | G4.2, G7.2 |
+| [OBAAF-JEN-011](#obaaf-jen-011) | high | authority | Publishing can run after a failed or skipped check | G7.2 |
+| [OBAAF-JEN-012](#obaaf-jen-012) | high | authority | Publish without a provenance check | G5.2, G7.2, R8 |
+| [OBAAF-JEN-013](#obaaf-jen-013) | medium | authority | Secret interpolated into a command | G3.4 |
+| [OBAAF-JEN-014](#obaaf-jen-014) | high | authority | Signing key available to build steps | G3.4, G5.1 |
+| [OBAAF-JEN-015](#obaaf-jen-015) | high | authority | Webhook trigger token written in the Jenkinsfile | G3.1, G9.1 |
+| [OBAAF-REPO-001](#obaaf-repo-001) | medium | authority | CI definition files have no code owner | G1.1, G1.2, G8.2, R5 |
 | [OBAAF-REPO-002](#obaaf-repo-002) | medium | authority | Agent instruction files have no code owner | G8.2, R5 |
 | [OBAAF-INS-001](#obaaf-ins-001) | high | authority | Hidden characters in an agent instruction file | G8.2, R5 |
 
@@ -231,13 +248,135 @@ The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all
 
 **Fix.** Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or replace the placeholders by hand.
 
+## OBAAF-JEN-001
+
+**Credentials available to change-request code or an AI agent** (high). Requirements: G3.4, G8.1, G9.1, R2, R3. Supports: FR3, FR7.
+
+A credential binding (withCredentials, an environment credentials() entry, sshagent, or a wrapper step that takes a credentialsId) surrounds build steps that a change request can reach, or an AI agent. The steps run the change's own code, so its author can read the credential even when Jenkins takes the Jenkinsfile from a trusted branch; an agent can be told to disclose it. Stages that run only for change requests and agent stages are high; stages that nothing in the Jenkinsfile keeps away from change requests are medium, because whether the job builds pull requests is job configuration. Conditions the checker cannot evaluate are reported as unknown.
+
+**Fix.** Bind credentials only in stages that change requests cannot reach (for example `when { branch 'main' }` or `when { not { changeRequest() } }`, and better in a separate job that builds only protected branches), and never around an agent. Keep the model credential in an inference proxy outside the agent's workload.
+
+## OBAAF-JEN-002
+
+**Build steps on the controller or on agents shared with privileged work** (high). Requirements: G3.1, G3.2, R7. Supports: FR3, FR4.
+
+A stage runs on the built-in node (label `built-in` or `master`), where build code can read $JENKINS_HOME and the keys that decrypt every stored credential; or one persistent agent label serves both work that change requests reach and a stage that holds credentials or publishes, so code from a change request can tamper with the later privileged build. Steps on the controller that change requests or an agent can steer are high; others are medium. `agent any` and computed labels are reported as unknown, because which agents exist is controller configuration.
+
+**Fix.** Set the built-in node's executors to 0 and run builds on agents. Give change-request and agent work ephemeral agents (a Kubernetes pod or a fresh container per build) and keep persistent agents with privileged labels for protected-branch and release work only.
+
+## OBAAF-JEN-003
+
+**AI agent stage can push, start jobs or publish** (high). Requirements: G8.1, R2, R4. Supports: FR8.
+
+A stage that runs an AI agent also pushes to the repository, starts another job with the build step, or publishes, in the same workspace. What the agent wrote or was told then reaches the effect without review. Builds started with the build step run as SYSTEM unless build authorization is configured, so job permissions shown to people do not limit them.
+
+**Fix.** Keep the agent stage inert: let it write a proposal (a patch or bundle) as an artifact, and apply it in a separate job that verifies the agent-run record and the proposal (`obaaf verify agent-run`, `obaaf proposal check`) behind an input step with a named submitter.
+
+**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. See the [lane templates](../templates/github-actions/README.md).
+
+## OBAAF-JEN-004
+
+**Pipeline code from an unapproved revision** (high). Requirements: G1.2, G3.1, G8.2, R5. Supports: FR9.
+
+The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shared library at a version taken from a branch name, parameter or other run-time value (a trusted global library runs outside the Groovy sandbox), or Groovy loaded from the workspace with `load` or evaluated from a file in a stage that change requests reach. For a change request the workspace holds the change's own files. Library trust, version overrides and Replay permission are controller configuration and are reported as unknown.
+
+**Fix.** Pin libraries to a reviewed commit (`@Library('lib@<40-character SHA>')`) and disallow version overrides for privileged jobs. Read pipeline code with `readTrusted` and `evaluate`, or move it into a pinned library, instead of `load` from the workspace. Restrict Run/Replay on jobs that hold credentials.
+
+## OBAAF-JEN-005
+
+**Release without an approval by a named person** (medium). Requirements: G6.2, R4. Supports: FR6.
+
+An input step sets no submitter, so any user with Build permission on the job can approve it, including the person who started the build; or the pipeline publishes with no input step before the publish. Whether approvers are independent of the requester, and whether an approval is bound to the exact artifacts, is reported as unknown.
+
+**Fix.** Put an input step with `submitter` set to a release group before the publish, keep the requester out of that group, and bind the approval to artifact digests (for example with `obaaf verify release`).
+
+## OBAAF-JEN-006
+
+**Build container or pod can reach the host** (high). Requirements: G3.2, R7. Supports: FR4, FR7.
+
+A docker or Kubernetes agent runs privileged, mounts the Docker socket or host paths, shares the host's network, PID or IPC namespace, or adds powerful capabilities. Code in the container can then take over the host and every build on it. Agents that run change-request code or an AI agent are high; others are medium. Pod templates defined on the controller (inheritFrom) and pod files outside the checkout are reported as unknown.
+
+**Fix.** Remove the privileged settings. Build images with a rootless builder (for example BuildKit rootless or Kaniko) instead of the host's Docker socket, and run untrusted and agent work in pods without host mounts, host namespaces or extra capabilities, enforced by an admission policy.
+
+## OBAAF-JEN-007
+
+**AI agent stage without an egress restriction** (low). Requirements: G3.3, G8.1, R7. Supports: FR7.
+
+Nothing in the Jenkinsfile limits the network access of a stage that runs an AI agent, and Jenkins has no egress control of its own. A policy declared in `OBAAF_EGRESS` is reported too, so a declaration is not mistaken for enforcement.
+
+**Fix.** Run the agent in a Kubernetes pod in a namespace whose NetworkPolicy allows only the inference proxy, with no route to the controller, cloud metadata or the cluster API. When the network enforces it outside the Jenkinsfile, record that with an expiring ignore entry.
+
+## OBAAF-JEN-008
+
+**Image, library or agent CLI not pinned** (medium). Requirements: G2.1, R6. Supports: FR10, FR12.
+
+A container image is referenced by a tag instead of a sha256 digest, a shared library is loaded at its default version or at a branch or tag, or an agent CLI is installed without a fixed version. Whoever controls the tag, branch or registry entry then chooses the code that runs. References used by agent or publishing stages are high; stages with credentials are medium; others are low.
+
+**Fix.** Pin images to `@sha256:` digests, libraries to a full commit SHA, and agent CLIs to an exact version (for example `npm install -g @anthropic-ai/claude-code@1.2.3`), and update the pins through reviewed changes.
+
+## OBAAF-JEN-009
+
+**Untrusted text interpolated into a command** (high). Requirements: G3.1, G8.1, R1. Supports: FR3.
+
+A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or concatenation of text that others control: a change request's title, source branch or author name (high), build parameters (medium), or branch and tag names (low), directly or through a variable assigned from them, or commit text read with git log. The value becomes part of the command before the shell runs. Parameters passed to other jobs from such values are reported at medium.
+
+**Fix.** Use single-quoted Groovy strings and let the shell expand the value: `sh 'echo "$CHANGE_TITLE"'`, with the value in the environment (it already is for CHANGE_* and parameters, or set it with withEnv).
+
+## OBAAF-JEN-010
+
+**Artifact from another build used by a moving reference** (high). Requirements: G4.2, G7.2. Supports: FR6.
+
+A pipeline that publishes copies artifacts from another job by a selector that moves (the default last successful build, last completed, latest saved, a permalink or a workspace) and does not check their digests before publishing, so a different build's output can be published. High when the same stage publishes.
+
+**Fix.** Copy from a specific build number recorded with the approval, and check the artifacts' sha256 digests against the signed build record (`obaaf verify release`) before publishing.
+
+## OBAAF-JEN-011
+
+**Publishing can run after a failed or skipped check** (high). Requirements: G7.2. Supports: FR6.
+
+A publish step sits in a post condition that runs after failure (always, failure, unstable, unsuccessful, changed, regression, aborted, cleanup) or in a Scripted catch or finally block, or a check before the publish ignores its own failure (catchError, warnError, returnStatus, `|| ...`). The publish can then run after verification failed or was skipped.
+
+**Fix.** Publish only in steps that run after every check succeeded (in a later stage, or in post { success }), and let a failed check stop the build.
+
+## OBAAF-JEN-012
+
+**Publish without a provenance check** (high). Requirements: G5.2, G7.2, R8. Supports: FR6.
+
+The pipeline publishes without first verifying provenance, approvals and agent-run records in an earlier step whose failure stops the build. A provenance-only check such as `cosign verify-attestation` is reported at medium.
+
+**Fix.** Run `obaaf verify release` in a step before the publish, without catchError, warnError, returnStatus or `|| true`, so a failure stops the build.
+
+## OBAAF-JEN-013
+
+**Secret interpolated into a command** (medium). Requirements: G3.4. Supports: FR7.
+
+A sh, bat or powershell step puts a bound secret into its script with Groovy interpolation. The secret then appears in the command line, where other processes on the agent can read it, and escaping it breaks easily. The Jenkins documentation warns against this.
+
+**Fix.** Reference the secret as a shell variable inside a single-quoted Groovy string, for example `sh 'curl -u "$USER:$TOKEN" ...'`.
+
+## OBAAF-JEN-014
+
+**Signing key available to build steps** (high). Requirements: G3.4, G5.1. Supports: FR11.
+
+A credential binding whose ID or variable names signing material (a code-signing certificate, keystore or private key), or a command that imports a key, makes the key readable by every step in its scope. High when the stage also publishes.
+
+**Fix.** Sign through a key service or HSM-backed signing service called by a dedicated signing stage or job, so no build step can read the private key.
+
+## OBAAF-JEN-015
+
+**Webhook trigger token written in the Jenkinsfile** (high). Requirements: G3.1, G9.1. Supports: FR3, FR4.
+
+A webhook trigger (for example GenericTrigger) has its token written in the Jenkinsfile. The token alone authorizes a request, so anyone who can read the repository can start the job and choose every value the trigger reads from the request, and the Generic Webhook Trigger plugin runs token-started builds as SYSTEM. High when the pipeline holds credentials, publishes or runs an AI agent.
+
+**Fix.** Take the token from a Jenkins credential (`tokenCredentialId`), rotate the exposed one, and verify the sender with the plugin's HMAC whitelist so forged payloads are rejected.
+
 ## OBAAF-REPO-001
 
-**Workflow files have no code owner** (medium). Requirements: G1.1, G1.2, G8.2, R5. Supports: FR9.
+**CI definition files have no code owner** (medium). Requirements: G1.1, G1.2, G8.2, R5. Supports: FR9.
 
-No CODEOWNERS rule covers the workflow files, so a change to how the project builds, releases or runs agents does not need an owner's review.
+No CODEOWNERS rule covers the workflow files or Jenkinsfiles, so a change to how the project builds, releases or runs agents does not need an owner's review.
 
-**Fix.** Add a CODEOWNERS rule for `/.github/workflows/` and require code-owner review on protected branches (see templates/github-actions/CODEOWNERS.example).
+**Fix.** Add CODEOWNERS rules for `/.github/workflows/` and every Jenkinsfile, and require code-owner review on protected branches (see templates/github-actions/CODEOWNERS.example).
 
 ## OBAAF-REPO-002
 
@@ -257,9 +396,9 @@ An agent instruction or configuration file contains invisible or direction-chang
 
 ## Test set
 
-Each workflow below models a documented attack pattern. The checker must report every expected rule for it (FR12); `tests/test_fr12_checker.py` enforces this.
+Each workflow or Jenkins pipeline below models a documented attack pattern. The checker must report every expected rule for it (FR12); `tests/test_fr12_checker.py` and `tests/test_jenkins_rules.py` enforce this.
 
-| Test workflow | Models | Expected rules |
+| Test file | Models | Expected rules |
 | --- | --- | --- |
 | `tests/fixtures/workflows/risky/claude-action-toctou.yml` | Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk. | OBAAF-GHA-012, OBAAF-GHA-011, OBAAF-GHA-020 |
 | `tests/fixtures/workflows/risky/clinejection-release.yml` | Clinejection, part 2: the release workflow restores the shared cache and publishes with a long-lived token, unchecked. | OBAAF-GHA-006, OBAAF-GHA-014, OBAAF-GHA-016, OBAAF-GHA-017, OBAAF-GHA-008 |
@@ -274,3 +413,17 @@ Each workflow below models a documented attack pattern. The checker must report 
 | `tests/fixtures/workflows/risky/template-placeholder.yml` | A template copied without replacing its placeholders. | OBAAF-GHA-023 |
 | `tests/fixtures/workflows/risky/tj-actions-unpinned.yml` | tj-actions: a release job runs a third-party action by a movable tag while credentials are in reach. | OBAAF-GHA-008, OBAAF-GHA-016, OBAAF-GHA-017 |
 | `tests/fixtures/workflows/risky/unsafe-checkout-opt-in.yml` | Opting out of actions/checkout's fork protection in a privileged workflow. | OBAAF-GHA-019, OBAAF-GHA-002 |
+| `tests/fixtures/jenkins/risky/agent-fixes-and-pushes.groovy` | An AI agent fixes failing tests and the same stage pushes its edits with an SSH key, with the agent CLI installed unpinned. | OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-008 |
+| `tests/fixtures/jenkins/risky/approval-by-anyone.groovy` | A release waits for an input step that any user who can build the job may approve. | OBAAF-JEN-005 |
+| `tests/fixtures/jenkins/risky/build-on-controller.groovy` | Pull request builds run on the built-in node, where build code can read the controller's secrets. | OBAAF-JEN-002 |
+| `tests/fixtures/jenkins/risky/library-version-from-parameter.groovy` | The shared library version is taken from a build parameter, so whoever starts the build chooses the pipeline code. | OBAAF-JEN-004 |
+| `tests/fixtures/jenkins/risky/load-from-workspace.groovy` | A trusted Jenkinsfile loads deployment Groovy from the workspace, which a pull request controls, with credentials bound. | OBAAF-JEN-004, OBAAF-JEN-001 |
+| `tests/fixtures/jenkins/risky/pr-build-with-credentials.groovy` | A multibranch job binds a registry token around the test stage that runs for pull requests, so a pull request's tests can read it. | OBAAF-JEN-001 |
+| `tests/fixtures/jenkins/risky/pr-title-injection.groovy` | Nx-style injection: a pull request title is interpolated by Groovy into a shell script. | OBAAF-JEN-009 |
+| `tests/fixtures/jenkins/risky/privileged-build-pod.groovy` | Docker-in-Docker for pull request builds: a privileged pod with the host's Docker socket, images by tag. | OBAAF-JEN-006, OBAAF-JEN-008 |
+| `tests/fixtures/jenkins/risky/publish-after-failure.groovy` | A release pipeline swallows a failed verification and uploads in post always, with no approval. | OBAAF-JEN-011, OBAAF-JEN-012, OBAAF-JEN-005 |
+| `tests/fixtures/jenkins/risky/publish-last-successful.groovy` | A promotion job publishes whatever the last successful build produced, without checking digests. | OBAAF-JEN-010, OBAAF-JEN-012, OBAAF-JEN-005 |
+| `tests/fixtures/jenkins/risky/secret-in-command-line.groovy` | A deploy step interpolates a password with Groovy, so it appears in the process list. | OBAAF-JEN-013 |
+| `tests/fixtures/jenkins/risky/shared-agent-label.groovy` | One persistent agent label runs pull request builds and the deployment that holds credentials. | OBAAF-JEN-002 |
+| `tests/fixtures/jenkins/risky/signing-key-in-build.groovy` | A release build loads the code-signing certificate into the job, then uploads, with no verification or approval. | OBAAF-JEN-014, OBAAF-JEN-012, OBAAF-JEN-005 |
+| `tests/fixtures/jenkins/risky/webhook-triggered-agent.groovy` | A webhook-triggered review agent: the trigger token is in the file, the title is interpolated, and the agent gets an API key. | OBAAF-JEN-015, OBAAF-JEN-009, OBAAF-JEN-001, OBAAF-JEN-007 |

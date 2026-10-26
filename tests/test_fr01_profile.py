@@ -78,7 +78,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_ids_are_stable_format(self):
         for rid in self.c.rules:
-            self.assertRegex(rid, r"^OBAAF-(GHA|REPO|INS)-\d{3}$")
+            self.assertRegex(rid, r"^OBAAF-(GHA|JEN|REPO|INS)-\d{3}$")
         for iid in self.c.items:
             self.assertTrue(re.fullmatch(r"[1-4]\.\d{1,2}", iid))
 

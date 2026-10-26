@@ -17,6 +17,7 @@ from pathlib import Path
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
+from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker import rules as rules_mod
 from obaaf.checker import workflow as wf_mod
@@ -182,6 +183,7 @@ class Config:
     agents: dict = field(default_factory=dict)
     ignore: list = field(default_factory=list)
     path: str | None = None
+    jenkins: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, root: Path, explicit: str | None = None) -> "Config":
@@ -207,8 +209,16 @@ class Config:
                         until if isinstance(until, date) else date.fromisoformat(str(until))
                     except ValueError as exc:
                         raise ConfigError(f"{path}: ignore entry 'until' must be a date (YYYY-MM-DD): {exc}") from exc
-                return cls(lanes=dict(data.get("lanes") or {}), agents=dict(data.get("agents") or {}),
-                           ignore=list(ignore), path=str(path))
+                jenkins = data.get("jenkins") or {}
+                if not isinstance(jenkins, dict) or not isinstance(jenkins.get("files") or [], list) or \
+                        not isinstance(jenkins.get("exclude") or [], list):
+                    raise ConfigError(f"{path}: jenkins must be a mapping, and jenkins.files and jenkins.exclude "
+                                      "lists of globs")
+                agents = data.get("agents") or {}
+                if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
+                    raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
+                return cls(lanes=dict(data.get("lanes") or {}), agents=dict(agents), ignore=list(ignore),
+                           path=str(path), jenkins=dict(jenkins))
         if explicit:
             raise ConfigError(f"config file not found: {explicit}")
         return cls()
@@ -221,6 +231,13 @@ class CheckResult:
     errors: list[str]
     config: Config
     notes: list[str] = field(default_factory=list)
+    jenkins_files: list[str] = field(default_factory=list)   # the subset of files checked as Jenkinsfiles
+    coverage: list[dict] = field(default_factory=list)       # per Jenkinsfile and rule: pass/fail/unknown/...
+    jenkins: list[dict] = field(default_factory=list)        # per Jenkinsfile: kind, digest, file-wide unknowns
+
+    @property
+    def workflow_files(self) -> list[str]:
+        return [f for f in self.files if f not in set(self.jenkins_files)]
 
     def active(self) -> list[Finding]:
         return [f for f in self.findings if not f.suppressed]
@@ -261,19 +278,47 @@ def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None
             break
 
 
+PLATFORMS = ("auto", "github", "jenkins")
+
+
+def _resolve(target: Path, platform: str) -> tuple[Path, list[Path], list[Path], bool]:
+    """(root, workflow files, Jenkinsfiles, is_repo) for a path given to `obaaf check`."""
+    target = target.resolve()
+    if target.is_file():
+        # A single file: GitHub Actions workflows are YAML; a Jenkinsfile or a .groovy pipeline is Jenkins.
+        is_jenkins = platform == "jenkins" or (platform == "auto" and (
+            jenkins_mod.is_jenkinsfile(target) or target.suffix.lower() == ".groovy"))
+        return target.parent, ([] if is_jenkins else [target]), ([target] if is_jenkins else []), False
+    root, workflows = wf_mod.locate(target)
+    if platform == "jenkins":
+        workflows = []
+    return root, workflows, [], True
+
+
 def check(target: Path, files: list[Path] | None = None, config: Config | None = None,
-          catalog: Catalog | None = None, today: date | None = None) -> CheckResult:
-    """Check a repository root (workflows plus repository files) or specific workflow files."""
+          catalog: Catalog | None = None, today: date | None = None, platform: str = "auto") -> CheckResult:
+    """Check a repository root (workflows, Jenkinsfiles and repository files) or specific files.
+
+    platform: auto (both kinds of CI definition), github (workflows only) or jenkins (Jenkinsfiles only).
+    """
+    if platform not in PLATFORMS:
+        raise ValueError(f"platform must be one of {', '.join(PLATFORMS)}, not {platform!r}")
     catalog = catalog or load()
     target = target.resolve()
-    is_repo = files is None
-    root = target
+    jenkins_paths: list[Path] = []
     if files is None:
-        if target.is_file():
-            files, root, is_repo = [target], target.parent, False
-        else:
-            files = wf_mod.discover(target)
+        root, files, jenkins_paths, is_repo = _resolve(target, platform)
+    else:
+        root, is_repo = target, False
+        if platform != "github":
+            jenkins_paths = [f for f in files if platform == "jenkins" or jenkins_mod.is_jenkinsfile(f)
+                             or f.suffix.lower() == ".groovy"]
+            files = [f for f in files if f not in jenkins_paths]
     config = config or Config.load(root)
+    # Jenkinsfiles are found from the repository root, not from .github/workflows.
+    if is_repo and platform != "github" and target == root:
+        jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
+                                             list(config.jenkins.get("exclude") or []))
     script_cmds = _script_commands(catalog, config)
     findings: list[Finding] = []
     errors: list[str] = []
@@ -300,12 +345,41 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         findings.extend(rules_mod.WorkflowRules(workflow, catalog).run())
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
+    jenkins_results = []
+    jenkins_rels: list[str] = []
+    for path in jenkins_paths:
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            rel = path.name
+        rels.append(rel)
+        jenkins_rels.append(rel)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{rel}: cannot be read: {exc}")
+            continue
+        result = jenkins_mod.analyze(rel, data, catalog, root, extra_agents=config.agents,
+                                     lane_overrides=config.lanes)
+        jenkins_results.append(result)
+        if result.error:
+            errors.append(f"{rel}: {result.error}")
+            continue
+        findings.extend(result.findings)
+        agent_lane_present = agent_lane_present or result.agent_present
+        suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
     if is_repo:
         findings.extend(rules_mod.repo_findings(root, rels, catalog))
     _apply_ignores(findings, config, today or date.today())
     findings.sort(key=Finding.sort_key)
     notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
-    return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes)
+    cov: list[dict] = []
+    summaries: list[dict] = []
+    for result in jenkins_results:
+        cov.extend(jenkins_mod.coverage(result, findings))
+        summaries.append(jenkins_mod.summary(result))
+    return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
+                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries)
 
 
 def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present: bool,
@@ -323,10 +397,10 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
                 f"{len(instruction_files)} agent instruction file(s) are present ({shown}) but no workflow job was "
                 "classified into the agent lane, so the agent controls did not run on any job. If an agent runs "
                 "indirectly, for example through a wrapper script like 'bash run-agent.sh', declare its command in "
-                "agents.commands in .github/obaaf.yml, or set OBAAF_LANE: agent on the job. See "
-                "docs/checker-configuration.md.")
+                "agents.commands in .github/obaaf.yml, or set OBAAF_LANE: agent on the job (in a Jenkinsfile, "
+                "OBAAF_LANE = 'agent' in the stage's environment). See docs/checker-configuration.md.")
     if suspect_jobs:
-        shown = "; ".join(f"{w} job '{j}'" for w, j in suspect_jobs[:5])
+        shown = "; ".join(f"{w} {j}" if j.startswith("stage ") else f"{w} job '{j}'" for w, j in suspect_jobs[:5])
         more = f", and {len(suspect_jobs) - 5} more" if len(suspect_jobs) > 5 else ""
         notes.append(
             f"{len(suspect_jobs)} job(s) have a name that suggests agent work but stayed in the trusted lane "
@@ -335,20 +409,28 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
     return notes
 
 
-def lanes(target: Path, config: Config | None = None) -> list[tuple[str, str, str, str]]:
-    """(workflow, job, lane, reason) for every job, to show how the checker classified them."""
-    root = target.resolve()
+def lanes(target: Path, config: Config | None = None, platform: str = "auto") -> list[tuple[str, str, str, str]]:
+    """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
+    checker classified them."""
+    root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
-    script_root = root if root.is_dir() else root.parent
+    if is_repo and platform != "github" and target.resolve() == root:
+        jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
+                                             list(config.jenkins.get("exclude") or []))
     script_cmds = _script_commands(load(), config)
     out = []
-    files = [root] if root.is_file() else wf_mod.discover(root)
     for path in files:
-        rel = path.name if root.is_file() else path.relative_to(root).as_posix()
+        rel = path.relative_to(root).as_posix()
         workflow = wf_mod.parse(rel, path.read_text(encoding="utf-8", errors="replace"))
         if workflow.error:
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
-        _apply_script_detection(workflow, script_root, script_cmds)
+        _apply_script_detection(workflow, root, script_cmds)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
+    catalog = load()
+    for path in jenkins_paths:
+        rel = path.relative_to(root).as_posix()
+        result = jenkins_mod.analyze(rel, path.read_bytes(), catalog, root, extra_agents=config.agents,
+                                     lane_overrides=config.lanes)
+        out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
     return out

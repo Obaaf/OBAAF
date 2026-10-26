@@ -27,6 +27,7 @@ class Finding:
     job: str | None = None
     step: str | None = None
     suppressed: str | None = None
+    scope: str | None = None   # what `job` names: a GitHub Actions job (None) or a Jenkins stage ("stage")
 
     def sort_key(self) -> tuple:
         order = {"high": 0, "medium": 1, "low": 2}
@@ -537,7 +538,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
         uncovered = [p for p in workflow_paths if not repo_checks.owners_for(rules, p)]
         if uncovered:
             findings.append(Finding("OBAAF-REPO-001", catalog.rules["OBAAF-REPO-001"]["severity"], codeowners_path, 1,
-                                    f"No code owner for {len(uncovered)} workflow file(s): {', '.join(uncovered[:5])}."))
+                                    f"No code owner for {len(uncovered)} CI definition file(s): "
+                                    f"{', '.join(uncovered[:5])}."))
         uncovered = [p for p in instruction_files if not repo_checks.owners_for(rules, p)]
         if uncovered:
             findings.append(Finding("OBAAF-REPO-002", catalog.rules["OBAAF-REPO-002"]["severity"], codeowners_path, 1,

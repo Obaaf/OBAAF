@@ -143,6 +143,13 @@ installs that exact checkout using its dependency constraints. A new PyPI releas
 is a separate maintainer action after validation; these changes are not yet
 published there.
 
+## Jenkins
+
+Jenkinsfiles use the same file. `jenkins.files` adds pipelines with other names (globs from the
+repository root), `jenkins.exclude` leaves out test fixtures, `agents.steps` names shared-library
+steps that run an agent, and lane overrides and ignore entries name a stage as `file#stage` and
+`job: <stage>`. See [Jenkins](jenkins.md).
+
 ## Egress
 
 `OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020` and the agent lane templates for how egress is enforced.

@@ -93,7 +93,7 @@ requirements:
     obaaf:
       tools: ["obaaf snapshot"]
       templates: ["obaaf-agent-propose.yml: snapshot job"]
-      checks: [OBAAF-GHA-010]
+      checks: [OBAAF-GHA-010, OBAAF-JEN-009]
 
   - id: R2
     name: Authority derived from labels
@@ -116,7 +116,7 @@ requirements:
     github_gap: "No policy engine maps labels to permissions; enforce through lane structure and organization policy"
     obaaf:
       templates: ["obaaf-agent-propose.yml: agent job permissions"]
-      checks: [OBAAF-GHA-003, OBAAF-GHA-005]
+      checks: [OBAAF-GHA-003, OBAAF-GHA-005, OBAAF-JEN-001, OBAAF-JEN-003]
 
   - id: R3
     name: Per-invocation short-lived identity
@@ -141,7 +141,7 @@ requirements:
     github_gap: "Cloud trust policies must constrain the claims; model keys need a proxy"
     obaaf:
       docs: ["docs/inference-proxy.md"]
-      checks: [OBAAF-GHA-004, OBAAF-GHA-005]
+      checks: [OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-JEN-001]
 
   - id: R4
     name: Proposal–effect separation
@@ -164,7 +164,7 @@ requirements:
     obaaf:
       tools: ["obaaf proposal check", "obaaf attest approval"]
       templates: ["obaaf-agent-apply.yml"]
-      checks: [OBAAF-GHA-003, OBAAF-GHA-021, OBAAF-GHA-022]
+      checks: [OBAAF-GHA-003, OBAAF-GHA-021, OBAAF-GHA-022, OBAAF-JEN-003, OBAAF-JEN-005]
 
   - id: R5
     name: Instruction-plane integrity
@@ -187,7 +187,7 @@ requirements:
     obaaf:
       tools: ["obaaf check (instruction-file scan)", "obaaf proposal check"]
       templates: ["CODEOWNERS.example", "obaaf-agent-propose.yml: instructions from the base branch"]
-      checks: [OBAAF-INS-001, OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-GHA-012]
+      checks: [OBAAF-INS-001, OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-GHA-012, OBAAF-JEN-004]
 
   - id: R6
     name: Tool and model verification
@@ -207,7 +207,7 @@ requirements:
     github_native: "Referencing actions by full commit digest"
     github_gap: "No native verification of an action's provenance when it is consumed"
     obaaf:
-      checks: [OBAAF-GHA-008]
+      checks: [OBAAF-GHA-008, OBAAF-JEN-008]
 
   - id: R7
     name: Isolation and egress control
@@ -232,7 +232,7 @@ requirements:
     github_gap: "No native egress allow-list; use self-hosted ephemeral runners with network policy, or a runtime monitor"
     obaaf:
       templates: ["obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor"]
-      checks: [OBAAF-GHA-006, OBAAF-GHA-007, OBAAF-GHA-011, OBAAF-GHA-013, OBAAF-GHA-020]
+      checks: [OBAAF-GHA-006, OBAAF-GHA-007, OBAAF-GHA-011, OBAAF-GHA-013, OBAAF-GHA-020, OBAAF-JEN-002, OBAAF-JEN-006, OBAAF-JEN-007]
 
   - id: R8
     name: Attested agent runs
@@ -258,7 +258,7 @@ requirements:
       tools: ["obaaf attest agent-run", "obaaf verify agent-run", "obaaf attest approval", "obaaf verify release"]
       schemas: ["agent-run.schema.json", "agent-approval.schema.json"]
       templates: ["obaaf-agent-propose.yml: attest job", "obaaf-agent-apply.yml", "obaaf-publish.yml: verify jobs"]
-      checks: [OBAAF-GHA-016, OBAAF-GHA-021]
+      checks: [OBAAF-GHA-016, OBAAF-GHA-021, OBAAF-JEN-012]
 
 # Paper 1, Table 3. Where each field of the agent-run record comes from.
 attestation_v01_note: >-

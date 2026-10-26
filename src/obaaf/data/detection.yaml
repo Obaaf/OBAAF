@@ -25,17 +25,18 @@ agent_actions:
   - cline/cline
 
 # Commands in `run:` scripts that start an agent CLI. Python regular
-# expressions, matched against each line.
+# expressions, matched against each line. Options may come before the
+# prompt flag or subcommand (claude --model x -p ...).
 agent_commands:
-  - '(^|[\s;&|(])claude\s+(-p|--print)\b'
+  - '(^|[\s;&|(])claude\s+([^\n;&|]*\s)?(-p|--print)\b'
   - '@anthropic-ai/claude-code'
-  - '(^|[\s;&|(])gemini\s+(-p|--prompt)\b'
+  - '(^|[\s;&|(])gemini\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '@google/gemini-cli'
-  - '(^|[\s;&|(])codex\s+exec\b'
+  - '(^|[\s;&|(])codex\s+([^\n;&|]*\s)?exec\b'
   - '@openai/codex'
   - '(^|[\s;&|(])aider\s'
-  - '(^|[\s;&|(])opencode\s+run\b'
-  - '(^|[\s;&|(])copilot\s+(-p|--prompt)\b'
+  - '(^|[\s;&|(])opencode\s+([^\n;&|]*\s)?run\b'
+  - '(^|[\s;&|(])copilot\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '(^|[\s;&|(])cline\s'
 
 # Files that steer agents (R5). Glob patterns relative to the repository
@@ -97,6 +98,48 @@ upload_commands:
   - '(^|[\s;&|(])dotnet\s+nuget\s+push\b'
   - '(^|[\s;&|(])docker\s+push\b'
   - '(^|[\s;&|(]|\./)scripts?/publish'
+
+# Jenkins only (advisory): Pipeline steps and commands that publish outside Jenkins. The
+# commands extend upload_commands for Jenkinsfiles; they are kept separate so adding them
+# does not move GitHub Actions jobs into the release lane without review. Generic file
+# transfer (scp, rsync, sshPublisher, ftpPublisher) is not counted, because it mostly copies
+# reports and logs; declare a stage that releases that way with OBAAF_LANE = 'release'.
+jenkins_upload_steps:
+  - s3Upload
+  - nexusArtifactUploader
+  - nexusPublisher
+  - googleStorageUpload
+  - rtUpload
+  - rtPublishBuildInfo
+  - rtDockerPush
+  - azureUpload
+  - androidApkUpload
+  - appCenter
+  - createGitHubRelease
+# Jenkins Pipeline steps that run an AI agent (the AI Agent plugin's aiAgent step). Steps of a
+# shared library that wrap an agent go in agents.steps in the checker configuration.
+jenkins_agent_steps:
+  - aiAgent
+jenkins_upload_commands:
+  - '(^|[\s;&|(])(\./)?(mvn|mvnw)\b[^\n;&|]*\s(deploy|release:perform)\b'
+  - '(^|[\s;&|(])(\./)?(gradle|gradlew)\b[^\n;&|]*\s(publish\w*|uploadArchives)\b'
+  - '(^|[\s;&|(])(jf|jfrog)\s+rt\s+(u|upload|dp|docker-push|bp|build-publish)\b'
+  - '(^|[\s;&|(])helm\s+push\b'
+  - '(^|[\s;&|(])(crane|skopeo)\s+(push|copy)\b'
+  - '(^|[\s;&|(])curl\b[^\n;&|]*\s(-T|--upload-file)\s'
+  - '(^|[\s;&|(])az\s+artifacts\s+universal\s+publish\b'
+
+# Agent CLIs installed from a package registry (R6). An install without a version, or with
+# a moving tag such as @latest, runs whatever was published last. npm and PyPI names.
+agent_packages:
+  - "@anthropic-ai/claude-code"
+  - "@google/gemini-cli"
+  - "@openai/codex"
+  - "@github/copilot"
+  - opencode-ai
+  - aider-chat
+  - aider-install
+  - "@qodo/command"
 
 # Steps that sign provenance or other attestations (G7.1, FR5).
 provenance_actions:

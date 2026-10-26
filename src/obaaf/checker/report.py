@@ -39,22 +39,29 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append("")
             lines.append(current)
         rule = catalog.rules[f.rule]
-        where = f"job {f.job}" if f.job else ""
+        where = f"{f.scope or 'job'} {f.job}" if f.job else ""
         lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else ""))
         lines.append(f"        {f.message}")
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
         if _remediation(catalog, f.rule) == "architecture":
+            where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
-                         "one-line change. See templates/github-actions/.")
+                         f"one-line change. See {where_to}.")
     suppressed = [f for f in result.findings if f.suppressed]
     cats = {cat: {severity: 0 for severity in SARIF_LEVEL} for cat in ("authority", "hygiene")}
     for f in active:
         cats[_category(catalog, f.rule)][f.severity] += 1
     a, h = cats["authority"], cats["hygiene"]
     lines.append("")
-    lines.append(f"{len(result.files)} workflow file(s) checked.")
+    if result.jenkins_files:
+        lines += _jenkins_coverage_text(result)
+        lines.append("")
+    if result.workflow_files or not result.jenkins_files:
+        lines.append(f"{len(result.workflow_files)} workflow file(s) checked.")
+    if result.jenkins_files:
+        lines.append(f"{len(result.jenkins_files)} Jenkinsfile(s) checked (advisory).")
     lines.append(f"Authority findings: {a['high']} high, {a['medium']} medium, {a['low']} low.")
     lines.append(f"Hygiene findings: {h['high']} high, {h['medium']} medium, {h['low']} low."
                  + (f" {len(suppressed)} ignored by configuration." if suppressed else ""))
@@ -68,6 +75,40 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         for note in result.notes:
             lines.append(f"  - {note}")
     return "\n".join(lines).lstrip("\n") + "\n"
+
+
+def _jenkins_coverage_text(result: CheckResult) -> list[str]:
+    lines = ["Jenkins coverage (advisory). Exit status 0 is not a conformance decision: controller settings "
+             "(authorization, build authorization, agents, library trust, Replay, network policy) are not in a "
+             "Jenkinsfile, and what the checker cannot see is listed as unknown."]
+    for summary in result.jenkins:
+        path = summary["path"]
+        rows = [c for c in result.coverage if c["path"] == path]
+        counts = {}
+        for row in rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        order = ("fail", "ignored", "unknown", "pass", "not applicable")
+        shown = ", ".join(f"{counts[k]} {k}" for k in order if counts.get(k))
+        kind = summary["kind"] or "not analyzed"
+        lines.append(f"  {path} ({kind}, {summary['digest'][:19]}...): {shown}")
+        if summary["error"]:
+            lines.append(f"    {summary['error']}")
+            continue
+        general = summary["unknowns"]
+        if general:
+            lines.append("    No rule can pass, because part of the pipeline was not analyzed:")
+            for reason in general[:5]:
+                lines.append(f"      {reason}")
+            if len(general) > 5:
+                lines.append(f"      ... and {len(general) - 5} more")
+        for row in rows:
+            specific = [r for r in row["reasons"] if r not in general]
+            if row["status"] == "unknown" and specific:
+                for reason in specific[:3]:
+                    lines.append(f"    unknown {row['rule']}: {reason}")
+                if len(specific) > 3:
+                    lines.append(f"    unknown {row['rule']}: ... and {len(specific) - 3} more")
+    return lines
 
 
 def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
@@ -93,11 +134,15 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "agentControls": catalog.rules[f.rule].get("agent_controls", []),
                 "fix": " ".join(catalog.rules[f.rule]["fix"].split()),
                 "suppressed": f.suppressed,
+                **({"scope": f.scope} if f.scope else {}),
             }
             for f in result.findings
         ],
         "notes": list(result.notes),
     }
+    if result.jenkins_files:
+        # Added in 0.3: present only when Jenkinsfiles were checked, so existing consumers see no change.
+        payload["jenkins"] = {"advisory": True, "files": result.jenkins, "coverage": result.coverage}
     return json.dumps(payload, indent=2) + "\n"
 
 
