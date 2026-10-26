@@ -213,6 +213,9 @@ def _check_approvals(decision: Decision, policy: Policy, approvals: list[dict] |
         if login.lower() in excluded:
             decision.warnings.append(f"approval by {login} is not counted: {login} started or re-ran the release")
             continue
+        if policy.approvers and login.lower() not in {a.lower() for a in policy.approvers}:
+            decision.warnings.append(f"approval by {login} is not counted: {login} is not in release.approvers")
+            continue
         reviewers.add(login)
     decision.approvals = sorted(reviewers)
     if len(reviewers) < policy.min_approvals:
@@ -220,6 +223,153 @@ def _check_approvals(decision: Decision, policy: Policy, approvals: list[dict] |
             f"the release has {len(reviewers)} qualifying approval(s) from distinct people in environment(s) {names}; "
             f"the policy requires {policy.min_approvals}. (An administrator bypass of the environment leaves no "
             "approval and is blocked here.)")
+
+
+# ------------------------------------------------------------------ Jenkins run evidence
+# The controller's JSON for a build (BUILD_URL/api/json) records who approved its input steps
+# (ApproverAction, added by the Pipeline: Input Step plugin), why it started (CauseAction: a user, an
+# upstream build, a Replay), and which commit the Git plugin checked out (BuildData). The publish job
+# passes its own build's JSON and the JSON of the build that produced the artifacts.
+JENKINS_APPROVER = "org.jenkinsci.plugins.workflow.support.steps.input.ApproverAction"
+JENKINS_USER_CAUSE = "hudson.model.Cause$UserIdCause"
+JENKINS_UNSAFE_CAUSES = {
+    "org.jenkinsci.plugins.workflow.cps.replay.ReplayCause":
+        "is a Replay, which can run an edited Jenkinsfile",
+    "org.jenkinsci.plugins.pipeline.modeldefinition.causes.RestartDeclarativePipelineCause":
+        "was restarted from a stage, which skips the stages before it",
+}
+JENKINS_TREE = ("url,number,actions[_class,userId,lastBuiltRevision[SHA1],"
+                "causes[_class,userId,shortDescription,upstreamProject,upstreamBuild,upstreamUrl]]")
+
+
+def is_jenkins_run(document) -> bool:
+    return isinstance(document, dict) and isinstance(document.get("actions"), list)
+
+
+def jenkins_run_facts(document: dict) -> dict:
+    """What a Jenkins build's JSON says: approvers, the users who started it, its upstream builds,
+    unsafe causes, the commits the Git plugin checked out, and causes it could not classify."""
+    facts = {"approvers": [], "starters": [], "unsafe": [], "upstream": [], "revisions": set(), "causes": 0,
+             "unclassified": 0, "url": str(document.get("url") or "")}
+    for action in document.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        if action.get("_class") == JENKINS_APPROVER and action.get("userId"):
+            facts["approvers"].append(str(action["userId"]))
+        sha = (action.get("lastBuiltRevision") or {}).get("SHA1") if isinstance(action.get("lastBuiltRevision"),
+                                                                              dict) else None
+        if sha:
+            facts["revisions"].add(str(sha).lower())
+        for cause in action.get("causes") or []:
+            if not isinstance(cause, dict):
+                continue
+            facts["causes"] += 1
+            cls = cause.get("_class", "")
+            if not cls:
+                facts["unclassified"] += 1
+            if cls == JENKINS_USER_CAUSE or (cause.get("userId") and "UserIdCause" in cls):
+                facts["starters"].append(str(cause["userId"]))
+            if cls in JENKINS_UNSAFE_CAUSES or "ReplayCause" in cls or "RestartDeclarativePipelineCause" in cls:
+                reason = JENKINS_UNSAFE_CAUSES.get(cls) or f"has an unsafe cause ({cls})"
+                facts["unsafe"].append(reason + (f" ({cause['shortDescription']})"
+                                                 if cause.get("shortDescription") else ""))
+            if cause.get("upstreamProject") is not None or cause.get("upstreamUrl") is not None:
+                facts["upstream"].append({"project": str(cause.get("upstreamProject") or ""),
+                                          "build": str(cause.get("upstreamBuild") or ""),
+                                          "url": str(cause.get("upstreamUrl") or "")})
+    return facts
+
+
+def _controller_base(build_url: str) -> str:
+    """https://ci.example/jenkins/ from https://ci.example/jenkins/job/a/job/b/7/."""
+    index = build_url.find("/job/")
+    return build_url[: index + 1] if index >= 0 else ""
+
+
+def _check_jenkins_evidence(decision: Decision, policy: Policy, run: dict | None, release_run: dict | None,
+                            source_revision: str | None, tags: set[str], pre_approval: bool) -> None:
+    """Tie the artifacts to one tag build of the release commit, and the approvals to the publishing
+    build that build started. Anything missing or ambiguous blocks."""
+    for label, document in (("publishing build", run), ("build that produced the artifacts", release_run)):
+        if document is None:
+            continue
+        facts = jenkins_run_facts(document)
+        for problem in facts["unsafe"]:
+            decision.blocks.append(f"the {label} {problem}")
+        if not facts["causes"] or facts["unclassified"]:
+            decision.blocks.append(f"the {label}'s JSON does not say why it started (request it with "
+                                   f"tree={JENKINS_TREE})")
+    if release_run is not None:
+        produced = jenkins_run_facts(release_run)
+        if not source_revision:
+            decision.blocks.append("pass --source-revision, so the build that produced the artifacts can be checked")
+        elif not produced["revisions"]:
+            decision.blocks.append("the build that produced the artifacts records no commit (the Git plugin's "
+                                   "lastBuiltRevision), so it cannot be tied to the release commit")
+        elif source_revision.lower() not in produced["revisions"]:
+            decision.blocks.append(f"the build that produced the artifacts checked out "
+                                   f"{', '.join(sorted(produced['revisions']))[:60]}, not the release commit "
+                                   f"{source_revision[:12]}")
+    if pre_approval:
+        return
+    if (run is None) != (release_run is None):
+        decision.blocks.append("Jenkins releases need both the publishing build's JSON (--approvals) and the JSON "
+                               "of the build that produced the artifacts (--release-run)")
+        return
+    if run is None:
+        return
+    facts = jenkins_run_facts(run)
+    if facts["starters"]:
+        decision.blocks.append(f"the publishing build was started by hand ({', '.join(facts['starters'])}), not by "
+                               "the release build")
+    if len(facts["upstream"]) != 1:
+        decision.blocks.append(f"the publishing build has {len(facts['upstream'])} upstream build(s); it must be "
+                               "started by exactly one release build")
+        return
+    upstream = facts["upstream"][0]
+    expected = _controller_base(facts["url"]) + upstream["url"] + upstream["build"] + "/"
+    produced_url = jenkins_run_facts(release_run)["url"]
+    if not facts["url"] or produced_url.rstrip("/") != expected.rstrip("/"):
+        decision.blocks.append(f"--release-run is {produced_url or 'a build without a URL'}, but the publishing "
+                               f"build was started by {expected}")
+    if policy.jenkins_project:
+        allowed = {f"{policy.jenkins_project}/{tag}" for tag in tags}
+        if upstream["project"] not in allowed:
+            decision.blocks.append(f"the release build is {upstream['project']}, not the tag build "
+                                   f"{' or '.join(sorted(allowed)) or policy.jenkins_project + '/<tag>'} of project "
+                                   f"{policy.jenkins_project}")
+    else:
+        decision.blocks.append("set release.jenkins_project in the policy to the project that builds only release "
+                               "tags: without it, a build of any job could stand in for the tag build")
+
+
+def _check_jenkins_approvals(decision: Decision, policy: Policy, run: dict, actors: list[str],
+                             release_run: dict | None) -> None:
+    """Release approvals from Jenkins input steps: distinct approvers recorded on the publishing build,
+    none of whom started it or the build that produced the artifacts."""
+    facts = jenkins_run_facts(run)
+    excluded = {a.lower() for a in actors if a}
+    excluded |= {s.lower() for s in facts["starters"]}
+    if release_run is not None:
+        excluded |= {s.lower() for s in jenkins_run_facts(release_run)["starters"]}
+    if not policy.approver_not_actor:
+        excluded = set()
+    reviewers = set()
+    for login in facts["approvers"]:
+        if login.lower() in excluded:
+            decision.warnings.append(f"approval by {login} is not counted: {login} started the release or the build "
+                                     "that produced it")
+            continue
+        if policy.approvers and login.lower() not in {a.lower() for a in policy.approvers}:
+            decision.warnings.append(f"approval by {login} is not counted: {login} is not in release.approvers "
+                                     "(Jenkins administrators can approve any input step)")
+            continue
+        reviewers.add(login)
+    decision.approvals = sorted(reviewers)
+    if len(reviewers) < policy.min_approvals:
+        decision.blocks.append(
+            f"the Jenkins build records {len(reviewers)} qualifying approval(s) from distinct people (input steps "
+            f"approved by someone who did not start the release); the policy requires {policy.min_approvals}")
 
 
 # ------------------------------------------------------------------ agent runs
@@ -526,11 +676,22 @@ def _is_ancestor(repo_dir: Path, commit: str, branch: str) -> bool | None:
 
 # ------------------------------------------------------------------ main entry point
 def verify_release(policy: Policy, artifacts: list[Path], *, gh: GhRunner | None = None,
-                   dsse_files: list[Path] | None = None, approvals: list[dict] | None = None,
+                   dsse_files: list[Path] | None = None, approvals: list[dict] | dict | None = None,
                    actors: list[str] | None = None, repo_dir: Path | None = None, git_range: str | None = None,
-                   source_revision: str | None = None, pre_approval: bool = False) -> Decision:
-    """Verify everything before an upload. With pre_approval, skip the approvals (shown to the approver)."""
+                   source_revision: str | None = None, pre_approval: bool = False,
+                   release_run: dict | None = None) -> Decision:
+    """Verify everything before an upload. With pre_approval, skip the approvals (shown to the approver).
+
+    `approvals` is GitHub's run approvals list, or a Jenkins build's JSON; `release_run` is the
+    JSON of the Jenkins build that produced the artifacts."""
     decision = Decision()
+    if release_run is not None and not is_jenkins_run(release_run):
+        decision.blocks.append("--release-run is not a Jenkins build's JSON (expected an 'actions' list)")
+        release_run = None
+    jenkins = release_run is not None or is_jenkins_run(approvals)
+    if jenkins and approvals is not None and not is_jenkins_run(approvals):
+        decision.blocks.append("--approvals must be the publishing build's Jenkins JSON when --release-run is given")
+        approvals = None
     files: list[Path] = []
     for artifact in artifacts:
         try:
@@ -615,13 +776,34 @@ def verify_release(policy: Policy, artifacts: list[Path], *, gh: GhRunner | None
                              if v.signer.get("kind") == "sigstore"), None)
             if cert_env:
                 entry["attestedOn"] = cert_env
+            ref = (pred.get("source") or {}).get("ref", "") or ""
+            if ref.startswith("refs/tags/"):
+                entry.setdefault("_tags", []).append(ref[len("refs/tags/"):])
             recorded_actor = (pred.get("trigger") or {}).get("actor", "")
             if recorded_actor and recorded_actor not in trigger_actors:
                 trigger_actors.append(recorded_actor)
         decision.artifacts.append(entry)
 
+    if jenkins:
+        tags = set()
+        for entry in decision.artifacts:
+            tags |= set(entry.pop("_tags", []))
+        _check_jenkins_evidence(decision, policy, approvals if is_jenkins_run(approvals) else None, release_run,
+                                source_revision, tags, pre_approval)
+    else:
+        for entry in decision.artifacts:
+            entry.pop("_tags", None)
+    if release_run is not None:
+        trigger_actors += [a for a in jenkins_run_facts(release_run)["starters"] if a not in trigger_actors]
     if pre_approval:
         decision.warnings.append("approvals were not checked (pre-approval run); the upload job checks them")
+    elif jenkins:
+        if policy.min_approvals > 0:
+            if is_jenkins_run(approvals):
+                _check_jenkins_approvals(decision, policy, approvals, trigger_actors, release_run)
+            else:
+                decision.blocks.append("no Jenkins approvals were supplied (pass the publishing build's JSON as "
+                                       "--approvals)")
     else:
         _check_approvals(decision, policy, approvals, trigger_actors)
 

@@ -357,6 +357,7 @@ def cmd_verify_release(args) -> int:
     try:
         policy = Policy.load(args.policy)
         approvals = json.loads(Path(args.approvals).read_text(encoding="utf-8")) if args.approvals else None
+        release_run = json.loads(Path(args.release_run).read_text(encoding="utf-8")) if args.release_run else None
     except (PolicyError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -365,7 +366,8 @@ def cmd_verify_release(args) -> int:
         decision = release.verify_release(
             policy, [Path(a) for a in args.artifacts], gh=gh, dsse_files=[Path(p) for p in args.dsse or []],
             approvals=approvals, actors=args.actor or [], repo_dir=Path(args.repo_dir) if args.repo_dir else None,
-            git_range=args.range, source_revision=args.source_revision, pre_approval=args.pre_approval)
+            git_range=args.range, source_revision=args.source_revision, pre_approval=args.pre_approval,
+            release_run=release_run)
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAIL
@@ -378,6 +380,44 @@ def cmd_verify_release(args) -> int:
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write("## OBAAF release verification\n\n```\n" + decision.to_text() + "```\n")
     return EXIT_OK if decision.ok else EXIT_FAIL
+
+
+def cmd_dsse_prepare(args) -> int:
+    import hashlib
+
+    from obaaf.verify import dsse
+
+    try:
+        stmt = json.loads(Path(args.statement).read_text(encoding="utf-8"))
+        message = dsse.to_sign(stmt)
+        Path(args.out).write_bytes(message)
+        if args.digest_out:
+            Path(args.digest_out).write_bytes(hashlib.new(args.digest, message).digest())
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"wrote {args.out} ({len(message)} bytes to sign)" + (f" and its {args.digest} digest to "
+                                                                 f"{args.digest_out}" if args.digest_out else ""))
+    return EXIT_OK
+
+
+def cmd_dsse_assemble(args) -> int:
+    from obaaf.attest.common import write_json
+    from obaaf.verify import dsse
+
+    try:
+        stmt = json.loads(Path(args.statement).read_text(encoding="utf-8"))
+        key = dsse.PublicKey.load(args.public_key)
+        envelope = dsse.assemble(stmt, Path(args.signature).read_bytes(), key)
+    except dsse.SignatureError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    write_json(args.out, envelope)
+    print(f"wrote {args.out}: signature verified with key {key.key_id[:16]}")
+    return EXIT_OK
 
 
 def cmd_verify_agent_run(args) -> int:
@@ -640,6 +680,24 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--records-dir", default=".obaaf/records")
     x.set_defaults(func=cmd_record_write)
 
+    # dsse
+    ds = sub.add_parser("dsse", help="sign records with a key in a key service (signing: keys)").add_subparsers(
+        dest="sub", required=True)
+    x = ds.add_parser("prepare", help="write the bytes a key service signs for a statement")
+    x.add_argument("--statement", required=True, help="the statement written by an attest command's --statement-out")
+    x.add_argument("--out", required=True, help="the message to sign (for services that sign the message)")
+    x.add_argument("--digest-out", help="its digest, for services that sign a digest (aws kms sign "
+                                        "--message-type DIGEST)")
+    x.add_argument("--digest", choices=("sha256", "sha384"), default="sha256",
+                   help="digest algorithm for --digest-out: sha256 for P-256 and RSA keys, sha384 for P-384")
+    x.set_defaults(func=cmd_dsse_prepare)
+    x = ds.add_parser("assemble", help="build the DSSE envelope from a key service's signature, after checking it")
+    x.add_argument("--statement", required=True)
+    x.add_argument("--signature", required=True, help="the signature: raw bytes or base64, DER or r||s for ECDSA")
+    x.add_argument("--public-key", required=True, help="PEM public key of the signing key (as in the policy)")
+    x.add_argument("--out", required=True)
+    x.set_defaults(func=cmd_dsse_assemble)
+
     # verify
     v = sub.add_parser("verify", help="verification before upload").add_subparsers(dest="sub", required=True)
     x = v.add_parser("release", help="block an upload unless provenance, approvals and agent records verify (FR6)")
@@ -647,7 +705,10 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--artifacts", nargs="+", required=True)
     x.add_argument("--gh", default="gh", help="path to the GitHub CLI")
     x.add_argument("--dsse", action="append", help="DSSE envelope or bundle (signing: keys)")
-    x.add_argument("--approvals", help="JSON from the workflow run approvals API")
+    x.add_argument("--approvals", help="JSON from the workflow run approvals API, or for Jenkins the publishing "
+                                       "build's JSON from the controller (BUILD_URL/api/json)")
+    x.add_argument("--release-run", help="Jenkins: the JSON of the build that produced the artifacts "
+                                         "(its BUILD_URL/api/json); whoever started it cannot approve")
     x.add_argument("--actor", action="append",
                    help="someone who started or re-ran the release; their approvals do not count (repeatable)")
     x.add_argument("--pre-approval", action="store_true",

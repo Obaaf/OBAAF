@@ -1,9 +1,16 @@
 # Jenkins
 
-`obaaf check` reads Jenkinsfiles as well as GitHub Actions workflows. For Jenkins it is an
-**advisory auditor**: it reports what a Jenkinsfile shows, and it says plainly what a Jenkinsfile
-cannot show. It does not enforce anything, sign anything, or talk to a Jenkins controller. Those
-come later (see [What is not built yet](#what-is-not-built-yet)).
+OBAAF runs on Jenkins in two parts:
+
+- `obaaf check` reads Jenkinsfiles as well as GitHub Actions workflows. For Jenkins it is an
+  **advisory auditor**: it reports what a Jenkinsfile shows, and it says plainly what a Jenkinsfile
+  cannot show.
+- The **release lane** ([below](#the-release-lane-on-jenkins)) builds from a protected tag, signs
+  SLSA provenance and the OBAAF build record with a key held in a key service, and blocks the
+  upload unless `obaaf verify release` passes and a named person approves.
+
+The agent and effect lanes, controller inventory and enforcement are not built for Jenkins yet
+(see [What is not built yet](#what-is-not-built-yet)).
 
 ```sh
 obaaf check .                        # workflows and Jenkinsfiles in the repository
@@ -203,15 +210,135 @@ credential scopes and post blocks, checks that cannot stop a publish, taint thro
 filtered `changeRequest` conditions, more credential wrappers, computed pod specs, map-form
 triggers, and a quadratic step); each is fixed and has a regression test.
 
+## The release lane on Jenkins
+
+The same rule as on GitHub Actions: no provenance, no upload. Two templates in
+[`templates/jenkins/`](../templates/jenkins/README.md) split the work so that signing and upload
+credentials never reach code a branch or pull request can change:
+
+| Job | Where it runs | What it does | Credentials |
+| --- | --- | --- | --- |
+| `obaaf-release-build.Jenkinsfile` | a multibranch project that discovers tags only | builds the release, keeps `dist/`, starts the publish job | none |
+| `obaaf-release-publish.Jenkinsfile` | its own Pipeline job, read from the protected default branch | finds the tag build that started it, resolves the tag through your SCM, copies that build's artifacts, writes and signs the records, verifies, waits for approval, verifies again with the approvals, uploads | SCM read, signing, controller read, upload |
+
+The split matters on Jenkins in a way it does not on GitHub Actions: credentials scoped to a
+multibranch project reach every branch and pull request it builds, and a pipeline runs whatever
+Jenkinsfile its branch carries. So the build job holds nothing, and everything that can sign or
+publish lives in a job whose definition comes only from the default branch.
+
+Give the tag builds a project of their own, with tag discovery and nothing else, and keep branches
+and pull requests in your usual project. A branch can carry any name, including one that looks like
+a release tag, and its build runs whatever Jenkinsfile the branch holds; in a project that builds
+only tags, every build runs the Jenkinsfile of a protected tag. Jenkins discovers tags but does not
+build them on its own: add the "Build tags" strategy from the Basic Branch Build Strategies plugin,
+or start each tag build by hand, in which case that person cannot approve the release.
+
+### How the artifacts are tied to the tag
+
+The publish job takes no parameters. It finds the build that started it from its own start cause
+(`currentBuild.getBuildCauses`), refuses to run if a person started it, and requires that build to be
+in the tag project. The tag is the name of that build's job, resolved to a commit through your SCM.
+At the end, the verifier checks the same facts again from the controller's JSON for both builds,
+which the publish job fetches with a read-only API token:
+
+- the publishing build was started by exactly one build, and not by a person;
+- that build is the one whose JSON was passed as `--release-run` (same URL);
+- that build is the tag build `<release.jenkins_project>/<tag>`, where the tag is the one in the
+  signed build record;
+- that build checked out the release commit, as the Git plugin records it (`lastBuiltRevision`);
+- neither build is a Replay (which can run an edited Jenkinsfile) or was restarted from a stage
+  (which skips the stages before it);
+- every start cause has a class, so nothing is hidden by a JSON request that leaves fields out.
+
+Anything missing blocks: a policy without `release.jenkins_project`, approvals from Jenkins without `--release-run`, a GitHub approvals list
+with a Jenkins `--release-run`, a build with no recorded causes, or a tag build with no recorded
+commit. The pre-approval check runs the parts that do not need approvals, so the approver sees them.
+
+### Signing with a key service
+
+Jenkins has no identity for a job that the public Sigstore service accepts, so the publish job signs
+DSSE envelopes with a key in a key service, and the policy sets `signing: keys` (the verifier has
+supported that mode since 0.1; this is its first template). Two commands wrap the key service, so
+the private key never leaves it and no OBAAF code needs cloud libraries:
+
+```sh
+obaaf attest build-record ... --statement-out build-record.statement.json
+obaaf dsse prepare --statement build-record.statement.json --out build-record.to-sign --digest-out build-record.digest
+aws kms sign --key-id alias/obaaf-release --message fileb://build-record.digest --message-type DIGEST \
+  --signing-algorithm ECDSA_SHA_256 --query Signature --output text > build-record.sig
+obaaf dsse assemble --statement build-record.statement.json --signature build-record.sig \
+  --public-key .obaaf/keys/release.pub.pem --out build-record.dsse.json
+```
+
+`prepare` writes the exact bytes DSSE signs (and their digest, for services that sign a digest).
+`assemble` takes the signature as raw bytes or base64, DER or raw r||s, checks it against the public
+key, and only then writes the envelope, so a wrong key or a changed statement fails in the build,
+not at release time. Google Cloud KMS hashes its input itself, so give it the bytes to sign, not the
+digest (`gcloud kms asymmetric-sign --digest-algorithm sha256 --input-file build-record.to-sign
+--signature-file build-record.sig ...`). Azure Key Vault (`az keyvault key sign --algorithm ES256`
+with the base64 digest) returns r||s, which `assemble` accepts. Use an ECDSA P-256 key (P-384 with
+`--digest sha384`), or RSA.
+
+To set it up: create the key (in AWS, key spec `ECC_NIST_P256`, usage `SIGN_VERIFY`), export its public
+key to `.obaaf/keys/release.pub.pem` on the default branch (`aws kms get-public-key ... --output text |
+base64 -d | openssl pkey -pubin -inform DER -outform PEM`), give the publish job a credential that can
+call only `kms:Sign` on that key, and copy
+[`obaaf-policy.example.yaml`](../templates/jenkins/obaaf-policy.example.yaml) to `.obaaf/policy.yaml`,
+with `release.jenkins_project` set to the tag project and `release.approvers` to your release managers.
+
+### Approvals Jenkins records
+
+The publish job's `input` step names a submitter group. When someone approves it, the Pipeline:
+Input Step plugin records an `ApproverAction` with their user ID on the build. The verifier:
+
+- counts distinct approvers, and does not count anyone who started either build;
+- counts only people listed in `release.approvers`, when the policy lists them. Set it: Jenkins
+  administrators can approve any input step whatever its submitter says, and an input step with no
+  submitter can be approved by anyone who can build the job;
+- checks, as on GitHub, the signatures, the artifact digests, the build record, the release
+  commit's place on the protected branch, and agent records.
+
+### What this does not prove
+
+Be precise about what the Jenkins release lane rests on, because some of it is controller
+configuration the files cannot show:
+
+- **The publish job's definition.** The checks hold only while the publish job runs this file from
+  the default branch, because that job also fetches the controller JSON the verifier reads. Grant
+  Run/Replay and Configure on it to nobody who can push branches; the verifier blocks a Replay it can
+  see, but a replayed script could also edit that check.
+- **Who holds the signing credential.** Keep it in a folder that contains only the publish job. A
+  label does not stop other jobs from asking for the same agents: restrict the release agents to the
+  release jobs on the controller (for example with the Job Restrictions plugin), or run the release
+  jobs in a fresh Kubernetes pod per build. On EKS, an IAM role for the agent pod's service account
+  is better than a stored credential.
+- **Where the build ran.** The tier in the build record comes from the publish job's `--tier`: it
+  is declared, not observed.
+- **What the tag build did.** The artifacts are trusted as the output of the tag build that started
+  the publish job. The verifier checks that build checked out the release commit, but a Jenkinsfile
+  can check out more than one commit; the guarantee comes from the tag's Jenkinsfile, which your
+  SCM's tag protection controls, and from the tag project building nothing else. The release commit
+  itself is resolved through your SCM, not taken from that build.
+- **Who created the tag.** Jenkins does not record it, so keep tag creators out of the approver group.
+- **Run identity.** Fields such as `BUILD_URL` in the records come from the build's own environment
+  and say so (`"reportedBy": "build process environment (self-reported)"`); they locate a build, they
+  do not authenticate it.
+
+These templates were checked with OBAAF's own Jenkins rules, and the signing and verification path is
+tested end to end with a simulated key service and simulated controller JSON; they have not yet run
+on a live controller.
+
 ## What is not built yet
 
-The Jenkins integration is staged (D-034 to D-036 in [DECISIONS.md](../DECISIONS.md)). This release
-is the advisory auditor. Not yet built:
+The Jenkins integration is staged (D-034 to D-037 in [DECISIONS.md](../DECISIONS.md)). Built: the
+advisory auditor and the release lane. Not yet built:
 
+- the agent and effect lanes: a snapshot of Jenkins triggers, agent-run records whose authority
+  comes from the Jenkinsfile model and controller facts, approval records for agent changes, and the
+  AI workload as a separate Kubernetes Job behind the inference proxy;
 - controller inventory (an exported, signed snapshot of security, agent, library and job settings)
   that would turn many unknowns into passes or findings;
 - shared-library analysis at a verified revision;
-- enforcement: admission checks before agent, effect and release jobs, signed Jenkins run
-  evidence, and Jenkins job templates for the agent and effect lanes.
+- signed Jenkins run evidence from the controller, so run identity stops being self-reported.
 
 Until then, treat a clean Jenkins report as "nothing found in the file", not as assurance.

@@ -16,7 +16,7 @@ This is draft guidance for OBAAF version 0.1. The studio pilot will test and rev
 
 Both are signed through GitHub's Sigstore with the workflow's identity, using a certificate issued for that job that expires within minutes, so no long-lived provenance key exists to steal. Artifact attestations need a public repository or GitHub Enterprise Cloud; see [GitHub settings](../github-settings.md#plan-limits).
 
-**Do this on another CI system.** Generate the same records with `obaaf attest slsa` and `obaaf attest build-record`. Sign them as DSSE envelopes (the signed-envelope format that in-toto attestations use) with a key held in a cloud key service or hardware module, for example with the cosign tool and a key-service key. Then set `signing: keys` in the release policy.
+**Do this on another CI system.** Generate the same records with `obaaf attest slsa` and `obaaf attest build-record`. Sign them as DSSE envelopes (the signed-envelope format that in-toto attestations use) with a key held in a cloud key service or hardware module: `obaaf dsse prepare` writes the bytes to sign, the key service signs them, and `obaaf dsse assemble` checks the signature and writes the envelope. Then set `signing: keys` in the release policy. On Jenkins, the [release templates](../jenkins.md#the-release-lane-on-jenkins) do all of this.
 
 **Keep as evidence.** The provenance and build record of the latest release.
 

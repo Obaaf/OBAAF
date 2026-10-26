@@ -36,6 +36,8 @@ release:
   min_approvals: 1           # Tier 4 (item 4.3): 2. 0 only on plans without environment reviewers
                              # (docs/github-settings.md#plan-limits), with a person setting builds live
   approver_not_actor: true   # whoever pushed the tag or re-ran a run cannot be the approver
+  # Optional: only these people's approvals count, whoever the environment lets approve.
+  # approvers: [release-manager-1, release-manager-2]
 
 agents:
   check: true                # set to false only if no agent can change this repository
