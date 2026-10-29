@@ -34,7 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Verifying DSSE envelopes signed with a key held in a key service or hardware module.
-keys = ["cryptography>=42"]
+keys = ["cryptography>=50.0.2"]
 
 [project.scripts]
 obaaf = "obaaf.cli:main"
