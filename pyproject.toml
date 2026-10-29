@@ -28,7 +28,7 @@ classifiers = [
   "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-  "PyYAML>=6.0",
+  "PyYAML>=6.0.3",
   "jsonschema>=4.18",
 ]
 
