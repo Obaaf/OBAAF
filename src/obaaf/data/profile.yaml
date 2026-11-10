@@ -250,7 +250,7 @@ families:
           or long-lived tokens are stored on build hosts, and every such credential is issued per job
           and expires, or is used only through a signing service.
         evidence: "Credential configuration; inspection of hosts for stored credentials."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-009, OBAAF-GHA-011, OBAAF-GHA-018, OBAAF-JEN-001, OBAAF-JEN-013, OBAAF-JEN-014]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-009, OBAAF-GHA-011, OBAAF-GHA-018, OBAAF-GHA-024, OBAAF-JEN-001, OBAAF-JEN-013, OBAAF-JEN-014]
 
   - id: F4
     title: Derived data and caches
@@ -616,4 +616,4 @@ families:
           work needs, each with an expiry date, and their contributions are built only in the untrusted
           lane until reviewed.
         evidence: "Access lists with expiry dates; the pipeline lane used for partner contributions."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-019, OBAAF-JEN-001, OBAAF-JEN-015]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-019, OBAAF-GHA-024, OBAAF-JEN-001, OBAAF-JEN-015]

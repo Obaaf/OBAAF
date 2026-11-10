@@ -35,6 +35,7 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-021](#obaaf-gha-021) | high | authority | Agent output applied without verifying its record | G8.3, R4, R8 |
 | [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
+| [OBAAF-GHA-024](#obaaf-gha-024) | high | authority | Protected secret used outside its environment | G3.4, G9.1 |
 | [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
 | [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
 | [OBAAF-JEN-003](#obaaf-jen-003) | high | authority | AI agent stage can push, start jobs or publish | G8.1, R2, R4 |
@@ -248,6 +249,14 @@ The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all
 
 **Fix.** Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or replace the placeholders by hand.
 
+## OBAAF-GHA-024
+
+**Protected secret used outside its environment** (high). Requirements: G3.4, G9.1. Supports: FR3, FR12.
+
+The checker configuration lists the secret under protected_secrets, but a job references it without declaring the environment that holds it. Anyone with write access can read every repository secret by pushing a branch with a new workflow, so a secret worth protecting must live only in an environment whose deployment branches are limited to the default branch (or that requires reviewers), and every job that uses it must declare that environment. A job that takes every secret (secrets: inherit or toJSON(secrets)) counts as using each protected secret. An environment named by an expression cannot be confirmed and is reported at medium severity. The checker cannot see where the secret is stored or the environment's branch rule; check both in the repository settings.
+
+**Fix.** Keep the secret only in the environment named in protected_secrets, limit that environment's deployment branches to the default branch, delete any repository or organization copy, and add `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
+
 ## OBAAF-JEN-001
 
 **Credentials available to change-request code or an AI agent** (high). Requirements: G3.4, G8.1, G9.1, R2, R3. Supports: FR3, FR7.
@@ -406,6 +415,7 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 | `tests/fixtures/workflows/risky/effect-without-checks.yml` | An effect job that applies an agent's output with write access, without verifying it or waiting for approval. | OBAAF-GHA-021, OBAAF-GHA-022 |
 | `tests/fixtures/workflows/risky/nx-title-injection.yml` | Nx "s1ngularity": a pull-request title expanded inside a shell step of a privileged workflow. | OBAAF-GHA-010, OBAAF-GHA-001 |
 | `tests/fixtures/workflows/risky/promptpwnd-issue-agent.yml` | PromptPwnd: an agent triggered by issues and comments reads outsider text while holding write tokens, OIDC and an API key. | OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-008, OBAAF-GHA-020 |
+| `tests/fixtures/workflows/risky/protected-secret-repo-scope.yml` | A private evaluation set's read token kept as a repository secret; any branch's workflow could check the set out and print it. | OBAAF-GHA-024 |
 | `tests/fixtures/workflows/risky/pwn-request.yml` | A "pwn request": pull_request_target builds a fork's code with the base repository's token and secrets. | OBAAF-GHA-001, OBAAF-GHA-002, OBAAF-GHA-008, OBAAF-GHA-009, OBAAF-GHA-011 |
 | `tests/fixtures/workflows/risky/pytorch-self-hosted.yml` | PyTorch: pull requests run on persistent self-hosted runners that later build releases. | OBAAF-GHA-013, OBAAF-GHA-008, OBAAF-GHA-009 |
 | `tests/fixtures/workflows/risky/release-from-comment.yml` | A release lane that a comment can start. | OBAAF-GHA-015 |

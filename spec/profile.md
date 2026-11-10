@@ -222,7 +222,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Credential configuration; inspection of hosts for stored credentials.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, unforgeable provenance · SLSA v1.2 requirements: Build L3: signing material inaccessible to build steps (unforgeable provenance) · Assessment items: 2.4 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-009`, `OBAAF-GHA-011`, `OBAAF-GHA-018`, `OBAAF-JEN-001`, `OBAAF-JEN-013`, `OBAAF-JEN-014`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, unforgeable provenance · SLSA v1.2 requirements: Build L3: signing material inaccessible to build steps (unforgeable provenance) · Assessment items: 2.4 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-009`, `OBAAF-GHA-011`, `OBAAF-GHA-018`, `OBAAF-GHA-024`, `OBAAF-JEN-001`, `OBAAF-JEN-013`, `OBAAF-JEN-014`
 
 ## F4 Derived data and caches
 
@@ -486,4 +486,4 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Access lists with expiry dates; the pipeline lane used for partner contributions.
 
-**Maps to.** SSDF: PO.2: Implement Roles and Responsibilities; PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 1.7, 2.8 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-002`, `OBAAF-GHA-019`, `OBAAF-JEN-001`, `OBAAF-JEN-015`
+**Maps to.** SSDF: PO.2: Implement Roles and Responsibilities; PO.5: Implement and Maintain Secure Environments for Software Development · Assessment items: 1.7, 2.8 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-002`, `OBAAF-GHA-019`, `OBAAF-GHA-024`, `OBAAF-JEN-001`, `OBAAF-JEN-015`

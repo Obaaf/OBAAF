@@ -95,6 +95,22 @@ Informational findings are included in text, JSON and SARIF, but do not fail any
 severity threshold. SARIF records use their actual reported severity; a rule's
 documented default is not necessarily the severity of each occurrence.
 
+<a id="protected-secrets"></a>
+## Protected secrets
+
+List the secrets that must never be available outside an environment. Anyone with write access can read a repository secret by pushing a branch with a new workflow, so these belong in an environment limited to the default branch ([GitHub settings](github-settings.md#secrets)):
+
+```yaml
+# .github/obaaf.yml
+protected_secrets:
+  PYPI_TOKEN: release          # must be used only by jobs in the `release` environment
+  PRIVATE_SET_TOKEN: private-set
+```
+
+A plain list (`protected_secrets: [PYPI_TOKEN]`) accepts any declared environment. Names are case-insensitive and may use `*` and `?` globs, but not a bare wildcard. OBAAF-GHA-024 is reported, at high severity, for every job that uses a listed secret without the named environment, including jobs that take every secret (`secrets: inherit`, `toJSON(secrets)`). An environment named by an expression is reported at medium, because the checker cannot tell which environment it will be.
+
+The rule checks the workflow files against what you declared. It cannot see that the secret has actually been removed from the repository and organization, or that the environment's deployment branches are limited, so check those in the settings.
+
 ## When a finding does not apply
 
 Suppress a finding you have reviewed with an expiring `ignore` entry. Every entry needs a rule, a path, a reason, and an `until` date, and the path may not match everything:

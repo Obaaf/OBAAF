@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,10 +71,11 @@ def _bypasses_failure(raw) -> bool:
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
-    def __init__(self, workflow: Workflow, catalog: Catalog) -> None:
+    def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
+        self.protected = dict(protected or {})
         self.findings: list[Finding] = []
 
     def add(self, rule: str, line: int, message: str, job: Job | None = None, step: Step | None = None,
@@ -93,6 +95,7 @@ class WorkflowRules:
         for job in self.wf.jobs.values():
             self.permissions_declared(job)
             self.secrets_untrusted(job)
+            self.protected_secrets(job)
             self.untrusted_checkout(job)
             self.script_injection(job)
             self.agent_rules(job)
@@ -140,6 +143,44 @@ class WorkflowRules:
             self.add("OBAAF-GHA-001", job.line,
                      f"Job '{job.id}' receives {shown} and runs on pull requests. Forks get no secrets, but "
                      "branches pushed by anyone with write access do.", job, severity="low")
+
+    # -------------------------------------------------------------- GHA-024
+    def protected_secrets(self, job: Job) -> None:
+        if not self.protected:
+            return
+        names = job.secret_names()
+        takes_all = bool(names & {"*", "*inherit"})
+        hits: dict[str, str | None] = {}
+        for pattern, env in self.protected.items():
+            if takes_all:
+                hits[pattern] = env
+                continue
+            for name in names:
+                if fnmatch.fnmatchcase(name.upper(), pattern):
+                    hits[name.upper()] = env
+        if not hits:
+            return
+        declared = job.environment
+        dynamic = bool(declared and "${{" in declared)
+        via = " (it takes every secret)" if takes_all else ""
+        for name in sorted(hits):
+            wanted = hits[name]
+            if declared and not dynamic and (wanted is None or declared == wanted):
+                continue
+            need = f"environment '{wanted}'" if wanted else "an environment"
+            if dynamic:
+                self.add("OBAAF-GHA-024", job.line,
+                         f"Job '{job.id}' uses protected secret {name}{via} with environment '{declared}', an "
+                         f"expression the checker cannot confirm is {need}.", job, severity="medium")
+            elif declared:
+                self.add("OBAAF-GHA-024", job.line,
+                         f"Job '{job.id}' uses protected secret {name}{via} in environment '{declared}', not "
+                         f"{need}.", job)
+            else:
+                self.add("OBAAF-GHA-024", job.line,
+                         f"Job '{job.id}' uses protected secret {name}{via} without declaring {need}, so it "
+                         "can only get the secret from the repository or organization, where any branch can "
+                         "read it.", job)
 
     # -------------------------------------------------------------- GHA-002, GHA-019
     def untrusted_checkout(self, job: Job) -> None:

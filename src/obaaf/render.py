@@ -299,9 +299,11 @@ def read_test_set(fixtures_dir: Path) -> list[dict]:
         text = path.read_text(encoding="utf-8")
         expect = re.search(r"^(?:#|//) obaaf-expect:\s*(.+)$", text, re.M)
         models = re.search(r"^(?:#|//) obaaf-models:\s*(.+)$", text, re.M)
+        config = re.search(r"^(?:#|//) obaaf-config:\s*(.+)$", text, re.M)
         if expect:
             cases.append({"file": f"{base}/{path.name}",
-                          "expect": expect.group(1).split(), "models": models.group(1).strip() if models else ""})
+                          "expect": expect.group(1).split(), "models": models.group(1).strip() if models else "",
+                          "config": json.loads(config.group(1)) if config else None})
     return cases
 
 

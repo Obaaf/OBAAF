@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Protected secrets
+
+- New rule OBAAF-GHA-024. List secrets under `protected_secrets` in `.github/obaaf.yml` (optionally with the environment that must hold each one), and the checker reports every job that uses one without declaring that environment. Anyone with write access can read a repository secret by pushing a workflow on a branch; the GitHub settings guide now says so and describes how to keep such secrets in an environment limited to the default branch. Test fixtures can carry a configuration in an `# obaaf-config:` line.
+
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
