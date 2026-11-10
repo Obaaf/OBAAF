@@ -174,5 +174,80 @@ class BaselineTest(unittest.TestCase):
             self.assertEqual(code, 1)
 
 
+class BaselineIntegrityTest(unittest.TestCase):
+    """Findings from an independent review of the first version."""
+
+    def write(self, tmp):
+        path = tmp / "obaaf-baseline.json"
+        code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "low")
+        self.assertEqual(code, 0, err)
+        return path
+
+    def test_an_entry_whose_text_does_not_match_its_fingerprint_is_refused(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            path = self.write(tmp)
+            data = json.loads(path.read_text())
+            data["findings"][0]["severity"] = "low" if data["findings"][0]["severity"] != "low" else "info"
+            data["findings"][0]["message"] = "something harmless"
+            path.write_text(json.dumps(data))
+            code, _, err = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 2)
+            self.assertIn("does not match", err)
+
+    def test_a_disguised_worse_finding_cannot_be_accepted(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            path = self.write(tmp)
+            wf = tmp / ".github" / "workflows" / "ci0.yml"
+            wf.write_text(wf.read_text().replace("on: [pull_request]", "on: [pull_request_target]"))
+            _, out, _ = run_cli("check", tmp, "--format", "json", "--fail-on", "never")
+            worse = [f for f in json.loads(out)["findings"] if f["rule"] == "OBAAF-GHA-001"][0]
+            data = json.loads(path.read_text())
+            data["findings"][0]["fingerprint"] = baseline.fingerprint(
+                type("F", (), {"rule": worse["rule"], "severity": worse["severity"], "path": worse["path"],
+                               "job": worse["job"], "step": worse["step"], "scope": None,
+                               "message": worse["message"]})())
+            path.write_text(json.dumps(data))
+            code, _, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 2)
+
+    def test_stale_entries_follow_the_fail_on_threshold(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A", "TOKEN_B")
+            path = self.write(tmp)
+            repo(tmp, "TOKEN_A")   # a low finding disappears
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "high")
+            self.assertEqual(code, 0, out)
+            self.assertIn("no longer matches", out)
+            code, _, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 1)
+            code, _, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "hygiene:low")
+            self.assertEqual(code, 0)
+
+    def test_expired_ignores_are_not_written_into_the_baseline(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            (tmp / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci0.yml\n"
+                "    reason: reviewed\n    until: 2000-01-01\n")
+            path = tmp / "b.json"
+            code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 0)
+            self.assertIn("expired", err)
+            self.assertEqual(json.loads(path.read_text())["findings"], [])
+
+    def test_an_entry_for_a_finding_now_ignored_is_not_stale(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            path = self.write(tmp)
+            (tmp / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci0.yml\n"
+                "    reason: reviewed\n    until: 2999-01-01\n")
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("no longer match", out)
+
+
 if __name__ == "__main__":
     unittest.main()

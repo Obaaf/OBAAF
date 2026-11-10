@@ -141,12 +141,16 @@ def cmd_check(args) -> int:
             return EXIT_FAIL
         Path(args.write_baseline).write_text(baseline_mod.build(result), encoding="utf-8")
         print(f"Baseline written to {args.write_baseline}.", file=sys.stderr)
+        expired = [f for f in result.findings if baseline_mod.expired_ignore(f)]
+        if expired:
+            print(f"warning: {len(expired)} finding(s) whose ignore entry has expired were not written to the "
+                  "baseline; renew or remove those ignore entries.", file=sys.stderr)
         return EXIT_OK
     if result.errors:
         return EXIT_FAIL
     if result.gating(args.fail_on, load()):
         return EXIT_FAIL
-    if result.baseline_stale and args.fail_on != "never":
+    if result.stale_gating(args.fail_on, load()):
         return EXIT_FAIL
     return EXIT_OK
 

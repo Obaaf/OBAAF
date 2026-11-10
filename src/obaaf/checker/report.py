@@ -75,8 +75,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
-                         "a finding. That fails the check: regenerate the baseline with --write-baseline so "
-                         "the improvement is locked in.")
+                         "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
+                         "with --write-baseline so the improvement is locked in.")
             for entry in result.baseline_stale:
                 where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
                 lines.append(f"  no longer found: {entry.get('rule')} {entry.get('path')}{where} - {entry.get('message', '')}")
