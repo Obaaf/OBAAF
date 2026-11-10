@@ -115,6 +115,22 @@ The checker refuses a configuration with a setting it does not know, so a misspe
 
 The rule checks the workflow files against what you declared. It cannot see that the secret has actually been removed from the repository and organization, or that the environment's deployment branches are limited, so check those in the settings.
 
+<a id="baseline"></a>
+## Adopting the checker without hiding regressions
+
+A project that adopts the checker with existing findings usually starts in reporting mode (`--fail-on never`). Reporting mode lets new findings in unnoticed. A baseline keeps the existing findings visible while failing on anything new:
+
+```bash
+obaaf check . --write-baseline .github/obaaf-baseline.json   # record today's findings, once
+obaaf check . --baseline .github/obaaf-baseline.json --fail-on low
+```
+
+With `--baseline`, a finding recorded in the baseline is still reported, marked `(baseline)` in text, `"baselined": true` in JSON and `baselineState: unchanged` in SARIF, but does not fail the check. Every other finding at or above `--fail-on` fails it. So does a baseline entry that no longer matches any finding: regenerate the baseline with `--write-baseline` and commit it, so the improvement is locked in and the finding cannot come back unnoticed.
+
+Findings are matched on rule, severity, file, job, step and message, but not line number, so moving code does not churn the baseline. A finding that becomes more severe, or a job that receives an additional secret, no longer matches and counts as new. Findings already ignored by configuration are not written to the baseline.
+
+The baseline is a list of accepted risks, so review changes to it like changes to the workflows: put it under CODEOWNERS. A change that adds a line to the baseline is accepting a new finding, and the diff shows exactly which one. Prefer an `ignore` entry, with its reason and expiry, for a finding you have decided does not apply.
+
 ## When a finding does not apply
 
 Suppress a finding you have reviewed with an expiring `ignore` entry. Every entry needs a rule, a path, a reason, and an `until` date, and the path may not match everything:

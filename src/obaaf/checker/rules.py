@@ -29,6 +29,7 @@ class Finding:
     step: str | None = None
     suppressed: str | None = None
     scope: str | None = None   # what `job` names: a GitHub Actions job (None) or a Jenkins stage ("stage")
+    baselined: bool = False    # accepted by `obaaf check --baseline`: reported, but does not fail the check
 
     def sort_key(self) -> tuple:
         order = {"high": 0, "medium": 1, "low": 2}

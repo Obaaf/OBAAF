@@ -40,7 +40,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(current)
         rule = catalog.rules[f.rule]
         where = f"{f.scope or 'job'} {f.job}" if f.job else ""
-        lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else ""))
+        lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else "")
+                     + ("  (baseline)" if f.baselined else ""))
         lines.append(f"        {f.message}")
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
@@ -69,6 +70,16 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"Informational findings (not gated): {a['info']} authority, {h['info']} hygiene.")
     for f in suppressed:
         lines.append(f"  ignored: {f.rule} {f.path}:{f.line} - {f.suppressed}")
+    if result.baseline_used:
+        accepted = sum(1 for f in active if f.baselined)
+        lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
+        if result.baseline_stale:
+            lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
+                         "a finding. That fails the check: regenerate the baseline with --write-baseline so "
+                         "the improvement is locked in.")
+            for entry in result.baseline_stale:
+                where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
+                lines.append(f"  no longer found: {entry.get('rule')} {entry.get('path')}{where} - {entry.get('message', '')}")
     if result.notes:
         lines.append("")
         lines.append("Notes (advisory; they do not affect the result):")
@@ -135,11 +146,15 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "fix": " ".join(catalog.rules[f.rule]["fix"].split()),
                 "suppressed": f.suppressed,
                 **({"scope": f.scope} if f.scope else {}),
+                **({"baselined": f.baselined} if result.baseline_used else {}),
             }
             for f in result.findings
         ],
         "notes": list(result.notes),
     }
+    if result.baseline_used:
+        # Present only with --baseline, so existing consumers see no change.
+        payload["baseline"] = {"stale": result.baseline_stale}
     if result.jenkins_files:
         # Added in 0.3: present only when Jenkinsfiles were checked, so existing consumers see no change.
         payload["jenkins"] = {"advisory": True, "files": result.jenkins, "coverage": result.coverage}
@@ -189,6 +204,8 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
         }
         if f.suppressed:
             entry["suppressions"] = [{"kind": "external", "justification": f.suppressed}]
+        if result.baseline_used and not f.suppressed:
+            entry["baselineState"] = "unchanged" if f.baselined else "new"
         results.append(entry)
     sarif = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",

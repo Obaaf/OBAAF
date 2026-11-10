@@ -106,7 +106,20 @@ def cmd_check(args) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.baseline and args.write_baseline:
+        print("error: use --baseline or --write-baseline, not both", file=sys.stderr)
+        return EXIT_USAGE
+    from obaaf.checker import baseline as baseline_mod
+    entries = None
+    if args.baseline:
+        try:
+            entries = baseline_mod.load(Path(args.baseline))
+        except baseline_mod.BaselineError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
+    if entries is not None:
+        baseline_mod.apply(result, entries)
     if not result.files and not result.errors:
         # Checking nothing must not look like a pass (an empty or mistyped path).
         kinds = {"github": "GitHub Actions workflows", "jenkins": "Jenkinsfiles"}.get(
@@ -122,9 +135,18 @@ def cmd_check(args) -> int:
     else:
         text = report.to_text(result, show_fixes=not args.no_fixes)
     _write(text, args.output)
+    if args.write_baseline:
+        if result.errors:
+            print("error: not writing a baseline while some CI definitions could not be read", file=sys.stderr)
+            return EXIT_FAIL
+        Path(args.write_baseline).write_text(baseline_mod.build(result), encoding="utf-8")
+        print(f"Baseline written to {args.write_baseline}.", file=sys.stderr)
+        return EXIT_OK
     if result.errors:
         return EXIT_FAIL
     if result.gating(args.fail_on, load()):
+        return EXIT_FAIL
+    if result.baseline_stale and args.fail_on != "never":
         return EXIT_FAIL
     return EXIT_OK
 
@@ -572,6 +594,11 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true", help="omit fix text in text output")
+    x.add_argument("--baseline", metavar="FILE",
+                   help="findings recorded in this baseline are reported but do not fail the check; any other "
+                        "finding does, and so does a baseline entry that no longer matches (regenerate it)")
+    x.add_argument("--write-baseline", metavar="FILE",
+                   help="write every finding not ignored by configuration to FILE as the new baseline, and exit 0")
     x.set_defaults(func=cmd_check)
 
     # snapshot

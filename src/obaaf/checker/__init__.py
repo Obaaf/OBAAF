@@ -281,6 +281,8 @@ class CheckResult:
     jenkins_files: list[str] = field(default_factory=list)   # the subset of files checked as Jenkinsfiles
     coverage: list[dict] = field(default_factory=list)       # per Jenkinsfile and rule: pass/fail/unknown/...
     jenkins: list[dict] = field(default_factory=list)        # per Jenkinsfile: kind, digest, file-wide unknowns
+    baseline_used: bool = False                              # set by baseline.apply
+    baseline_stale: list[dict] = field(default_factory=list) # baseline entries no finding matched
 
     @property
     def workflow_files(self) -> list[str]:
@@ -301,6 +303,8 @@ class CheckResult:
         threshold = SEVERITY_ORDER[severity]
         out = []
         for f in self.active():
+            if f.baselined:
+                continue
             if SEVERITY_ORDER[f.severity] < threshold:
                 continue
             if category is not None and (catalog.rules[f.rule].get("category") or "authority") != category:
