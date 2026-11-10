@@ -369,9 +369,6 @@ class InjectionDetectionTest(unittest.TestCase):
                 self.assertEqual(found, flagged)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ProtectedSecretsTest(unittest.TestCase):
     """GHA-024: a secret listed in protected_secrets is used only by jobs that declare its environment."""
@@ -431,11 +428,39 @@ jobs:
                 'echo "${{ secrets.X }}" | wc -c', 'echo "${{ toJSON(secrets) }}" | wc -c')
             found = [f for f in findings_for(tmp, text, config=config) if f.rule == "OBAAF-GHA-024"]
             self.assertEqual(len(found), 1)
-            self.assertIn("takes every secret", found[0].message)
-            caller = ("name: wf\non: [push]\npermissions:\n  contents: read\njobs:\n  call:\n"
-                      "    uses: example/repo/.github/workflows/x.yml@" + SHA + "\n    secrets: inherit\n")
-            found = [f for f in findings_for(tmp, caller, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
-            self.assertEqual(len(found), 1)
+            self.assertIn("can take every secret", found[0].message)
+            for index in ("format('{0}_TOKEN', 'PRIVATE_SET')", "matrix.k"):
+                text = self.JOB.format(extra="", secret="X").replace("secrets.X", f"secrets[{index}]")
+                found = [f for f in findings_for(tmp, text, config=config) if f.rule == "OBAAF-GHA-024"]
+                self.assertEqual(len(found), 1, index)
+
+    def test_context_name_case_does_not_matter(self):
+        with TempDir() as tmp:
+            config = checker.Config.from_data({"protected_secrets": ["PRIVATE_SET_TOKEN"]}, "test")
+            text = self.JOB.format(extra="", secret="X").replace("secrets.X", "SECRETS.private_set_token")
+            self.assertEqual(len([f for f in findings_for(tmp, text, config=config) if f.rule == "OBAAF-GHA-024"]), 1)
+
+    def test_environment_names_are_case_insensitive(self):
+        self.assertEqual(self.run_case({"PRIVATE_SET_TOKEN": "private-set"}, "    environment: Private-Set\n"), [])
+
+    def test_a_looser_pattern_cannot_relax_a_stricter_one(self):
+        found = self.run_case({"PRIVATE_SET_TOKEN": "private-set", "*_TOKEN": None}, "    environment: other\n")
+        self.assertEqual(len(found), 1)
+        self.assertIn("not environment 'private-set'", found[0].message)
+
+    def test_reusable_workflow_callers(self):
+        with TempDir() as tmp:
+            config = checker.Config.from_data({"protected_secrets": {"PRIVATE_SET_TOKEN": "private-set"}}, "test")
+            head = ("name: wf\non: [push]\npermissions:\n  contents: read\njobs:\n  call:\n"
+                    "    uses: example/repo/.github/workflows/x.yml@" + SHA + "\n")
+            # inherit passes repository and organization secrets only, never an environment's.
+            inherit = head + "    secrets: inherit\n"
+            self.assertEqual([f for f in findings_for(tmp, inherit, name="c.yml", config=config)
+                              if f.rule == "OBAAF-GHA-024"], [])
+            mapped = head + "    secrets:\n      token: ${{ secrets.PRIVATE_SET_TOKEN }}\n"
+            found = [f for f in findings_for(tmp, mapped, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
+            self.assertEqual([f.severity for f in found], ["high"])
+            self.assertIn("in the called workflow's job", found[0].message)
 
     def test_no_config_means_no_findings(self):
         with TempDir() as tmp:
@@ -443,10 +468,15 @@ jobs:
             self.assertEqual([f for f in findings_for(tmp, text) if f.rule == "OBAAF-GHA-024"], [])
 
     def test_config_is_validated(self):
-        for bad in ("TOKEN", [""], ["*"], ["NAME WITH SPACE"], ["GITHUB_TOKEN"], {"A": ""}, {"A": "${{ x }}"},
-                    {"A": 3}):
+        for bad in ("TOKEN", [""], ["*"], ["*_*"], ["A?_*"], ["NAME WITH SPACE"], ["GITHUB_TOKEN"], {"ABC": ""},
+                    {"ABC": "${{ x }}"}, {"ABC": 3}):
             with self.subTest(bad=bad), self.assertRaises(checker.ConfigError):
                 checker.Config.from_data({"protected_secrets": bad}, "test")
+
+    def test_unknown_settings_are_refused(self):
+        with self.assertRaises(checker.ConfigError) as ctx:
+            checker.Config.from_data({"protected-secrets": ["PRIVATE_SET_TOKEN"]}, "test")
+        self.assertIn("protected-secrets", str(ctx.exception))
 
     def test_config_file_is_read(self):
         with TempDir() as tmp:
@@ -455,3 +485,6 @@ jobs:
             (tmp / ".github" / "workflows" / "wf.yml").write_text(self.JOB.format(extra="", secret="PRIVATE_SET_TOKEN"))
             rules = {f.rule for f in checker.check(tmp).findings}
             self.assertIn("OBAAF-GHA-024", rules)
+
+if __name__ == "__main__":
+    unittest.main()

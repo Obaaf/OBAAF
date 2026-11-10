@@ -149,38 +149,56 @@ class WorkflowRules:
         if not self.protected:
             return
         names = job.secret_names()
-        takes_all = bool(names & {"*", "*inherit"})
-        hits: dict[str, str | None] = {}
+        caller = bool(job.reusable)
+        # A reusable-workflow call with `secrets: inherit` passes repository and organization secrets
+        # only, never an environment's, and the caller cannot declare an environment. Whether a
+        # protected secret still has such a copy is a settings question, not a workflow one.
+        if caller:
+            names = names - {"*inherit"}
+        takes_all = "*" in names or "*inherit" in names
+        # Every protected entry a secret matches applies, so an overlapping, looser pattern can never
+        # relax a stricter one.
+        hits: list[tuple[str, str, str | None]] = []   # (secret shown, pattern, required environment)
         for pattern, env in self.protected.items():
             if takes_all:
-                hits[pattern] = env
+                hits.append((pattern, pattern, env))
                 continue
-            for name in names:
+            for name in sorted(names):
                 if fnmatch.fnmatchcase(name.upper(), pattern):
-                    hits[name.upper()] = env
+                    hits.append((name.upper(), pattern, env))
         if not hits:
             return
         declared = job.environment
         dynamic = bool(declared and "${{" in declared)
-        via = " (it takes every secret)" if takes_all else ""
-        for name in sorted(hits):
-            wanted = hits[name]
-            if declared and not dynamic and (wanted is None or declared == wanted):
+        via = " (it can take every secret)" if takes_all else ""
+        reported: set[str] = set()
+        for name, pattern, wanted in hits:
+            ok = declared and not dynamic and (wanted is None or declared.casefold() == wanted.casefold())
+            if ok:
                 continue
             need = f"environment '{wanted}'" if wanted else "an environment"
-            if dynamic:
-                self.add("OBAAF-GHA-024", job.line,
-                         f"Job '{job.id}' uses protected secret {name}{via} with environment '{declared}', an "
-                         f"expression the checker cannot confirm is {need}.", job, severity="medium")
+            if caller:
+                message = (f"Job '{job.id}' passes protected secret {name}{via} to the reusable workflow "
+                           f"{job.reusable}. A calling job cannot declare an environment, so the secret can only "
+                           f"come from the repository or organization; pass none, and declare {need} in the called "
+                           "workflow's job instead.")
+                severity = None
+            elif dynamic:
+                message = (f"Job '{job.id}' uses protected secret {name}{via} with environment '{declared}', an "
+                           f"expression the checker cannot confirm is {need}.")
+                severity = "medium"
             elif declared:
-                self.add("OBAAF-GHA-024", job.line,
-                         f"Job '{job.id}' uses protected secret {name}{via} in environment '{declared}', not "
-                         f"{need}.", job)
+                message = f"Job '{job.id}' uses protected secret {name}{via} in environment '{declared}', not {need}."
+                severity = None
             else:
-                self.add("OBAAF-GHA-024", job.line,
-                         f"Job '{job.id}' uses protected secret {name}{via} without declaring {need}, so it "
-                         "can only get the secret from the repository or organization, where any branch can "
-                         "read it.", job)
+                message = (f"Job '{job.id}' uses protected secret {name}{via} without declaring {need}, so it "
+                           "can only get the secret from the repository or organization, where any branch can "
+                           "read it.")
+                severity = None
+            if message in reported:
+                continue
+            reported.add(message)
+            self.add("OBAAF-GHA-024", job.line, message, job, severity=severity)
 
     # -------------------------------------------------------------- GHA-002, GHA-019
     def untrusted_checkout(self, job: Job) -> None:

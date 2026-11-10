@@ -178,6 +178,7 @@ class ConfigError(ValueError):
 
 
 _SECRET_NAME = re.compile(r"^[A-Za-z_*?][A-Za-z0-9_*?]*$")
+CONFIG_KEYS = frozenset({"lanes", "agents", "ignore", "jenkins", "protected_secrets"})
 
 
 def parse_protected_secrets(value, path) -> dict:
@@ -195,9 +196,12 @@ def parse_protected_secrets(value, path) -> dict:
                           "name to environment")
     out: dict = {}
     for name, env in pairs:
-        if not isinstance(name, str) or not _SECRET_NAME.match(name) or not name.strip("*?"):
+        if not isinstance(name, str) or not _SECRET_NAME.match(name):
             raise ConfigError(f"{path}: protected_secrets entry {name!r} is not a secret name (letters, digits, "
-                              "underscores, and * or ? globs, not a bare wildcard)")
+                              "underscores, and * or ? globs)")
+        if len(re.sub(r"[*?_]", "", name)) < 3:
+            raise ConfigError(f"{path}: protected_secrets entry {name!r} is too broad; name at least three letters "
+                              "or digits (for example *_API_KEY)")
         if name.upper() == "GITHUB_TOKEN":
             raise ConfigError(f"{path}: GITHUB_TOKEN is not a stored secret; protected_secrets cannot list it")
         if env is not None and (not isinstance(env, str) or not env.strip() or "${{" in env):
@@ -233,6 +237,11 @@ class Config:
         """A configuration from parsed YAML; `path` names it in error messages."""
         if not isinstance(data, dict):
             raise ConfigError(f"{path}: expected a mapping")
+        unknown = sorted(str(k) for k in data if k not in CONFIG_KEYS)
+        if unknown:
+            # A misspelt key (protected-secrets) would otherwise turn a control off without a word.
+            raise ConfigError(f"{path}: unknown setting(s) {', '.join(unknown)}; the checker reads "
+                              f"{', '.join(sorted(CONFIG_KEYS))}")
         ignore = data.get("ignore") or []
         for entry in ignore:
             if not isinstance(entry, dict):

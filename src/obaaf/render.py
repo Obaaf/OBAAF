@@ -282,7 +282,11 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
                 "enforce this.", "",
                 "| Test file | Models | Expected rules |", "| --- | --- | --- |"]
         for case in test_set:
-            out.append(f"| `{case['file']}` | {case['models']} | {', '.join(case['expect'])} |")
+            models = case["models"]
+            if case.get("config"):
+                shown = json.dumps(case["config"], separators=(", ", ": "))
+                models += f" Checked with the configuration `{shown}`."
+            out.append(f"| `{case['file']}` | {models} | {', '.join(case['expect'])} |")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -300,10 +304,14 @@ def read_test_set(fixtures_dir: Path) -> list[dict]:
         expect = re.search(r"^(?:#|//) obaaf-expect:\s*(.+)$", text, re.M)
         models = re.search(r"^(?:#|//) obaaf-models:\s*(.+)$", text, re.M)
         config = re.search(r"^(?:#|//) obaaf-config:\s*(.+)$", text, re.M)
+        try:
+            parsed = json.loads(config.group(1)) if config else None
+        except ValueError as exc:
+            raise ValueError(f"{path}: the obaaf-config line is not valid JSON: {exc}") from exc
         if expect:
             cases.append({"file": f"{base}/{path.name}",
                           "expect": expect.group(1).split(), "models": models.group(1).strip() if models else "",
-                          "config": json.loads(config.group(1)) if config else None})
+                          "config": parsed})
     return cases
 
 
