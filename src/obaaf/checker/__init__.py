@@ -281,6 +281,8 @@ class CheckResult:
     jenkins_files: list[str] = field(default_factory=list)   # the subset of files checked as Jenkinsfiles
     coverage: list[dict] = field(default_factory=list)       # per Jenkinsfile and rule: pass/fail/unknown/...
     jenkins: list[dict] = field(default_factory=list)        # per Jenkinsfile: kind, digest, file-wide unknowns
+    baseline_used: bool = False                              # set by baseline.apply
+    baseline_stale: list[dict] = field(default_factory=list) # baseline entries no finding matched
 
     @property
     def workflow_files(self) -> list[str]:
@@ -293,6 +295,23 @@ class CheckResult:
         threshold = SEVERITY_ORDER[severity]
         return [f for f in self.active() if SEVERITY_ORDER[f.severity] >= threshold]
 
+    def stale_gating(self, spec: str, catalog: Catalog) -> list[dict]:
+        """Baseline entries no finding matched that make `--fail-on spec` fail: the same threshold and
+        category as findings, so a vanished low finding does not fail `--fail-on high`."""
+        category, severity = parse_fail_on(spec)
+        if severity == "never":
+            return []
+        threshold = SEVERITY_ORDER[severity]
+        out = []
+        for entry in self.baseline_stale:
+            if SEVERITY_ORDER.get(entry.get("severity"), 0) < max(threshold, 1):
+                continue
+            rule = catalog.rules.get(entry.get("rule"), {})
+            if category is not None and (rule.get("category") or "authority") != category:
+                continue
+            out.append(entry)
+        return out
+
     def gating(self, spec: str, catalog: Catalog) -> list[Finding]:
         """Active findings that make `--fail-on spec` fail (empty means it passes)."""
         category, severity = parse_fail_on(spec)
@@ -301,6 +320,8 @@ class CheckResult:
         threshold = SEVERITY_ORDER[severity]
         out = []
         for f in self.active():
+            if f.baselined:
+                continue
             if SEVERITY_ORDER[f.severity] < threshold:
                 continue
             if category is not None and (catalog.rules[f.rule].get("category") or "authority") != category:

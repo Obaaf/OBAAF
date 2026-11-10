@@ -9,6 +9,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - GHA-024 hardening, after an independent review: a computed secret index (`secrets[format(...)]`, `secrets[matrix.k]`) counts as every secret for all rules; the `secrets` context matches in any case; overlapping `protected_secrets` entries all apply; environment names compare case-insensitively; reusable-workflow callers get advice they can follow, and `secrets: inherit` is no longer reported; globs need three letters or digits; unknown configuration settings are refused. The published test set shows the configuration a fixture is checked with.
 - New rule OBAAF-GHA-024. List secrets under `protected_secrets` in `.github/obaaf.yml` (optionally with the environment that must hold each one), and the checker reports every job that uses one without declaring that environment. Anyone with write access can read a repository secret by pushing a workflow on a branch; the GitHub settings guide now says so and describes how to keep such secrets in an environment limited to the default branch. Test fixtures can carry a configuration in an `# obaaf-config:` line.
 
+### Baselines
+
+- `obaaf check --write-baseline FILE` records the current findings; `obaaf check --baseline FILE` reports them but fails only on new findings, or on baseline entries that no longer match (so fixes are locked in). Findings match without line numbers. JSON output marks `baselined` and lists stale entries, and SARIF output sets `baselineState`, only when a baseline is used. See docs/checker-configuration.md#baseline. Each entry's fingerprint is recomputed from its visible fields on load (a mismatch is refused), stale entries follow the `--fail-on` threshold and category, and expired ignores are never written into a baseline.
+
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
