@@ -1,6 +1,6 @@
 # Contributing
 
-OBAAF is in draft (version 0.x) and not yet open to outside contributions. This file describes how the maintainer works now and how contributions will work after public release.
+OBAAF accepts contributions under the rules below. Version 0.x formats may still change before 1.0, so open an issue before a large change.
 
 ## Ground rules
 
@@ -21,7 +21,7 @@ obaaf check .
 
 ## Review responsibility
 
-The maintainer reviews, edits and tests changes before merging them. Contributors are responsible for their submissions and must have the right to contribute them under the project's applicable terms. Proposed decisions remain pending in [DECISIONS.md](DECISIONS.md) until explicitly accepted, changed or rejected.
+The maintainers review, edit and test changes before merging them. Contributors are responsible for their submissions and must have the right to contribute them under the project's applicable terms. Proposed decisions remain pending in [DECISIONS.md](DECISIONS.md) until explicitly accepted, changed or rejected.
 
 ## Licenses
 

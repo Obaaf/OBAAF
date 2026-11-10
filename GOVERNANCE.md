@@ -1,6 +1,6 @@
 # Governance
 
-*Draft, for maintainer confirmation. It records how OBAAF is already run and sets out how the project adds maintainers and makes decisions. It changes nothing about copyright ([LICENSING.md](LICENSING.md)).*
+*Adopted 2026-11-09 by both maintainers (D-038). It records how OBAAF is run and sets out how the project adds maintainers and makes decisions. It changes nothing about copyright ([LICENSING.md](LICENSING.md)).*
 
 OBAAF is a free, open project (NFR1). This document states who decides what, how changes are made, and how someone becomes a maintainer. The aim is a structure a new contributor — or an external reviewer — can understand at a glance.
 
@@ -34,7 +34,7 @@ The project actively wants to grow beyond its two founders, including with maint
 
 ## Code of conduct
 
-The project follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Reports of unacceptable behavior go to the maintainers. *(Adopting it as a `CODE_OF_CONDUCT.md` file in the repository is a recommended next step.)*
+The project follows the Contributor Covenant 2.1, adopted as [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Reports go to the maintainers.
 
 ## Changes to this document
 
