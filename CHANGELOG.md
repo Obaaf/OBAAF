@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Project
+
+- Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
+
 ### Platform scope
 
 - The website, README, adoption guide, glossary, traceability and package description now say that `obaaf check` reads GitHub Actions workflows and, as an advisory auditor, Jenkinsfiles. The templates, `setup-obaaf` and keyless signing remain GitHub Actions only. The site's quickstart runs `obaaf check .`, which covers both.

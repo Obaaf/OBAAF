@@ -45,6 +45,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-035 | The Jenkins adapter sits beside the workflow checker | Proposed |
 | D-036 | Jenkins results are advisory, and unknowns are coverage, not findings | Proposed |
 | D-037 | The Jenkins release lane signs with a key service and reads approvals from the controller | Proposed |
+| D-038 | Governance adopted; the project accepts outside contributions | Accepted, 2026-11-09 |
 
 ---
 
@@ -196,6 +197,12 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 
 **Decision.** On Jenkins, the release lane is two jobs: a build job in a multibranch project that discovers only tags and builds them with no credentials, and a publish job, read only from the default branch and taking no parameters, that finds the tag build that started it from its own start cause, resolves the tag through the SCM, copies that build's artifacts, signs SLSA provenance and the build record as DSSE envelopes through a key service (`obaaf dsse prepare` and `assemble`), and runs `obaaf verify release` before and after a named approver. The verifier reads both builds' JSON from the controller and ties them together: the publishing build was started by exactly one build, which is the one passed as the producing build, is the tag build `release.jenkins_project/<tag>` for the tag in the signed build record, and checked out the release commit (`lastBuiltRevision`). It counts approvals (`ApproverAction`) only from people in `release.approvers` who started neither build, blocks Replays, stage restarts, builds started by hand and causes it cannot classify, and fails closed when either build's JSON is missing. Run identity in Jenkins records comes from the build's environment and is marked self-reported. **Reason.** Jenkins has no per-job identity the public Sigstore service accepts; credentials scoped to a multibranch project reach every branch and pull request; a branch can carry a tag-like name and its own Jenkinsfile; administrators can approve any input step; and the controller, not the pipeline, is where approvals and start causes are recorded. A parameterized publish job would trust whoever started it to name the right build. **Consequence.** The lane's guarantees depend on controller settings OBAAF cannot see yet (who may Replay or configure the publish job, credential scope, which jobs use the release agents) and on the tag's Jenkinsfile; docs/jenkins.md lists them. Signed controller evidence comes with the inventory phase. **Status.** Proposed.
 
+
+### D-038 Governance adopted; the project accepts outside contributions
+
+**Decision.** [GOVERNANCE.md](GOVERNANCE.md) is adopted as written, no longer a draft: two maintainers (Osita Sean Keluo-Udeke and Ofonna Nweze), lazy consensus day to day, significant changes recorded here, and the Contributor Covenant 2.1 as the code of conduct ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)). [CONTRIBUTING.md](CONTRIBUTING.md) no longer says the project is closed: it accepts contributions under its existing rules (DCO sign-off, public sources only, data first, tests with every rule).
+
+**Reason.** The repository already worked this way (two maintainers in CODEOWNERS, a numbered decision log, DCO, SECURITY.md), but the draft marker and the "not yet open" line told a newcomer the opposite. The 0.x caveat stays: formats may change before 1.0, so large changes start as an issue.
 ---
 
 ## Open questions from the specification
