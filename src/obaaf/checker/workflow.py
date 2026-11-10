@@ -99,6 +99,9 @@ def _narrow(events: set[str], cond: str) -> set[str]:
     expr = cond.strip()
     if expr.startswith("${{") and expr.endswith("}}"):
         expr = expr[3:-2]
+    # A negated status function (`!cancelled()`, common beside `needs.x.result == 'success'`) says
+    # nothing about the event, so it cannot invert an event test; drop it before looking for others.
+    expr = re.sub(r"!\s*(?:always|cancelled|failure|success)\s*\(\s*\)", "true", expr, flags=re.I)
     if re.search(r"!(?!=)", expr):
         return events  # a negation can invert any test below; do not narrow
     eq_rx = re.compile(r"github\.event_name\s*==\s*['\"]([A-Za-z_]+)['\"]", re.I)

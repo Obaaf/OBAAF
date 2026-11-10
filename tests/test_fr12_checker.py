@@ -127,6 +127,20 @@ class CheckerBypassesTest(unittest.TestCase):
         with TempDir() as tmp:
             self.assertEqual(rules_of(findings_for(tmp, wf)).get("OBAAF-GHA-010"), "high")
 
+    def test_a_negated_status_function_still_lets_an_event_test_narrow(self):
+        base = ("on: [pull_request, workflow_dispatch]\npermissions: {{contents: read}}\njobs:\n  run:\n"
+                "    if: ${{{{ {cond} }}}}\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: echo \"${{{{ secrets.KEY }}}}\" | wc -c\n")
+        with TempDir() as tmp:
+            narrowed = base.format(cond="!cancelled() && github.event_name == 'workflow_dispatch'")
+            self.assertNotIn("OBAAF-GHA-001", rules_of(findings_for(tmp, narrowed)))
+            # A negation that can invert the event test still stops narrowing.
+            inverted = base.format(cond="!cancelled() && !(github.event_name == 'workflow_dispatch')")
+            self.assertIn("OBAAF-GHA-001", rules_of(findings_for(tmp, inverted)))
+            # And an alternative without an event test still reaches pull requests.
+            either = base.format(cond="!cancelled() && github.event_name == 'workflow_dispatch' || always()")
+            self.assertIn("OBAAF-GHA-001", rules_of(findings_for(tmp, either)))
+
     def test_a_job_that_runs_an_agent_cannot_declare_itself_out_of_the_agent_lane(self):
         wf = ("on: issue_comment\npermissions: {}\njobs:\n  triage:\n    runs-on: ubuntu-latest\n"
               "    permissions: {contents: write}\n    env: {OBAAF_LANE: trusted}\n    steps:\n"
