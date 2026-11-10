@@ -13,6 +13,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 - `obaaf check --write-baseline FILE` records the current findings; `obaaf check --baseline FILE` reports them but fails only on new findings, or on baseline entries that no longer match (so fixes are locked in). Findings match without line numbers. JSON output marks `baselined` and lists stale entries, and SARIF output sets `baselineState`, only when a baseline is used. See docs/checker-configuration.md#baseline. Each entry's fingerprint is recomputed from its visible fields on load (a mismatch is refused), stale entries follow the `--fail-on` threshold and category, and expired ignores are never written into a baseline.
 
+### Fixed
+
+- A negated status function in a job's `if:` (for example `!cancelled() && github.event_name == 'workflow_dispatch'`) no longer stops the checker from narrowing the job's triggers by its event test. Any other negation still does.
+
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
