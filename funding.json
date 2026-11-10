@@ -20,7 +20,7 @@
   }],
   "funding": {
     "channels": [
-      { "guid": "github-sponsors", "type": "payment-provider", "address": "YOUR_GITHUB_SPONSORS_URL", "description": "GitHub Sponsors" }
+      { "guid": "github-sponsors", "type": "payment-provider", "address": "https://github.com/sponsors/seanudeke", "description": "GitHub Sponsors" }
     ],
     "plans": [
       { "guid": "support", "status": "active", "name": "Support OBAAF", "description": "General support for maintenance and the independent-studio pilot.", "amount": 0, "currency": "USD", "frequency": "one-time", "channels": ["github-sponsors"] }
