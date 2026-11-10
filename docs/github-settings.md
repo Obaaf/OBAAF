@@ -41,7 +41,18 @@ Create two environments (Settings → Environments):
 
 "Prevent self-review" stops the person who triggered a run from approving it. OBAAF also refuses to count approvals by anyone who started or re-ran the runs involved, and, for the effect lane, by the person who triggered the agent or anyone who wrote its inputs (R4). Only one required reviewer needs to approve an environment, so two-person release uses two environments in sequence (item 4.3, DECISIONS.md D-016).
 
+<a id="secrets"></a>
 ## Secrets and variables
+
+**Write access means every repository secret.** A repository or organization secret is available to any workflow, and anyone who can push a branch can add a workflow that prints it. Branch protection does not help, because the workflow runs from the unprotected branch. The same is true of a coding agent with write access. Fork pull requests get no secrets, but people with write access, and the agents they run, do not need a fork.
+
+So decide which secrets are worth protecting (signing and upload credentials, tokens that read private data such as an evaluation set, deploy keys) and, for each:
+
+1. Store it only in an environment, never as a repository or organization secret. Delete any copy at those levels: a job without an environment still receives it.
+2. Limit the environment's deployment branches to the default branch (**Deployment branches and tags → Selected branches and tags**). A workflow pushed to any other branch is then refused the environment. Add required reviewers as well when a person should approve each use.
+3. Declare `environment: <name>` on every job that needs it, and list it under `protected_secrets` in `.github/obaaf.yml` so the checker flags any job that uses it outside that environment (OBAAF-GHA-024, see [checker configuration](checker-configuration.md#protected-secrets)).
+
+Two limits. A `pull_request_target` or `workflow_run` workflow runs as the default branch, so a branch rule does not stop it; only required reviewers do (OBAAF-GHA-001 reports these). And the checker reads workflow files only: it cannot see where a secret is stored or how an environment is configured, so check both here after any change.
 
 - Keep store upload credentials only as secrets of the `release` environment. Do not create repository or organization secrets that other workflows could read.
 - Repository variables the templates read: `OBAAF_MODEL_ENDPOINT` (the inference proxy), `OBAAF_ALLOWED_LABELS` (labels an agent may propose), and optionally `OBAAF_EGRESS_MONITOR` and `OBAAF_ALLOWED_ENDPOINTS` (agent egress monitor) and `OBAAF_UPLOAD_SARIF`.

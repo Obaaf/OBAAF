@@ -177,6 +177,36 @@ class ConfigError(ValueError):
     pass
 
 
+_SECRET_NAME = re.compile(r"^[A-Za-z_*?][A-Za-z0-9_*?]*$")
+
+
+def parse_protected_secrets(value, path) -> dict:
+    """protected_secrets: a list of secret names (any declared environment will do), or a mapping of
+    secret name to the environment that must hold it. Names may use * and ? globs; secret names are
+    case-insensitive in GitHub, so they are compared in upper case."""
+    if value is None:
+        return {}
+    if isinstance(value, list):
+        pairs = [(name, None) for name in value]
+    elif isinstance(value, dict):
+        pairs = list(value.items())
+    else:
+        raise ConfigError(f"{path}: protected_secrets must be a list of secret names or a mapping of secret "
+                          "name to environment")
+    out: dict = {}
+    for name, env in pairs:
+        if not isinstance(name, str) or not _SECRET_NAME.match(name) or not name.strip("*?"):
+            raise ConfigError(f"{path}: protected_secrets entry {name!r} is not a secret name (letters, digits, "
+                              "underscores, and * or ? globs, not a bare wildcard)")
+        if name.upper() == "GITHUB_TOKEN":
+            raise ConfigError(f"{path}: GITHUB_TOKEN is not a stored secret; protected_secrets cannot list it")
+        if env is not None and (not isinstance(env, str) or not env.strip() or "${{" in env):
+            raise ConfigError(f"{path}: protected_secrets environment for {name!r} must be a literal "
+                              "environment name")
+        out[name.upper()] = env.strip() if isinstance(env, str) else None
+    return out
+
+
 @dataclass
 class Config:
     lanes: dict = field(default_factory=dict)
@@ -184,44 +214,52 @@ class Config:
     ignore: list = field(default_factory=list)
     path: str | None = None
     jenkins: dict = field(default_factory=dict)
+    # Secret name (upper case, glob allowed) -> the environment that must hold it, or None for any
+    # declared environment.
+    protected_secrets: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, root: Path, explicit: str | None = None) -> "Config":
         candidates = [Path(explicit)] if explicit else [root / rel for rel in CONFIG_LOCATIONS]
         for path in candidates:
             if path.is_file():
-                data = yamlutil.load_file(path) or {}
-                if not isinstance(data, dict):
-                    raise ConfigError(f"{path}: expected a mapping")
-                ignore = data.get("ignore") or []
-                for entry in ignore:
-                    if not isinstance(entry, dict):
-                        raise ConfigError(f"{path}: every ignore entry must be a mapping")
-                    for key in ("rule", "path", "reason", "until"):
-                        if not entry.get(key):
-                            raise ConfigError(f"{path}: every ignore entry needs rule, path, reason and until; "
-                                              f"missing {key!r} in {dict(entry)}")
-                    if not re.sub(r"[*?/\[\]!]", "", str(entry["path"])).strip("."):
-                        raise ConfigError(f"{path}: ignore path {entry['path']!r} matches everything; name the "
-                                          "workflow file the finding is in")
-                    try:
-                        until = entry["until"]
-                        until if isinstance(until, date) else date.fromisoformat(str(until))
-                    except ValueError as exc:
-                        raise ConfigError(f"{path}: ignore entry 'until' must be a date (YYYY-MM-DD): {exc}") from exc
-                jenkins = data.get("jenkins") or {}
-                if not isinstance(jenkins, dict) or not isinstance(jenkins.get("files") or [], list) or \
-                        not isinstance(jenkins.get("exclude") or [], list):
-                    raise ConfigError(f"{path}: jenkins must be a mapping, and jenkins.files and jenkins.exclude "
-                                      "lists of globs")
-                agents = data.get("agents") or {}
-                if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
-                    raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
-                return cls(lanes=dict(data.get("lanes") or {}), agents=dict(agents), ignore=list(ignore),
-                           path=str(path), jenkins=dict(jenkins))
+                return cls.from_data(yamlutil.load_file(path) or {}, path)
         if explicit:
             raise ConfigError(f"config file not found: {explicit}")
         return cls()
+
+    @classmethod
+    def from_data(cls, data, path) -> "Config":
+        """A configuration from parsed YAML; `path` names it in error messages."""
+        if not isinstance(data, dict):
+            raise ConfigError(f"{path}: expected a mapping")
+        ignore = data.get("ignore") or []
+        for entry in ignore:
+            if not isinstance(entry, dict):
+                raise ConfigError(f"{path}: every ignore entry must be a mapping")
+            for key in ("rule", "path", "reason", "until"):
+                if not entry.get(key):
+                    raise ConfigError(f"{path}: every ignore entry needs rule, path, reason and until; "
+                                      f"missing {key!r} in {dict(entry)}")
+            if not re.sub(r"[*?/\[\]!]", "", str(entry["path"])).strip("."):
+                raise ConfigError(f"{path}: ignore path {entry['path']!r} matches everything; name the "
+                                  "workflow file the finding is in")
+            try:
+                until = entry["until"]
+                until if isinstance(until, date) else date.fromisoformat(str(until))
+            except ValueError as exc:
+                raise ConfigError(f"{path}: ignore entry 'until' must be a date (YYYY-MM-DD): {exc}") from exc
+        jenkins = data.get("jenkins") or {}
+        if not isinstance(jenkins, dict) or not isinstance(jenkins.get("files") or [], list) or \
+                not isinstance(jenkins.get("exclude") or [], list):
+            raise ConfigError(f"{path}: jenkins must be a mapping, and jenkins.files and jenkins.exclude "
+                              "lists of globs")
+        agents = data.get("agents") or {}
+        if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
+            raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
+        return cls(lanes=dict(data.get("lanes") or {}), agents=dict(agents), ignore=list(ignore),
+                   path=str(path), jenkins=dict(jenkins),
+                   protected_secrets=parse_protected_secrets(data.get("protected_secrets"), path))
 
 
 @dataclass
@@ -343,7 +381,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 agent_lane_present = True
             elif job.lane == "trusted" and _AGENT_HINT.search(f"{job.id} {job.name}"):
                 suspect_jobs.append((rel, job.id))
-        findings.extend(rules_mod.WorkflowRules(workflow, catalog).run())
+        findings.extend(rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets).run())
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
     jenkins_results = []
     jenkins_rels: list[str] = []

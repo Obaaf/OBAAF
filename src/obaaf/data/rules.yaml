@@ -365,6 +365,27 @@ rules:
       Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or
       replace the placeholders by hand.
 
+  - id: OBAAF-GHA-024
+    title: Protected secret used outside its environment
+    severity: high
+    category: authority
+    requirements: [G3.4, G9.1]
+    supports: [FR3, FR12]
+    description: >-
+      The checker configuration lists the secret under protected_secrets, but a job references it
+      without declaring the environment that holds it. Anyone with write access can read every
+      repository secret by pushing a branch with a new workflow, so a secret worth protecting must live
+      only in an environment whose deployment branches are limited to the default branch (or that
+      requires reviewers), and every job that uses it must declare that environment. A job that takes
+      every secret (secrets: inherit or toJSON(secrets)) counts as using each protected secret. An
+      environment named by an expression cannot be confirmed and is reported at medium severity. The
+      checker cannot see where the secret is stored or the environment's branch rule; check both in the
+      repository settings.
+    fix: >-
+      Keep the secret only in the environment named in protected_secrets, limit that environment's
+      deployment branches to the default branch, delete any repository or organization copy, and add
+      `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
+
   # Jenkins (advisory). These rules read a Jenkinsfile and the files it names; controller
   # configuration is reported as coverage unknowns, never as a pass. See docs/jenkins.md.
   - id: OBAAF-JEN-001
