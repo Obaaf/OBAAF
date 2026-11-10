@@ -6,6 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Protected secrets
 
+- GHA-024 hardening, after an independent review: a computed secret index (`secrets[format(...)]`, `secrets[matrix.k]`) counts as every secret for all rules; the `secrets` context matches in any case; overlapping `protected_secrets` entries all apply; environment names compare case-insensitively; reusable-workflow callers get advice they can follow, and `secrets: inherit` is no longer reported; globs need three letters or digits; unknown configuration settings are refused. The published test set shows the configuration a fixture is checked with.
 - New rule OBAAF-GHA-024. List secrets under `protected_secrets` in `.github/obaaf.yml` (optionally with the environment that must hold each one), and the checker reports every job that uses one without declaring that environment. Anyone with write access can read a repository secret by pushing a workflow on a branch; the GitHub settings guide now says so and describes how to keep such secrets in an environment limited to the default branch. Test fixtures can carry a configuration in an `# obaaf-config:` line.
 
 ### Project

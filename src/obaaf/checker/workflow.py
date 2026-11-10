@@ -41,8 +41,11 @@ PERMISSION_SCOPES = {
 }
 
 EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-SECRET_RE = re.compile(r"\bsecrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*['\"]([^'\"]+)['\"]\s*\])")
-ALL_SECRETS_RE = re.compile(r"\b(toJSON|tojson)\s*\(\s*secrets\s*\)", re.I)
+# Context names are case-insensitive in expressions (SECRETS.KEY works), so these match any case.
+SECRET_RE = re.compile(r"(?<![.\w-])secrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*['\"]([^'\"]+)['\"]\s*\])", re.I)
+# toJSON(secrets), or an index the checker cannot read (secrets[format(...)], secrets[matrix.k]):
+# either can reach any secret, so both count as every secret.
+ALL_SECRETS_RE = re.compile(r"\btojson\s*\(\s*secrets\s*\)|(?<![.\w-])secrets\s*\[\s*(?!['\"][^'\"]+['\"]\s*\])", re.I)
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 # Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
 HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
@@ -136,8 +139,7 @@ def secret_names(value: Any) -> set[str]:
             names.add("*")
         for match in SECRET_RE.finditer(expr):
             names.add(match.group(1) or match.group(2))
-    names.discard("GITHUB_TOKEN")
-    return names
+    return {n for n in names if n.upper() != "GITHUB_TOKEN"}
 
 
 @dataclass

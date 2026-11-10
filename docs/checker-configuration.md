@@ -107,7 +107,11 @@ protected_secrets:
   PRIVATE_SET_TOKEN: private-set
 ```
 
-A plain list (`protected_secrets: [PYPI_TOKEN]`) accepts any declared environment. Names are case-insensitive and may use `*` and `?` globs, but not a bare wildcard. OBAAF-GHA-024 is reported, at high severity, for every job that uses a listed secret without the named environment, including jobs that take every secret (`secrets: inherit`, `toJSON(secrets)`). An environment named by an expression is reported at medium, because the checker cannot tell which environment it will be.
+A plain list (`protected_secrets: [PYPI_TOKEN]`) accepts any declared environment. Names are case-insensitive and may use `*` and `?` globs, with at least three letters or digits (`*_API_KEY`, not `*_*`). When several entries match a secret, every one applies. OBAAF-GHA-024 is reported, at high severity, for every job that uses a listed secret without the named environment, including jobs that can take every secret (`toJSON(secrets)`, or `secrets[...]` with a computed index). Environment names compare case-insensitively, as GitHub does. An environment named by an expression is reported at medium, because the checker cannot tell which environment it will be.
+
+A job that calls a reusable workflow (`uses:` at job level) cannot declare an environment. Passing it a protected secret is reported, with the advice to declare the environment in the called workflow's job instead. `secrets: inherit` is not reported, because it passes repository and organization secrets only, never an environment's.
+
+The checker refuses a configuration with a setting it does not know, so a misspelt key such as `protected-secrets` cannot turn a rule off silently.
 
 The rule checks the workflow files against what you declared. It cannot see that the secret has actually been removed from the repository and organization, or that the environment's deployment branches are limited, so check those in the settings.
 
