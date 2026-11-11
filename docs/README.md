@@ -12,6 +12,7 @@
 | [Traceability](traceability.md) | Reviewers | Each functional requirement, where it is built, and how it is tested |
 | [Live acceptance tests](live-acceptance-tests.md) | Maintainers | Procedures for a sandbox GitHub repository |
 | [Glossary](glossary.md) | Everyone | Plain-language meanings of the terms used here |
+| [Flagship plan](flagship.md) | Maintainers | The plan and progress of the work to make the core hold up in real use |
 
 The specifications themselves are in [`spec/`](../spec/), generated from the data in [`src/obaaf/data/`](../src/obaaf/data/).
 
