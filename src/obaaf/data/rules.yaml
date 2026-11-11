@@ -164,12 +164,14 @@ rules:
     supports: [FR3]
     description: >-
       A script interpolates text that an outsider controls, such as an issue title, a pull-request title
-      or body, a branch name or a commit message, with `${{ }}`, in any spelling (index syntax, any
-      letter case) or through `toJSON` of the event. A wildcard or a computed index
-      (`github.event.*.title`, `github.event[inputs.kind].body`) counts as reaching those fields, and
-      so does `${{ env.NAME }}` when the step, job or workflow sets NAME from one of them. The text
-      becomes part of the script before the shell runs, so it can run commands. This is how the Nx
-      compromise began.
+      or body, a branch name or a commit message, with `${{ }}`: written plainly, with index syntax, in
+      any letter case, through `toJSON` or another function given the event object, through a group
+      (`(github.event.issue).title`), or through a wildcard or computed index
+      (`github.event.*.title`, `github.event[inputs.kind].body`). `${{ env.NAME }}` counts when the
+      step, job or workflow sets NAME from one of these fields, and `${{ matrix.x }}` when the job's
+      matrix is built from one. Values set while the job runs, or passed from another job, are not
+      followed. The text becomes part of the script before the shell runs, so it can run commands.
+      This is how the Nx compromise began.
     fix: >-
       Pass the value through an environment variable (`env: TITLE: ${{ github.event.issue.title }}`)
       and use it quoted in the script (`"$TITLE"`), so the shell treats it as data.

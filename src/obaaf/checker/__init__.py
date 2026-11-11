@@ -418,6 +418,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")
             continue
+        except RecursionError:
+            errors.append(f"{rel}: nested too deeply to read; the checker cannot tell what this file does")
+            continue
         findings.extend(found)
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
     jenkins_results = []

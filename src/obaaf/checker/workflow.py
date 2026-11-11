@@ -136,17 +136,27 @@ def _narrow(events: set[str], cond: str) -> set[str]:
     return events
 
 
-def expressions(value: Any) -> Iterator[str]:
-    """Yield the body of every ${{ }} expression found anywhere in a value (see expr.bodies)."""
+def expressions(value: Any, _seen: set | None = None) -> Iterator[str]:
+    """Yield the body of every ${{ }} expression found anywhere in a value (see expr.bodies).
+
+    A mapping or list reached again through a YAML alias is read once: its expressions were already
+    yielded, and a file of nested aliases would otherwise take time exponential in its size.
+    """
     if isinstance(value, str):
         yield from expr_mod.bodies(value)
-    elif isinstance(value, dict):
-        for k, v in value.items():
-            yield from expressions(k)
-            yield from expressions(v)
-    elif isinstance(value, list):
-        for v in value:
-            yield from expressions(v)
+    elif isinstance(value, (dict, list)):
+        if _seen is None:
+            _seen = set()
+        if id(value) in _seen:
+            return
+        _seen.add(id(value))
+        if isinstance(value, dict):
+            for k, v in value.items():
+                yield from expressions(k, _seen)
+                yield from expressions(v, _seen)
+        else:
+            for v in value:
+                yield from expressions(v, _seen)
 
 
 def secret_names(value: Any) -> set[str]:
@@ -258,6 +268,7 @@ class Job:
     steps: list[Step] = field(default_factory=list)
     lane: str = "trusted"
     lane_reason: str = ""
+    _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -415,11 +426,13 @@ class Job:
         """Secrets the job can read. The whole job is read, not a list of keys known to take
         secrets, so a reference in a place the checker did not expect (for example `outputs`) is
         still found."""
-        names = secret_names(self.workflow.raw.get("env")) | secret_names(self.raw)
-        passed = self.raw.get("secrets")
-        if isinstance(passed, str) and passed.strip():
-            names.add("*inherit")      # the only string GitHub accepts here is `inherit`
-        return names
+        if self._secret_names is None:
+            names = secret_names(self.workflow.raw.get("env")) | secret_names(self.raw)
+            passed = self.raw.get("secrets")
+            if isinstance(passed, str) and passed.strip():
+                names.add("*inherit")      # the only string GitHub accepts here is `inherit`
+            self._secret_names = frozenset(names)
+        return set(self._secret_names)
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
@@ -505,13 +518,50 @@ class Workflow:
         return after or 1
 
 
+# Characters that some YAML readers treat as a line break and others as ordinary text. Where the
+# readers disagree, text after one of them can be a comment to the checker and a value to GitHub.
+_DISPUTED_BREAKS = {"\u0085": "U+0085", "\u2028": "U+2028", "\u2029": "U+2029"}
+
+
+def _unreadable(value: Any, _seen: set | None = None) -> str | None:
+    """The first value of a kind the checker does not read (a set, pairs or binary data, which only
+    an explicit YAML tag produces), or None. Skipping one silently would be a pass on text nobody
+    read."""
+    if isinstance(value, (dict, list)):
+        if _seen is None:
+            _seen = set()
+        if id(value) in _seen:
+            return None
+        _seen.add(id(value))
+        for item in (list(value.keys()) + list(value.values())) if isinstance(value, dict) else value:
+            found = _unreadable(item, _seen)
+            if found:
+                return found
+        return None
+    if isinstance(value, (set, frozenset, tuple, bytes, bytearray)):
+        return type(value).__name__
+    return None
+
+
 def parse(path: str, text: str) -> Workflow:
+    for char, name in _DISPUTED_BREAKS.items():
+        if char in text:
+            return Workflow(path=path, text=text, raw={}, error=(
+                f"contains the character {name}, which YAML readers do not agree is a line break, so the "
+                "checker cannot tell what GitHub would read; remove it"))
     try:
         raw = yamlutil.load(text)
     except Exception as exc:  # yaml errors, duplicate keys
         return Workflow(path=path, text=text, raw={}, error=f"cannot parse YAML: {exc}")
     if not isinstance(raw, dict):
         return Workflow(path=path, text=text, raw={}, error="not a workflow (top level is not a mapping)")
+    try:
+        odd = _unreadable(raw)
+    except RecursionError:
+        odd = "nesting too deep to read"
+    if odd:
+        return Workflow(path=path, text=text, raw={}, error=(
+            f"contains a value the checker does not read ({odd}); write it as plain YAML text, lists and mappings"))
     workflow = Workflow(path=path, text=text, raw=raw)
     jobs = raw.get("jobs")
     if not isinstance(jobs, dict):
@@ -533,6 +583,8 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     groups = 0
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
+            workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "
+                                     "check what it does")
             continue
         line = getattr(step_raw, "line", job.line)
         if "parallel" in step_raw:

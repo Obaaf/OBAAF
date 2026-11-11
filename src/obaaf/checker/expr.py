@@ -1,19 +1,22 @@
 """Reading GitHub Actions expressions (the text inside `${{ }}`).
 
 The rules ask two things of an expression: which secrets it can read, and whether it expands text
-an outsider wrote. Both used to be answered by matching patterns against the expression's text,
-and a spelling the patterns did not expect was a way past the rule. Here the expression is split
-into tokens and the context references are read from them. Whatever the reader cannot pin down
-counts as the worst case: a reference to `secrets` that is not one literal name is every secret,
-and a wildcard or computed index matches any field.
+an outsider wrote. Matching patterns against the expression's text answers neither reliably: a
+spelling the patterns did not expect is a way past the rule. Here the expression is split into
+tokens and its context references are read from them. Where the reader cannot pin a reference
+down it takes the wider reading: a reference to `secrets` that is not one literal name is every
+secret, a wildcard or computed index matches any field, and an argument of a function is treated
+as something the function may turn into text.
 
-Nothing is evaluated.
+Nothing is evaluated, and nothing here has been checked against a run on GitHub. What the reader
+does not follow is listed where it is used (rules.py, OBAAF-GHA-010).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 OPEN, CLOSE = "${{", "}}"
 _ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
@@ -117,66 +120,113 @@ class Segment:
         return self.value.lower() if self.kind == NAME else "*" if self.kind == STAR else "[...]"
 
 
-def _matching_bracket(toks: list[tuple[str, str]], start: int) -> int:
-    """Index of the `]` that closes the `[` at `start`, or len(toks) when there is none."""
-    depth = 0
-    for k in range(start, len(toks)):
-        if toks[k] == ("op", "["):
-            depth += 1
-        elif toks[k] == ("op", "]"):
-            depth -= 1
-            if depth == 0:
-                return k
-    return len(toks)
+@dataclass(frozen=True)
+class Ref:
+    """One context reference in an expression."""
+
+    path: tuple            # of Segment
+    extracted: bool = False   # an argument of a function call, which may turn an object into its text
 
 
-def _paths(toks: list[tuple[str, str]]) -> list[tuple[Segment, ...]]:
-    out: list[tuple[Segment, ...]] = []
-    i, n = 0, len(toks)
-    while i < n:
-        kind, text = toks[i]
-        if kind != "id" or (i > 0 and toks[i - 1] == ("op", ".")) or (i + 1 < n and toks[i + 1] == ("op", "(")):
-            # Not the start of a context reference: an operator, a literal, a function name, or a
-            # property of a function's result (fromJSON(x).name), whose object is read on its own.
-            i += 1
+# Deeper nesting of ( and [ than this is refused. Real expressions nest a handful of levels.
+MAX_DEPTH = 64
+
+
+def _closers(toks: list) -> list[int]:
+    """For each `(` or `[`, the index of the token that closes it, or len(toks) when nothing does."""
+    close = [len(toks)] * len(toks)
+    stack: list[int] = []
+    for k, (kind, text) in enumerate(toks):
+        if kind != "op":
             continue
-        segments = [Segment(NAME, text)]
-        j = i + 1
-        while j < n:
-            if toks[j] == ("op", ".") and j + 1 < n and toks[j + 1][0] == "id":
-                segments.append(Segment(NAME, toks[j + 1][1]))
-                j += 2
-            elif toks[j] == ("op", ".") and j + 1 < n and toks[j + 1] == ("op", "*"):
-                segments.append(Segment(STAR))
-                j += 2
-            elif toks[j] == ("op", "["):
-                close = _matching_bracket(toks, j)
-                inner = toks[j + 1:close]
-                if len(inner) == 1 and inner[0][0] == "str":
-                    segments.append(Segment(NAME, inner[0][1]))
-                else:
-                    segments.append(Segment(COMPUTED))
-                    out.extend(_paths(inner))      # what the index itself reads
-                j = close + 1
+        if text in "([":
+            stack.append(k)
+        elif text in ")]" and stack and toks[stack[-1]][1] == ("(" if text == ")" else "["):
+            close[stack.pop()] = k
+    return close
+
+
+def _accessors(toks: list, close: list, j: int, hi: int, in_call: bool, depth: int, out: list,
+               segments: list | None) -> int:
+    """Read `.name`, `.*` and `[...]` from position j, adding them to `segments` (when given), and
+    return the position after them. What a computed index itself reads is added to `out`."""
+    while j < hi:
+        if toks[j] == ("op", ".") and j + 1 < hi and toks[j + 1][0] == "id":
+            segment = Segment(NAME, toks[j + 1][1])
+            j += 2
+        elif toks[j] == ("op", ".") and j + 1 < hi and toks[j + 1] == ("op", "*"):
+            segment = Segment(STAR)
+            j += 2
+        elif toks[j] == ("op", "["):
+            end = min(close[j], hi)
+            if end - j == 2 and toks[j + 1][0] == "str":
+                segment = Segment(NAME, toks[j + 1][1])
             else:
-                break
-        out.append(tuple(segments))
-        i = j
-    return out
+                segment = Segment(COMPUTED)
+                _read(toks, close, j + 1, end, in_call, depth + 1, out)
+            j = end + 1
+        else:
+            break
+        if segments is not None:
+            segments.append(segment)
+    return j
 
 
-def paths(expr: str) -> list[tuple[Segment, ...]]:
-    """Every context reference in an expression, as a tuple of segments: `github.event.issue.title`,
-    `github['event'].issue.title` and `GITHUB.EVENT.ISSUE.TITLE` all give the same four names;
-    `secrets.*` ends in a STAR and `secrets[format(...)]` in a COMPUTED segment."""
-    return _paths(tokens(expr))
+def _read(toks: list, close: list, lo: int, hi: int, in_call: bool, depth: int, out: list) -> None:
+    if depth > MAX_DEPTH:
+        raise TooComplex("an expression is nested too deeply to read; the checker cannot tell what it expands")
+    i = lo
+    while i < hi:
+        kind, text = toks[i]
+        if kind == "id" and i + 1 < hi and toks[i + 1] == ("op", "("):
+            # A function call. Its arguments are read as extracted: toJSON, join, format or a
+            # function added later can turn an object into text. What follows the call (`.name`,
+            # `[...]`) applies to the function's result, not to a context.
+            end = min(close[i + 1], hi)
+            _read(toks, close, i + 2, end, True, depth + 1, out)
+            i = _accessors(toks, close, end + 1, hi, in_call, depth, out, None)
+        elif (kind, text) == ("op", "("):
+            # A group. `(github.event.issue).title` reads the same field as the plain spelling, and
+            # `(a || b).title` reads it from either side, so what follows the group is added to each
+            # reference inside it.
+            end = min(close[i], hi)
+            inner: list = []
+            _read(toks, close, i + 1, end, in_call, depth + 1, inner)
+            suffix: list = []
+            i = _accessors(toks, close, end + 1, hi, in_call, depth, out, suffix)
+            if suffix:
+                inner = [r if r.extracted else Ref(r.path + tuple(suffix), False) for r in inner]
+            out.extend(inner)
+        elif kind == "id" and not (i > 0 and toks[i - 1] == ("op", ".")):
+            segments = [Segment(NAME, text)]
+            i = _accessors(toks, close, i + 1, hi, in_call, depth, out, segments)
+            out.append(Ref(tuple(segments), in_call))
+        else:
+            i += 1
 
 
-def dotted(path: tuple[Segment, ...]) -> str:
+@lru_cache(maxsize=4096)
+def refs(expr: str) -> tuple:
+    """Every context reference in an expression. `github.event.issue.title`,
+    `github['event'].issue.title`, `GITHUB.EVENT.ISSUE.TITLE` and `(github.event.issue).title` all
+    give the same four names; `secrets.*` ends in a STAR and `secrets[format(...)]` in a COMPUTED
+    segment. Raises TooComplex for an expression nested too deeply to read."""
+    toks = tokens(expr)
+    out: list = []
+    _read(toks, _closers(toks), 0, len(toks), False, 0, out)
+    return tuple(out)
+
+
+def paths(expr: str) -> list[tuple]:
+    return [ref.path for ref in refs(expr)]
+
+
+def dotted(path: tuple) -> str:
     return ".".join(s.shown() for s in path)
 
 
 ALL = "*"
+_SECRET_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
 
 
 def secret_refs(expr: str) -> set[str]:
@@ -184,37 +234,39 @@ def secret_refs(expr: str) -> set[str]:
 
     Only `secrets.NAME` and `secrets['NAME']` name one secret. Everything else that touches the
     `secrets` context (`toJSON(secrets)`, `secrets.*`, `secrets[matrix.key]`, `secrets` passed to a
-    function) can reach every secret, and is reported as that.
+    function, an index that is not a name) can reach every secret, and is reported as that.
     """
     names: set[str] = set()
     for path in paths(expr):
         if path[0].value.lower() != "secrets":
             continue
-        if len(path) == 1 or path[1].kind != NAME or not path[1].value.strip():
+        if len(path) == 1 or path[1].kind != NAME or not _SECRET_NAME.match(path[1].value):
             names.add(ALL)
         else:
             names.add(path[1].value)
     return names
 
 
-# What a pattern segment accepts: a set of names, or None for anything (an array index).
-Pattern = tuple
-
-
-def reaches(path: tuple[Segment, ...], pattern: Pattern) -> bool:
+def reaches(path: tuple, pattern: tuple, extracted: bool = False) -> bool:
     """Whether a context reference can read the field a pattern names.
 
-    A STAR or COMPUTED segment in the reference matches any name. A reference at least as long as
-    the pattern reads the field (or something inside it). A shorter reference reads an object that
-    contains the field; it counts only when it has a STAR or COMPUTED segment, because that is what
-    turns the object into its values (`github.event.issue.*`, `github.event[inputs.kind]`).
+    A pattern is one accepted set of names per segment, or None where the data has an array index.
+    A STAR or COMPUTED segment in the reference matches anything. A reference as long as the pattern
+    reads the field. A shorter one reads an object that contains the field; it counts when
+    something can turn that object into text: a STAR or COMPUTED segment (`github.event.issue.*`,
+    `github.event[inputs.kind]`), or being an argument of a function (`extracted`). A longer one
+    reads inside a text field, which holds nothing.
     """
-    open_ended = any(s.kind != NAME for s in path)
-    if len(path) < len(pattern) and not open_ended:
+    if len(path) > len(pattern):
+        return False
+    if len(path) < len(pattern) and not (extracted or any(s.kind != NAME for s in path)):
         return False
     for segment, accepted in zip(path, pattern):
-        if segment.kind != NAME or accepted is None:
+        if segment.kind != NAME:
             continue
-        if segment.value.lower() not in accepted:
+        if accepted is None:
+            if not segment.value.isdigit():
+                return False
+        elif segment.value.lower() not in accepted:
             return False
     return True
