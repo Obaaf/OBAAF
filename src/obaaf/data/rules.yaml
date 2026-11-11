@@ -171,9 +171,10 @@ rules:
       step, job or workflow sets NAME from one of these fields, directly or through other env values
       or the matrix, and `${{ matrix.x }}` when the job's matrix is built from one. Not followed:
       values set while the job runs, values passed between jobs or into reusable workflows and
-      composite actions, and scripts other than `run` and `actions/github-script`. The text becomes
-      part of the script before the shell runs, so it can run commands. This is how the Nx
-      compromise began.
+      composite actions, scripts other than `run` and `actions/github-script`, an `env:` written as
+      one expression that itself reads env or matrix values, and a `with:` written as one
+      expression. The text becomes part of the script before the shell runs, so it can run
+      commands. This is how the Nx compromise began.
     fix: >-
       Pass the value through an environment variable (`env: TITLE: ${{ github.event.issue.title }}`)
       and use it quoted in the script (`"$TITLE"`), so the shell treats it as data.
