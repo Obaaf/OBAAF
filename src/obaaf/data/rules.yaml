@@ -165,8 +165,11 @@ rules:
     description: >-
       A script interpolates text that an outsider controls, such as an issue title, a pull-request title
       or body, a branch name or a commit message, with `${{ }}`, in any spelling (index syntax, any
-      letter case) or through `toJSON` of the event. The text becomes part of the script before the
-      shell runs, so it can run commands. This is how the Nx compromise began.
+      letter case) or through `toJSON` of the event. A wildcard or a computed index
+      (`github.event.*.title`, `github.event[inputs.kind].body`) counts as reaching those fields, and
+      so does `${{ env.NAME }}` when the step, job or workflow sets NAME from one of them. The text
+      becomes part of the script before the shell runs, so it can run commands. This is how the Nx
+      compromise began.
     fix: >-
       Pass the value through an environment variable (`env: TITLE: ${{ github.event.issue.title }}`)
       and use it quoted in the script (`"$TITLE"`), so the shell treats it as data.
@@ -377,8 +380,9 @@ rules:
       repository secret by pushing a branch with a new workflow, so a secret worth protecting must live
       only in an environment whose deployment branches are limited to the default branch (or that
       requires reviewers), and every job that uses it must declare that environment. A job that can
-      take every secret (toJSON(secrets), or secrets[...] with a computed index) counts as using each
-      protected secret. A job that calls a reusable workflow cannot declare an environment, so passing
+      take every secret counts as using each protected secret: that is any use of the secrets context
+      other than one literal name, such as toJSON(secrets), secrets.* or secrets[...] with a computed
+      index. A job that calls a reusable workflow cannot declare an environment, so passing
       it a protected secret is reported; secrets: inherit is not, because it never passes an
       environment's secrets. Every matching entry applies, so a looser pattern cannot relax a stricter
       one. An environment named by an expression cannot be confirmed and is reported at medium

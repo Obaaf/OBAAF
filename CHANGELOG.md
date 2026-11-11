@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Expressions
+
+- The checker now reads `${{ }}` expressions from their tokens instead of matching their text, and takes the worst case for anything it cannot pin down. Four spellings that no rule reported are now reported. (1) `secrets.*`, and any other use of the `secrets` context that is not one literal name (for example `contains(secrets, 'x')`), counts as every secret for OBAAF-GHA-001, 005 and 024. (2) A secret referenced anywhere in a job is found, including in `outputs`; before, only `env`, `with`, `secrets`, `container`, `services` and `steps` were read. (3) An expression is no longer cut short at a `}}` inside a string, as in `${{ format('}}{0}', secrets.KEY) }}`, which hid whatever followed from every rule that reads expressions. (4) OBAAF-GHA-010 follows a wildcard or computed index (`github.event.*.title`, `github.event.issue.*`, `github.event[inputs.kind].body`) and `${{ env.NAME }}` when NAME is set from an outsider-written field. Text inside a string, such as `format('secrets.KEY')`, is no longer mistaken for a reference. A text with too many unfinished expressions to read is an error and fails the check. None of these cases has been run on GitHub; where the platform's behaviour was in doubt the wider reading was taken. Findings for workflows that used none of these spellings are unchanged (checked on this repository, its fixtures and templates, and Expectrail).
+
 ### Protected secrets
 
 - GHA-024 hardening, after an independent review: a computed secret index (`secrets[format(...)]`, `secrets[matrix.k]`) counts as every secret for all rules; the `secrets` context matches in any case; overlapping `protected_secrets` entries all apply; environment names compare case-insensitively; reusable-workflow callers get advice they can follow, and `secrets: inherit` is no longer reported; globs need three letters or digits; unknown configuration settings are refused. The published test set shows the configuration a fixture is checked with.

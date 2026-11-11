@@ -17,6 +17,7 @@ from pathlib import Path
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
+from obaaf.checker import expr as expr_mod
 from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker import rules as rules_mod
@@ -411,7 +412,13 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 agent_lane_present = True
             elif job.lane == "trusted" and _AGENT_HINT.search(f"{job.id} {job.name}"):
                 suspect_jobs.append((rel, job.id))
-        findings.extend(rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets).run())
+        try:
+            found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets).run()
+        except expr_mod.TooComplex as exc:
+            # A file the checker could not read is an error, never a pass.
+            errors.append(f"{rel}: {exc}")
+            continue
+        findings.extend(found)
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
     jenkins_results = []
     jenkins_rels: list[str] = []
