@@ -1,8 +1,8 @@
 # Flagship: plan and progress
 
-*Status: in progress. Done: item 0, slice 2d.1, slice 1.1; all three are on `main` (#52 and #55 merged on 2026-11-11). Next: slice 1.2. Last updated 2026-11-11, after run 2.*
+*Status: in progress. Done and on `main`: item 0, slice 2d.1, slice 1.1. Open slices and what each needs are in [the table below](#what-may-be-worked-on-and-when). Last updated 2026-11-11, after run 2.*
 
-**First thing next run:** as for any run, read the state of the current standing pull request (linked from the tracking issue) and merge `main` into `flagship` if `main` has moved.
+**First thing every run:** read the tracking issue's comments to see which slices other runs hold, then the state of the current standing pull request (linked from the tracking issue); merge `main` into `flagship` if `main` has moved.
 
 This is the working plan for taking OBAAF from a young linter to a framework that holds up in real use. Sean Keluo-Udeke asked for it on 2026-11-11. A scheduled Claude agent does the work over many runs. Each run starts from nothing but this file and the tracking issue ([#51](https://github.com/Obaaf/OBAAF/issues/51)), so everything learned or decided is written here.
 
@@ -17,6 +17,53 @@ It is a planning document, not part of the specification. Decisions that change 
 - A new standing pull request is opened when `flagship` differs from `main` in content, not merely by a merge commit (decision F-14).
 - Comments by Sean or another maintainer on the tracking issue or the standing pull request outrank this plan.
 - Every claim that something works links a run or says "not run".
+
+## Working in parallel
+
+From 2026-11-11 several runs may work at once (decision F-16). No run waits for another to finish.
+
+- **A claim** is a comment on the tracking issue: `Run started, <UTC time>, run <tag>, slice <id>`. The tag is any short word the run picks. It is released by `Run finished, <UTC time>, run <tag>` with the report. A claim with no matching "Run finished" lapses after 5 hours.
+- **A run takes the first slice in the table below that** is not done, is not claimed, has every slice in its "needs" column merged into `flagship`, and, if it is marked *core*, only when no other active run holds a *core* slice. *Core* slices change the checker's shared code (`src/obaaf/checker/`, `cli.py`, the rule data), where two slices at once would collide.
+- **After posting a claim, read the comments once more.** If another run claimed the same slice first, withdraw (`Run finished, <UTC time>, run <tag>: withdrew`) and choose again.
+- **Unblocking** (a red check on `flagship` or the standing pull request, `main` ahead of `flagship`, a comment from Sean) is claimed the same way, as slice `unblock`, by the first run that finds it.
+- **Shared files.** A run changes only its own slice's entry in this file, the decisions it adds and its own run-log line, and only its own row in the tracking issue. Before pushing an update to this file it fetches and merges `flagship`; on a conflict it keeps both sides. Never force-push.
+- **If nothing qualifies,** the run posts a one-line "Run finished" and stops. It does not invent work and does not start a slice whose needs are unmet.
+
+### What may be worked on, and when
+
+| Slice | Needs | Core |
+| --- | --- | --- |
+| 1.2 Enforcement and the platform | nothing | |
+| 1.3 Enterprise products and agent tools | nothing | |
+| 1.4 Positioning | 1.2, 1.3 | |
+| 2a.1 Lifecycle | nothing | core |
+| 2a.2 Controls that clear GHA-005 and GHA-020 | 2a.1 | core |
+| 2a.3 Reports that lead with accepted risk | 2a.1 | core |
+| 2b.1 Read, snapshot, report what was not read | nothing | |
+| 2b.2 Rules for the six incidents | 2b.1 | |
+| 2b.3 Drift | 2b.1 | |
+| 2b.4 Expectrail, read-only | 2b.2 | |
+| 2c.1 Egress control: design | 1.2 | |
+| 2c.2 The action and its escape tests | 2c.1 | |
+| 2c.3 The checker recognises it | 2c.2, 2a.2 | core |
+| 2d.2 Bypass attempts, rule by rule | nothing | core |
+| 2d.3 Property and fuzz tests | nothing | core |
+| 2d.4 Local reusable workflows and composite actions | nothing | core |
+| 2d.5 Agent tools installed by a script | 1.4 | core |
+| 3.1 Measure the adoption path that exists | nothing | |
+| 3.2 Zero-config first run | 2a.3 | core |
+| 3.3 `obaaf init` | 2a.1 | core |
+| 3.4 CI integration | 2a.3 | |
+| 3.5 Versioning, and from report-only to gate | 2a.1 | |
+| 3.6 Timed again | 3.2, 3.3, 3.4 | |
+| 3.7 Expectrail case study | 2b.4 | |
+| 3.8 "Run this and send us the result" | 3.2 | |
+| 4.1 Website: content and truth table | 1.4 | |
+| 4.2 Website: home page | 4.1 | |
+| 4.3 Website: pages | 4.1, 3.7 | |
+| 4.4 Website: checked in a browser | 4.2, 4.3 | |
+
+The settings audit (2b) is new code in its own module, so it is not marked core; if a 2b slice has to change the checker's shared code it waits for the core slot like any other. Where a later slice's design should follow the positioning section and 1.4 is not yet done, the slice says in its pull request what it assumed.
 
 ## Where OBAAF stood on 2026-11-11
 
@@ -59,7 +106,7 @@ Both papers were read before planning (Paper 1: abstract, sections 5 to 8 and 11
 
 Items are done in order. Each slice lists what "done" means. A slice is not done until it is merged into `flagship`.
 
-Legend: ☐ open, ◐ in progress, ☑ merged into `flagship`.
+Legend: ☐ open, ◐ in progress, ☑ merged into `flagship`. The order below is the order of preference; what may actually start is decided by [the table above](#what-may-be-worked-on-and-when).
 
 ### 0. Set up and plan
 
@@ -165,13 +212,15 @@ The site lives in [`site/`](../site/README.md), is built by `site/build.py`, and
 | F-12 | 2026-11-11 | A fix that changes code after the reviewer's last pass is either reviewed again or limited to wording. | The second round of fixes in 2d.1 introduced a new problem (memory), which only the next review pass caught. |
 | F-13 | 2026-11-11 | Agent commits carry Sean's sign-off line from this point on. Earlier commits are left as they are. This replaces the second half of F-05; the author of the commits is still the session's identity. | Sean said so in the session after run 2 ("Proceed with the sign-off"). The line is his statement under the DCO, and the form is the one his earlier commits use. History is never rewritten, so commits before this have none. If a DCO check is ever added it will want the author and the sign-off to match; that would need a further word from Sean. |
 | F-14 | 2026-11-11 | A new standing pull request opens when `flagship` and `main` differ in content. A difference of merge commits alone does not count. | GitHub merges the standing pull request with a merge commit, which `flagship` then has to merge back. If that alone counted as "ahead", every merge would call for another empty pull request. |
+| F-15 | 2026-11-11 | The comparison in slice 1.1 stands without the tools that need PyPI, Docker or a token. No slice waits for access the session lacks: it does what can be done, names what was not run, and moves on. | Sean said so in the session after run 2. The five tools run are the closest to OBAAF; the other five are described from their own pages. The one gap that could change a conclusion is Semgrep's rule list, which could not be read at all; the page says so. |
+| F-16 | 2026-11-11 | Runs may work in parallel, with claims on the tracking issue and the dependency table above. This replaces "one run at a time". | Sean asked for continuous work that never waits on another agent, on tasks nobody else holds and that depend on nothing in progress. One *core* slice at a time keeps two runs out of the same checker files. |
 
 ## Waiting on Sean
 
 1. **The current standing pull request** (linked from the tracking issue), whenever it is ready. #55 was merged on 2026-11-11, so slices 2d.1 and 1.1 are on `main`. 2d.1 is not released; an adopter whose workflows use one of the newly caught spellings will see new findings when it is.
 2. **Leave draft slice pull requests for the agent to finish.** A slice is a draft until it is reviewed and green (decision F-11). Sean merged #52 to #55 himself; #56 was left as a draft and the agent merged it.
 3. **Do not copy the agent footer** into your own comments on the tracking issue or the standing pull request; a later run would read such a comment as an agent report (decision F-01).
-4. **PyPI for the scheduled task's environment.** The session cannot reach PyPI, the Go module proxy or crates.io, so Checkov, Semgrep and Gato-X were not run, and local tests use the machine's packages (CI uses the pinned constraints). Per the product documentation read on 2026-11-11, all three registries are on the default allowlist of a cloud environment whose network access is **Trusted**; a refusal suggests the task's environment is set to None or to Custom without the defaults. The setting is on the environment: edit the scheduled task, open its cloud environment's settings, and set **Network access** to Trusted, or to Custom with "Also include default list of common package managers" ticked. It applies from the next run. If the task is a Cowork task with no cloud environment shown, the organisation's network setting under Organization settings, Capabilities, Code execution governs instead.
+4. **PyPI is optional now.** Sean chose on 2026-11-11 to proceed without it (decision F-15). If it is ever wanted: the setting is on the scheduled task's cloud environment. Edit the task, open the environment's settings and set **Network access** to Trusted, or to Custom with "Also include default list of common package managers" ticked; it applies from the next run.
 5. **Dependabot #40, #42, #43**: see the table above.
 6. **Findings other tools reported on OBAAF's own repository** (zizmor 7, Octoscan 4; listed in [landscape.md](landscape.md)) are not triaged. They are queued under slice 2d.4.
 
@@ -182,3 +231,4 @@ The site lives in [`site/`](../site/README.md), is built by `site/build.py`, and
 | 1 | 2026-11-11, 18:35 to about 21:00 | Item 0 done: tracking issue #51, this plan, standing pull request #52. Slice 2d.1 done in two pull requests, #53 and #54, after three passes by an independent reviewer. Sean merged all three pull requests himself, and confirmed it after the run: #52 and #53 at 19:08, before #53's review had finished, and #54 at 20:33, after its review but before its CI had started. The full suite was then run locally on the merged `flagship`: 499 pass. `main` was merged back into `flagship`. Item 1 not started, apart from three GitHub changelog pages read for 2b. What took the time: the first review pass ran 67 minutes, so a slice with review needs about two hours. |
 | 2 | 2026-11-11, 20:59 to about 21:55 | Asked for by Sean in the session. CI on #55 passed (all nine checks, at 20:58) and it was marked ready. Slice 1.1 done: `docs/landscape.md`, first part, merged by the agent as #56 after two fact-check passes and green CI. Sean left the draft alone. Not started: 1.2 to 1.4. |
 | after 2 | 2026-11-11, about 21:50 | Sean merged #55 and said to add his sign-off line to the agent's commits (F-13). `main` merged back into `flagship`; this file updated; the next standing pull request opened. No slice. |
+| after 2 | 2026-11-11, about 22:00 | Sean asked for continuous, parallel-safe work and chose not to wait for PyPI (F-15, F-16). This file gained the claim rules and the dependency table; the scheduled task's instructions and timing were changed to match. No slice. |
