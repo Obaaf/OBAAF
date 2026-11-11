@@ -1,6 +1,6 @@
 # The landscape: what else checks GitHub Actions, and where OBAAF fits
 
-*Checked 2026-11-11. This first part covers ten workflow scanners. Runtime enforcement and GitHub's own features, enterprise products, and the positioning section are still to come ([flagship plan](flagship.md), items 1.2 to 1.4).*
+*Checked 2026-11-11. Part 1 covers ten workflow scanners. [Part 2](#part-2-tools-that-enforce-and-what-github-itself-provides) covers tools that enforce while a job runs, GitHub's own features, and the standards for build provenance. Enterprise products and the positioning section are still to come ([flagship plan](flagship.md), items 1.3 and 1.4).*
 
 The aim is a fair comparison a team can rely on. Every fact below comes from a page read or a command run on the date above, and says which. Where a source did not say, this page says "not stated" rather than guess.
 
@@ -150,9 +150,191 @@ These are inputs to the positioning section (item 1.4), not decisions.
 3. OBAAF missed things on its own subject that other tools caught. The agent tool installed with `curl | bash` is the clearest.
 4. A team that runs only OBAAF today loses what zizmor, poutine and actionlint report. For "lose nothing by running OBAAF as the default check" to hold, OBAAF has to run them, read their output, or say plainly to run them alongside.
 
+## Part 2: tools that enforce, and what GitHub itself provides
+
+*Checked 2026-11-11.*
+
+Part 1 was about tools that read workflow files and report. This part is about three other things: tools that restrict what a running job can do, the features GitHub has built into the platform, and the standards for recording what went into a build. For each it says what OBAAF should use as it is, what it should recommend, and what is left for OBAAF to build.
+
+### How this part was put together
+
+**Reading.** Each project's own pages were read on 2026-11-11; the links are under [Sources](#sources). Three limits apply:
+
+- GitHub's REST reference pages are long, and their response schemas were not read. Field names below come from the example responses and the parameter tables.
+- Harden-Runner's "how it works" page does not describe how its agent filters traffic on a GitHub-hosted runner, and the agent's own repository was not read.
+- The Agent Workflow Firewall's pages disagree with each other about its default mode (see [below](#restricting-what-an-agents-job-can-reach-five-ways)).
+
+**Running.** One tool was run: CodeQL's queries for GitHub Actions, offline, on the same three targets as part 1 (OBAAF at `07de975`, Expectrail at `0509d73`, OBAAF's 15 risky workflows).
+
+| Tool | Version run | Commands |
+| --- | --- | --- |
+| CodeQL | CLI 2.27.4, from the bundle tagged `codeql-bundle-v2.27.4`; query pack `codeql/actions-queries` 0.6.39 | `codeql database create --language=actions`, then `codeql database analyze` with the suite `actions-code-scanning.qls` (17 queries) and again with `actions-security-extended.qls` (23 queries) |
+
+**Not run**, and why. The egress controls need a GitHub runner, or Docker with root, and this part changed no workflow; trying them is the job of slice 2c.1 of the [flagship plan](flagship.md). `gh attestation verify`, cosign and slsa-verifier need the GitHub API or a signed artifact, and this work uses no token.
+
+### At a glance
+
+| What | Kind | Licence or plan | Enforces, or reports? | Knows about AI agents? |
+| --- | --- | --- | --- | --- |
+| [GitHub's native egress firewall](https://github.com/github-early-access/actions-native-egress-firewall/) | Platform feature. Its README says "Status: Technical Preview" | Plan not stated. The README describes a programme for "design partners" | Enforces or logs, from outside the runner's virtual machine | Not stated |
+| [Agent Workflow Firewall](https://github.com/github/gh-aw-firewall) (AWF) | Open source command and action, from GitHub | MIT | Enforces a domain allowlist on one command and its children | Yes. It is built to confine an agent, and has a proxy that "holds LLM API keys so they never reach the agent process" |
+| [GitHub Agentic Workflows](https://github.com/github/gh-aw) (gh-aw) | A way to write agent workflows in Markdown, compiled to Actions workflows. Generally available since 2026-10-28 | MIT. "GitHub Free, Team, and Enterprise" | Enforces by how it builds the workflow: read-only agent job, writes in separate jobs, AWF around the agent | Yes. It is the closest thing on GitHub to OBAAF's agent lane |
+| [Copilot's firewall](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/customize-the-agent-firewall) | Built into Copilot's cloud agent | Part of Copilot | Enforces, for "processes started by the agent via its Bash tool" | Yes, for Copilot's own agent only |
+| [Harden-Runner](https://github.com/step-security/harden-runner) | An action that installs an agent on the runner (StepSecurity) | Action: Apache-2.0. The community agent for Linux is open source; the enterprise agent is not. Free "for public repositories on GitHub-hosted runners"; the paid tier is listed at $16 per contributing developer per month | `egress-policy: audit` reports; `egress-policy: block` enforces | Nothing specific on the pages read |
+| [Bullfrog](https://github.com/bullfrogsec/bullfrog) | An action | MIT | `audit` (the default) reports; `block` enforces | Nothing on the page read |
+| [Workflow execution protections](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) | Platform feature (an "Actions policy"). Generally available since 2026-09-17 | "All public repositories, and private repositories on GitHub Team or GitHub Enterprise." Evaluate mode: Enterprise Cloud only | Enforces before a run starts: who may trigger which workflow, and by which event | Actor rules can name Copilot |
+| [Workflow lockfiles](https://github.blog/changelog/2026-10-28-github-actions-workflow-lockfiles-are-generally-available/) | Platform feature. Generally available since 2026-10-28 | Enterprise Cloud, Team and Free plans | Enforces: an onboarded workflow runs the commits recorded in the lockfile | No |
+| [Rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) | Platform feature | Public repositories on Free; private ones on Pro, Team and Enterprise Cloud | Enforces rules on branches, tags and pushes | No |
+| [CodeQL for GitHub Actions](https://github.blog/changelog/2025-04-22-github-actions-workflow-security-analysis-with-codeql-is-now-generally-available/) | Static analysis in code scanning. Generally available since 2025-04-22 | Licence of the query pack not read. Plan terms were read only in summary form | Reports | None among its 23 queries |
+| [Artifact attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations) | Platform feature | Public repositories on every current plan; private ones need Enterprise Cloud | Records. Nothing is enforced until someone verifies: "the attestations must be verified" | No |
+| [SLSA](https://slsa.dev/spec/) 1.2 | Specification | Community Specification License 1.0 | Neither. It defines levels and recommends formats | Nothing found on the pages read |
+| [Sigstore](https://docs.sigstore.dev/about/overview/) (cosign v3.1.4) | Signing services and tools | cosign: Apache-2.0 | Signs and verifies | No |
+| [in-toto attestation framework](https://github.com/in-toto/attestation/blob/main/spec/README.md) 1.2 | Format | Not read | Neither. It is the envelope the others use | No |
+| [slsa-github-generator](https://github.com/slsa-framework/slsa-github-generator) and [slsa-verifier](https://github.com/slsa-framework/slsa-verifier) | Tools | Apache-2.0 | Both READMEs say the project "is **no longer actively maintained**" and suggest GitHub artifact attestations | No |
+
+### Restricting what an agent's job can reach: five ways
+
+OBAAF's agent control R7 asks that an agent job reach only the hosts its task needs. Until now OBAAF has only reported the lack of such a control (OBAAF-GHA-020). On a GitHub-hosted runner the job has passwordless `sudo`, so the question to ask of any control is: where does it live, relative to the code it confines?
+
+| | Where it runs | What it filters | What keeps the confined code from switching it off |
+| --- | --- | --- | --- |
+| **GitHub's native egress firewall** | "**outside** the runner VM" | "DNS and HTTP/HTTPS traffic", against an allowlist of hosts in `.github/egress-firewall.yaml`. It ends TLS at the boundary and starts it again to the destination | Nothing inside the machine can reach it. GitHub's roadmap post says it "remains immutable even if an attacker gains root access inside the runner environment" |
+| **AWF** | In Docker containers on the runner: a Squid proxy, the agent's container, and a proxy for model keys | HTTP and HTTPS by domain name ("using SNI"). DNS only to the configured resolvers. "Direct IP access (without domain names) is blocked" | The command runs as an ordinary user, after the container has dropped `CAP_NET_ADMIN`, `CAP_SYS_CHROOT` and `CAP_SYS_ADMIN`. `no-new-privileges` and a seccomp profile are set, and the Docker socket is replaced by `/dev/null` to prevent "firewall bypass via `docker run`" |
+| **Harden-Runner** | An agent the action installs on the runner's own virtual machine | Community tier: "block unknown outbound calls at the DNS and network layers", against `allowed-endpoints` | `disable-sudo-and-containers` removes `sudo` and Docker from the job. The pages read do not say what a job that keeps `sudo` can do to the agent |
+| **Bullfrog** | On the runner's own virtual machine | `allowed-domains`, `allowed-ips`, and a DNS policy | `enable-sudo: false`. Its README says: "Root access can be used to bypass egress filtering entirely" |
+| **Copilot's firewall** | Inside Copilot's own environment | An allowlist of hosts | Not described. Its own page says it "should not be considered a comprehensive security solution" |
+
+Limits each project states, and bypasses that have been published. These are stated as their sources state them; none was reproduced here.
+
+- **GitHub's native egress firewall.** A technical preview, on Linux only, reached by `runs-on: ubuntu-24.04-firewall`. The README expects "roughly a **15–20% increase in workflow runtime**". Because TLS is ended at the boundary, a job that pins certificates has to trust a per-run certificate. Policy for a whole organisation is "not the focus of this technical preview", and "APIs may change". The policy file is read "from the same ref (branch, tag, or SHA) that the workflow runs from". The README does not say what happens to protocols other than HTTP, or whether an allowlist can hold IP ranges. GitHub's roadmap post of 2026-03-26 put the public preview "6-9 months" out and gave no date for general availability.
+- **AWF.** Its own threat table lists "Kernel exploits" as "Not protected", because a container shares its host's kernel, and rates host file access as high risk because the home directory is mounted read-write. "IPv6 not supported (only IPv4 configured)"; whether IPv6 is blocked or merely absent is not stated. `--enable-dind` hands the agent the Docker socket and, in the documentation's words, "allows firewall bypass". The pages disagree about the default mode: the older ones describe `sudo awf` with `iptables` rules on the host, while the command-line help in the notes for release v0.28.71 calls that `--legacy-security` and says a mode that "Requires no sudo/NET_ADMIN" is now the default. Published advisories for AWF were not searched for.
+- **Harden-Runner.** Five advisories are published on its repository; four concern egress or privilege, and all four are rated moderate. Two are bypasses of the block policy, by DNS over HTTPS ([GHSA-46g3-37rh-v698](https://osv.dev/vulnerability/GHSA-46g3-37rh-v698)) and by DNS over TCP ([GHSA-g699-3x6g-wm3g](https://github.com/advisories/GHSA-g699-3x6g-wm3g)). Both are fixed in v2.16.0, both say the attacker must already be running code in the workflow, and both say the enterprise tier is not affected. The third is outbound connections that escaped logging through `sendto`, `sendmsg` and `sendmmsg` (GHSA-cpmj-h4f6-r6pq, published 2026-02-07, titled for the community tier; the advisory itself was not read). The fourth is `disable-sudo` evaded through Docker (GHSA-mxr3-8whj-j74r, fixed in v2.12.0; `disable-sudo-and-containers` is the vendor's answer to it). Harden-Runner's limitations page says it is not supported for jobs that run in a container on the standard labels, because "it needs sudo access on the Ubuntu VM to run", nor on `ubuntu-slim` runners. It sends telemetry about each run to StepSecurity; the community tier can turn that off in block mode. Its documentation says "The Community Tier does not support private repositories." The latest release seen is v2.22.4 (6 November; the page prints no year).
+- **Bullfrog.** Runs only on GitHub-hosted Ubuntu runners, and not for jobs in containers. One CVE is published, [CVE-2025-47775](https://osv.dev/vulnerability/CVE-2025-47775) (DNS over TCP, fixed in 0.8.4). An independent researcher published three more reports against v0.8.4 between 2026-02-28 and 2026-03-02: reaching a blocked site that shares an IP address with an allowed one by changing the `Host` header, a second DNS query carried in the same TCP segment as an allowed one, and restoring `sudo` through the `docker` group. Each post records no reply from the maintainers. The README now pins v0.11.1; whether those three are fixed in it was not established.
+- **Copilot's firewall.** Its page says it "only applies to processes started by the agent via its Bash tool", not to MCP servers or setup steps, and only inside Copilot's own environment.
+
+What this means for OBAAF (inputs to slices 2a.2, 2c.1 and 2c.3):
+
+1. **Where the control lives decides what it is worth.** Only GitHub's native firewall sits where the job cannot reach it. AWF confines by taking privileges away inside a container. Harden-Runner and Bullfrog run beside the job, on the same kernel and, unless `sudo` and Docker are removed, under the same root. The published bypasses are close to a ready-made list of the escape tests OBAAF's own control must pass: another resolver, DNS over TCP, DNS over HTTPS, a `Host` header aimed at a shared address, `sudo`, and the Docker socket.
+2. **OBAAF should not write a fifth firewall if an existing one can be used.** AWF is MIT-licensed, is published as an action, wraps any command, and already drops the privileges the confined command would need to undo it. The design in slice 2c.1 should start from pinning and wrapping AWF, proving it with OBAAF's own escape tests in CI, and teaching the checker to recognise the step. Building a new mechanism is justified only if AWF fails those tests or cannot be pinned and verified. GitHub's native firewall is the better choice wherever it is available, and the checker should come to recognise it too.
+3. **OBAAF's present test for an egress control is too generous.** OBAAF-GHA-020 clears today for any step that uses `step-security/harden-runner` with `egress-policy: block` and has no `if:`. It does not look at the version (releases before v2.16.0 have two published bypasses of the block policy), at whether `sudo` and containers are removed, at where in the job the step sits, or at whether the repository is one the free tier covers. Slice 2c.3 has to tighten this.
+4. **AWF's key proxy is the "inference proxy" OBAAF specified and never built.** OBAAF's agent control R3 keeps the model key out of the agent's reach, and [the inference proxy page](inference-proxy.md) says OBAAF ships none. AWF's README says its API proxy is "always enabled"; its usage page lists the flag as off by default. If the README is right, an agent job run under AWF may be able to clear OBAAF-GHA-005 by a control that exists today. That has to be tested before it is claimed.
+5. **Two statements in OBAAF's documents are out of date.** The agent template and the inference proxy page say GitHub-hosted runners "have no native egress allow-list". That is still true of what is generally available, and no longer true of what is in preview.
+
+### GitHub Agentic Workflows: the nearest neighbour
+
+GitHub Agentic Workflows became generally available on 2026-10-28. A workflow is written in Markdown with a YAML header and compiled into an ordinary Actions workflow (a `.lock.yml` file). Its documentation describes these layers:
+
+- The agent job "runs with minimal read-only permissions, while write operations are deferred to separate jobs".
+- What the agent wants to write (an issue, a comment, a pull request) is buffered as an artifact, the "safe outputs", and applied by separate jobs that each hold one narrow permission.
+- "a separate detection job" has an agent with a security prompt read those outputs before they are applied.
+- The agent runs "inside a sandboxed container behind the Agent Workflow Firewall".
+- The compiler pins actions, allows only listed expressions, and runs actionlint, zizmor and poutine (named in the architecture diagram).
+
+It supports Copilot, Claude Code, Codex, Gemini and Pi as engines.
+
+Its documentation is plain about its limits. The README says agentic workflows need "careful human supervision, and even then things can still go wrong". The architecture page says setup steps, custom jobs and the jobs that apply safe outputs are "trusted executable code", "not automatically confined to the agent sandbox"; that the detection job's default is a warn mode which "can publish annotated reviewable outputs even when detection finds a threat or cannot complete"; and that "A read-only `GITHUB_TOKEN` does not remove other credentials or privileged host access."
+
+How this compares with OBAAF, said plainly:
+
+- **OBAAF's agent lane templates aim at the same design** (an agent job with read-only access, and a separate job that applies its proposal after a check), and they are behind. gh-aw is a generally available GitHub product with a firewall and a key proxy. OBAAF's agent template ships with an example agent "which calls no model". A team starting a new agent workflow today should look at gh-aw first.
+- **gh-aw governs workflows written in its format.** Nothing on the pages read says it inspects agent jobs written by hand as ordinary workflow files, which is what all 19 of Expectrail's agent jobs are. That, and repository settings, is the ground left to OBAAF: check the agent jobs a repository already has, whatever they were written in, and say what each can reach.
+- **gh-aw already takes part 1's advice.** It runs actionlint, zizmor and poutine rather than rewriting them.
+- **OBAAF does not recognise a gh-aw workflow as an agent job with controls.** Whether it should read a compiled `.lock.yml` file and credit the controls in it is a question for slices 2a.2 and 2c.3.
+
+### GitHub's policy features, and what a settings audit can read
+
+**Workflow execution protections** are an allowlist of who may trigger a workflow (actor rules) and which events may start it (event rules). They are set for an enterprise, an organisation or a repository, can target named workflow files, and are evaluated "before a run". When a rule blocks a run, "disallowed workflow runs will fail with an error"; the documentation's example reads "Event 'workflow_dispatch' is not allowed to trigger Actions workflows." This is the feature behind the incident in which an Expectrail workflow's new `workflow_run` trigger was refused at startup and pull requests went unscanned for hours.
+
+The same feature carries the change of 2026-12-02. GitHub has added a default rule that blocks `pull_request_target` in public repositories that have no event policy of their own. It runs in evaluate mode now and is enforced from 2026-12-02. To keep such a workflow running, a repository has to allow the event in a policy, which can name the workflow files it applies to.
+
+**Workflow lockfiles** record the commit of every action a workflow uses, directly or through another action, in `.github/workflows/actions.lock`, written by the `gh actions-lock` extension. An onboarded workflow then "runs its recorded commit", and a "Require lockfile" policy can force adoption. The pages read say nothing about container images or about tools a `run` script downloads, so lockfiles do not cover the `curl … | bash` installs that part 1 found in Expectrail's agent jobs. An older policy, from 2025-08-15, can require every action to be pinned to a full commit SHA.
+
+**Rulesets** are named lists of rules for branches and tags. "Anyone with read access to a repository can view its active rulesets." A bypass list can name roles, teams and GitHub Apps. Where several rulesets or a branch protection rule apply to one branch, "the most restrictive version of the rule applies".
+
+**What can be read, and by whom.** This is what decides how much a read-only audit can see. From GitHub's REST reference (API version 2026-03-10):
+
+| Setting | Endpoints | Who can read it, per the reference |
+| --- | --- | --- |
+| Rulesets that apply to a repository, with their rules (required approvals, required checks and the rest) | `GET /repos/{owner}/{repo}/rulesets`, `GET /repos/{owner}/{repo}/rulesets/{ruleset_id}`, `GET /repos/{owner}/{repo}/rules/branches/{branch}` | Anyone, without a token, for a public repository |
+| Who may bypass a ruleset | the `bypass_actors` field of a ruleset | "only returned if the user making the API request has write access to the ruleset" |
+| Environments: required reviewers, wait timer, which branches may deploy | `GET /repos/{owner}/{repo}/environments`, `GET /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies` | Anyone, without a token, for a public repository |
+| Actions settings: allowed actions, the SHA pinning requirement, the default token permission, approval for fork pull requests | `GET /repos/{owner}/{repo}/actions/permissions` and the endpoints under it | A token with the "Administration" repository permission (read) |
+| Actions policies (workflow execution protections) | `GET /repos/{owner}/{repo}/actions/policies`, `GET /orgs/{org}/actions/policies` | A token with the "Administration" permission (write), per the reference |
+
+So an audit with no token can check, on a public repository, whether a protected environment restricts its branches, how many approvals a ruleset requires and which checks it names. It cannot see who may bypass a ruleset, or the Actions policy that blocks a trigger, without a token that holds more than read access. A settings audit that never asks for more than read access has to report those two as unread, by name, and say what access would show them. None of these endpoints was called in this part; that is slice 2b.1. Classic branch protection rules have endpoints of their own, which were not read.
+
+### CodeQL for GitHub Actions, run on the same targets
+
+CodeQL has analysed workflow files since 2025-04-22, and GitHub's default code scanning setup turns it on when it finds workflows on the default branch. The query pack run here has 17 queries in the default suite and 6 more in the extended one: code injection, checkout of untrusted code, artifact and cache poisoning, environment and `PATH` injection, secrets exposure, a missing `permissions` block, known vulnerable actions and unpinned tags. None is about an AI agent, a model key or network egress.
+
+| Target | Files read | Default suite | Extended suite |
+| --- | --- | --- | --- |
+| OBAAF | 5 (4 workflows and `actions/setup-obaaf/action.yml`) | 0 | 0 |
+| Expectrail | 32 (27 workflows and 5 local action files) | 0 | 1: `actions/untrusted-checkout/medium` in the local action `expectrail-verify` |
+| OBAAF's 15 risky workflows | 15 | 7 | 9 |
+
+On the risky workflows, in the extended suite:
+
+| Test workflow | OBAAF rules its test requires | CodeQL |
+| --- | --- | --- |
+| `nx-title-injection` | GHA-010, 001 | `actions/code-injection/critical` (twice) |
+| `pwn-request` | GHA-001, 002, 008, 009, 011 | `actions/untrusted-checkout/critical`, `actions/missing-workflow-permissions` |
+| `unsafe-checkout-opt-in` | GHA-019, 002 | `actions/untrusted-checkout/critical` |
+| `pytorch-self-hosted` | GHA-013, 008, 009 | `actions/missing-workflow-permissions` |
+| `clinejection-triage` | GHA-007, 003, 008 | `actions/missing-workflow-permissions` |
+| `tj-actions-unpinned` | GHA-008, 016, 017 | `actions/unpinned-tag` (extended suite only) |
+| `promptpwnd-issue-agent` | GHA-001, 003, 004, 005, 008, 020 | `actions/unpinned-tag` (extended suite only), for the agent action's `v1` tag |
+| the other eight | | nothing |
+
+What the run says:
+
+- **CodeQL covers the same generic ground as the scanners in part 1**, and less of it than zizmor did on these files: it reported 7 of the 15 risky workflows, where zizmor reported 12.
+- **It said nothing about the `expression-spellings` workflow**, which zizmor, Octoscan and actionlint all reported in part 1. That file reaches an issue's title and body through an environment variable, a group and a wildcard, and reads `secrets.*`.
+- **It has no notion of an agent job.** Five of the test workflows are about an agent job. On two of them CodeQL reported something generic (a missing `permissions` block, an unpinned tag), and on none of them anything about the agent. That matches the list of its queries.
+- **It reads local action files**, which OBAAF does not (slice 2d.4). It read `actions/setup-obaaf/action.yml` and reported nothing there, where zizmor reported a high `github-env` finding. Which of the two is right was not judged.
+- None of CodeQL's findings was judged as a true or false positive.
+
+What OBAAF should do: not rebuild any of this. A public repository gets CodeQL's workflow analysis from GitHub's default setup, and OBAAF's adoption guide should say to turn it on. OBAAF already writes SARIF, so its findings can sit beside CodeQL's in code scanning.
+
+### Provenance: artifact attestations, SLSA, Sigstore and in-toto
+
+These four fit together, and OBAAF already uses all of them rather than its own cryptography:
+
+- **in-toto** defines the envelope: a statement that binds a predicate to the digests of the files it is about. The current version of the attestation framework is 1.2.
+- **SLSA** defines levels for how a build was run, and a provenance predicate (`https://slsa.dev/provenance/v1`) that fits in an in-toto statement. Version 1.2, announced on 2025-11-24, added a Source track beside the Build track. Build Environment and Dependency tracks are working drafts. SLSA is a specification, not a tool, and its own text is careful about its reach: Build L3 "does not require that a build platform prevents a producer from performing a risky or insecure build". Nothing about AI agents was found on the pages read.
+- **Sigstore** signs with short-lived certificates tied to an identity (for a workflow, its OIDC identity) and records signatures in a public log, so there is no long-lived signing key to steal. The latest cosign release seen is v3.1.4 (the release's files are dated 2026-10-20).
+- **GitHub artifact attestations** put the three together: a job with `id-token: write` and `attestations: write` signs an in-toto statement through Sigstore, and `gh attestation verify` checks it. GitHub's documentation says this alone "provides SLSA v1.0 Build Level 2", and Level 3 when the build runs in a reusable workflow shared across repositories. Public repositories use Sigstore's public instance; private ones use GitHub's own, which has no public log. Private repositories need Enterprise Cloud.
+
+The two tools that used to be the route to SLSA provenance on GitHub, slsa-github-generator and slsa-verifier, both now say they are no longer actively maintained and suggest GitHub artifact attestations and `gh attestation verify` instead.
+
+What OBAAF should do: keep consuming. Its release and agent templates already sign in-toto statements through GitHub's Sigstore with `actions/attest` and `actions/attest-build-provenance`, and its own records are extra predicates in the same envelope. It should not add signing or verification of its own where `gh attestation verify` will do, and should point adopters to that command's `--signer-workflow` and `--deny-self-hosted-runners` options. An attestation does nothing until something refuses to publish an artifact that fails to verify. OBAAF's part there is small and worth keeping: OBAAF-GHA-017 reports a release workflow that signs no provenance, and OBAAF-GHA-016 one that uploads without checking it first.
+
+### What GitHub says is still coming
+
+GitHub's [Actions security roadmap](https://github.blog/news-insights/product-news/whats-coming-to-our-github-actions-2026-security-roadmap/) of 2026-03-26 listed six items with a timeline. Two have shipped (execution protections, lockfiles) and one is in technical preview (the egress firewall). The other three bear directly on OBAAF's rules, and their state today was not established:
+
+- **Scoped secrets.** "Secrets are no longer implicitly inherited" by reusable workflows. This is the area of OBAAF-GHA-005 and 024, and of the Expectrail incident in which a reusable workflow could not see its caller's environment secrets.
+- **A separate permission for managing secrets**, so that "write access to a repository will no longer grant secret management permissions".
+- **Actions Data Stream**: "Near real-time execution telemetry", which is also where the egress firewall's logs are to go.
+
+Each of these can turn an OBAAF rule from a warning about a gap in the platform into a check that a platform control is switched on. The rules should be revisited as each one ships.
+
+### What part 2 suggests
+
+Inputs to the positioning section (item 1.4), not decisions.
+
+1. **Enforcement: consume, and prove.** There are now four ways to restrict a hosted runner's network that OBAAF did not write. OBAAF's contribution should be to say which of them really confines an agent job, to test that claim in the open, and to make its checker tell the real thing from a look-alike.
+2. **The agent lane: defer to gh-aw for new workflows.** OBAAF's templates should not compete with a generally available GitHub product on its own platform. OBAAF's ground is the agent jobs gh-aw did not compile.
+3. **Settings: still open ground, with a hard limit.** No tool in either part compares settings with what the workflows assume. GitHub's API lets anyone read a public repository's rulesets and environments, but not who may bypass a ruleset, nor the Actions policies, without more than read access.
+4. **Provenance: nothing to build.** Use GitHub artifact attestations and `gh attestation verify`.
+5. **Generic workflow analysis: nothing to build.** Between zizmor, CodeQL, poutine and actionlint the generic rules are covered several times over. Part 1 reached the same conclusion.
+6. **A date.** From 2026-12-02 a public repository's `pull_request_target` workflows stop running unless a policy allows them. OBAAF has four weeks to be able to tell an adopter whether that applies to them.
+
 ## Sources
 
 Read on 2026-11-11.
+
+### Part 1
 
 - zizmor: [documentation](https://docs.zizmor.sh/), [audits](https://docs.zizmor.sh/audits/), [usage](https://docs.zizmor.sh/usage/), [installation](https://docs.zizmor.sh/installation/), [release notes](https://docs.zizmor.sh/release-notes/), [repository](https://github.com/zizmorcore/zizmor)
 - actionlint: [repository](https://github.com/rhysd/actionlint), [checks](https://github.com/rhysd/actionlint/blob/main/docs/checks.md), [usage](https://github.com/rhysd/actionlint/blob/main/docs/usage.md), [configuration](https://github.com/rhysd/actionlint/blob/main/docs/config.md), [releases](https://github.com/rhysd/actionlint/releases)
@@ -166,3 +348,25 @@ Read on 2026-11-11.
 - Semgrep rules: [repository](https://github.com/semgrep/semgrep-rules), [licence file](https://github.com/semgrep/semgrep-rules/blob/develop/LICENSE)
 
 Not read, and so not relied on: poutine's rule documentation, Octoscan's licence file, the Semgrep rule list for GitHub Actions, and the text of the Semgrep rules licence.
+
+### Part 2
+
+- GitHub's native egress firewall: [early access repository](https://github.com/github-early-access/actions-native-egress-firewall/), [Actions security roadmap](https://github.blog/news-insights/product-news/whats-coming-to-our-github-actions-2026-security-roadmap/) (2026-03-26, updated 2026-03-30)
+- Agent Workflow Firewall: [repository](https://github.com/github/gh-aw-firewall), [documentation](https://github.github.com/gh-aw-firewall/), [usage](https://github.com/github/gh-aw-firewall/blob/main/docs/usage.md), [chroot mode](https://github.com/github/gh-aw-firewall/blob/main/docs/chroot-mode.md), [quickstart](https://github.com/github/gh-aw-firewall/blob/main/docs/quickstart.md), [domain filtering](https://github.github.com/gh-aw-firewall/guides/domain-filtering/), [notes for release v0.28.71](https://newreleases.io/project/github/github/gh-aw-firewall/release/v0.28.71) (a third-party copy of the release notes)
+- GitHub Agentic Workflows: [repository](https://github.com/github/gh-aw), [licence](https://github.com/github/gh-aw/blob/main/LICENSE), [architecture](https://github.github.com/gh-aw/introduction/architecture/), [network permissions](https://github.github.com/gh-aw/reference/network/), [network configuration](https://github.github.com/gh-aw/guides/network-configuration/), [general availability](https://github.blog/changelog/2026-10-28-github-agentic-workflows-generally-available/) (2026-10-28)
+- Copilot's firewall: [customising or disabling the firewall](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/customize-the-agent-firewall)
+- Harden-Runner: [repository](https://github.com/step-security/harden-runner), [documentation](https://docs.stepsecurity.io/harden-runner), [how it works](https://github.com/step-security/harden-runner/blob/main/docs/how-it-works.md), [limitations](https://github.com/step-security/harden-runner/blob/main/docs/limitations.md), [releases](https://github.com/step-security/harden-runner/releases), [release v2.16.0](https://github.com/step-security/harden-runner/releases/tag/v2.16.0), [security advisories](https://github.com/step-security/harden-runner/security), [GHSA-g699-3x6g-wm3g](https://github.com/advisories/GHSA-g699-3x6g-wm3g), [GHSA-46g3-37rh-v698](https://osv.dev/vulnerability/GHSA-46g3-37rh-v698), [the `disable-sudo` change](https://www.stepsecurity.io/blog/evolving-harden-runners-disable-sudo-policy-for-improved-runner-security) (2025-04-21), [pricing](https://www.stepsecurity.io/pricing), and the reporter's account of the two DNS bypasses, ["More egress filtering bypasses in harden-runner"](https://devansh.bearblog.dev/harden-runner-bypass/) (2026-03-15)
+- Bullfrog: [repository](https://github.com/bullfrogsec/bullfrog), [CVE-2025-47775](https://osv.dev/vulnerability/CVE-2025-47775), and three posts by the same researcher: [shared IP address](https://devansh.bearblog.dev/virtual-hosting-bypass/) (2026-03-02), [DNS pipelining](https://devansh.bearblog.dev/bullfrog-dns-pipelining/) (2026-02-28), [`sudo` through Docker](https://devansh.bearblog.dev/sudo-bypass/) (2026-02-28)
+- Workflow execution protections: [governing execution of workflows](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution), [about Actions policies](https://docs.github.com/en/actions/concepts/about-actions-policies), [REST endpoints for Actions policies](https://docs.github.com/en/rest/actions/policies), [public preview](https://github.blog/changelog/2026-06-18-control-who-and-what-triggers-github-actions-workflows/) (2026-06-18), [general availability](https://github.blog/changelog/2026-09-17-workflow-execution-protections-in-github-actions-generally-available/) (2026-09-17), [blocking and SHA pinning in the allowed actions policy](https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/) (2025-08-15)
+- Workflow lockfiles: [general availability](https://github.blog/changelog/2026-10-28-github-actions-workflow-lockfiles-are-generally-available/) (2026-10-28), [public preview](https://github.blog/changelog/2026-10-14-github-actions-workflow-lockfiles-in-public-preview/) (2026-10-14), [locking action dependencies](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/secure-your-work/lock-workflow-dependencies)
+- Rulesets and other settings: [about rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets), REST reference for [rules](https://docs.github.com/en/rest/repos/rules), [environments](https://docs.github.com/en/rest/deployments/environments), [deployment branch policies](https://docs.github.com/en/rest/deployments/branch-policies), [protection rules](https://docs.github.com/en/rest/deployments/protection-rules), [Actions permissions](https://docs.github.com/en/rest/actions/permissions), and [permissions required for fine-grained tokens](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+- CodeQL for GitHub Actions: [general availability](https://github.blog/changelog/2025-04-22-github-actions-workflow-security-analysis-with-codeql-is-now-generally-available/) (2025-04-22), [the queries](https://docs.github.com/en/code-security/reference/code-scanning/codeql/codeql-queries/actions-built-in-queries); the lists of queries and the results come from the run, not from the page
+- Artifact attestations: [concept](https://docs.github.com/en/actions/concepts/security/artifact-attestations), [how to use them](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations), [`gh attestation verify`](https://cli.github.com/manual/gh_attestation_verify)
+- SLSA: [specification](https://slsa.dev/spec/), [announcement of version 1.2](https://slsa.dev/blog/2025/11/announce-slsa-v1.2) (2025-11-24), [Build track](https://slsa.dev/spec/v1.2/build-track-basics), [Build requirements](https://slsa.dev/spec/v1.2/build-requirements), drafts of the [Build Environment](https://slsa.dev/spec/draft/attested-build-env-levels) and [Dependency](https://slsa.dev/spec/draft/dependency-track) tracks, [slsa-github-generator](https://github.com/slsa-framework/slsa-github-generator), [slsa-verifier](https://github.com/slsa-framework/slsa-verifier)
+- Sigstore: [overview](https://docs.sigstore.dev/about/overview/), [cosign](https://github.com/sigstore/cosign), [cosign releases](https://github.com/sigstore/cosign/releases), [Rekor v2](https://blog.sigstore.dev/rekor-v2-ga/) (2025-10-10)
+- in-toto: [attestation framework](https://github.com/in-toto/attestation/blob/main/spec/README.md), [version 1](https://github.com/in-toto/attestation/blob/main/spec/v1/README.md)
+- Other GitHub changelog entries: [more control over hosted runners](https://github.blog/changelog/2026-06-25-more-control-over-your-github-hosted-runners/) (2026-06-25), [package firewall](https://github.blog/changelog/2026-10-20-github-package-firewall-in-public-preview/) (2026-10-20; a proxy for package registries, not a control on a runner's network)
+
+Read, but not relied on: StepSecurity's own [comparison of Harden-Runner with GitHub's firewall](https://www.stepsecurity.io/blog/github-actions-native-egress-firewall-vs-harden-runner-five-differences-that-matter) (2026-10-28).
+
+Not read, and so not relied on: the repository of Harden-Runner's agent and its page of advisory GHSA-cpmj-h4f6-r6pq; AWF's architecture and security pages; gh-aw's pages on safe outputs and threat detection (the architecture page was used instead); the REST reference's response schemas; the licence of CodeQL's query pack; the in-toto project's own site; GitHub's documentation on `pull_request_target` and on enforcing lockfiles; and GitHub's changelog listing for Actions, so entries between 2026-06-25 and 2026-10-01 may have been missed.
