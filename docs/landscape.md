@@ -448,13 +448,13 @@ Inputs to the positioning section (item 1.4), not decisions.
 
 *Written 2026-11-11, from parts 1 to 3. These are the positions the [flagship plan](flagship.md) works to. They are proposals until OBAAF's maintainers accept them.*
 
-OBAAF is a small open-source project with one adopter, and that adopter is its author's own. A third of its rules report what larger tools report too, and on its own subject it is no longer alone. So the position is narrow on purpose:
+OBAAF is a small open-source project with one adopter, and that adopter is its author's own. A third of its 24 GitHub Actions rules report what larger tools report too, and on its own subject it is no longer alone. So the position is narrow on purpose:
 
 > For the jobs in a repository that run an AI agent or publish a release, OBAAF says what each job can reach, checks that the controls claimed for it are real (in the workflow file, in the repository's settings, and while the job runs), and shows its evidence. For everything else it points to the tool that already does it well.
 
-This is the position OBAAF is building towards. Today it reads workflow files only: no settings, nothing enforced, and a control is accepted because the file names it.
+This is the position OBAAF is building towards. Today it reads files in the repository only: no settings, nothing enforced while a job runs, and a control is accepted because the file names it.
 
-The aim is that a team can run OBAAF as its default check and lose nothing. A team that runs only `obaaf check` today does lose something: what zizmor, CodeQL, actionlint and poutine report. The aim is met by setting those tools up beside OBAAF, not by rewriting them inside it, and it is not met until `obaaf init` does that.
+The aim is that a team can run OBAAF as its default check and lose nothing. A team that runs only `obaaf check` today does lose something: what zizmor, CodeQL, actionlint and poutine report, and on agent jobs three checks ci-agent-audit has and OBAAF does not (part 3). The aim is met by setting those tools up beside OBAAF, not by rewriting them inside it, and it is not met until `obaaf init` does that.
 
 ### Where OBAAF does not compete
 
@@ -463,9 +463,9 @@ The aim is that a team can run OBAAF as its default check and lose nothing. A te
 | Area | Use this | What OBAAF does there |
 | --- | --- | --- |
 | General weaknesses in workflow files: script injection, checkout of a pull request's code, unpinned actions, token permissions, caches, runners | zizmor first: it has the most rules and fixes some findings itself. CodeQL where code scanning is on. actionlint for plain mistakes. poutine for scripts piped into a shell | Adds no new general rule. Keeps the eight it has, because the one adopter gates on them, and holds them to the standard in the next section. Planned (slices 3.2 to 3.4), not built: the first run names these tools; `obaaf init` offers to set them up beside OBAAF, reporting only; the adoption guide tells readers to turn on GitHub's default code scanning setup |
-| Restricting what a job can reach on the network | GitHub's native egress firewall where a repository has it. Otherwise the Agent Workflow Firewall. Harden-Runner or Cimon where a team already runs one. None was run here | Planned (slice 2c), not built: a small action that pins and wraps AWF, escape tests that try to get out of it on every change, and a checker that recognises a real control and refuses a look-alike. OBAAF writes a mechanism of its own only if AWF fails those tests |
+| Restricting what a job can reach on the network | GitHub's native egress firewall where a repository has it. Otherwise the Agent Workflow Firewall. Harden-Runner or Cimon where a team already runs one. None was run here | Planned (slice 2c), not built: a small action that pins and wraps AWF, escape tests that try to get out of it on every change, and a checker that recognises a real control and refuses a look-alike. OBAAF writes a mechanism of its own only if AWF fails those tests or cannot be pinned and verified |
 | Controlling who and what can start a workflow | GitHub's workflow execution protections | Planned (slice 2b), not built: where the policy can be read, compare it with the triggers the workflows use, starting with the `pull_request_target` change of 2026-12-02 |
-| Pinning and vetting the actions a workflow uses | GitHub's workflow lockfiles and its policy for pinning to a commit. Chainguard Actions is a commercial option (not run here) | Keeps its report of unpinned actions (GHA-008). Does not yet know about lockfiles |
+| Pinning and vetting the actions a workflow uses | GitHub's workflow lockfiles and its policy for pinning to a commit. Chainguard Actions is a commercial option in open beta (not run here) | Keeps its report of unpinned actions (GHA-008). Does not know about lockfiles; no slice plans it yet |
 | Writing a new agent workflow | GitHub Agentic Workflows (not run here) | OBAAF's agent lane templates stay as a worked example of its controls. They are not the recommended place to start |
 | Signing and verifying what was built | GitHub artifact attestations and `gh attestation verify` | Keeps its own records (an agent's run, an approval, a build) as in-toto statements signed the same way, and its two rules about releases without provenance |
 | Scanning what steers an agent: skills, MCP servers, instruction files | Snyk's agent-scan, Agent Threat Rules, agent-audit, promptwarden (none run here) | Keeps its two small rules about instruction files. Adds none |
@@ -488,7 +488,7 @@ Checked against OBAAF's code on 2026-11-11, and against the tools in parts 1 to 
 
 Today:
 
-- **A job can be declared an agent job, whatever starts the agent.** A job the checker would otherwise class as trusted or untrusted can be declared an agent, effect or release job; a declaration cannot move a job to a lane with fewer rules. A job has one lane, so one already classed as release or effect cannot also be declared an agent job. This is how Expectrail's 17 home-grown agent jobs are checked at all.
+- **A job can be declared an agent job, whatever starts the agent.** A job the checker would otherwise class as trusted or untrusted can be declared an agent, effect or release job; a declaration cannot move a job to a lane with fewer rules. This is how Expectrail's 17 home-grown agent jobs are checked at all.
 - **A secret can be tied to the environment it belongs in**, and a job that uses it without naming that environment is reported (OBAAF-GHA-024). OBAAF knows this only from its configuration file; like zizmor, it cannot see where the secret is stored. zizmor has a neighbouring audit that is not told which secret belongs where.
 - **Rules for the job that applies an agent's output** (OBAAF-GHA-021, 022) and for releases (016 to 018). No tool that was run reported these. By their rule lists, ci-agent-audit's AIA010 and AIA011 and Checkov's CKV_GHA_5 and 6 come close; neither was run.
 - **Signed records of an agent's run and of a person's approval**, and commands that refuse a release or an agent's proposal without them. Expectrail uses only `obaaf proposal check`; no adopter uses the signed records or `obaaf verify`.
@@ -505,7 +505,7 @@ Not alone, and not to be claimed as such: asking what an agent job in CI can rea
 
 R means another tool reported the same or a neighbouring weakness on that rule's test workflow, in the runs of parts 1 and 2. "R: none" does not mean the tools were silent on the file. D means the overlap is read from a tool's list of rules, and that tool was not run.
 
-Positions: *Shared* means at least one other tool reports the same weakness. *Partly shared* means another tool reports part of it. *OBAAF's subject* means agents in CI, where OBAAF is not alone. *OBAAF's* means no tool that was run reported it.
+Positions: *Shared* means at least one other tool reports the same weakness. *Partly shared* means another tool reports part of it. *OBAAF's subject* means agents in CI, where OBAAF is not alone. *OBAAF's* means no tool that was run reported the same weakness; a neighbouring report is named in the row.
 
 | OBAAF rule | What it reports | Who else reports it | Position |
 | --- | --- | --- | --- |
@@ -519,7 +519,7 @@ Positions: *Shared* means at least one other tool reports the same weakness. *Pa
 | GHA-015 | A release workflow started by untrusted input | R: zizmor `dangerous-triggers`, which reports the trigger and not that the workflow releases | Partly shared |
 | GHA-001 | A secret reachable from an untrusted trigger | R: zizmor reports the trigger and, outside its default persona, the secret, as separate findings | Partly shared. The combination is OBAAF's |
 | GHA-014 | A release job not behind a protected environment | R: zizmor `secrets-outside-env`, outside its default persona, reports the secret used with no environment | Partly shared. Means little until the settings audit can read the environment |
-| GHA-003, 004, 005 | An agent job can write, can request cloud credentials, holds a secret | R: zizmor reports some of the same permissions, without knowing the job runs an agent. D: ci-agent-audit AIA005 | OBAAF's subject |
+| GHA-003, 004, 005 | An agent job can write, can request cloud credentials, holds a secret | R: zizmor reports some of the same facts, most outside its default persona, without knowing the job runs an agent. D: ci-agent-audit AIA005 | OBAAF's subject |
 | GHA-012 | An agent reads instructions from the change under review | R: none. D: ci-agent-audit AIA008 is close | OBAAF's subject |
 | GHA-020 | An agent job with no egress restriction | R: none. D: ci-agent-audit AIA006 | OBAAF's subject. Slice 2c is to make it checkable |
 | GHA-021, 022 | An agent's output applied without verifying its record, or without approval | R: none. D: ci-agent-audit AIA010 and AIA011 are close | OBAAF's subject |
@@ -530,12 +530,12 @@ Positions: *Shared* means at least one other tool reports the same weakness. *Pa
 | GHA-023 | A placeholder left in an OBAAF template | Not applicable | Housekeeping |
 | REPO-001, REPO-002, INS-001 | No code owner for CI files or instruction files; hidden characters in an instruction file | D: the scanners for agent configuration in part 3 cover instruction files | Kept small |
 
-Eight of the 24 GitHub Actions rules are shared outright and three partly. OBAAF has one adopter. GitHub wrote in April 2025 that during the preview of CodeQL's workflow analysis it had "helped secure over 158,000 repositories"; use of the other tools was not measured. On those eight rules OBAAF adds little that a team running zizmor does not already have; they stay because rule ids are stable and the one adopter gates on them. The 15 Jenkins rules are advisory and are not in the table.
+Eight of the 24 GitHub Actions rules are shared outright and three partly. OBAAF has one adopter. GitHub wrote in April 2025 that during the preview of CodeQL's workflow analysis it had "helped secure over 158,000 repositories"; use of the other tools was not measured. On those eight rules OBAAF adds little that a team running zizmor, poutine and CodeQL does not already have; they stay because rule ids are stable and the one adopter gates on them. The 15 Jenkins rules are advisory and are not in the table.
 
 ### What changes in OBAAF's plan because of this
 
 1. **No new general rules** (decision F-19). Depth goes to the rules that are OBAAF's subject, to the settings audit and to enforcement.
-2. **Egress (slice 2c) starts from AWF** (F-20), not from a new mechanism. The checker is to recognise GitHub's native firewall, AWF and OBAAF's wrapper, each under stated conditions, and Harden-Runner only when its version, the removal of `sudo` and containers, the step's place in the job and the kind of repository can all be established without trusting text the workflow's author controls. Otherwise it says "cannot tell".
+2. **Egress (slice 2c) starts from AWF** (F-20), not from a new mechanism. The checker is to recognise GitHub's native firewall, AWF and OBAAF's wrapper, each under stated conditions, and Harden-Runner only when its version, the removal of `sudo` and containers, the step's place in the job and the kind of repository can all be established, the version never from a comment. Otherwise it says "cannot tell".
 3. **New agent workflows are pointed at GitHub Agentic Workflows** (F-21). Because of that, slice 2a.2 has to settle whether OBAAF reads the workflows gh-aw compiles and credits their controls, or says plainly that it does not.
 4. **Clearing "a secret is available to an agent job" (slice 2a.2)** tests the two key proxies that exist before designing anything.
 5. **Agent detection (slices 2d.5 and 3.3)** becomes data in the style of signature files, covers the named tools, reports the settings their documentation warns about as new rules, and for `obaaf init` also proposes any job that holds a model provider's key (F-22). A tool that an agent job installs by a script is OBAAF's to report; the same in any other job is poutine's (F-24).
