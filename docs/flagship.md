@@ -2,6 +2,8 @@
 
 *Status: in progress. Item 0 (set up and plan) and slice 2d.1 are done; everything else is open. Next: item 1. Last updated 2026-11-11 (end of run 1).*
 
+**First thing next run:** read CI on the standing pull request #55. It was opened as a draft at 20:43 UTC on 2026-11-11 and its CI run was still queued, with no job started, when run 1 ended twenty minutes later (the same had happened to #54's run from 20:23). If every check is green, mark #55 ready for review. If one is red, fix it in a slice first. The code on `flagship` has passed the full suite locally but has not been through CI, and has not run on Python 3.10 at all.
+
 This is the working plan for taking OBAAF from a young linter to a framework that holds up in real use. Sean Keluo-Udeke asked for it on 2026-11-11. A scheduled Claude agent does the work over many runs. Each run starts from nothing but this file and the tracking issue ([#51](https://github.com/Obaaf/OBAAF/issues/51)), so everything learned or decided is written here.
 
 It is a planning document, not part of the specification. Decisions that change what the tools do also get a *Proposed* entry in [DECISIONS.md](../DECISIONS.md) in the slice that implements them, for the maintainers to accept or reject when they merge.
