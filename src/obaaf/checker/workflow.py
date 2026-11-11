@@ -14,6 +14,7 @@ from typing import Any, Iterator
 
 from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
+from obaaf.checker import expr as expr_mod
 
 LANES = ("untrusted", "agent", "effect", "release", "trusted")
 
@@ -40,12 +41,6 @@ PERMISSION_SCOPES = {
     "repository-projects", "security-events", "statuses", "vulnerability-alerts",
 }
 
-EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-# Context names are case-insensitive in expressions (SECRETS.KEY works), so these match any case.
-SECRET_RE = re.compile(r"(?<![.\w-])secrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*['\"]([^'\"]+)['\"]\s*\])", re.I)
-# toJSON(secrets), or an index the checker cannot read (secrets[format(...)], secrets[matrix.k]):
-# either can reach any secret, so both count as every secret.
-ALL_SECRETS_RE = re.compile(r"\btojson\s*\(\s*secrets\s*\)|(?<![.\w-])secrets\s*\[\s*(?!['\"][^'\"]+['\"]\s*\])", re.I)
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 # Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
 HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
@@ -81,6 +76,27 @@ UNTRUSTED_FIELDS = [
     r"github\.head_ref\b",
 ]
 UNTRUSTED_FIELDS_RE = re.compile("|".join(f"(?:{p})" for p in UNTRUSTED_FIELDS))
+
+# The same fields as paths, one accepted set of names per segment (None accepts anything, for an
+# array index). Used for the spellings a text pattern cannot follow: `github.event.*.title`,
+# `github.event.issue.*`, `github.event[inputs.kind].body` (see expr.reaches).
+_TEXT, _WHO, _IDENTITY = {"title", "body"}, {"author", "committer"}, {"name", "email"}
+UNTRUSTED_PATHS = [
+    ({"github"}, {"event"}, {"issue", "pull_request", "discussion"}, _TEXT),
+    ({"github"}, {"event"}, {"comment", "review", "review_comment"}, {"body"}),
+    ({"github"}, {"event"}, {"pull_request"}, {"head"}, {"ref", "label"}),
+    ({"github"}, {"event"}, {"pull_request"}, {"head"}, {"repo"},
+     {"name", "full_name", "description", "homepage", "default_branch"}),
+    ({"github"}, {"event"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"head_commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"commits"}, None, {"message"}),
+    ({"github"}, {"event"}, {"commits"}, None, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_branch", "display_title"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"author"}, _IDENTITY),
+    ({"github"}, {"event"}, {"pages"}, None, {"page_name"}),
+    ({"github"}, {"head_ref"}),
+]
 
 # References to a pull request's code (OBAAF-GHA-002, OBAAF-GHA-012).
 PR_HEAD_REF_RE = re.compile(
@@ -121,10 +137,9 @@ def _narrow(events: set[str], cond: str) -> set[str]:
 
 
 def expressions(value: Any) -> Iterator[str]:
-    """Yield the body of every ${{ }} expression found anywhere in a value."""
+    """Yield the body of every ${{ }} expression found anywhere in a value (see expr.bodies)."""
     if isinstance(value, str):
-        for match in EXPR_RE.finditer(value):
-            yield match.group(1)
+        yield from expr_mod.bodies(value)
     elif isinstance(value, dict):
         for k, v in value.items():
             yield from expressions(k)
@@ -135,13 +150,11 @@ def expressions(value: Any) -> Iterator[str]:
 
 
 def secret_names(value: Any) -> set[str]:
-    """Names of secrets referenced in a value; '*' means every secret (toJSON(secrets))."""
+    """Names of secrets referenced in a value; '*' means every secret: toJSON(secrets), secrets.*,
+    a computed index, or any other use of the secrets context that is not one literal name."""
     names: set[str] = set()
-    for expr in expressions(value):
-        if ALL_SECRETS_RE.search(expr):
-            names.add("*")
-        for match in SECRET_RE.finditer(expr):
-            names.add(match.group(1) or match.group(2))
+    for body in expressions(value):
+        names |= expr_mod.secret_refs(body)
     return {n for n in names if n.upper() != "GITHUB_TOKEN"}
 
 
@@ -399,11 +412,13 @@ class Job:
         return events
 
     def secret_names(self) -> set[str]:
-        names = secret_names(self.workflow.raw.get("env")) | secret_names(self.raw.get("env"))
-        for key in ("with", "secrets", "container", "services", "steps"):
-            names |= secret_names(self.raw.get(key))
-        if self.raw.get("secrets") == "inherit":
-            names.add("*inherit")
+        """Secrets the job can read. The whole job is read, not a list of keys known to take
+        secrets, so a reference in a place the checker did not expect (for example `outputs`) is
+        still found."""
+        names = secret_names(self.workflow.raw.get("env")) | secret_names(self.raw)
+        passed = self.raw.get("secrets")
+        if isinstance(passed, str) and passed.strip():
+            names.add("*inherit")      # the only string GitHub accepts here is `inherit`
         return names
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:

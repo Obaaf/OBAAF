@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from obaaf.catalog import Catalog
+from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, runs_after_failure,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, runs_after_failure,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -228,14 +229,45 @@ class WorkflowRules:
             text = step.text()
             if not text:
                 continue
-            for expr in expressions(text):
-                normalized = normalize_expression(expr)
-                match = UNTRUSTED_FIELDS_RE.search(normalized) or TOJSON_UNTRUSTED_RE.search(normalized)
-                if match:
+            for body in expressions(text):
+                found = self._untrusted_text(body) or self._untrusted_through_env(body, step, job)
+                if found:
                     self.add("OBAAF-GHA-010", step.line,
-                             f"Step '{step.name}' expands {match.group(0)} inside its script.", job, step,
+                             f"Step '{step.name}' expands {found} inside its script.", job, step,
                              severity="high" if untrusted else "medium")
                     break
+
+    @staticmethod
+    def _untrusted_text(body: str) -> str | None:
+        """The outsider-written field an expression expands, if any."""
+        normalized = normalize_expression(body)
+        match = UNTRUSTED_FIELDS_RE.search(normalized) or TOJSON_UNTRUSTED_RE.search(normalized)
+        if match:
+            return match.group(0)
+        # Spellings the patterns above cannot follow: a wildcard or a computed index stands for any
+        # field, so it is treated as reaching the outsider-written ones.
+        for path in expr_mod.paths(body):
+            if any(expr_mod.reaches(path, pattern) for pattern in UNTRUSTED_PATHS):
+                return expr_mod.dotted(path)
+        return None
+
+    def _untrusted_through_env(self, body: str, step: Step, job: Job) -> str | None:
+        """`${{ env.TITLE }}` in a script is expanded before the shell runs, like any expression.
+        If the step, job or workflow sets TITLE from an outsider-written field, the script expands
+        that field. (`"$TITLE"`, which the shell reads, is the safe form.)"""
+        for path in expr_mod.paths(body):
+            if path[0].value.lower() != "env":
+                continue
+            name = path[1].value.lower() if len(path) > 1 and path[1].kind == expr_mod.NAME else None
+            for scope in (step.env, job.env, self.wf.env):
+                for key, value in scope.items():
+                    if name is not None and str(key).lower() != name:
+                        continue
+                    for inner in expressions(value):
+                        held = self._untrusted_text(inner)
+                        if held:
+                            return f"{expr_mod.dotted(path)}, which holds {held},"
+        return None
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
     def agent_rules(self, job: Job) -> None:
