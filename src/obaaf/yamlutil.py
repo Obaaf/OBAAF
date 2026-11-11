@@ -78,6 +78,15 @@ def _construct_sequence(loader: _Loader, node: yaml.SequenceNode) -> LineList:
     return result
 
 
+def _construct_null(loader: _Loader, node: yaml.ScalarNode) -> None:
+    """PyYAML reads any scalar tagged !!null as nothing, whatever it says. A reader that ignores
+    the tag would see the text, so text under that tag is refused rather than dropped."""
+    if not isinstance(node, yaml.ScalarNode) or node.value not in ("", "~", "null", "Null", "NULL"):
+        raise yaml.constructor.ConstructorError(None, None, "a value tagged !!null holds text", node.start_mark)
+    return None
+
+
+_Loader.add_constructor("tag:yaml.org,2002:null", _construct_null)
 _Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 _Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_SEQUENCE_TAG, _construct_sequence)
 

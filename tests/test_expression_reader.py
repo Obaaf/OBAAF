@@ -5,12 +5,14 @@ text: the rule saw nothing, and the workflow would still have used the secret or
 outsider's text. The fix is the reader in obaaf.checker.expr, so the tests cover the reader and
 then each rule that depends on it.
 
-None of these workflows has been run on GitHub. The reader takes the wider reading wherever the
-platform's behaviour is in doubt, so being wrong about the platform costs a false positive, not a
-miss.
+None of these workflows has been run on GitHub. Where the platform's behaviour was known to be in
+doubt, the reader takes the wider reading. An independent review of the first version of this
+change found more spellings (groups, function results, a second hop through env, the matrix) and
+inputs that crashed or stalled the reader; those are the later classes in this file.
 """
 
 import random
+import time
 import unittest
 
 from helpers import TempDir, run_cli
@@ -18,6 +20,7 @@ from helpers import TempDir, run_cli
 from obaaf import checker
 from obaaf.checker import expr
 from obaaf.checker import workflow as wf_mod
+from obaaf.checker.rules import WorkflowRules
 
 HEAD = "on: {trigger}\npermissions:\n  contents: read\n"
 STEP = "      - run: echo hi\n"
@@ -272,6 +275,261 @@ class UnreadableTextTest(unittest.TestCase):
             self.assertIn("cannot tell", result.errors[0])
             code, _, _ = run_cli("check", tmp, "--fail-on", "never")
             self.assertNotEqual(code, 0)
+
+
+class GroupsAndFunctionResultsTest(unittest.TestCase):
+    """A property or index applied to a group or to a function's result reads the same field."""
+
+    REPORTED = [
+        "(github.event.issue).title",
+        "(github).event.issue.title",
+        "(github.event.issue)['title']",
+        "((github.event).issue).title",
+        "(github).head_ref",
+        "(github.event.issue || github.event.pull_request).title",
+        "toJSON(github.event.issue || 1)",
+        "toJSON((github.event))",
+        "fromJSON(toJSON(github.event.issue || 1)).title",
+        "case(true, github.event.issue, 1).title",
+        "format('{0}', github.event.issue)",
+        "github.*",
+        "join(github.event.*)",
+        "toJSON(github.event.commits.*)",
+        "github.event.commits[0].message",
+        "github.event.commits['0'].message",
+        "github.event.commits[''].message",
+        "github.event.commits['0x0'].message",
+        "github.event.pages[' 0'].page_name",
+        "github.event.pull_request.*.ref",
+    ]
+    NOT_REPORTED = [
+        "(github.event.issue || github.event.pull_request).number",
+        "github.event.*.number",
+        "github.event[github.event_name].number",
+        "github.event.pull_request.*.sha",
+        "github.event.commits.*.id",
+        "github.event.issue && 'yes' || 'no'",
+        "join(github.event.pull_request.labels.*.name, ',')",
+        "format('{0}', github.event.pull_request.number)",
+        "hashFiles('**/package-lock.json')",
+    ]
+
+    def test_reported(self):
+        for text in self.REPORTED:
+            self.assertTrue(WorkflowRules._untrusted_text(text), text)
+
+    def test_near_misses_are_not_reported(self):
+        for text in self.NOT_REPORTED:
+            self.assertIsNone(WorkflowRules._untrusted_text(text), text)
+
+    def test_through_the_checker(self):
+        for text in ("(github.event.issue).title", "(github.event.issue || github.event.pull_request).title",
+                     "toJSON(github.event.issue || 1)"):
+            findings, errors = _rules(_script("echo '${{ " + text + " }}'"))
+            self.assertEqual(errors, [])
+            self.assertEqual([r for r, _, _ in findings].count("OBAAF-GHA-010"), 1, text)
+
+    def test_secrets_through_groups_and_function_results(self):
+        self.assertEqual(expr.secret_refs("(secrets).KEY"), {"KEY"})
+        self.assertEqual(expr.secret_refs("(secrets || 1)['KEY']"), {"KEY"})
+        for text in ("toJSON((secrets))", "case(true, secrets, 1).KEY", "(secrets).*", "(secrets)[matrix.k]",
+                     "secrets['*']", "secrets['*inherit']", "secrets['not a name']"):
+            self.assertEqual(expr.secret_refs(text), {expr.ALL}, text)
+        for text in ("!secrets.KEY", "secrets.KEY&&1", "1||secrets.KEY", "''==secrets.KEY", "0<secrets.KEY"):
+            self.assertEqual(expr.secret_refs(text), {"KEY"}, text)
+
+    def test_expression_in_a_mapping_key_is_read(self):
+        workflow = (HEAD.format(trigger="issue_comment") + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    steps:\n      - run: echo hi\n        env:\n          ${{ secrets.DEPLOY_KEY }}: x\n")
+        findings, _ = _rules(workflow)
+        self.assertTrue(any(r == "OBAAF-GHA-001" and "DEPLOY_KEY" in m for r, _, m in findings), findings)
+
+
+class IndirectionTest(unittest.TestCase):
+    """Outsider-written text that reaches a script through env (in two hops) or the matrix."""
+
+    def _gha010(self, workflow):
+        findings, errors = _rules(workflow)
+        self.assertEqual(errors, [])
+        return [m for rule, _, m in findings if rule == "OBAAF-GHA-010"]
+
+    def _chain(self, where, value="${{ env.A }}"):
+        top = "env:\n  A: ${{ github.event.issue.title }}\n" if where == "workflow" else ""
+        job = "    env:\n      A: ${{ github.event.issue.title }}\n" if where == "job" else ""
+        return ("on: issues\npermissions:\n  contents: read\n" + top + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                + job + "    steps:\n      - run: echo \"${{ env.B }}\"\n        env:\n          B: " + value + "\n")
+
+    def test_step_env_that_reads_job_or_workflow_env(self):
+        for where in ("job", "workflow"):
+            found = self._gha010(self._chain(where))
+            self.assertEqual(len(found), 1, where)
+            self.assertIn("github.event.issue.title", found[0])
+        self.assertEqual(len(self._gha010(self._chain("job", "${{ format('{0}', env.A) }}"))), 1)
+        self.assertEqual(len(self._gha010(self._chain("job", "${{ toJSON(env) }}"))), 1)
+
+    def test_env_value_written_with_a_group(self):
+        step = "        env:\n          TITLE: ${{ (github.event.issue).title }}\n"
+        self.assertEqual(len(self._gha010(_script("echo \"${{ env.TITLE }}\"", env=step))), 1)
+
+    def test_step_value_that_replaces_the_job_value_is_not_reported(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    env:\n      TITLE: ${{ github.event.issue.title }}\n    steps:\n"
+                    "      - run: echo \"${{ env.TITLE }}\"\n        env:\n          TITLE: fixed\n")
+        self.assertEqual(self._gha010(workflow), [])
+
+    def test_matrix_value_set_from_event_text(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    strategy:\n      matrix:\n        t: [\"${{ github.event.issue.title }}\"]\n"
+                    "    steps:\n      - run: echo \"${{ matrix.t }}\"\n")
+        found = self._gha010(workflow)
+        self.assertEqual(len(found), 1)
+        self.assertIn("matrix", found[0])
+
+    def test_env_value_set_from_a_matrix_that_holds_event_text(self):
+        for where in ("job", "step"):
+            job = "    env:\n      TITLE: ${{ matrix.t }}\n" if where == "job" else ""
+            step = "        env:\n          TITLE: ${{ format('{0}', matrix.t) }}\n" if where == "step" else ""
+            workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                        "    strategy:\n      matrix:\n        t: [\"${{ github.event.issue.title }}\"]\n" + job +
+                        "    steps:\n      - run: echo \"${{ env.TITLE }}\"\n" + step)
+            self.assertEqual(len(self._gha010(workflow)), 1, where)
+
+    def test_matrix_entry_that_is_the_whole_event_object(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    strategy:\n      matrix:\n        e: [\"${{ github.event.issue }}\"]\n"
+                    "    steps:\n      - run: echo \"${{ matrix.e.title }}\"\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
+    def test_env_written_as_one_expression(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    steps:\n      - run: echo \"${{ env.T }}\"\n"
+                    "        env: ${{ fromJSON(format('{{\"T\":{0}}}', toJSON(github.event.issue.title))) }}\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
+    def test_env_key_written_as_an_expression(self):
+        step = "        env:\n          ${{ github.event.issue.title }}: x\n"
+        self.assertEqual(len(self._gha010(_script("echo '${{ toJSON(env) }}'", env=step))), 1)
+
+    def test_three_hops_through_env(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\nenv:\n  A: ${{ github.event.issue.title }}\n"
+                    "jobs:\n  work:\n    runs-on: ubuntu-latest\n    env:\n      B: ${{ env.A }}\n    steps:\n"
+                    "      - run: echo \"${{ env.D }}\"\n        env:\n          C: ${{ env.B }}\n          D: ${{ env.C }}\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
+    def test_ordinary_matrix_is_not_reported(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n"
+                    "    steps:\n      - run: echo \"${{ matrix.os }}\"\n")
+        self.assertEqual(self._gha010(workflow), [])
+
+
+class HardInputTest(unittest.TestCase):
+    """Crafted files must end in an error or a result within seconds, never a crash or a stall.
+    Before the review fixes the first crashed the whole run and the others took 8 to 115 seconds."""
+
+    def _timed(self, workflow, limit=10.0):
+        started = time.monotonic()
+        with TempDir() as tmp:
+            result = _check(tmp, workflow)
+        self.assertLess(time.monotonic() - started, limit)
+        return result
+
+    def test_deep_nesting_is_an_error_for_that_file_only(self):
+        with TempDir() as tmp:
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / ".github" / "workflows" / "ok.yml").write_text(_job("${{ secrets.DEPLOY_KEY }}"), encoding="utf-8")
+            result = _check(tmp, _job("${{ " + "a[" * 1100 + "0" + "]" * 1100 + " }}"))
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertIn("nested too deeply", result.errors[0])
+            self.assertTrue(any(f.rule == "OBAAF-GHA-001" and f.path.endswith("ok.yml") for f in result.findings))
+        for text in ("a[" * 5000, "(" * 5000, "f(" * 5000, "a[" * 60 + "(" * 60):
+            with self.assertRaises(expr.TooComplex):
+                expr.refs(text)
+
+    def test_nesting_within_the_limit_is_read(self):
+        text = "(" * 40 + "secrets.KEY" + ")" * 40
+        self.assertEqual(expr.secret_refs(text), {"KEY"})
+
+    def test_long_expression_in_workflow_env_with_several_jobs(self):
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    steps:\n{STEP}" for n in range(6))
+        workflow = ("on: push\npermissions:\n  contents: read\nenv:\n  V: ${{ " + "a[" * 50 + "1," * 20000
+                    + " }}\njobs:\n" + jobs)
+        self._timed(workflow)
+
+    def test_many_env_entries_and_many_expressions(self):
+        env = "".join(f"  V{n}: v\n" for n in range(2000))
+        script = " ".join("${{ env[0] }}" for _ in range(2000))
+        workflow = ("on: issues\npermissions:\n  contents: read\nenv:\n" + env + "jobs:\n  work:\n"
+                    "    runs-on: ubuntu-latest\n    steps:\n      - run: echo " + script + "\n")
+        self._timed(workflow)
+
+    def test_nested_aliases_are_read_once(self):
+        levels = "      a0: &a0 [\"${{ secrets.DEPLOY_KEY }}\"]\n" + "".join(
+            f"      a{n}: &a{n} [{', '.join([f'*a{n - 1}'] * 10)}]\n" for n in range(1, 9))
+        workflow = (HEAD.format(trigger="issue_comment") + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    strategy:\n      matrix:\n" + levels + "    steps:\n" + STEP)
+        result = self._timed(workflow)
+        self.assertTrue(any(f.rule == "OBAAF-GHA-001" for f in result.findings))
+
+    def test_long_suffix_on_a_large_group_is_read_in_bounded_memory(self):
+        text = "(" + "||".join(["a"] * 6000) + ")" + ".b" * 30000
+        started = time.monotonic()
+        found = expr.refs(text)
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual(len(found), 6000)
+        self.assertTrue(all(len(ref.path) <= expr.MAX_SEGMENTS for ref in found))
+        self.assertTrue(all(len(ref.path) <= expr.MAX_SEGMENTS for ref in expr.refs("a" + ".b" * 30000)))
+
+    def test_dropping_segments_past_the_limit_loses_nothing_the_rules_use(self):
+        longest = max(len(pattern) for pattern in wf_mod.UNTRUSTED_PATHS)
+        self.assertGreater(expr.MAX_SEGMENTS, longest)
+        self.assertEqual(expr.secret_refs("(secrets).KEY" + ".x" * 100), {"KEY"})
+
+    def test_long_run_of_spaces_in_an_expression(self):
+        self._timed(_script("echo \"${{ github.sha" + " " * 60000 + "}}\""))
+
+
+class UnreadableYamlTest(unittest.TestCase):
+    """Values the checker would have skipped without a word are errors instead."""
+
+    def _errors(self, workflow):
+        return _rules(workflow)[1]
+
+    def test_steps_given_as_tagged_pairs(self):
+        workflow = (HEAD.format(trigger="issues") + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    steps: !!pairs\n      - run: echo \"${{ github.event.issue.title }}\"\n")
+        self.assertTrue(any("does not read" in e for e in self._errors(workflow)))
+
+    def test_env_given_as_a_tagged_set(self):
+        workflow = (HEAD.format(trigger="issues") + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    env: !!set\n      ? ${{ secrets.DEPLOY_KEY }}\n    steps:\n" + STEP)
+        self.assertTrue(any("does not read" in e for e in self._errors(workflow)))
+
+    def test_binary_value(self):
+        self.assertTrue(any("does not read" in e for e in self._errors(_job("!!binary JHt7IHNlY3JldHMuWCB9fQ=="))))
+
+    def test_step_that_is_not_a_mapping(self):
+        workflow = (HEAD.format(trigger="issues") + "jobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    steps:\n      - echo hi\n")
+        self.assertTrue(any("not a mapping" in e for e in self._errors(workflow)))
+
+    def test_line_breaks_yaml_readers_disagree_about(self):
+        for char in ("\u0085", "\u2028", "\u2029"):
+            errors = self._errors(_job("x" + char + "# ${{ secrets.DEPLOY_KEY }}"))
+            self.assertTrue(any("line break" in e for e in errors), repr(char))
+
+    def test_text_under_a_null_tag(self):
+        errors = self._errors(_job("!!null \"${{ secrets.DEPLOY_KEY }}\""))
+        self.assertTrue(any("cannot parse" in e and "null" in e for e in errors), errors)
+
+    def test_job_that_is_not_a_mapping(self):
+        workflow = HEAD.format(trigger="issues") + "jobs:\n  work: echo\n  other:\n    runs-on: ubuntu-latest\n    steps:\n" + STEP
+        self.assertTrue(any("job 'work' is not a mapping" in e for e in self._errors(workflow)))
+
+    def test_dates_and_numbers_are_still_ordinary_values(self):
+        workflow = (HEAD.format(trigger="push") + "env:\n  RELEASED: 2026-11-11\n  COUNT: 3\n  RATIO: 0.5\n"
+                    "  EMPTY:\n  ON: true\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n" + STEP)
+        self.assertEqual(self._errors(workflow), [])
 
 
 if __name__ == "__main__":
