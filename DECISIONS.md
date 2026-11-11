@@ -46,6 +46,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-036 | Jenkins results are advisory, and unknowns are coverage, not findings | Proposed |
 | D-037 | The Jenkins release lane signs with a key service and reads approvals from the controller | Proposed |
 | D-038 | Governance adopted; the project accepts outside contributions | Accepted, 2026-11-09 |
+| D-039 | A workflow job is in every lane it qualifies for, and a declaration only adds a lane | Proposed, 2026-11-11 |
 
 ---
 
@@ -203,6 +204,12 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 **Decision.** [GOVERNANCE.md](GOVERNANCE.md) is adopted as written, no longer a draft: two maintainers (Osita Sean Keluo-Udeke and Ofonna Nweze), lazy consensus day to day, significant changes recorded here, and the Contributor Covenant 2.1 as the code of conduct ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)). [CONTRIBUTING.md](CONTRIBUTING.md) no longer says the project is closed: it accepts contributions under its existing rules (DCO sign-off, public sources only, data first, tests with every rule).
 
 **Reason.** The repository already worked this way (two maintainers in CODEOWNERS, a numbered decision log, DCO, SECURITY.md), but the draft marker and the "not yet open" line told a newcomer the opposite. The 0.x caveat stays: formats may change before 1.0, so large changes start as an issue.
+### D-039 A workflow job is in every lane it qualifies for, and a declaration only adds a lane
+
+**Decision.** The workflow checker decides each lane on its own (agent, effect, release, untrusted) and applies the rules of every lane a job is in. `OBAAF_LANE` and a `lanes:` entry add a lane to those and never remove one; every declaration for a job counts, whichever file it is in. A declared value that is not a lane is reported in the notes. `--lanes` and the `lanes()` function still give one lane per job, the first in the order agent, effect, release, untrusted, and name the others in the reason. Proposed in the flagship work (slice 2d.2a); the Jenkins analyser is unchanged.
+
+**Reason.** With one lane per job, chosen in a fixed order, a job that did two things was checked for one, and a declaration that disagreed with the inferred lane was dropped. A reviewer showed two cases (an agent job that publishes got no release rules; a declared agent job that publishes got no agent rules), and three more of the same class turned up in the fix, one of which let a declaration remove a finding. SECURITY.md counts a false negative as a vulnerability. Keeping the single lane in what is displayed means existing `--lanes` output, messages and baselines do not change for jobs in one lane.
+
 ---
 
 ## Open questions from the specification

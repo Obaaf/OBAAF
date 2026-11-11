@@ -4,6 +4,19 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Lanes
+
+A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it.
+
+- **A job that runs an agent and publishes** was checked as an agent job only: the release rules (OBAAF-GHA-006, 014, 015, 016, 017) did not run on it. It is now in both lanes.
+- **A job declared an agent job that also publishes** was checked as a release job only, and the declaration was dropped: no OBAAF-GHA-003, 005 or 020. The same held for any declared lane on a job the checker had already placed in another. A declaration now adds a lane and never replaces one.
+- **A declaration could remove a finding.** Declaring a pull request job `release` or `effect` moved it out of the untrusted lane and dropped OBAAF-GHA-011. So did adding an upload step. A job on pull request triggers is now in the untrusted lane whatever else it is.
+- **An agent started from a repository script** was detected only in jobs with no other lane. It is now detected in any job.
+- **Two declarations for one job.** A lane in `.github/obaaf.yml` hid the job's own `OBAAF_LANE`, a per-job entry hid a per-file entry, and a job's `OBAAF_LANE` hid the workflow's. All of them now count.
+- **A declared value that is not a lane** (`OBAAF_LANE: Agent`, a misspelling, an expression) was ignored without a word. Case and surrounding space no longer matter, and any other value that is not a lane is listed in the report's notes, as is a `lanes:` entry for a job or file the checker did not find. Notes do not change the exit code.
+
+What an adopter will see: new findings on jobs that are in more than one lane, and `--lanes` lines that name the extra lanes (`agent (…; also release: …)`). Findings and messages for jobs in one lane are unchanged, so baselines still match. A `lanes:` entry with a value OBAAF does not know now produces a note. The Jenkins analyser assigns lanes with its own code and is not changed.
+
 ### Expressions
 
 Several spellings that no rule reported are now reported. They were found by reading the checker and by an independent review of the first fix. None has been run on GitHub.

@@ -370,16 +370,16 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
     def agent_rules(self, job: Job) -> None:
-        if job.lane != "agent":
+        if not job.in_lane("agent"):
             return
         perms = job.permissions
         if perms is None:
             self.add("OBAAF-GHA-003", job.line,
-                     f"Agent job '{job.id}' ({job.lane_reason}) does not declare permissions, so it may inherit "
+                     f"Agent job '{job.id}' ({job.reason_for('agent')}) does not declare permissions, so it may inherit "
                      "write access.", job)
         elif perms.write_scopes():
             self.add("OBAAF-GHA-003", job.line,
-                     f"Agent job '{job.id}' ({job.lane_reason}) holds write permissions: "
+                     f"Agent job '{job.id}' ({job.reason_for('agent')}) holds write permissions: "
                      f"{', '.join(perms.write_scopes())}.", job)
         if perms is not None and perms.oidc:
             self.add("OBAAF-GHA-004", job.line,
@@ -433,7 +433,7 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-006/014/015/016
     def release_rules(self, job: Job) -> None:
-        if job.lane != "release":
+        if not job.in_lane("release"):
             return
         triggers = job.triggers()
         bad = triggers & UNTRUSTED_TRIGGERS
@@ -569,7 +569,7 @@ class WorkflowRules:
         privileged = (not permissions or not permissions.declared or permissions.write_scopes()
                       or permissions.oidc or job.secret_names()
                       or job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS)
-        severity = ("high" if job.lane in ("release", "agent", "effect") else
+        severity = ("high" if any(job.in_lane(lane) for lane in ("release", "agent", "effect")) else
                     "medium" if privileged else "low")
         refs = [(s, s.uses, s.line) for s in job.steps if s.uses]
         if job.reusable and not job.reusable.startswith("./"):
@@ -607,7 +607,8 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-011
     def persisted_credentials(self, job: Job) -> None:
-        exposed = job.lane in ("agent", "untrusted") or bool(job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS)
+        exposed = (job.in_lane("agent") or job.in_lane("untrusted")
+                   or bool(job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS))
         if not exposed:
             return
         for step in job.steps:
@@ -621,7 +622,7 @@ class WorkflowRules:
         if kind == "github-hosted":
             return
         untrusted = job.triggers() & UNTRUSTED_TRIGGERS
-        if untrusted or job.lane == "agent":
+        if untrusted or job.in_lane("agent"):
             why = f"can be started by {_fmt_triggers(untrusted)}" if untrusted else "runs an agent"
             labels = ", ".join(job.runs_on) or "no labels"
             if kind == "self-hosted":
@@ -641,7 +642,7 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-018
     def signing_keys(self, job: Job) -> None:
-        severity = "high" if job.lane == "release" else "medium"
+        severity = "high" if job.in_lane("release") else "medium"
         patterns = [re.compile(p, re.I) for p in self.detection.get("signing_secret_patterns", [])]
         keys = sorted(n for n in job.secret_names() if not n.startswith("*") and any(p.search(n) for p in patterns))
         if keys:
@@ -658,7 +659,7 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-021/022
     def effect_rules(self, job: Job) -> None:
-        if job.lane != "effect":
+        if not job.in_lane("effect"):
             return
         verify_patterns = self.detection.get("record_verify_commands", [])
         proposal_patterns = self.detection.get("proposal_check_commands", [])
@@ -694,7 +695,7 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-017
     def provenance_missing(self) -> None:
-        uploading = [j for j in self.wf.jobs.values() if j.lane == "release" and j.upload_steps(self.detection)]
+        uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
         actions = self.detection.get("provenance_actions", [])

@@ -17,6 +17,9 @@ from obaaf.catalog import load as load_catalog
 from obaaf.checker import expr as expr_mod
 
 LANES = ("untrusted", "agent", "effect", "release", "trusted")
+# A job is in every lane it qualifies for, and gets the rules of each. This is the order they are
+# shown in; the first one a job is in is the lane `--lanes` names. "trusted" means none of them.
+LANE_ORDER = ("agent", "effect", "release", "untrusted")
 
 # Triggers whose payload or initiating actor someone without write access can
 # influence, and which run in the base repository's context with its token,
@@ -268,7 +271,36 @@ class Job:
     steps: list[Step] = field(default_factory=list)
     lane: str = "trusted"
     lane_reason: str = ""
+    # Every lane the job is in, and why. The rules ask `in_lane`; `lane` and `lane_reason` are what
+    # is shown for the job.
+    lanes: dict = field(default_factory=dict)
+    lane_notes: list = field(default_factory=list)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
+
+    def in_lane(self, lane: str) -> bool:
+        return lane in self.lanes if self.lanes else self.lane == lane
+
+    def reason_for(self, lane: str) -> str:
+        """Why the job is in `lane`, as a finding quotes it."""
+        if lane not in self.lanes:
+            return self.lane_reason
+        notes = self.lane_notes if lane == self.lane else []
+        return "; ".join([self.lanes[lane], *notes])
+
+    def add_lane(self, lane: str, reason: str) -> None:
+        """Put the job in one more lane. A job never leaves a lane."""
+        if lane in LANE_ORDER:
+            self.lanes[lane] = reason
+        self.settle_lane()
+
+    def settle_lane(self, default_reason: str = "default") -> None:
+        present = [lane for lane in LANE_ORDER if lane in self.lanes]
+        if not present:
+            self.lane, self.lane_reason = "trusted", "; ".join([default_reason, *self.lane_notes])
+            return
+        self.lane = present[0]
+        also = [f"also {lane}: {self.lanes[lane]}" for lane in present[1:]]
+        self.lane_reason = "; ".join([self.lanes[self.lane], *also, *self.lane_notes])
 
     @property
     def name(self) -> str:
@@ -486,6 +518,7 @@ class Workflow:
     jobs: dict[str, Job] = field(default_factory=dict)
     error: str | None = None
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
+    lane_problems: list[str] = field(default_factory=list)  # lane declarations that name no lane
 
     @property
     def triggers(self) -> dict[str, Any]:
@@ -606,49 +639,81 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
         job.steps.append(Step(index=len(job.steps), raw=step_raw, line=line, background=background))
 
 
-def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: dict | None = None) -> None:
-    """Assign each job a lane.
+def declared_lane(value) -> str | None:
+    """The lane a declaration names, or None when it names none. Case and surrounding space do
+    not matter, so `Agent` is not silently a different thing from `agent`."""
+    if not isinstance(value, str):
+        return None
+    lane = value.strip().lower()
+    return lane if lane in LANES else None
 
-    Inference comes first. A job inferred to be in the agent, effect, release or untrusted lane
-    stays there: neither OBAAF_LANE nor the checker configuration can move it to a lane with fewer
-    rules. A declared lane decides only for jobs that inference leaves as trusted, or moves an
-    untrusted job into the agent, effect or release lane, whose rules are stricter.
+
+def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: dict | None = None) -> None:
+    """Put each job in every lane it belongs to.
+
+    Inference comes first, and each lane is decided on its own: a job that runs an agent and
+    publishes is in the agent lane and in the release lane, and gets the rules of both. A lane
+    declared with OBAAF_LANE or in the checker configuration is added to those. A declaration never
+    takes a job out of a lane, so it can add rules and cannot remove any. A declared value that is
+    not a lane is recorded in `workflow.lane_problems`, never dropped without a word.
     """
     detection = load_catalog().detection
     overrides = overrides or {}
     extra_agents = extra_agents or {}
+    workflow.lane_problems = []
     for job in workflow.jobs.values():
-        lane, reason = _infer_lane(job, detection, extra_agents)
-        override = overrides.get(f"{workflow.path}#{job.id}") or overrides.get(workflow.path)
-        explicit = job.env.get("OBAAF_LANE") or workflow.env.get("OBAAF_LANE")
-        declared = (override, "set in the checker configuration") if override in LANES else \
-            (str(explicit), "set by OBAAF_LANE") if explicit in LANES else (None, "")
-        if declared[0] and declared[0] != lane:
-            if lane == "trusted" or (lane == "untrusted" and declared[0] in ("agent", "effect", "release")):
-                lane, reason = declared
+        job.lanes = _inferred_lanes(job, detection, extra_agents)
+        job.lane_notes = []
+        config_key = f"{workflow.path}#{job.id}"
+        declarations = [
+            (overrides.get(config_key), "set in the checker configuration",
+             f"the checker configuration sets lanes: '{config_key}'"),
+            (overrides.get(workflow.path), "set in the checker configuration",
+             f"the checker configuration sets lanes: '{workflow.path}'"),
+            (job.env.get("OBAAF_LANE"), "set by OBAAF_LANE", f"{workflow.path}: job '{job.id}' sets OBAAF_LANE"),
+            (workflow.env.get("OBAAF_LANE"), "set by OBAAF_LANE", f"{workflow.path} sets OBAAF_LANE"),
+        ]
+        declared: dict = {}
+        trusted_why = None
+        for value, why, where in declarations:
+            if value is None or value == "":
+                continue
+            lane = declared_lane(value)
+            if lane is None:
+                problem = (f"{where} to {str(value)!r}, which is not a lane ({', '.join(LANES)}); "
+                           "the declaration changes nothing")
+                if problem not in workflow.lane_problems:
+                    workflow.lane_problems.append(problem)
+            elif lane == "trusted":
+                trusted_why = trusted_why or why
             else:
-                reason += f"; declared {declared[0]}, which cannot override what the job does"
-        elif declared[0]:
-            reason = declared[1]
-        job.lane, job.lane_reason = lane, reason
+                # The first declaration of a lane gives the reason that is shown, as it did when a
+                # job had one lane: the configuration before OBAAF_LANE, the job before the workflow.
+                declared.setdefault(lane, why)
+        job.lanes.update(declared)
+        if trusted_why and job.lanes:
+            job.lane_notes.append("declared trusted, which cannot override what the job does")
+        job.settle_lane(trusted_why or "default")
 
 
-def _infer_lane(job: Job, detection: dict, extra_agents: dict) -> tuple[str, str]:
+def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
+    """Every lane the job's own content puts it in, with the reason for each."""
+    lanes: dict = {}
     agent = job.runs_agent(detection, extra_agents.get("actions", ()), extra_agents.get("commands", ()))
     if agent:
-        return "agent", agent
+        lanes["agent"] = agent
     triggers = job.triggers()
     writes = bool(job.permissions and job.permissions.write_scopes())
     if triggers & {"workflow_run", TRUSTED_WORKFLOW_RUN} and writes and _downloads_from_trigger_run(job):
-        return "effect", "applies the output of another workflow's run"
-    if job.upload_steps(detection):
-        return "release", "uploads or publishes artifacts"
+        lanes["effect"] = "applies the output of another workflow's run"
     env_name = (job.environment or "").lower()
-    if re.search(r"release|prod|publish|store|steam|itch|deploy", env_name) and not (triggers & UNTRUSTED_TRIGGERS):
-        return "release", f"uses the '{job.environment}' environment"
+    if job.upload_steps(detection):
+        lanes["release"] = "uploads or publishes artifacts"
+    elif re.search(r"release|prod|publish|store|steam|itch|deploy", env_name) and not (triggers & UNTRUSTED_TRIGGERS):
+        lanes["release"] = f"uses the '{job.environment}' environment"
     if triggers and triggers <= PR_TRIGGERS | {"merge_group"} | ({"push"} if "pull_request" in triggers else set()):
-        return "untrusted", "builds pull requests"
-    return "trusted", "default"
+        lanes["untrusted"] = "builds pull requests"
+    return lanes
 
 
 ARTIFACT_API_RE = re.compile(
