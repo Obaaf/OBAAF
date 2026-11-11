@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from obaaf.catalog import Catalog
+from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, runs_after_failure,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, runs_after_failure,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -55,7 +56,9 @@ def normalize_expression(expr: str) -> str:
     """
     out = re.sub(r"\[\s*'([^']*)'\s*\]", r".\1", expr)
     out = re.sub(r'\[\s*"([^"]*)"\s*\]', r".\1", out)
-    out = re.sub(r"\s*\.\s*", ".", out)
+    # The look-behind starts a match only at the beginning of a run of spaces, so a long run with no
+    # dot after it is scanned once, not once per space.
+    out = re.sub(r"(?<!\s)\s*\.\s*", ".", out)
     return out.lower()
 
 
@@ -228,14 +231,142 @@ class WorkflowRules:
             text = step.text()
             if not text:
                 continue
-            for expr in expressions(text):
-                normalized = normalize_expression(expr)
-                match = UNTRUSTED_FIELDS_RE.search(normalized) or TOJSON_UNTRUSTED_RE.search(normalized)
-                if match:
+            view = None
+            for body in expressions(text):
+                found = self._untrusted_text(body)
+                if not found:
+                    if view is None:
+                        view = self._indirect(job, step)
+                    found = self._untrusted_indirectly(body, view)
+                if found:
                     self.add("OBAAF-GHA-010", step.line,
-                             f"Step '{step.name}' expands {match.group(0)} inside its script.", job, step,
+                             f"Step '{step.name}' expands {found} inside its script.", job, step,
                              severity="high" if untrusted else "medium")
                     break
+
+    @staticmethod
+    def _untrusted_text(body: str) -> str | None:
+        """The outsider-written field an expression expands, if any."""
+        normalized = normalize_expression(body)
+        match = UNTRUSTED_FIELDS_RE.search(normalized) or TOJSON_UNTRUSTED_RE.search(normalized)
+        if match:
+            return match.group(0)
+        # Spellings the patterns above cannot follow. A wildcard or a computed index stands for any
+        # field, and a function may turn the object it is given into text, so each is treated as
+        # reaching the outsider-written fields inside the object it names.
+        for ref in expr_mod.refs(body):
+            if any(expr_mod.reaches(ref.path, pattern, ref.extracted) for pattern in UNTRUSTED_PATHS):
+                return expr_mod.dotted(ref.path)
+        return None
+
+    def _held(self, value, objects: bool = False) -> str | None:
+        """The outsider-written field a workflow value holds, if any. With `objects`, a value that
+        is the object containing such a field counts too (a matrix entry can be a whole object,
+        whose fields the script then reads)."""
+        for body in expressions(value):
+            held = self._untrusted_text(body)
+            if held:
+                return held
+            if objects:
+                for ref in expr_mod.refs(body):
+                    if any(expr_mod.reaches(ref.path, pattern, True) for pattern in UNTRUSTED_PATHS):
+                        return expr_mod.dotted(ref.path)
+        return None
+
+    @staticmethod
+    def _env_refs(value) -> tuple[set, bool]:
+        """Names (lower case) a value reads from the env context, and whether it reads all of it."""
+        names, everything = set(), False
+        for body in expressions(value):
+            for path in expr_mod.paths(body):
+                if path[0].value.lower() != "env":
+                    continue
+                if len(path) > 1 and path[1].kind == expr_mod.NAME:
+                    names.add(path[1].value.lower())
+                else:
+                    everything = True
+        return names, everything
+
+    def _env_taint(self, scopes: list[dict], base: dict, matrix: str | None = None) -> dict:
+        """Env name -> the outsider-written field its value holds, directly, through other env
+        values (`B: ${{ env.A }}`), or through the job's matrix when that holds one (`matrix`).
+        Later scopes override earlier ones key for key. `base` is taint from the enclosing scopes,
+        which these values can read but do not replace."""
+        entries: dict = {}
+        for scope in scopes:
+            entries.update(scope)
+        tainted: dict = {}
+        readers: dict = {}          # lower-case name -> keys whose value reads env.<name>
+        read_all: list = []         # keys whose value reads the whole env context
+        for key, value in entries.items():
+            held = self._held(key) or self._held(value)
+            if not held and matrix and any(path[0].value.lower() == "matrix"
+                                           for body in expressions(value) for path in expr_mod.paths(body)):
+                held = matrix
+            if held:
+                tainted[key] = held
+                continue
+            names, everything = self._env_refs(value)
+            if everything:
+                read_all.append(key)
+            for name in names:
+                readers.setdefault(name, []).append(key)
+        inherited = {str(k).lower(): v for k, v in base.items()}
+        queue = [(str(k).lower(), v) for k, v in tainted.items()] + list(inherited.items())
+        seen_all = False
+        while queue:
+            name, held = queue.pop()
+            dependants = readers.pop(name, [])
+            if not seen_all:
+                dependants = dependants + read_all
+                seen_all = True
+            for key in dependants:
+                if key not in tainted:
+                    tainted[key] = held
+                    queue.append((str(key).lower(), held))
+        return tainted
+
+    def _indirect(self, job: Job, step: Step) -> dict:
+        """What a step's script can reach through the env and matrix contexts: env names that hold
+        outsider-written text (lower case), whether the job's matrix does, and whether an `env:`
+        written as one expression (so its names cannot be read) does."""
+        cache = self.__dict__.setdefault("_job_views", {})
+        if job.id not in cache:
+            matrix = self._held(job.raw.get("strategy"), objects=True)
+            whole = next((held for held in (self._held(raw.get("env"), objects=True)
+                                            for raw in (self.wf.raw, job.raw)
+                                            if isinstance(raw.get("env"), str)) if held), None)
+            cache[job.id] = (self._env_taint([self.wf.env, job.env], {}, matrix), matrix, whole)
+        job_taint, matrix, whole = cache[job.id]
+        if isinstance(step.raw.get("env"), str):
+            whole = whole or self._held(step.raw.get("env"), objects=True)
+        step_taint = self._env_taint([step.env], job_taint, matrix) if step.env else {}
+        env: dict = {}
+        for key, held in job_taint.items():
+            if key not in step.env:             # a step value of the same name replaces the job's
+                env.setdefault(str(key).lower(), held)
+        for key, held in step_taint.items():
+            env.setdefault(str(key).lower(), held)
+        return {"env": env, "matrix": matrix, "env_whole": whole}
+
+    @staticmethod
+    def _untrusted_indirectly(body: str, view: dict) -> str | None:
+        """`${{ env.TITLE }}` or `${{ matrix.title }}` in a script is expanded before the shell runs,
+        like any expression. If TITLE is set from an outsider-written field, the script expands that
+        field. (`"$TITLE"`, which the shell reads, is the safe form.)"""
+        for path in expr_mod.paths(body):
+            root = path[0].value.lower()
+            if root == "env" and (view["env"] or view["env_whole"]):
+                if len(path) > 1 and path[1].kind == expr_mod.NAME:
+                    held = view["env"].get(path[1].value.lower())
+                else:
+                    held = next(iter(view["env"].values()), None)
+                held = held or view["env_whole"]
+                if held:
+                    return f"{expr_mod.dotted(path)}, which holds {held},"
+            elif root == "matrix" and view["matrix"]:
+                return f"{expr_mod.dotted(path)}, from a matrix that holds {view['matrix']},"
+        return None
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
     def agent_rules(self, job: Job) -> None:

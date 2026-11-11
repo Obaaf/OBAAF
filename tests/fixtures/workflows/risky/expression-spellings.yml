@@ -1,0 +1,23 @@
+# obaaf-models: Spellings that a text match misses: a wildcard over the secrets context, a secret after "}}" inside a string, event text reached through a group, a wildcard and env.
+# obaaf-expect: OBAAF-GHA-010 OBAAF-GHA-001 OBAAF-GHA-005 OBAAF-GHA-024
+# obaaf-config: {"protected_secrets": {"*_API_KEY": "main-only"}}
+name: Triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    env:
+      OBAAF_LANE: agent
+      TITLE: ${{ (github.event.issue).title }}
+    outputs:
+      key: ${{ format('}}{0}', secrets.MODEL_API_KEY) }}
+    steps:
+      - run: echo "${{ env.TITLE }}"
+      - run: echo "${{ join(github.event.*.body, ' ') }}"
+      - run: ./triage.sh
+        env:
+          EVERYTHING: ${{ join(secrets.*, ' ') }}
