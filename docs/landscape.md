@@ -1,6 +1,6 @@
 # The landscape: what else checks GitHub Actions, and where OBAAF fits
 
-*Checked 2026-11-11. Part 1 covers ten workflow scanners. [Part 2](#part-2-tools-that-enforce-and-what-github-itself-provides) covers tools that enforce while a job runs, GitHub's own features, and the standards for build provenance. Enterprise products and the positioning section are still to come ([flagship plan](flagship.md), items 1.3 and 1.4).*
+*Checked 2026-11-11. Part 1 covers ten workflow scanners. [Part 2](#part-2-tools-that-enforce-and-what-github-itself-provides) covers tools that enforce while a job runs, GitHub's own features, and the standards for build provenance. [Part 3](#part-3-enterprise-products-and-tools-aimed-at-ai-agents-in-ci) covers seven enterprise products and the tools aimed at AI agents in CI. The positioning section is still to come ([flagship plan](flagship.md), item 1.4).*
 
 The aim is a fair comparison a team can rely on. Every fact below comes from a page read or a command run on the date above, and says which. Where a source did not say, this page says "not stated" rather than guess.
 
@@ -330,6 +330,119 @@ Inputs to the positioning section (item 1.4), not decisions.
 5. **Generic workflow analysis: nothing to build.** Between zizmor, CodeQL, poutine and actionlint the generic rules are covered several times over. Part 1 reached the same conclusion.
 6. **A date.** From 2026-12-02 GitHub blocks `pull_request_target` in public repositories unless a policy allows the event. OBAAF has three weeks to be able to tell an adopter whether that applies to them.
 
+## Part 3: enterprise products, and tools aimed at AI agents in CI
+
+*Checked 2026-11-11.*
+
+This part has two halves. The first is seven products sold to security teams. Everything said about them comes from their public pages: marketing pages, press releases and, where they exist, public documentation. Each statement is the vendor's own claim, quoted or closely paraphrased, and none was tested. No account was created, so nothing behind a login was seen; each entry says what that leaves unknown. The second half is the tools and guidance aimed at AI agents running in CI, which is OBAAF's own subject.
+
+### How this part was put together
+
+**Reading.** The pages listed under [Sources](#sources) were read on 2026-11-11. Several vendor pages print no date. One open-source tool, ci-agent-audit, was also read as source code, from a copy of its repository at commit `4a88ee6` (2026-11-07).
+
+**Running.** Nothing in this part was run. An attempt to run ci-agent-audit on the three targets of parts 1 and 2, with no network, was refused by the working session's own safety rules, because the tool came from a source the session had not used before; nothing was done to get around that. Aikido's Opengrep rules were not run either: they need the Opengrep engine, which was not set up. The statements below about what these two would find are therefore from their documentation and, for ci-agent-audit, its source.
+
+### Seven enterprise products
+
+| Product | What its public pages say about CI | Repository settings | Enforces, or reports? | AI agents |
+| --- | --- | --- | --- | --- |
+| **Wiz** (Wiz Code) | "Wiz now parses your GitHub Actions workflow YAML files and models workflows, jobs, runners, and their relationships" (2026-04-20). Flags "Dangerous triggers like pull_request_target", risky permissions, and keeps an inventory of every action in use | "over 40 Cloud Configuration Rules targeting VCS settings" (a 2024 page) | Findings. Blocking is not stated | "Wiz now detects risks and misconfigurations related to the use of AI agents in CI". Also published research on AI actions (below) |
+| **Endor Labs** | "Scan the GitHub Actions used in your workflow files for vulnerabilities, malware, and risky configuration." Named policies: impostor commits, script injection, untrusted checkout, use of the `secrets` object, cloud authentication without OIDC | Yes. Five policies for Actions settings are named, among them "Default workflow token permission should be read only" and "Workflows should not be allowed to create and approve pull requests"; a product page says "over 50 out-of-the-box policies" | "Policies can break builds, block PRs, send notifications, or open tickets" | Its own security agents, which run "inside the coding assistant your developers already have". One is named "CI/CD Posture". Confining an agent inside a CI job is not stated |
+| **Cycode** | Cimon, a run-time agent for CI runners built on eBPF. In prevent mode: "unauthorized network call dropped, unexpected process killed, prohibited file access denied". Scanning workflow files is not stated on the pages read | Not stated on the pages read | Cimon blocks at run time, or only observes in detect mode | "AI Teammates" are Cycode's own agents. Nothing on the pages read about an agent inside a CI job |
+| **Legit Security** | "CI/CD risk detection, PR checks, pre-receive hooks, gated build steps". Research from 2024: "Legit analyzed 2,500,000 GitHub Actions workflow files" | Through Legitify, its open-source scanner (part 1). How the platform itself reads settings is not stated | Claims gating (the quotation to the left) | "Real-time guardrails against prompt injection, malicious MCP servers, secret leakage, and dangerous operations" for coding assistants such as Cursor, Copilot and Claude Code. An agent inside a CI job is not stated |
+| **Apiiro** | "detect CI/CD pipeline and source code management (SCM) misconfigurations, vulnerabilities, exposures"; an inventory of pipelines. GitHub Actions is not named | "SCM misconfigurations"; which settings is not stated | "scan and AutoFix vulnerable or non-compliant code before it reaches the source control manager". A block on a merge or a build is not stated | "Prevent coding agents from generating vulnerable and non-compliant code"; finds "MCP servers, skills, plugins" on developers' machines. An agent inside a CI job is not stated |
+| **Snyk** | Its GitHub Actions run Snyk's scanners in CI ("for checking your projects for vulnerabilities"). Nothing read says any Snyk product analyses workflow files | Not stated | The actions "fail the workflow when issues are found" | An "Agent Security solution" (2026-03-23): Agent Scan for "every MCP server and agent skill", Agent Guard for "stopping destructive commands" in the development loop. Agents inside CI jobs are not mentioned |
+| **Chainguard** | Chainguard Actions: "a securely rebuilt catalog of GitHub Actions and similar CI/CD workflows", in open beta since 2026-06-24, with "the last 5 versions of 500+ Actions". It does not scan a customer's workflows for weaknesses; a migration tool lists the actions they use | Not stated | A repository uses it by allowing `chainguard-actions/*` in its Actions settings | Agent Skills: "a continuously maintained catalog of hardened AI agent skills". "network access scoping" is listed only among rules planned for later |
+
+Open source, price, and what cannot be known without an account:
+
+- **Wiz.** Nothing open source is named on the pages read, and no price. Its public guide to hardening GitHub Actions (2026-04-15) recommends zizmor for linting workflows and names allstar, pinact and Gato-X. Not knowable from them: the rules themselves (the links go to the product and its documentation behind a login), which permissions its GitHub integration asks for, whether anything blocks, and whether the 2024 figure for settings rules is current.
+- **Endor Labs.** Its documentation is public and names its policies, which is more than the others publish. Its agents are "free and open source for Endor Labs customers"; the licence is not named. Prices are not stated. Not knowable: the permissions its GitHub App needs, and how the "Block compromised action versions and tag hijacks in real time" on a product page works, which the documentation read does not describe.
+- **Cycode.** "Cimon is free and open source. It runs on GitHub Actions and Azure Pipelines." (a page updated 2026-07-01). The licence is not named there, and Cimon's repository was not read. The same page says Cimon "can run as a standalone tool or connect to the Cycode platform", and that connecting "means generating an API key in Cycode"; its 2023 instructions required the Cimon GitHub App and an API key. Not knowable: what the platform reads of workflows and settings, and prices.
+- **Legit Security.** Legitify is open source (part 1). No price. Not knowable: the platform's rules, whether it parses workflow files, and how it connects to GitHub.
+- **Apiiro.** Nothing open source is named, and no price. Not knowable: the rules, which CI systems are supported, which settings are read.
+- **Snyk.** Agent Scan's command-line tool is Apache-2.0. It needs a Snyk token, and its page says it validates what it finds "with local checks and the Agent Scan API", sending agent application details, MCP server configurations, tool names and descriptions and skill content to Snyk, with secrets redacted. In March 2026 Agent Scan was in open preview and Agent Guard in private preview; their state today was not established. No price on the pages read.
+- **Chainguard.** A "30-day free trial"; no price after it. Not knowable from the pages read: whether the rebuilt actions are signed or carry provenance, and what Checks, Workspaces and Harness (in its navigation) and a Chainguard MCP (a post) do; the posts for Checks, Workspaces and MCP are dated 2026-10-14.
+
+What the seven have in common, and what that means for OBAAF:
+
+- **Their AI claims are mostly about a different place.** Legit, Apiiro, Snyk, Endor and Chainguard describe the developer's side: the coding assistant, its MCP servers and skills, and the code it writes. On the pages read, only Wiz says, in so many words, that it detects misconfigured AI agents in CI. OBAAF's subject, an agent running in a CI job with the job's secrets and token, is not crowded among these seven, and is no longer empty either.
+- **Where they read settings, the pages describe checks against fixed good practice** ("Default workflow token permission should be read only"). None says it compares a setting with what the repository's workflows assume, which is what all six of Expectrail's incidents were. That agrees with part 1. It is also a statement about marketing pages, not about products nobody here has used.
+- **Cimon is a sixth way to restrict a job's network**, beside the five in part 2, and like Harden-Runner and Bullfrog it runs on the runner beside the job. It belongs in slice 2c.1's reading list.
+- **OBAAF cannot compete with these as products and should not try.** They come with support, dashboards, and coverage of many systems. What a small open-source project can offer beside them is narrow, checkable and free: a specific question answered with evidence.
+
+### Tools and guidance aimed at AI agents in CI
+
+#### ci-agent-audit: the nearest open-source neighbour
+
+[ci-agent-audit](https://github.com/layer8labs8/ci-agent-audit) "reads your GitHub Actions and GitLab CI files and warns you when an AI agent such as Claude Code, Gemini CLI, or Codex is set up in a way that an outsider could abuse." It is MIT-licensed, written in Python (about 3,400 lines), marked alpha, at version 0.1.4. It "only reads YAML files", writes text, JSON, SARIF and GitHub annotations, can fix three kinds of finding itself, and runs as a command, an action or a pre-commit hook. How many people use it was not established.
+
+It finds agents by name: 20 signature files, one per tool, listing, where they apply, the action names, the command-line program and package, the inputs and flags that carry a prompt, the settings that are dangerous, and, for one, a minimum safe version. Its eleven rules, in its own words:
+
+| Rule | Its question | Nearest OBAAF rule |
+| --- | --- | --- |
+| AIA001 | "Can outsiders write part of the agent's prompt?" | None for the prompt as such. GHA-010 covers event text in a script; GHA-012 covers instruction files from the change under review |
+| AIA002 | "Are the agent's safety checks turned off?" (flags such as `--dangerously-skip-permissions`) | None |
+| AIA003 | "Can anyone trigger the agent?" (a `[bot]` name check that can be spoofed, or `"*"`) | None. GHA-001 looks at the trigger and a secret, not at the action's own allowlist |
+| AIA004 | "Is the agent action outdated or on a moving version?" | GHA-008 for the moving version. Nothing for a version known to be unsafe |
+| AIA005 | "Does the agent hold too much access?" | GHA-003, 004, 005 |
+| AIA006 | "Can the agent send data anywhere?" | GHA-020 |
+| AIA007 | "Does CI download MCP servers with no fixed version?" | None |
+| AIA008 | "Does a privileged job run the agent on untrusted PR code?" | GHA-002, 012 |
+| AIA009 | "Is the agent told or allowed to fetch issue text with `gh`?" | None |
+| AIA010 | "Does the model's answer reach a shell or git command?" | GHA-021 and 022, for a separate effect job |
+| AIA011 | "Is agent work pushed straight to `main`?" | GHA-022 |
+
+The right-hand column comes from reading both rule lists, not from running both tools on the same files.
+
+Its README is candid about limits. It reports "93.9% recall and 100% precision" on its own cases and adds: "We wrote them ourselves, so treat this as a regression check and not a promise about your repository." It "can't detect agents that read issues through their own built-in tools when the workflow doesn't mention them", does not follow data through artifacts, caches or scripts in other languages, and "takes `sandbox: read-only` as written and doesn't verify what the sandbox enforces".
+
+What this means for OBAAF, said plainly:
+
+- **It asks OBAAF's question, and on named tools it asks it in more detail.** OBAAF's own list is 11 action names and 10 command patterns, and it reads none of the agent actions' dangerous settings. Rules AIA002, 003, 007 and 009 have no counterpart in OBAAF at all.
+- **Neither tool finds an agent it has no name for.** Of Expectrail's 19 declared agent jobs, two install and call a named agent program. The other 17 start their model from the project's own code (twelve through `python -m agents.…`, five through other project modules), and ten of them install an agent's command-line program with `curl … | bash`; Expectrail's configuration says "The checker does not recognise our model entry points". Neither tool's list names any of these. Both tools let an adopter extend the list (ci-agent-audit with `--signatures-dir`, by action or program name; OBAAF with `agents.commands` and `agents.actions`). Only OBAAF also lets a job be declared an agent job outright, which is what Expectrail did; no equivalent was found in ci-agent-audit's README. A heuristic worth testing for `obaaf init` is a job that holds a model provider's key.
+- **What OBAAF has that it does not:** a declared agent job that no name matches; a secret tied to the environment it belongs in (GHA-024); the release and provenance rules; rules for a separate job that applies an agent's output; and, planned, settings and controls that are verified, not taken as written.
+- **Both tools share the weakness slice 2c.3 is meant to remove from OBAAF:** they accept a control because the workflow file says it is there.
+
+Its README names one more project in the area, ARKEXA, which was not read.
+
+#### Research: PromptPwnd and the AI actions
+
+[Aikido's PromptPwnd](https://www.aikido.dev/blog/promptpwnd-github-actions-ai-agents) (2025-12-04, updated 2026-03-17) named the pattern: "Untrusted user input → injected into prompts → AI agent executes privileged tools → secrets leaked or workflows manipulated." It reports that "At least 5 Fortune 500 companies are impacted" and that Google patched its own Gemini CLI repository "within four days". Aikido says it is "open-sourcing Opengrep rules for all security vendors"; those rules were not read or run here. Its remedies: restrict the agent's tools, keep untrusted input out of prompts, treat the agent's output as untrusted code, and limit what a leaked token can do.
+
+[Wiz's study of AI-powered actions](https://www.wiz.io/blog/github-actions-security-ai-powered-actions-vulnerabilities) (2026-04-30) looked at `anthropics/claude-code-action`, `google-github-actions/run-gemini-cli`, `openai/codex-action` and `actions/ai-inference`. It found that "Only two actions - claude-code-action and codex-action - implement their own permission checks", that checks on a bot's name do not tell an app installed in the repository from an outside one, and that verbose output modes expose secrets. Its first recommendation to workflow authors includes: "Do not rely on core models to prevent prompt injection." It released no tool; it points Wiz's customers to rules in the product.
+
+Both describe exactly the agent job OBAAF's rules are about, and both recommend controls OBAAF does not yet check: the action's own allowlist of who may trigger it, and the tools the agent is given.
+
+#### The agent actions' own guardrails
+
+Two widely used agent actions document their own controls, and those controls are things a checker can read.
+
+- **`openai/codex-action`** (Apache-2.0) has an input `safety-strategy`. Its default, `drop-sudo`, "revokes the default user's `sudo` access before invoking Codex", removes access to service sockets "including the Docker daemon", and starts Codex "with `no_new_privs`, no supplementary groups, and empty" capability sets. The other values are `unprivileged-user`, `read-only` and `unsafe` ("No privilege reduction"). The action gives the model key to a proxy it starts, not to Codex; the README warns Codex "could read it if it can reach process memory", and the security notes say passwordless `sudo` can expose it. By default only people with write access can trigger it. Its recommended profile "does not grant network access"; a list of allowed hosts is not described.
+- **`anthropics/claude-code-action`** "can only be triggered by users with write access to the repository" unless `allowed_non_write_users` or `allowed_bots` is set; its security page calls the first "a significant security risk". When `allowed_non_write_users` is used, it recommends "restricting allowed tools" to the minimum. It strips hidden text from what the agent reads, "but new bypass techniques may emerge". Its security page says nothing about restricting the network.
+
+What this means for OBAAF:
+
+- **`safety-strategy: unsafe`, `allowed_non_write_users: "*"`, `allow-users: "*"` and `--dangerously-skip-permissions` are cheap, exact things to report**, and OBAAF reports none of them. ci-agent-audit's signature files list all four; whether Aikido's rules cover them was not established.
+- **`drop-sudo` is prior art for slice 2c.** It is the same list OBAAF's own control needs: no `sudo`, no Docker socket, no new privileges, no capabilities. It restricts privilege, not the network, so it complements a firewall and does not replace one.
+- **A second key proxy exists.** With AWF's (part 2), that is two shipped partial answers to the "inference proxy" OBAAF's agent control R3 calls for. Both run on the runner, inside the job. R3 asks for a proxy "outside the agent's reach", and the fix text of OBAAF-GHA-005 for one "outside the job"; whether either is enough has to be tested before OBAAF-GHA-005 points at them.
+
+#### Scanners for agent configuration, which are not about CI
+
+[Snyk's agent-scan](https://github.com/snyk/agent-scan), [Agent Threat Rules](https://github.com/Agent-Threat-Rule/agent-threat-rules) (MIT), [agent-audit](https://github.com/HeadyZhang/agent-audit) (MIT; its README says 66 rules mapped to the OWASP Agentic Top 10) and [promptwarden](https://github.com/paulochastinet/promptwarden) (MIT) scan agent code, MCP configurations, and skill and instruction files. None of their pages says it reads a workflow file. OBAAF has two rules that read these files (a code owner for instruction files, and hidden characters in them); OBAAF-GHA-012 reads the workflow. It should not grow them into a scanner of agent configuration; these tools exist.
+
+Not read: two GitHub previews announced on 2026-10-28, "Code scanning for AI applications" and "AI Scan for repositories", known here only by their titles.
+
+### What part 3 suggests
+
+Inputs to the positioning section (item 1.4), not decisions.
+
+1. **OBAAF is not alone on its own subject.** Part 1 found no tool, among the ten it read, with the agent framing. At least three outside that list have it: ci-agent-audit, in the open; Wiz, by its own account; and Aikido, which says its product and its open Opengrep rules detect the pattern (not read or run here). Others were not read (ARKEXA) or not looked for. OBAAF cannot claim to be the only one.
+2. **What is left that only OBAAF does** is narrower and still real: agent jobs that are declared because nothing can detect them; a secret bound to an environment; the job that applies an agent's output; settings checked against what the workflows assume; and controls verified from what can be read, with "cannot tell" where they cannot.
+3. **On named agent tools OBAAF is behind ci-agent-audit, which was first released on 2026-10-30 and is marked alpha (OBAAF is marked alpha too).** It should either adopt signature files of the same kind and the checks for dangerous settings, or read ci-agent-audit's output, or recommend it alongside. Which one is a decision for 1.4.
+4. **Enterprise products: do not compete; be the narrow, checkable thing beside them.**
+5. **Two shipped key proxies and one shipped privilege drop** (AWF, `codex-action`) are candidates for the control behind OBAAF-GHA-005; AWF's firewall, not either proxy, is the candidate for 020. Both proxies run on the runner inside the job, which is weaker than the proxy "outside the job" that the fix text of OBAAF-GHA-005 asks for; R3 itself says "outside the agent's reach". Whether either clears a rule has to be tested first.
+
 ## Sources
 
 Read on 2026-11-11.
@@ -370,3 +483,20 @@ Not read, and so not relied on: poutine's rule documentation, Octoscan's licence
 Read, but not relied on: StepSecurity's own [comparison of Harden-Runner with GitHub's firewall](https://www.stepsecurity.io/blog/github-actions-native-egress-firewall-vs-harden-runner-five-differences-that-matter) (2026-10-28).
 
 Not read, and so not relied on: the repository of Harden-Runner's agent and its page of advisory GHSA-cpmj-h4f6-r6pq; AWF's architecture and security pages; gh-aw's pages on safe outputs and threat detection (the architecture page was used instead); the REST reference's response schemas; the licence of CodeQL's query pack; the in-toto project's own site; GitHub's documentation on `pull_request_target` and on enforcing lockfiles; and GitHub's changelog listing for Actions, so entries between 2026-06-25 and 2026-10-01 may have been missed.
+
+### Part 3
+
+- Wiz: [Wiz Code and the build environment](https://www.wiz.io/blog/from-code-to-pipeline-wiz-code-now-secures-your-build-environment) (2026-04-20), [hardening guide for GitHub Actions](https://www.wiz.io/blog/github-actions-security-guide) (2026-04-15), [AI-powered actions](https://www.wiz.io/blog/github-actions-security-ai-powered-actions-vulnerabilities) (2026-04-30), [GitHub, GitLab and Azure Repos](https://www.wiz.io/blog/wiz-code-unify-security-across-github-gitlab-and-azure-repos) (2024-07-18)
+- Endor Labs: documentation on [scanning GitHub Actions](https://docs.endorlabs.com/scan/github-actions) and [GitHub Action policies](https://docs.endorlabs.com/platform-administration/policies/finding-policies/github-action-policies), product pages on [CI/CD security](https://www.endorlabs.com/use-case/ci-cd-security), [pipeline discovery](https://endorlabs.com/product/endor-labs-ci-cd) and [agentic workflows](https://www.endorlabs.com/platform/agentic-workflows) (none dated)
+- Cycode: [CI/CD build hardening](https://cycode.com/blog/cicd-build-hardening/) (updated 2026-07-01), [introducing Cimon](https://cycode.com/blog/introducing-cimon-build-hardening/) (updated 2025-08-12), [press release on run-time protection and AI Teammates](https://www.businesswire.com/news/home/20250422028471/en) (the address is dated 2025-04-22)
+- Legit Security: [what is CI/CD security](https://www.legitsecurity.com/blog/what-is-cicd-security) (2024-11-25), [platform overview](https://info.legitsecurity.com/hubfs/Legit%20Agentic%20AppSec%20Platform%20Overview%20(3).pdf) (a PDF, undated), [the state of GitHub Actions security](https://www.legitsecurity.com/press-releases/the-state-of-github-actions-security) (2024-07-15), [introducing Legitify](https://www.legitsecurity.com/blog/introducing-legitify) (2022-08-18)
+- Apiiro: [home page](https://apiiro.com/), [ASPM](https://apiiro.com/product/aspm) (neither dated)
+- Snyk: [Agent Security announcement](https://snyk.io/news/snyk-launches-agent-security-solution/) (2026-03-23), [agent-scan](https://github.com/snyk/agent-scan), [Snyk's GitHub Actions](https://github.com/snyk/actions)
+- Chainguard: [introducing Chainguard Actions](https://www.chainguard.dev/unchained/introducing-chainguard-actions) (2026-03-17), [open beta](https://www.chainguard.dev/de-DE/unchained/secure-your-pipelines-with-chainguard-actions-now-available-in-open-beta) (2026-06-24, read in its German edition), [announcements of June 2026](https://www.chainguard.dev/unchained/everything-we-announced-during-ai-readiness-innovation-week) (2026-06-25), [Agent Skills](https://www.chainguard.dev/de-DE/unchained/introducing-chainguard-agent-skills) (2026-03-17, German edition)
+- ci-agent-audit: [repository](https://github.com/layer8labs8/ci-agent-audit), README and source at commit `4a88ee6`; two forks of it were read first ([one](https://github.com/AhmadAnzar/ci-agent-audit), [two](https://github.com/codekongdev/ci-agent-audit))
+- Aikido: [PromptPwnd](https://www.aikido.dev/blog/promptpwnd-github-actions-ai-agents) (2025-12-04, updated 2026-03-17)
+- `openai/codex-action`: [repository](https://github.com/openai/codex-action), [security notes](https://github.com/openai/codex-action/blob/main/docs/security.md), [documentation](https://developers.openai.com/codex/github-action) (it redirects to learn.chatgpt.com)
+- `anthropics/claude-code-action`: [security notes](https://github.com/anthropics/claude-code-action/blob/main/docs/security.md); Claude Code's own [security page](https://docs.claude.com/en/docs/claude-code/security)
+- Scanners for agent configuration: [Agent Threat Rules](https://github.com/Agent-Threat-Rule/agent-threat-rules), [agent-audit](https://github.com/HeadyZhang/agent-audit), [promptwarden](https://github.com/paulochastinet/promptwarden)
+
+Not read, and so not relied on: anything behind a login at any of the seven vendors, and their pricing pages; Cimon's repository; Aikido's Opengrep rules; ARKEXA; an "agentic-actions-auditor" plugin listed under Trail of Bits' skills, seen only as a search result; the October 2026 follow-up that Wiz's study of AI actions now links to; Apiiro's command-line tool; Chainguard's Checks, Workspaces, Harness and MCP; and the two GitHub previews for AI applications named above.
