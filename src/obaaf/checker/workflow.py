@@ -569,6 +569,7 @@ def parse(path: str, text: str) -> Workflow:
         return workflow
     for job_id, job_raw in jobs.items():
         if not isinstance(job_raw, dict):
+            workflow.problems.append(f"job '{job_id}' is not a mapping, so the checker cannot check what it does")
             continue
         job = Job(id=str(job_id), raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")

@@ -297,6 +297,9 @@ class GroupsAndFunctionResultsTest(unittest.TestCase):
         "toJSON(github.event.commits.*)",
         "github.event.commits[0].message",
         "github.event.commits['0'].message",
+        "github.event.commits[''].message",
+        "github.event.commits['0x0'].message",
+        "github.event.pages[' 0'].page_name",
         "github.event.pull_request.*.ref",
     ]
     NOT_REPORTED = [
@@ -382,6 +385,37 @@ class IndirectionTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn("matrix", found[0])
 
+    def test_env_value_set_from_a_matrix_that_holds_event_text(self):
+        for where in ("job", "step"):
+            job = "    env:\n      TITLE: ${{ matrix.t }}\n" if where == "job" else ""
+            step = "        env:\n          TITLE: ${{ format('{0}', matrix.t) }}\n" if where == "step" else ""
+            workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                        "    strategy:\n      matrix:\n        t: [\"${{ github.event.issue.title }}\"]\n" + job +
+                        "    steps:\n      - run: echo \"${{ env.TITLE }}\"\n" + step)
+            self.assertEqual(len(self._gha010(workflow)), 1, where)
+
+    def test_matrix_entry_that_is_the_whole_event_object(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    strategy:\n      matrix:\n        e: [\"${{ github.event.issue }}\"]\n"
+                    "    steps:\n      - run: echo \"${{ matrix.e.title }}\"\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
+    def test_env_written_as_one_expression(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+                    "    steps:\n      - run: echo \"${{ env.T }}\"\n"
+                    "        env: ${{ fromJSON(format('{{\"T\":{0}}}', toJSON(github.event.issue.title))) }}\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
+    def test_env_key_written_as_an_expression(self):
+        step = "        env:\n          ${{ github.event.issue.title }}: x\n"
+        self.assertEqual(len(self._gha010(_script("echo '${{ toJSON(env) }}'", env=step))), 1)
+
+    def test_three_hops_through_env(self):
+        workflow = ("on: issues\npermissions:\n  contents: read\nenv:\n  A: ${{ github.event.issue.title }}\n"
+                    "jobs:\n  work:\n    runs-on: ubuntu-latest\n    env:\n      B: ${{ env.A }}\n    steps:\n"
+                    "      - run: echo \"${{ env.D }}\"\n        env:\n          C: ${{ env.B }}\n          D: ${{ env.C }}\n")
+        self.assertEqual(len(self._gha010(workflow)), 1)
+
     def test_ordinary_matrix_is_not_reported(self):
         workflow = ("on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
                     "    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n"
@@ -437,6 +471,20 @@ class HardInputTest(unittest.TestCase):
         result = self._timed(workflow)
         self.assertTrue(any(f.rule == "OBAAF-GHA-001" for f in result.findings))
 
+    def test_long_suffix_on_a_large_group_is_read_in_bounded_memory(self):
+        text = "(" + "||".join(["a"] * 6000) + ")" + ".b" * 30000
+        started = time.monotonic()
+        found = expr.refs(text)
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual(len(found), 6000)
+        self.assertTrue(all(len(ref.path) <= expr.MAX_SEGMENTS for ref in found))
+        self.assertTrue(all(len(ref.path) <= expr.MAX_SEGMENTS for ref in expr.refs("a" + ".b" * 30000)))
+
+    def test_dropping_segments_past_the_limit_loses_nothing_the_rules_use(self):
+        longest = max(len(pattern) for pattern in wf_mod.UNTRUSTED_PATHS)
+        self.assertGreater(expr.MAX_SEGMENTS, longest)
+        self.assertEqual(expr.secret_refs("(secrets).KEY" + ".x" * 100), {"KEY"})
+
     def test_long_run_of_spaces_in_an_expression(self):
         self._timed(_script("echo \"${{ github.sha" + " " * 60000 + "}}\""))
 
@@ -469,6 +517,14 @@ class UnreadableYamlTest(unittest.TestCase):
         for char in ("\u0085", "\u2028", "\u2029"):
             errors = self._errors(_job("x" + char + "# ${{ secrets.DEPLOY_KEY }}"))
             self.assertTrue(any("line break" in e for e in errors), repr(char))
+
+    def test_text_under_a_null_tag(self):
+        errors = self._errors(_job("!!null \"${{ secrets.DEPLOY_KEY }}\""))
+        self.assertTrue(any("cannot parse" in e and "null" in e for e in errors), errors)
+
+    def test_job_that_is_not_a_mapping(self):
+        workflow = HEAD.format(trigger="issues") + "jobs:\n  work: echo\n  other:\n    runs-on: ubuntu-latest\n    steps:\n" + STEP
+        self.assertTrue(any("job 'work' is not a mapping" in e for e in self._errors(workflow)))
 
     def test_dates_and_numbers_are_still_ordinary_values(self):
         workflow = (HEAD.format(trigger="push") + "env:\n  RELEASED: 2026-11-11\n  COUNT: 3\n  RATIO: 0.5\n"

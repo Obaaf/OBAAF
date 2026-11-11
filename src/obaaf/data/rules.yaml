@@ -168,10 +168,12 @@ rules:
       any letter case, through `toJSON` or another function given the event object, through a group
       (`(github.event.issue).title`), or through a wildcard or computed index
       (`github.event.*.title`, `github.event[inputs.kind].body`). `${{ env.NAME }}` counts when the
-      step, job or workflow sets NAME from one of these fields, and `${{ matrix.x }}` when the job's
-      matrix is built from one. Values set while the job runs, or passed from another job, are not
-      followed. The text becomes part of the script before the shell runs, so it can run commands.
-      This is how the Nx compromise began.
+      step, job or workflow sets NAME from one of these fields, directly or through other env values
+      or the matrix, and `${{ matrix.x }}` when the job's matrix is built from one. Not followed:
+      values set while the job runs, values passed between jobs or into reusable workflows and
+      composite actions, and scripts other than `run` and `actions/github-script`. The text becomes
+      part of the script before the shell runs, so it can run commands. This is how the Nx
+      compromise began.
     fix: >-
       Pass the value through an environment variable (`env: TITLE: ${{ github.event.issue.title }}`)
       and use it quoted in the script (`"$TITLE"`), so the shell treats it as data.

@@ -8,8 +8,8 @@ down it takes the wider reading: a reference to `secrets` that is not one litera
 secret, a wildcard or computed index matches any field, and an argument of a function is treated
 as something the function may turn into text.
 
-Nothing is evaluated, and nothing here has been checked against a run on GitHub. What the reader
-does not follow is listed where it is used (rules.py, OBAAF-GHA-010).
+Nothing is evaluated, and nothing here has been checked against a run on GitHub. What the rules
+built on this reader do not follow is listed in each rule's description (data/rules.yaml).
 """
 
 from __future__ import annotations
@@ -27,7 +27,8 @@ NAME, STAR, COMPUTED = "name", "star", "computed"
 
 
 class TooComplex(ValueError):
-    """A text with so many overlapping expression starts that reading it would take too long."""
+    """Text the reader refuses rather than read slowly or wrongly: too many unfinished expression
+    starts, or brackets and parentheses nested too deeply."""
 
 
 _QUOTE_OR_CLOSE = re.compile(r"'|\}\}")
@@ -130,6 +131,10 @@ class Ref:
 
 # Deeper nesting of ( and [ than this is refused. Real expressions nest a handful of levels.
 MAX_DEPTH = 64
+# Segments kept per reference. The longest field the rules look for has six, and a reference longer
+# than the field it is compared with never matches, so the rest can be dropped. Without the limit
+# `(a || a || ...).b.b.b...` costs memory in proportion to its length squared.
+MAX_SEGMENTS = 16
 
 
 def _closers(toks: list) -> list[int]:
@@ -167,7 +172,7 @@ def _accessors(toks: list, close: list, j: int, hi: int, in_call: bool, depth: i
             j = end + 1
         else:
             break
-        if segments is not None:
+        if segments is not None and len(segments) < MAX_SEGMENTS:
             segments.append(segment)
     return j
 
@@ -195,7 +200,8 @@ def _read(toks: list, close: list, lo: int, hi: int, in_call: bool, depth: int, 
             suffix: list = []
             i = _accessors(toks, close, end + 1, hi, in_call, depth, out, suffix)
             if suffix:
-                inner = [r if r.extracted else Ref(r.path + tuple(suffix), False) for r in inner]
+                added = tuple(suffix)
+                inner = [r if r.extracted else Ref((r.path + added)[:MAX_SEGMENTS], False) for r in inner]
             out.extend(inner)
         elif kind == "id" and not (i > 0 and toks[i - 1] == ("op", ".")):
             segments = [Segment(NAME, text)]
@@ -250,7 +256,8 @@ def secret_refs(expr: str) -> set[str]:
 def reaches(path: tuple, pattern: tuple, extracted: bool = False) -> bool:
     """Whether a context reference can read the field a pattern names.
 
-    A pattern is one accepted set of names per segment, or None where the data has an array index.
+    A pattern is one accepted set of names per segment, or None where the data has an array index
+    (which a wildcard, a computed index or a string that is not a name can stand for).
     A STAR or COMPUTED segment in the reference matches anything. A reference as long as the pattern
     reads the field. A shorter one reads an object that contains the field; it counts when
     something can turn that object into text: a STAR or COMPUTED segment (`github.event.issue.*`,
@@ -265,7 +272,9 @@ def reaches(path: tuple, pattern: tuple, extracted: bool = False) -> bool:
         if segment.kind != NAME:
             continue
         if accepted is None:
-            if not segment.value.isdigit():
+            # An array index. A name such as `number` is not one; anything else written as a
+            # string ('0', '', ' 0', '0x0') may be converted to one.
+            if _SECRET_NAME.match(segment.value):
                 return False
         elif segment.value.lower() not in accepted:
             return False

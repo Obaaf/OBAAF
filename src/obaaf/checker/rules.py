@@ -259,12 +259,18 @@ class WorkflowRules:
                 return expr_mod.dotted(ref.path)
         return None
 
-    def _held(self, value) -> str | None:
-        """The outsider-written field a workflow value holds, if any."""
+    def _held(self, value, objects: bool = False) -> str | None:
+        """The outsider-written field a workflow value holds, if any. With `objects`, a value that
+        is the object containing such a field counts too (a matrix entry can be a whole object,
+        whose fields the script then reads)."""
         for body in expressions(value):
             held = self._untrusted_text(body)
             if held:
                 return held
+            if objects:
+                for ref in expr_mod.refs(body):
+                    if any(expr_mod.reaches(ref.path, pattern, True) for pattern in UNTRUSTED_PATHS):
+                        return expr_mod.dotted(ref.path)
         return None
 
     @staticmethod
@@ -281,10 +287,11 @@ class WorkflowRules:
                     everything = True
         return names, everything
 
-    def _env_taint(self, scopes: list[dict], base: dict) -> dict:
-        """Env name -> the outsider-written field its value holds, directly or through another env
-        value (`B: ${{ env.A }}`). Later scopes override earlier ones key for key. `base` is taint
-        from the enclosing scopes, which these values can read but do not replace."""
+    def _env_taint(self, scopes: list[dict], base: dict, matrix: str | None = None) -> dict:
+        """Env name -> the outsider-written field its value holds, directly, through other env
+        values (`B: ${{ env.A }}`), or through the job's matrix when that holds one (`matrix`).
+        Later scopes override earlier ones key for key. `base` is taint from the enclosing scopes,
+        which these values can read but do not replace."""
         entries: dict = {}
         for scope in scopes:
             entries.update(scope)
@@ -292,7 +299,10 @@ class WorkflowRules:
         readers: dict = {}          # lower-case name -> keys whose value reads env.<name>
         read_all: list = []         # keys whose value reads the whole env context
         for key, value in entries.items():
-            held = self._held(value)
+            held = self._held(key) or self._held(value)
+            if not held and matrix and any(path[0].value.lower() == "matrix"
+                                           for body in expressions(value) for path in expr_mod.paths(body)):
+                held = matrix
             if held:
                 tainted[key] = held
                 continue
@@ -318,19 +328,26 @@ class WorkflowRules:
 
     def _indirect(self, job: Job, step: Step) -> dict:
         """What a step's script can reach through the env and matrix contexts: env names that hold
-        outsider-written text (lower case), and whether the job's matrix does."""
+        outsider-written text (lower case), whether the job's matrix does, and whether an `env:`
+        written as one expression (so its names cannot be read) does."""
         cache = self.__dict__.setdefault("_job_views", {})
         if job.id not in cache:
-            cache[job.id] = (self._env_taint([self.wf.env, job.env], {}), self._held(job.raw.get("strategy")))
-        job_taint, matrix = cache[job.id]
-        step_taint = self._env_taint([step.env], job_taint) if step.env else {}
+            matrix = self._held(job.raw.get("strategy"), objects=True)
+            whole = next((held for held in (self._held(raw.get("env"), objects=True)
+                                            for raw in (self.wf.raw, job.raw)
+                                            if isinstance(raw.get("env"), str)) if held), None)
+            cache[job.id] = (self._env_taint([self.wf.env, job.env], {}, matrix), matrix, whole)
+        job_taint, matrix, whole = cache[job.id]
+        if isinstance(step.raw.get("env"), str):
+            whole = whole or self._held(step.raw.get("env"), objects=True)
+        step_taint = self._env_taint([step.env], job_taint, matrix) if step.env else {}
         env: dict = {}
         for key, held in job_taint.items():
             if key not in step.env:             # a step value of the same name replaces the job's
                 env.setdefault(str(key).lower(), held)
         for key, held in step_taint.items():
             env.setdefault(str(key).lower(), held)
-        return {"env": env, "matrix": matrix}
+        return {"env": env, "matrix": matrix, "env_whole": whole}
 
     @staticmethod
     def _untrusted_indirectly(body: str, view: dict) -> str | None:
@@ -339,11 +356,12 @@ class WorkflowRules:
         field. (`"$TITLE"`, which the shell reads, is the safe form.)"""
         for path in expr_mod.paths(body):
             root = path[0].value.lower()
-            if root == "env" and view["env"]:
+            if root == "env" and (view["env"] or view["env_whole"]):
                 if len(path) > 1 and path[1].kind == expr_mod.NAME:
                     held = view["env"].get(path[1].value.lower())
                 else:
-                    held = next(iter(view["env"].values()))
+                    held = next(iter(view["env"].values()), None)
+                held = held or view["env_whole"]
                 if held:
                     return f"{expr_mod.dotted(path)}, which holds {held},"
             elif root == "matrix" and view["matrix"]:
