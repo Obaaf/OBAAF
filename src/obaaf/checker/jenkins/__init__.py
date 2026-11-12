@@ -100,6 +100,10 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
     stages: dict[tuple, list] = {}
     for info in engine.infos:
         stages.setdefault(info.ctx.stage, []).append(info)
+    # A stage with no step the model records is still a stage a `lanes:` entry may name.
+    for stage in pipeline.stages:
+        result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
+    reached: dict[tuple, list] = {}     # (value, line) of an OBAAF_LANE -> the stages whose steps it reaches
     for stage, infos in stages.items():
         ai = next((i for i in infos if i.ai), None)
         pub = next((i for i in infos if i.publish), None)
@@ -118,20 +122,20 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         result.lanes.append((stage_label(stage), lane, reason))
         # Each key is the file, a `#` and a name for the stage. The file's own name may hold a `#`.
         result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
-        for value, line in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
-            # One finding for each declaration, not one for each stage it reaches.
-            if value is None:
-                problem = IdleDeclaration(kind="jenkins-computed", path=rel, line=line)
-            elif declared_lane(value) is None:
-                problem = IdleDeclaration.of("jenkins-not-a-lane", value, path=rel, line=line)
-            else:
-                continue
-            if problem not in result.lane_problems:
-                result.lane_problems.append(problem)
+        for pair in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
+            reached.setdefault(pair, []).append(stage_label(stage))
         if ai:
             result.agent_present = True
         elif stage and _AGENT_HINT.search(" ".join(stage)):
             result.suspect_stages.append(stage_label(stage))
+    for (value, line), labels in reached.items():
+        # One finding for each declaration, not one for each stage it reaches. The stages are part of
+        # what the finding is: the same value moved to another stage is another finding.
+        where = {"path": rel, "line": line, "stages": tuple(sorted(dict.fromkeys(labels)))}
+        if value is None:
+            result.lane_problems.append(IdleDeclaration(kind="jenkins-computed", **where))
+        elif declared_lane(value) is None:
+            result.lane_problems.append(IdleDeclaration.of("jenkins-not-a-lane", value, **where))
     return result
 
 

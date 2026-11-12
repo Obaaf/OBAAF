@@ -878,6 +878,16 @@ def one_line(text, limit: int | None = None) -> str:
     return out
 
 
+def as_text(value) -> str:
+    """`str(value)`, for a value that came out of a YAML file. Python refuses to print an integer of
+    more than a few thousand digits in decimal, and YAML reads `0xFF...` of any length as one; such
+    a number is given in hexadecimal, which has no limit."""
+    try:
+        return str(value)
+    except ValueError:
+        return hex(value) if isinstance(value, int) else repr(type(value).__name__)
+
+
 def shown_value(value) -> str:
     """A declared value as a note names it: what the author wrote, on one line and bounded."""
     if value is None or value == "":
@@ -888,7 +898,7 @@ def shown_value(value) -> str:
         return "a list"
     if isinstance(value, dict):
         return "a mapping"
-    text = str(value)
+    text = as_text(value)
     if not text.isascii():
         # A look-alike letter reads exactly like the lane it imitates; the escape shows the difference.
         text = text.encode("unicode_escape").decode("ascii")
@@ -910,17 +920,33 @@ def value_identity(value) -> str:
         return "a list"
     if isinstance(value, dict):
         return "a mapping"
-    text = str(value).lower() if isinstance(value, bool) else str(value)
+    text = str(value).lower() if isinstance(value, bool) else as_text(value)
     return bounded(text, quoted=True)
 
 
 def bounded(text: str, quoted: bool = False) -> str:
     """`text` as part of what identifies a finding: itself (in quotes when `quoted`), or its length
-    and digest when it is longer than VALUE_LIMIT characters."""
-    if len(text) > VALUE_LIMIT:
+    and digest when it is longer than VALUE_LIMIT characters. Unquoted text that itself begins like
+    a digest is given as its digest too, so no short text can stand for a long one."""
+    if len(text) > VALUE_LIMIT or (not quoted and text.startswith("sha256:")):
         digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
         return f"sha256:{digest} ({len(text)} characters)"
     return f"'{text}'" if quoted else text
+
+
+_LANE_VARIABLE = "OBAAF_LANE"
+
+
+def misnamed_lane_variables(env) -> list:
+    """The names in an `env` that are OBAAF_LANE in another spelling: other case, spaces round it, a
+    hyphen or a space for the underscore. The variable is read under its exact name only, as a
+    runner's shell would read it, so such a name declares nothing."""
+    out = []
+    for name in (env if isinstance(env, dict) else ()):
+        if isinstance(name, str) and name != _LANE_VARIABLE and \
+                re.sub(r"[\s_-]+", "_", name.strip()).upper() == _LANE_VARIABLE:
+            out.append(name)
+    return out
 
 
 @dataclass(frozen=True)
@@ -943,6 +969,8 @@ class IdleDeclaration:
     shown: str = ""
     lane: str | None = None
     service: str = ""             # the service whose env holds it
+    name: str = ""                # the variable as it is written, when that is not OBAAF_LANE
+    stages: tuple = ()            # the Jenkins stages whose steps the declaration reaches
     # Whether the job is already in the lane the declaration names, so nothing is missing because of it.
     redundant: bool = False
 
@@ -1003,6 +1031,12 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
             (workflow.env.get("OBAAF_LANE", _UNSET), "set by OBAAF_LANE",
              {"kind": "workflow-not-a-lane", "line": key_line(workflow.env, "OBAAF_LANE", 1)}),
         ]
+        for name in misnamed_lane_variables(job.env):
+            problem(IdleDeclaration.of("job-misnamed", job.env[name], path=workflow.path, job=job.id,
+                                       line=key_line(job.env, name, job.line), name=bounded(name)))
+        for name in misnamed_lane_variables(workflow.env):
+            problem(IdleDeclaration.of("workflow-misnamed", workflow.env[name], path=workflow.path,
+                                       line=key_line(workflow.env, name, 1), name=bounded(name)))
         declared: dict = {}
         trusted_why = None
         for value, why, where in declarations:
@@ -1042,6 +1076,12 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
 
     out = [found("step-env", step.raw["env"], step.line, step=step.name)
            for step in job.steps if stray(step.raw.get("env"))]
+    # A `parallel` group is a step to a reader and holds no step of its own in the model.
+    steps = job.raw.get("steps")
+    for number, group in enumerate(steps if isinstance(steps, list) else (), start=1):
+        if isinstance(group, dict) and "parallel" in group and stray(group.get("env")):
+            name = as_text(group.get("name") or group.get("id") or f"parallel group at step {number}")
+            out.append(found("step-env", group["env"], getattr(group, "line", job.line), step=name))
     container = job.raw.get("container")
     if isinstance(container, dict) and stray(container.get("env")):
         out.append(found("container-env", container["env"], job.line))

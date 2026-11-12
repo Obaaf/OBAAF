@@ -249,23 +249,26 @@ class ItCanBeAcceptedLikeAnyOtherFindingTest(unittest.TestCase):
     def adopter(self, tmp, config=None):
         return repo(tmp, job(name="byo-smoke"), self.CONFIG if config is None else config, name="byo-smoke.yml")
 
-    def test_by_an_ignore_entry_with_an_owner_a_reason_and_a_date(self):
-        entry = (f"ignore:\n  - rule: {CFG}\n    path: .github/obaaf.yml\n"
+    def test_not_by_an_ignore_entry_which_would_cover_every_declaration_in_the_file(self):
+        # An ignore entry accepts a rule in a file, whatever the finding says. An independent
+        # reviewer accepted `probe` that way, then renamed an agent job and misspelt its lane: three
+        # more findings, all accepted by the same entry, and the gate stayed green.
+        entry = (f"ignore:\n  - rule: {CFG}\n    path: .github/obaaf.yml\n    owner: '{OWNER}'\n"
                  f"    reason: probe is this project's own label for the job\n    until: {day(90)}\n")
         with TempDir() as tmp:
             self.adopter(tmp, self.CONFIG + entry)
-            without_owner = checker.check(tmp)
-            code_without, text, _ = run_cli("check", tmp, "--fail-on", "low")
-            self.adopter(tmp, self.CONFIG + entry + f"    owner: '{OWNER}'\n")
-            accepted = checker.check(tmp)
-            code_accepted, lead, _ = run_cli("check", tmp, "--fail-on", "low")
-        self.assertEqual([f.state for f in idle(without_owner)], ["new"])
-        self.assertEqual(code_without, 1)
-        self.assertIn("because it names no owner", text)
-        self.assertEqual([f.state for f in idle(accepted)], ["accepted"])
-        self.assertEqual(code_accepted, 0)
-        self.assertTrue(lead.startswith("Accepted risk: 1 finding(s) are accepted and do not fail the check (1 high)"),
-                        lead)
+            code, out, err = run_cli("check", tmp)
+            with self.assertRaises(checker.ConfigError):
+                checker.Config.load(tmp)
+            # A configuration built in code is not checked that way; the entry still accepts nothing.
+            self.adopter(tmp)
+            config = checker.Config(lanes={".github/workflows/byo-smoke.yml#byo-smoke": "probe"}, ignore=[
+                {"rule": CFG, "path": "*", "owner": OWNER, "reason": REASON, "until": day(90)}])
+            built = checker.check(tmp, config=config)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("an ignore entry cannot accept OBAAF-CFG-001", err)
+        self.assertIn("--write-baseline", err)
+        self.assertEqual([(f.state, f.suppressed) for f in idle(built)], [("new", None)])
 
     def test_by_a_baseline_entry_that_names_the_key_and_the_value(self):
         with TempDir() as tmp:
@@ -476,10 +479,144 @@ class TheRuleIsInTheCatalogueTest(unittest.TestCase):
 
     def test_every_case_has_one_template(self):
         from obaaf.checker import _IDLE_TEMPLATES, rules
-        kinds = {"job-not-a-lane", "workflow-not-a-lane", "jenkins-not-a-lane", "jenkins-computed", "step-env",
-                 "container-env", "service-env", "entry-not-a-lane", "entry-no-job", "entry-no-stage", "entry-no-file"}
+        kinds = {"job-not-a-lane", "workflow-not-a-lane", "job-misnamed", "workflow-misnamed", "jenkins-not-a-lane",
+                 "jenkins-computed", "step-env", "container-env", "service-env", "entry-not-a-lane", "entry-no-job",
+                 "entry-no-stage", "entry-no-file"}
         self.assertEqual(set(_IDLE_TEMPLATES), kinds)
         self.assertEqual([pair for pair in rules.CONFLICTS if pair[0] == CFG], [])
+
+
+class WhatAnIndependentReviewFoundTest(unittest.TestCase):
+    """Each case is one a reviewer that did not write the rule got past it with, on 2026-11-12."""
+
+    TWO_STAGES = """pipeline {
+  agent any
+  stages {
+    stage('Docs') {
+      %s
+      steps { echo 'docs' }
+    }
+    stage('Ship') {
+      %s
+      steps { sh './run-bot.sh' }
+    }
+  }
+}
+"""
+
+    def test_a_jenkins_declaration_is_the_stages_it_reaches(self):
+        misspelt = "environment { OBAAF_LANE = 'agnet' }"
+        with TempDir() as tmp:
+            repo(tmp, job(), jenkinsfile=self.TWO_STAGES % (misspelt, "environment { OBAAF_LANE = 'agent' }"))
+            before = checker.check(tmp)
+            entry = baseline.entry_for(idle(before)[0], OWNER, "The Docs stage is harmless", day(30))
+            baseline.apply(before, baseline.Baseline(baseline.FORMAT, [entry]))
+            # The acceptance was written for Docs. The same misspelling on Ship is another finding.
+            repo(tmp, job(), jenkinsfile=self.TWO_STAGES % ("", misspelt))
+            after = checker.check(tmp)
+            baseline.apply(after, baseline.Baseline(baseline.FORMAT, [entry]))
+            repo(tmp, job(), jenkinsfile=(self.TWO_STAGES % ("", "")).replace("agent any", "agent any\n  " + misspelt))
+            both = checker.check(tmp)
+        self.assertEqual(entry["facts"], {"stages": ["Docs"], "value": "'agnet'"})
+        self.assertEqual([f.state for f in idle(before)], ["accepted"])
+        self.assertEqual([(f.state, f.facts["stages"]) for f in idle(after)], [("new", ["Ship"])])
+        self.assertEqual(len(after.baseline_stale), 1)
+        self.assertEqual(idle(after)[0].message,
+                         "For the steps of stage 'Ship', OBAAF_LANE is set to 'agnet', which is not a lane "
+                         "(untrusted, agent, effect, release, trusted), so the declaration changes nothing.")
+        self.assertEqual([f.facts["stages"] for f in idle(both)], [["Docs", "Ship"]])
+
+    def test_an_entry_for_a_file_outside_the_run_whose_name_holds_a_hash(self):
+        config = ("jenkins:\n  files: ['svc#1/Jenkinsfile']\n"
+                  "lanes:\n  'svc#1/Jenkinsfile#Build': release\n  '.github/workflows/ci#2.yml#work': release\n")
+        with TempDir() as tmp:
+            repo(tmp, job(), config, name="ci#2.yml")
+            (tmp / "svc#1").mkdir()
+            (tmp / "svc#1" / "Jenkinsfile").write_text(JENKINSFILE % "", encoding="utf-8")
+            for platform in ("auto", "github", "jenkins"):
+                with self.subTest(platform=platform):
+                    self.assertEqual(idle(checker.check(tmp, platform=platform)), [])
+            self.assertEqual(idle(checker.check(tmp / ".github" / "workflows")), [])
+            # A file that is not there is a mistake whatever was checked.
+            (tmp / "svc#1" / "Jenkinsfile").unlink()
+            self.assertEqual([f.kind for f in idle(checker.check(tmp, platform="github"))], ["entry-no-file"])
+
+    def test_a_stage_with_no_step_is_still_a_stage_the_file_has(self):
+        text = """pipeline {
+  agent any
+  stages {
+    stage('Init') { steps { script { env.VERSION = "1.0.${BUILD_NUMBER}" } } }
+    stage('Empty') { steps { } }
+    stage('Ship') { steps { sh 'make' } }
+  }
+}
+"""
+        config = ("lanes:\n  Jenkinsfile#Init: untrusted\n  Jenkinsfile#Empty: release\n  Jenkinsfile#Ship: release\n"
+                  "  Jenkinsfile#Gone: untrusted\n  Jenkinsfile#Went: agent\n")
+        with TempDir() as tmp:
+            result = checker.check(repo(tmp, job(), config, jenkinsfile=text))
+        # Only `agent` and `release` change what is checked on a stage, so nothing is missing for the other.
+        self.assertEqual([(f.line, f.kind, f.severity) for f in idle(result)],
+                         [(5, "entry-no-stage", "low"), (6, "entry-no-stage", "high")])
+
+    def test_the_variable_in_another_spelling(self):
+        for name in ("obaaf_lane", "Obaaf_Lane", "'OBAAF_LANE '", "OBAAF-LANE", "' obaaf lane'"):
+            with self.subTest(name=name), TempDir() as tmp:
+                result = checker.check(repo(tmp, job(env=f"{name}: agent")))
+                self.assertEqual([(f.kind, f.severity, f.job, f.line) for f in idle(result)],
+                                 [("job-misnamed", "high", "work", 7)])
+                self.assertEqual(idle(result)[0].facts, {"name": name.strip("'"), "value": "'agent'"})
+        with TempDir() as tmp:
+            result = checker.check(repo(tmp, "env:\n  obaaf_lane: release\n" + job(env="OBAAF_LANE: agent, Obaaf_Lane: agent, "
+                                                                                    "obaaf-lane: trusted")))
+            others = checker.check(repo(tmp, job(env="OBAAF_LANES: agent, MY_OBAAF_LANE: agent, OBAAFLANE: agent, "
+                                                     "LANE: agent")))
+        self.assertEqual(idle(result)[0].message,
+                         "The workflow's env sets 'obaaf_lane' to 'release'. The variable that declares a lane is "
+                         "OBAAF_LANE, spelled exactly so, so the declaration changes nothing.")
+        # Beside a declaration that works, one that repeats its lane loses nothing; neither does `trusted`.
+        self.assertEqual(sorted((f.kind, f.severity, f.facts["name"]) for f in idle(result)),
+                         [("job-misnamed", "low", "Obaaf_Lane"), ("job-misnamed", "low", "obaaf-lane"),
+                          ("workflow-misnamed", "high", "obaaf_lane")])
+        self.assertEqual(idle(others), [])
+
+    def test_the_env_of_a_parallel_group(self):
+        steps = ("      - parallel:\n          - run: ./a.sh\n          - run: ./b.sh\n"
+                 "        env:\n          OBAAF_LANE: agent\n")
+        with TempDir() as tmp:
+            result = checker.check(repo(tmp, job(steps=steps)))
+        self.assertEqual([(f.kind, f.severity, f.step, f.line) for f in idle(result)],
+                         [("step-env", "high", "parallel group at step 1", 12)])
+
+    def test_a_number_too_long_for_python_to_print(self):
+        number = "0x" + "F" * 5000
+        with TempDir() as tmp:
+            repo(tmp, job(env=f"OBAAF_LANE: {number}"), f"lanes:\n  .github/workflows/wf.yml#work: {number}\n"
+                                                        f"  ? {number}\n  : agent\n")
+            result = checker.check(tmp)
+            codes = [run_cli("check", tmp, *options)[0]
+                     for options in ((), ("--format", "json"), ("--format", "sarif"), ("--lanes",))]
+        self.assertEqual(sorted(f.kind for f in idle(result)), ["entry-no-file", "entry-not-a-lane", "job-not-a-lane"])
+        self.assertEqual(codes, [1, 1, 1, 0])
+        self.assertTrue(all(len(f.message) < 500 for f in idle(result)))
+
+    def test_a_short_key_that_spells_out_a_digest_is_not_the_long_key_with_that_digest(self):
+        long_key = "x" * 5000
+        spelled = wf_mod.bounded(long_key)
+        self.assertRegex(spelled, r"^sha256:[0-9a-f]{64} \(5000 characters\)$")
+        self.assertNotEqual(wf_mod.bounded(spelled), spelled)
+        self.assertEqual(wf_mod.bounded(".github/workflows/wf.yml#work"), ".github/workflows/wf.yml#work")
+
+    def test_a_key_that_is_not_text_names_nothing_even_when_a_file_has_that_name(self):
+        config = "jenkins:\n  files: ['1.5']\nlanes:\n  1.5: agent\n  '1.5': release\n  true: agent\n"
+        with TempDir() as tmp:
+            repo(tmp, job(), config)
+            (tmp / "1.5").write_text(JENKINSFILE % "", encoding="utf-8")
+            result = checker.check(tmp)
+            alone = checker.check(tmp / ".github" / "workflows" / "wf.yml", config=checker.Config.load(tmp))
+        self.assertIn("1.5", result.jenkins_files)
+        self.assertEqual([(f.line, f.kind) for f in idle(result)], [(4, "entry-no-file"), (6, "entry-no-file")])
+        self.assertEqual([(f.line, f.kind) for f in idle(alone)], [(4, "entry-no-file"), (6, "entry-no-file")])
 
 
 class TheExampleConfigurationDeclaresNothingTest(unittest.TestCase):
