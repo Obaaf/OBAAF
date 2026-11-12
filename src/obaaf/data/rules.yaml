@@ -429,6 +429,45 @@ rules:
       deployment branches to the default branch, delete any repository or organization copy, and add
       `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+  # The checker's own configuration. A declaration that tells the checker which rules a job gets
+  # is a control like any other: one that does nothing is reported, never dropped without a word.
+  - id: OBAAF-CFG-001
+    title: Lane declaration that does nothing
+    severity: high
+    category: authority
+    requirements: []
+    supports: [FR12]
+    description: >-
+      A lane declaration puts a job in a lane (untrusted, agent, effect, release) so that the lane's
+      rules apply to it. This one changes nothing, so the job, stage or file it was written for gets
+      none of the rules it was meant to add, and every other finding on that job can be missing
+      without the report showing it. The cases: OBAAF_LANE, in a job's env, the workflow's env or a
+      Jenkinsfile, set to a value that is not a lane (a misspelling such as `agnet`, an expression,
+      an empty value, or in a Jenkinsfile a value computed when the build runs; in a Jenkinsfile,
+      where the declaration reaches at least one step); the variable under
+      another spelling in a job's env or the workflow's env (`obaaf_lane`, `OBAAF-LANE`); OBAAF_LANE
+      set in a step's env, a container's or a service's, where the checker does not read it; and an
+      entry under `lanes:` in the checker configuration whose value is not a lane, or that names a
+      job or Jenkins stage its file does not have, or a file that is not there. The finding is
+      reported where the declaration is written: in the workflow or Jenkinsfile, or in the checker
+      configuration. It is high because the checker cannot know which findings are missing: the
+      agent lane alone has high-severity rules. It is low when nothing can be missing: the declaration
+      names `trusted`, which adds no rule even where it is read; it is written where it is not read,
+      or under another spelling, in a job that is in the lane it names anyway; or it is an entry for
+      a Jenkins stage that is not there and names `untrusted` or `effect`, which change nothing on a
+      stage. An entry for a file outside the run (another file when one file is checked, a
+      Jenkinsfile when only workflows are checked) is not looked at. An ignore entry cannot accept
+      this finding, because it would accept every such declaration in the file it names; a baseline
+      entry, which names the one declaration and its value, can.
+    fix: >-
+      Correct the declaration or delete it. The value is one of untrusted, agent, effect, release or
+      trusted, and the variable is spelled OBAAF_LANE. In a workflow it belongs in the job's env or
+      the workflow's env; in a Jenkinsfile, in an environment block or a withEnv around the steps. A
+      `lanes:` entry names a workflow's file and job as `obaaf check . --lanes` prints them, and a
+      Jenkinsfile's stage by the file and the stage's own name (`Jenkinsfile#Ship`). Run
+      `obaaf check . --lanes` afterwards and confirm the lane (see
+      docs/checker-configuration.md#a-declaration-that-does-nothing).
+
   # Jenkins (advisory). These rules read a Jenkinsfile and the files it names; controller
   # configuration is reported as coverage unknowns, never as a pass. See docs/jenkins.md.
   - id: OBAAF-JEN-001

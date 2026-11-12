@@ -126,6 +126,7 @@ class Pipeline:
     opaque: list = field(default_factory=list)          # (line, what)
     triggers: list = field(default_factory=list)        # Trigger: SCM and webhook triggers named in the file
     literals: dict = field(default_factory=dict)        # variable -> Str assigned to it (last assignment)
+    stages: list = field(default_factory=list)          # every stage with a block, as a tuple of names, steps or not
 
 
 # ----------------------------------------------------------------------- helpers
@@ -1414,7 +1415,8 @@ class Builder:
         name = literal(arg) or (text_of(arg) if arg is not None else None) or "?"
         sctx = replace(ctx, stage=ctx.stage + (name,))
         if call.closure is None:
-            return
+            return      # `stage 'Build'` with no block: the steps after it are not in it
+        self.p.stages.append(sctx.stage)
         secs = self.sections(call.closure)
         is_declarative_stage = bool(secs.keys() & {"steps", "stages", "parallel", "matrix"}) and self.p.kind == \
             "declarative"

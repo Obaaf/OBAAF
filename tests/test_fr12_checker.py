@@ -56,7 +56,9 @@ class FindingsNameRequirementAndFixTest(unittest.TestCase):
             for f in checker.check(path).findings:
                 rule = catalog.rules[f.rule]
                 with self.subTest(rule=f.rule, file=path.name):
-                    if f.rule != "OBAAF-GHA-023":
+                    # Two rules are about the checker's own inputs and threaten no one requirement:
+                    # a template placeholder left in a workflow, and a lane declaration that does nothing.
+                    if f.rule not in ("OBAAF-GHA-023", "OBAAF-CFG-001"):
                         self.assertTrue(rule["requirements"] or rule.get("agent_controls"))
                     self.assertGreater(len(rule["fix"].split()), 5)
                     self.assertTrue(f.message)

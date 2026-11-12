@@ -22,7 +22,7 @@ from obaaf.checker.jenkins import parser as parser_mod
 from obaaf.checker.jenkins import rules as rules_mod
 from obaaf.checker.jenkins.model import CR_NO, CR_POSSIBLE, CR_YES
 from obaaf.checker.jenkins.rules import ALL, RULES, Unknown, stage_label
-from obaaf.checker.workflow import declared_lane, not_a_lane, one_line
+from obaaf.checker.workflow import IdleDeclaration, declared_lane
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "Library", "Intermediate", "Saved",
              "DerivedDataCache", ".godot", "Binaries", "build", "dist", "target", ".gradle", ".idea", "vendor"}
@@ -74,7 +74,7 @@ class FileResult:
     suspect_stages: list = field(default_factory=list)
     lanes: list = field(default_factory=list)       # (stage, lane, reason)
     stage_keys: set = field(default_factory=set)    # the names a `lanes:` entry may give a stage
-    lane_problems: list = field(default_factory=list)   # OBAAF_LANE values in the file that name no lane
+    lane_problems: list = field(default_factory=list)   # IdleDeclaration: OBAAF_LANE values that name no lane
 
 
 def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_agents: dict | None = None,
@@ -100,6 +100,10 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
     stages: dict[tuple, list] = {}
     for info in engine.infos:
         stages.setdefault(info.ctx.stage, []).append(info)
+    # A stage with no step the model records is still a stage a `lanes:` entry may name.
+    for stage in pipeline.stages:
+        result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
+    reached: dict[tuple, list] = {}     # (value, line) of an OBAAF_LANE -> the stages whose steps it reaches
     for stage, infos in stages.items():
         ai = next((i for i in infos if i.ai), None)
         pub = next((i for i in infos if i.publish), None)
@@ -116,23 +120,23 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         else:
             lane, reason = "unknown", "its condition cannot be evaluated" if crs else "runs no build code"
         result.lanes.append((stage_label(stage), lane, reason))
-        result.stage_keys.update(key.partition("#")[2] for key in engine.lane_keys(stage)[1:])
-        for value, line in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
-            # One note for each declaration, not one for each stage it reaches.
-            where = f"{one_line(rel, 120)}, line {line}, sets OBAAF_LANE"
-            if value is None:
-                problem = (f"{where} to a value computed when the build runs, which the checker cannot read as "
-                           "a lane; the declaration changes nothing")
-            elif declared_lane(value) is None:
-                problem = not_a_lane(where, value)
-            else:
-                continue
-            if problem not in result.lane_problems:
-                result.lane_problems.append(problem)
+        # Each key is the file, a `#` and a name for the stage. The file's own name may hold a `#`.
+        result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
+        for pair in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
+            # Not `stage_label`, which calls the steps outside any stage "pipeline": a stage may be named that.
+            reached.setdefault(pair, []).append(" > ".join(stage))
         if ai:
             result.agent_present = True
         elif stage and _AGENT_HINT.search(" ".join(stage)):
             result.suspect_stages.append(stage_label(stage))
+    for (value, line), labels in reached.items():
+        # One finding for each declaration, not one for each stage it reaches. The stages are part of
+        # what the finding is: the same value moved to another stage is another finding.
+        where = {"path": rel, "line": line, "stages": tuple(sorted(dict.fromkeys(labels)))}
+        if value is None:
+            result.lane_problems.append(IdleDeclaration(kind="jenkins-computed", **where))
+        elif declared_lane(value) is None:
+            result.lane_problems.append(IdleDeclaration.of("jenkins-not-a-lane", value, **where))
     return result
 
 

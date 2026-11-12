@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 
@@ -224,6 +225,7 @@ class Config:
     # Secret name (upper case, glob allowed) -> the environment that must hold it, or None for any
     # declared environment.
     protected_secrets: dict = field(default_factory=dict)
+    lane_lines: dict = field(default_factory=dict)      # `lanes:` key -> the line it is written on
 
     @classmethod
     def load(cls, root: Path, explicit: str | None = None) -> "Config":
@@ -260,6 +262,14 @@ class Config:
             if not re.sub(r"[*?/\[\]!]", "", str(entry["path"])).strip("."):
                 raise ConfigError(f"{path}: ignore path {entry['path']!r} matches everything; name the "
                                   "workflow file the finding is in")
+            if entry["rule"] == IDLE_DECLARATION:
+                # An ignore entry accepts a rule in a file, whatever the finding says. For this rule
+                # that is every lane declaration in the file, including ones not written yet.
+                raise ConfigError(f"{path}: an ignore entry cannot accept {IDLE_DECLARATION}. It would cover every "
+                                  "lane declaration in the file it names, whatever each is later changed to. "
+                                  "Correct the declaration, or accept that one declaration with a baseline entry "
+                                  "(obaaf check --write-baseline FILE --owner OWNER --reason REASON --expires "
+                                  "YYYY-MM-DD), which names its key and its value")
             if acceptance_mod.parse_date(entry["until"]) is None:
                 # A date and nothing else: a time of day cannot be compared with today, and other
                 # spellings of a date were read by some Python versions and not by others.
@@ -278,7 +288,8 @@ class Config:
             raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")
         return cls(lanes=dict(lanes), agents=dict(agents), ignore=list(ignore),
                    path=str(path), jenkins=dict(jenkins),
-                   protected_secrets=parse_protected_secrets(data.get("protected_secrets"), path))
+                   protected_secrets=parse_protected_secrets(data.get("protected_secrets"), path),
+                   lane_lines={key: wf_mod.key_line(lanes, key, 1) for key in lanes})
 
 
 @dataclass
@@ -361,6 +372,8 @@ def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None
     (owner, reason, an expiry date not passed and at most a year ahead) ignores a finding. An entry
     that matches and is not valid is attached to the finding, so the report can say what it lacks."""
     for finding in findings:
+        if finding.rule == IDLE_DECLARATION:
+            continue    # accepted by a baseline entry only, which names the one declaration (see Config.from_data)
         for entry in config.ignore:
             if entry["rule"] != finding.rule or not fnmatch.fnmatch(finding.path, str(entry["path"])):
                 continue
@@ -493,11 +506,13 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
     if is_repo:
         findings.extend(rules_mod.repo_findings(root, rels, catalog))
+    # A lane declaration that does nothing is a finding like any other: it can fail the check, be
+    # fixed by correcting it, or be accepted by an ignore or baseline entry.
+    findings.extend(declared.findings(catalog))
     today = today or date.today()
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
     notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
-    notes += declared.notes()
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -534,17 +549,49 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
     return notes
 
 
+IDLE_DECLARATION = "OBAAF-CFG-001"
+_NOT_A_LANE = f"which is not a lane ({', '.join(wf_mod.LANES)}), so the declaration changes nothing"
+_NOT_READ = ("where it is not read (it is read in the job's env and in the workflow's env), so the declaration "
+             "changes nothing")
+# One template for each case of OBAAF-CFG-001. The case is the finding's `kind`.
+_IDLE_TEMPLATES = {
+    "job-not-a-lane": f"Job '{{job}}' sets OBAAF_LANE to {{value}}, {_NOT_A_LANE}.",
+    "workflow-not-a-lane": f"The workflow's env sets OBAAF_LANE to {{value}}, {_NOT_A_LANE}.",
+    "job-misnamed": "Job '{job}' sets {name} to {value}. The variable that declares a lane is OBAAF_LANE, spelled "
+                    "exactly so, so the declaration changes nothing.",
+    "workflow-misnamed": "The workflow's env sets {name} to {value}. The variable that declares a lane is "
+                         "OBAAF_LANE, spelled exactly so, so the declaration changes nothing.",
+    "jenkins-not-a-lane": f"For the steps in {{stages}}, OBAAF_LANE is set to {{value}}, {_NOT_A_LANE}.",
+    "jenkins-computed": "For the steps in {stages}, OBAAF_LANE is set to a value computed when the build runs, "
+                        "which the checker cannot read as a lane, so the declaration changes nothing.",
+    "step-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in the env of step '{{step}}', {_NOT_READ}.",
+    "container-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in container.env, {_NOT_READ}.",
+    "service-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in services.{{service}}.env, {_NOT_READ}.",
+    "entry-not-a-lane": f"lanes: '{{entry}}' is set to {{value}}, {_NOT_A_LANE}.",
+    "entry-no-job": "lanes: '{entry}' (set to {value}) names a job that {file} does not have, so the declaration "
+                    "changes nothing.",
+    "entry-no-stage": "lanes: '{entry}' (set to {value}) names a stage that {file} does not have, so the "
+                      "declaration changes nothing.",
+    "entry-no-file": "lanes: '{entry}' (set to {value}) names a file the checker did not read, so the declaration "
+                     "changes nothing.",
+}
+
+
 class _LaneDeclarations:
-    """Lane declarations that did nothing, for the notes: a value that is not a lane, OBAAF_LANE on
-    a step, or a configured lane for a job, stage or file the checker did not find. A declaration can
-    only add rules, so one that silently does nothing leaves a job with fewer rules than its author
-    meant it to have."""
+    """Lane declarations that did nothing, each reported as a finding (OBAAF-CFG-001): a value that
+    is not a lane, OBAAF_LANE where it is not read, or a configured lane for a job, stage or file
+    the checker did not find. A declaration can only add rules, so one that silently does nothing
+    leaves a job with fewer rules than its author meant it to have."""
 
     def __init__(self, config: "Config", root: Path, is_repo: bool, on_its_own: bool, workflows_sought: bool,
                  jenkins_sought: bool) -> None:
         self.config, self.root, self.is_repo, self.on_its_own = config, root, is_repo, on_its_own
         self.workflows_sought, self.jenkins_sought = workflows_sought, jenkins_sought
-        self.problems: list[str] = []
+        self.problems: list = []                       # IdleDeclaration: written in a workflow or a Jenkinsfile
+        try:
+            self.resolved_root: Path | None = root.resolve()
+        except (OSError, RuntimeError):
+            self.resolved_root = None
         self.known: dict[str, tuple[str, set]] = {}    # path -> ("job" or "stage", the names it has)
         self.unread: set[str] = set()
 
@@ -563,7 +610,14 @@ class _LaneDeclarations:
         self.unread.update((rel, *(self.aliases(rel, path) if path else ())))
 
     def workflow(self, workflow, path: Path) -> None:
-        self.problems.extend(workflow.lane_problems)
+        """Take a classified workflow's declarations. Call it once every lane the job is in is
+        known, script detection included: a declaration written where it is not read loses nothing
+        when the job is in the lane it names anyway."""
+        for found in workflow.lane_problems:
+            job = workflow.jobs.get(found.job) if found.job else None
+            if job is not None and found.lane in wf_mod.LANE_ORDER and job.in_lane(found.lane):
+                found = replace(found, redundant=True)
+            self.problems.append(found)
         jobs = workflow.raw.get("jobs")
         # Every job the file names, including one the checker could not read and reported as an error.
         names = {str(name) for name in jobs} if isinstance(jobs, dict) else set(workflow.jobs)
@@ -574,46 +628,127 @@ class _LaneDeclarations:
         self.problems.extend(result.lane_problems)
         self.known[rel] = ("stage", set(result.stage_keys))
 
-    def _out_of_scope(self, path: str) -> bool:
+    def _unsought(self, path: str) -> bool:
         """Whether `path` is a file that exists and is of a kind this run did not look for at all
-        (a Jenkinsfile when only workflows were checked, or the other way round). An entry for a
-        file that does not exist is never out of scope: it is a mistake whatever was checked."""
+        (a Jenkinsfile when only workflows were checked, or the other way round)."""
         sought = self.workflows_sought if path.endswith((".yml", ".yaml")) else self.jenkins_sought
-        if sought:
+        if sought or self.resolved_root is None:
             return False
         try:
-            root = self.root.resolve()
-            target = (root / path).resolve()
-            return target.is_relative_to(root) and target.is_file()
-        except (OSError, ValueError):
+            target = self.resolved_root / path
+            # One look at the file system for a path that is not a file, which is nearly every one tried.
+            return target.is_file() and target.resolve().is_relative_to(self.resolved_root)
+        except (OSError, ValueError, RuntimeError):
             return False
 
-    def notes(self) -> list[str]:
-        found = list(self.problems)
+    def _out_of_scope(self, key: str) -> bool:
+        """Whether a `lanes:` key names a file outside this run: one that exists and is of a kind
+        the run did not look for. An entry for a file that does not exist is never out of scope: it
+        is a mistake whatever was checked. The file is the key, or the part of it before one of its
+        `#`, because a file's own name may hold one. A path is short and has few of them, so only
+        the first 4,096 characters and 64 cuts are tried."""
+        cuts = [len(key)] if len(key) <= 4096 else []
+        cut = -1
+        while len(cuts) < 64 and (cut := key.find("#", cut + 1)) != -1 and cut <= 4096:
+            cuts.append(cut)
+        return any(self._unsought(key[:cut]) for cut in cuts)
+
+    def config_path(self) -> str:
+        """The checker configuration as a finding names it: from the directory every other path in
+        the report is given from. A configuration that was not read from a file is named as the
+        file such a declaration would be written in."""
+        if not self.config.path:
+            return CONFIG_LOCATIONS[0]
+        given = Path(self.config.path)
+        try:
+            resolved, root = given.resolve(), self.root.resolve()
+            if resolved.is_relative_to(root):
+                return resolved.relative_to(root).as_posix()
+            return Path(os.path.relpath(resolved, root)).as_posix()
+        except (OSError, ValueError):
+            return given.as_posix()
+
+    def _finding(self, catalog: Catalog, kind: str, path: str, line: int, nothing_lost: bool,
+                 job: str | None = None, step: str | None = None, **values) -> Finding:
+        # A declaration that would have added no rule had it worked (it names `trusted`, or a lane
+        # the job is in anyway) is hardening. Any other leaves a job without rules its author meant
+        # it to have, and is reported at the rule's own severity.
+        severity = "low" if nothing_lost else catalog.rules[IDLE_DECLARATION]["severity"]
+        message, facts = rules_mod.compose(IDLE_DECLARATION, kind, _IDLE_TEMPLATES[kind], job, step, values)
+        return Finding(IDLE_DECLARATION, severity, path, line or 1, message, job=job, step=step, kind=kind,
+                       facts=facts)
+
+    def _entries(self, catalog: Catalog) -> list[Finding]:
+        """The `lanes:` entries of the checker configuration that do nothing."""
+        out: list[Finding] = []
+        where = self.config_path()
         for key, value in self.config.lanes.items():
-            path, sep, part = str(key).partition("#")
-            shown = wf_mod.one_line(key, 120)
-            if path in self.unread:
-                continue
-            read = path in self.known
-            if not read and (not self.is_repo or self._out_of_scope(path)):
-                continue    # the configuration covers more than the files this run was given
-            if wf_mod.declared_lane(value) is None:
-                found.append(wf_mod.not_a_lane(f"the checker configuration sets lanes: '{shown}'", value))
-            if not read:
-                found.append(f"lanes: '{shown}' in the checker configuration names a file the checker did not "
-                             "read; the declaration changes nothing")
-            elif sep and part not in self.known[path][1]:
+            # A key that is not text is shown as YAML writes it, not as Python does.
+            text = {True: "true", False: "false", None: "null"}.get(key, None) if isinstance(key, (bool, type(None))) \
+                else wf_mod.as_text(key)
+            named: list = []
+            # A key that is not text (`5:`, `true:`) is never looked up, so it names nothing.
+            if isinstance(key, str):
+                # The files this run read or refused that the key names, whole or before a `#`. A file's
+                # own name may hold a `#`, so the key is matched against the files, not cut at its first.
+                named = [(path, text[len(path) + 1:]) for path in (*self.known, *self.unread)
+                         if text == path or text.startswith(path + "#")]
+                if any(path in self.unread for path, _ in named):
+                    continue
+                named = [(path, part) for path, part in named if path in self.known]
+                if not named and (not self.is_repo or self._out_of_scope(text)):
+                    continue    # the configuration covers more than the files this run was given
+            lane = wf_mod.declared_lane(value)
+            shared = {"path": where, "line": self.config.lane_lines.get(key, 1),
+                      "entry": rules_mod.Fact(wf_mod.bounded(text), wf_mod.one_line(text, 120)),
+                      "value": rules_mod.Fact(wf_mod.value_identity(value), wf_mod.shown_value(value))}
+            if lane is None:
+                out.append(self._finding(catalog, "entry-not-a-lane", nothing_lost=False, **shared))
+            if not named:
+                out.append(self._finding(catalog, "entry-no-file", nothing_lost=lane == "trusted", **shared))
+            elif not any(text == path or part in self.known[path][1] for path, part in named):
+                path = named[0][0]
                 kind = self.known[path][0]
-                found.append(f"lanes: '{shown}' in the checker configuration names a {kind} that "
-                             f"{wf_mod.one_line(path, 120)} does not have; the declaration changes nothing")
-        return [f"Lane declaration ignored: {problem}." for problem in dict.fromkeys(found)]
+                # On a Jenkins stage only `agent` and `release` change what is checked (docs/jenkins.md).
+                harmless = ("trusted",) if kind == "job" else ("trusted", "untrusted", "effect")
+                out.append(self._finding(catalog, f"entry-no-{kind}", nothing_lost=lane in harmless, **shared,
+                                         file=rules_mod.Note(wf_mod.one_line(path, 120))))
+        return out
+
+    def findings(self, catalog: Catalog) -> list[Finding]:
+        """One finding for each declaration that did nothing."""
+        out: list[Finding] = []
+        for found in dict.fromkeys(self.problems):
+            values: dict = {}
+            if found.kind != "jenkins-computed":
+                values["value"] = rules_mod.Fact(found.value, found.shown)
+            if found.kind == "service-env":
+                values["service"] = rules_mod.Fact(found.service, wf_mod.one_line(found.service, 60))
+            if found.name:
+                values["name"] = rules_mod.Fact(found.name, f"'{found.name_shown}'")
+            if found.kind.startswith("jenkins-"):
+                # The labels are the checker's own, as `--lanes` prints them: a stage by its name, a
+                # stage in a stage as `Outer > Inner`, a method as `name()`, a post block as `post always`.
+                values["stages"] = rules_mod.Fact(list(found.stages), ", ".join(
+                    f"'{wf_mod.one_line(stage, 80)}'" if stage else "the pipeline outside any stage"
+                    for stage in found.stages))
+            out.append(self._finding(catalog, found.kind, found.path, found.line,
+                                     found.lane == "trusted" or found.redundant, found.job, found.step, **values))
+        return out + self._entries(catalog)
+
+    def notes(self, catalog: Catalog) -> list[str]:
+        """The same declarations as lines for `--lanes`, which lists lanes and reports no findings.
+        Each is one line whatever a job or a step is called."""
+        return [f"Lane declaration ignored: {wf_mod.one_line(f.path, 120)}, line {f.line}: "
+                f"{wf_mod.one_line(f.message)} (`obaaf check` reports it as {f.rule}, {f.severity}.)"
+                for f in sorted(self.findings(catalog), key=Finding.sort_key)]
 
 
 def lanes(target: Path, config: Config | None = None, platform: str = "auto",
           notes: list | None = None) -> list[tuple[str, str, str, str]]:
     """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
-    checker classified them. Lane declarations that did nothing are added to `notes` when it is given."""
+    checker classified them. Lane declarations that did nothing, which `check` reports as findings,
+    are added to `notes` as lines of text when it is given."""
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
     jenkins_sought = is_repo and platform != "github" and target.resolve() == root
@@ -646,5 +781,5 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             declared.jenkinsfile(rel, result)
         out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
     if notes is not None:
-        notes.extend(declared.notes())
+        notes.extend(declared.notes(catalog))
     return out

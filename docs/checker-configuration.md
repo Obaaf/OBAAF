@@ -60,7 +60,7 @@ jobs:
 
 A declaration adds a lane. It never takes a job out of a lane the checker inferred, so it can add rules and cannot remove any: declaring `release` on a job that runs an agent leaves it an agent job and makes it a release job as well. Declaring `trusted` adds no lane and removes none. When `trusted` is the only lane declared for a job and the checker puts the job in a lane anyway, the reason shown for that lane ends with `declared trusted, which cannot override what the job does`. Case and surrounding space do not matter (`Agent` is `agent`).
 
-`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else. A declaration that does nothing is listed in the notes at the end of the report as ignored: a value that is not a lane (a misspelling, an expression, an empty value), and `OBAAF_LANE` set in a step's `env`, a container's or a service's. `obaaf check . --lanes` prints the same notes.
+`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else, and under that exact name. A declaration that does nothing is a finding, `OBAAF-CFG-001`: a value that is not a lane (a misspelling, an expression, an empty value), the variable in another spelling (`obaaf_lane`), and `OBAAF_LANE` set in a step's `env`, a container's or a service's. See [A declaration that does nothing](#a-declaration-that-does-nothing).
 
 When a job is in a lane both because of what it does and because it was declared, the declaration is the reason shown (`set by OBAAF_LANE`, `set in the checker configuration`).
 
@@ -76,7 +76,41 @@ A lane override only adds rules, like `OBAAF_LANE`: the job is put in the lane y
 
 For a Jenkinsfile the key names a stage (`Jenkinsfile#Ship`) and also covers the stages nested in it; `Jenkinsfile` alone covers every stage. See [jenkins.md](jenkins.md).
 
-For a file this run reads, an entry is listed in the notes as ignored when its value is not a lane or when it names a job or Jenkins stage the file does not have. When a repository is checked, so is an entry for a file that is not there. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
+For a file this run reads, an entry is a finding (`OBAAF-CFG-001`, reported in the configuration file, on the entry's line) when its value is not a lane or when it names a job or Jenkins stage the file does not have. When a repository is checked, so is an entry for a file that is not there. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
+
+### A declaration that does nothing
+
+A lane declaration exists to add rules to a job. One that changes nothing leaves the job without those rules, and nothing else in the report would show it: a job declared `OBAAF_LANE: agnet` is not an agent job to the checker, so none of the agent findings appear and the check passes. Until 0.3.0 such a declaration was listed in the notes at the end of the report, which do not affect the result. It is now a finding, `OBAAF-CFG-001`, so it fails the check until it is corrected or accepted.
+
+```text
+.github/workflows/triage.yml
+     9  HIGH   OBAAF-CFG-001  Lane declaration that does nothing  [job triage]
+        Job 'triage' sets OBAAF_LANE to 'agnet', which is not a lane (untrusted, agent, effect, release, trusted), so the declaration changes nothing.
+```
+
+What is reported, and where:
+
+| The declaration | Reported in |
+| --- | --- |
+| `OBAAF_LANE` in a job's `env` or the workflow's `env`, set to a value that is not a lane | the workflow |
+| the variable in another spelling in a job's `env` or the workflow's `env`: another case, spaces round the name, a hyphen or a space for the underscore (`obaaf_lane`, `OBAAF-LANE`) | the workflow |
+| `OBAAF_LANE` in a step's `env`, a `parallel` group's, a container's or a service's, whatever its value | the workflow |
+| `OBAAF_LANE` in a Jenkinsfile, in an `environment` block or a `withEnv` that reaches at least one step, set to a value that is not a lane or computed when the build runs | the Jenkinsfile |
+| a `lanes:` entry whose value is not a lane | the configuration file |
+| a `lanes:` entry that names a job or Jenkins stage its file does not have, or a file that is not there. A stage written without a block (`stage 'Build'`) holds no step, and an entry for it is reported | the configuration file |
+| a `lanes:` entry whose key is not text (`5:`, `true:`) | the configuration file |
+
+The line is the line the declaration is written on. One that reaches a job or a step through a YAML alias or a merge key (`<<:`) is reported on the first line of that job or step. One entry can be two findings: `'ci.yml#wrok': agnet` has a value that is not a lane and names a job that is not there.
+
+**Severity.** The finding is high. The checker cannot know which findings are missing because of the declaration, and the agent lane alone has high-severity rules, so anything lower would let a gate set to `--fail-on high` pass a job whose agent rules never ran. It is low where nothing can be missing: the declaration names `trusted`, which adds no rule even where it is read; it is written where it is not read, or under another spelling, in a job that is in the lane it names anyway; or it is a `lanes:` entry for a Jenkins stage that is not there and names `untrusted` or `effect`, which change nothing on a stage. If the job later leaves that lane the finding becomes high, and a baseline entry that accepted it at low no longer covers it.
+
+**Fixing it.** Correct the value, spell the variable `OBAAF_LANE`, move it to the job's `env`, correct the `lanes:` key, or delete the declaration. For a workflow the key is the path and job that `obaaf check . --lanes` prints (`.github/workflows/ci.yml#build`). For a Jenkinsfile it is the file and the stage's own name (`Jenkinsfile#Ship`, or `Jenkinsfile#Outer > Inner`), without the word `stage` that `--lanes` prints before it. A finding in a Jenkinsfile names what the declaration reaches by the same labels: a stage by its name, a method that nothing in the file calls as `name()`, a `post` block as `post always`. One label differs: steps outside any stage are `pipeline` in `--lanes` and under `lanes:`, and the empty text (`""`) in the finding's `stages`, because a stage may itself be named `pipeline`. `--lanes` prints these declarations too, as notes, because it lists lanes and reports no findings.
+
+**Accepting it: with a baseline entry, not an `ignore` entry.** A baseline entry carries an owner, a reason and an expiry date, and names the declaration it accepts: the file it is written in, the job and step for one in a workflow, the names of the stages it reaches for one in a Jenkinsfile, the `lanes:` key for one in the configuration, the variable's name where that is misspelt, and the value it was set to. Change any of them and it is another finding. Two declarations that agree in all of them (two steps of the same name with the same stray declaration) need an entry each. Two Jenkins stages with the same label are one stage to the checker, here as in `--lanes` and under `lanes:`, so a declaration moved from one to the other is the same finding. The label is the stage's name with the stages it is nested in (`Outer > Inner`), so a stage that is itself named `Outer > Inner` shares it. A `lanes:` key that is not text and a text key spelled the same (`true:` and `'true':`) are one finding too; neither names a file. A value, key or name longer than 200 characters is identified by its length and SHA-256 digest, so that a baseline stays readable. An `ignore` entry cannot do this: it accepts a rule in a file, whatever the finding says, so one entry for the configuration file would accept every `lanes:` entry that does nothing, including ones written later. An `ignore` entry that names `OBAAF-CFG-001` is therefore a configuration error, and the check does not run.
+
+**The configuration file's path.** A finding about a `lanes:` entry names the configuration file from the directory every other path in the report is given from: `.github/obaaf.yml` when a repository is checked, and `../obaaf.yml` when one workflow is checked on its own with `--config .github/obaaf.yml`, because that workflow is `ci.yml` in the same report. A baseline written for one of those two ways of running the check therefore does not accept the finding in the other, as it does not for the findings in the workflow itself.
+
+**Not reported.** In a Jenkinsfile, `OBAAF_LANE` under another spelling, and one set by assignment (`env.OBAAF_LANE = 'agent'`), which the checker does not read as a declaration at all. A second configuration file: the checker reads the first of `.github/obaaf.yml`, `.github/obaaf.yaml` and `obaaf.yml` that exists, and says nothing about the others.
 
 `obaaf check . --lanes` shows the first lane a job is in, in the order agent, effect, release, untrusted, and names the others after it: `ci.yml#ship: agent (uses openai/codex-action; also release: uploads or publishes artifacts)`.
 

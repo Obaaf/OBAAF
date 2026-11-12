@@ -646,15 +646,20 @@ class JsonTest(unittest.TestCase):
                                              ".github/workflows/ci1.yml"])
             self.assertEqual(len(data["errors"]), 1)
             self.assertTrue(data["errors"][0].startswith(".github/workflows/broken.yml: "))
-            self.assertEqual(len(data["notes"]), 1)
-            self.assertTrue(data["notes"][0].startswith("Lane declaration ignored: lanes: "
-                                                        "'.github/workflows/ci0.yml#nobody'"))
+            # A lane declaration that does nothing was a note in 0.3.0. It is a finding now, in the
+            # file it is written in, and no note repeats it.
+            self.assertEqual(data["notes"], [])
             self.assertEqual([(f["rule"], f["title"], f["severity"], f["category"], f["path"], f["line"], f["job"],
                                f["suppressed"], f["baselined"], f["state"]) for f in data["findings"]],
+                             [("OBAAF-CFG-001", "Lane declaration that does nothing", "high", "authority",
+                               ".github/obaaf.yml", 2, None, None, False, "new")] +
                              [("OBAAF-GHA-001", "Secret available to a workflow started by untrusted input", "low",
                                "authority", f".github/workflows/ci{n}.yml", 7, "test", None, n == 0,
                                "accepted" if n == 0 else "new") for n in (0, 1)])
-            self.assertEqual(data["summary"], {"new": 1, "accepted": 1, "cannotTell": 0, "fixed": 0, "notAccepted": 0})
+            self.assertEqual(data["findings"][0]["message"],
+                             "lanes: '.github/workflows/ci0.yml#nobody' (set to 'agent') names a job that "
+                             ".github/workflows/ci0.yml does not have, so the declaration changes nothing.")
+            self.assertEqual(data["summary"], {"new": 2, "accepted": 1, "cannotTell": 0, "fixed": 0, "notAccepted": 0})
             self.assertEqual(json.loads(run_cli("check", tmp, "--baseline", path, "--format", "json")[1])
                              ["acceptedRisk"]["expiringSoon"], {"withinDays": 30, "total": 0, "findings": []})
             self.assertEqual(json.loads(run_cli("check", tmp, "--baseline", path, "--format", "json",
@@ -750,15 +755,15 @@ class SarifTest(unittest.TestCase):
 
     def test_errors_and_notes_are_in_the_run(self):
         run = self.run_of(result_of(accepted(), errors=["ci.yml: cannot be read as YAML: line 3"],
-                                    notes=["Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'."]))
+                                    notes=["1 job(s) have a name that suggests agent work but are not in the agent lane."]))
         invocation, = run["invocations"]
         self.assertIs(invocation["executionSuccessful"], False)
         seen = [(n["descriptor"]["id"], n["level"], n["message"]["text"])
                 for n in invocation["toolExecutionNotifications"]]
         self.assertEqual(seen[0][0], "accepted-risk")
         self.assertIn(("not-read", "error", "ci.yml: cannot be read as YAML: line 3"), seen)
-        self.assertIn(("note", "note", "Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'."),
-                      seen)
+        self.assertIn(("note", "note", "1 job(s) have a name that suggests agent work but are not in the agent "
+                       "lane."), seen)
 
     def test_baseline_entries_that_no_longer_match_and_an_old_baseline_are_in_the_run(self):
         result = result_of(finding())

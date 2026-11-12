@@ -1,0 +1,22 @@
+# obaaf-models: Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed.
+# obaaf-expect: OBAAF-CFG-001
+name: Issue triage
+on:
+  issues:
+    types: [opened]
+permissions: {}
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      OBAAF_LANE: agnet
+      MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+        with:
+          persist-credentials: false
+      - run: python -m tools.triage --issue "$ISSUE"
+        env:
+          ISSUE: ${{ github.event.issue.number }}
