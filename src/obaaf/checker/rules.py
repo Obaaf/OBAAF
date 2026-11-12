@@ -13,7 +13,7 @@ from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, runs_after_failure,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, one_line, runs_after_failure,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -32,6 +32,7 @@ class Control:
     name: str
     verdict: str
     detail: str = ""
+    id: str = ""        # a short name that stays the same when `name` is reworded
 
     def __post_init__(self) -> None:
         if self.verdict not in (VERIFIED, NOT_MET, CANNOT_TELL):
@@ -172,9 +173,10 @@ class WorkflowRules:
         self.findings: list[Finding] = []
 
     def add(self, rule: str, line: int, template: str, job: Job | None = None, step: Step | None = None,
-            severity: str | None = None, *, kind: str = "", **values) -> None:
+            severity: str | None = None, *, kind: str = "", controls: list | None = None, **values) -> None:
         """Report a finding. `template` is the message, with `{job}`, `{step}` and one `{name}` for
-        each of `values`; `kind` tells a rule's cases apart (see `compose`)."""
+        each of `values`; `kind` tells a rule's cases apart (see `compose`). `controls` are the
+        controls that would clear the finding, each with what the checker established about it."""
         job_id, step_name = (job.id if job else None), (step.name if step else None)
         message, facts = compose(rule, kind, template, job_id, step_name, values)
         self.findings.append(Finding(
@@ -187,6 +189,7 @@ class WorkflowRules:
             step=step_name,
             kind=kind,
             facts=facts,
+            controls=list(controls or []),
         ))
 
     def run(self) -> list[Finding]:
@@ -506,8 +509,10 @@ class WorkflowRules:
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
                                      for n in names))
+            egress = self._egress(job)[0]
             self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}.", job, kind="secrets",
-                     secrets=Fact(sorted(names), shown))
+                     secrets=Fact(sorted(names), shown),
+                     controls=[*self._secret_controls(job, names), self._input_control(job), egress])
         elif job.environment:
             self.add("OBAAF-GHA-005", job.line,
                      "Agent job '{job}' uses environment '{environment}', whose secrets it receives "
@@ -532,30 +537,150 @@ class WorkflowRules:
                          "Agent job '{job}' fetches the pull request's code in step '{step}'.", job, step,
                          kind="fetch")
 
-        # GHA-020: egress restriction. Only a blocking monitor that always runs enforces anything here;
-        # a declaration or a conditional monitor is reported, at the same severity, so it is not mistaken
-        # for enforcement.
+        # GHA-020: egress restriction. The finding is always there for an agent job; what was
+        # established about the one control that clears it decides where the finding stands.
+        egress, kind, values = self._egress(job)
+        templates = {
+            "none": "Agent job '{job}' shows no egress restriction (no OBAAF_EGRESS declaration and no "
+                    "blocking egress monitor).",
+            "declared": "Agent job '{job}': it declares OBAAF_EGRESS ({declared}) but nothing in the job enforces "
+                        "it. Make sure the runner's network enforces the policy.",
+            "conditional": "Agent job '{job}': its blocking egress monitor runs only if {condition}. Make sure the "
+                           "runner's network enforces the policy.",
+            "unverified-monitor": "Agent job '{job}' runs a blocking egress monitor ({action}). The checker "
+                                  "cannot yet tell whether it limits the agent.",
+        }
+        self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
+
+    # ---------------------------------------------------- controls for GHA-005 and GHA-020
+    def _egress(self, job: Job) -> tuple[Control, str, dict]:
+        """What the checker can establish about a limit on the job's network access: the control,
+        which case of OBAAF-GHA-020 it is, and that case's values.
+
+        Nothing is `verified` yet. A step that uses a known monitor in block mode with no condition
+        is "cannot tell": whether it holds depends on its version, on its running before the agent,
+        and on the job being unable to undo it with sudo or a container, none of which is read. A
+        monitor behind a condition, or a declaration alone, enforces nothing and is "not met"."""
+        name = "a control the checker recognises limits the job's network access to an allow-list"
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         monitors = [step for step in job.steps
                     if any(step.uses_action(a) for a in self.detection.get("egress_actions", []))
                     and str(step.with_.get("egress-policy", "")).lower() == "block"]
         enforced = [m for m in monitors if "if" not in m.raw]
         if enforced:
-            pass
-        elif monitors:
-            self.add("OBAAF-GHA-020", job.line,
-                     "Agent job '{job}': its blocking egress monitor runs only if {condition}. Make sure the "
-                     "runner's network enforces the policy.", job, kind="conditional",
-                     condition=str(monitors[0].raw.get('if')))
-        elif declared:
-            self.add("OBAAF-GHA-020", job.line,
-                     "Agent job '{job}': it declares OBAAF_EGRESS ({declared}) but nothing in the job enforces "
-                     "it. Make sure the runner's network enforces the policy.", job, kind="declared",
-                     declared=str(declared))
-        else:
-            self.add("OBAAF-GHA-020", job.line,
-                     "Agent job '{job}' shows no egress restriction (no OBAAF_EGRESS declaration and no "
-                     "blocking egress monitor).", job, kind="none")
+            first = enforced[0]
+            detail = (f"step '{one_line(first.name, 80)}' uses {first.action} in block mode, but the checker does "
+                      "not read what makes that hold: its version, that it starts before the agent does, and "
+                      "that the job cannot undo it with sudo or a container")
+            return (Control(name, CANNOT_TELL, detail, "egress-enforced"), "unverified-monitor",
+                    {"action": str(first.action)})
+        if monitors:
+            condition = str(monitors[0].raw.get("if"))
+            return (Control(name, NOT_MET, f"its blocking egress monitor runs only if {one_line(condition, 120)}",
+                            "egress-enforced"), "conditional", {"condition": condition})
+        if declared:
+            return (Control(name, NOT_MET, "OBAAF_EGRESS is a declaration, and nothing in the job enforces it",
+                            "egress-enforced"), "declared", {"declared": str(declared)})
+        return Control(name, NOT_MET, "no blocking egress control in the job", "egress-enforced"), "none", {}
+
+    def _secret_controls(self, job: Job, names: set) -> list[Control]:
+        """Two controls about where an agent job's secrets come from. The first is read from the
+        workflow and the checker configuration: every secret the job receives is listed in
+        `protected_secrets`, and the job declares the environment the entry names, which is what
+        OBAAF-GHA-024 checks for the secrets that are listed. The second is a repository setting
+        (the environment holds the secrets, nothing outside it does, and only protected branches
+        may use it), which `obaaf check` does not read, so it is "cannot tell"."""
+        scoped = "each of the job's secrets is listed in protected_secrets, and the job declares the environment named there"
+        setting = "the secrets are stored only in that environment, and only protected branches may use it"
+        declared = job.environment
+        environment = f"environment '{one_line(declared, 120)}'" if declared else "the environment"
+        unread = Control(setting, CANNOT_TELL,
+                         f"where a secret is stored and which branches may use {environment} are repository "
+                         "settings, which obaaf check does not read; obaaf audit reads environments and their "
+                         "branch rules", "environment-restricted")
+
+        def first(verdict: str, detail: str) -> list[Control]:
+            return [Control(scoped, verdict, detail, "secrets-protected"), unread]
+
+        if "*" in names or "*inherit" in names:
+            return first(NOT_MET, "the job can take every secret, so it is not limited to protected ones")
+        if job.reusable:
+            return first(NOT_MET, "a job that calls a reusable workflow cannot declare an environment, so the "
+                                  "secrets it passes come from the repository or organization")
+        upper = sorted({str(n).upper() for n in names})
+        wanted: dict = {}     # secret -> the environments its protected_secrets entries name (None: any)
+        for secret in upper:
+            wanted[secret] = [env for pattern, env in self.protected.items() if fnmatch.fnmatchcase(secret, pattern)]
+        unlisted = [secret for secret in upper if not wanted[secret]]
+        if unlisted:
+            return first(NOT_MET, f"not listed in protected_secrets: {', '.join(unlisted)}")
+        if not declared:
+            return first(NOT_MET, "the job declares no environment")
+        if "${{" in declared:
+            return first(CANNOT_TELL, f"the job's environment is an expression ({one_line(declared, 120)}), which "
+                                      "the checker cannot compare with the one protected_secrets names")
+        elsewhere = sorted({env for envs in wanted.values() for env in envs
+                            if env is not None and env.casefold() != declared.casefold()})
+        if elsewhere:
+            return first(NOT_MET, f"the job declares environment '{one_line(declared, 120)}', and "
+                                  f"protected_secrets names {', '.join(repr(env) for env in elsewhere)}")
+        return first(VERIFIED, f"{', '.join(upper)} in environment '{one_line(declared, 120)}'")
+
+    # Events that only someone with write access can cause, and whose payload outsiders do not write.
+    _WRITE_ACCESS_EVENTS = frozenset({"push", "workflow_dispatch", "schedule", "release"})
+
+    def _input_control(self, job: Job) -> Control:
+        """Whether anything a pull request, an issue or a comment controls reaches the job through
+        the three places the checker reads: the events that can start it, its checkout steps (and
+        the commands known to fetch a pull request), and the event fields its expressions read.
+        What a script, an action or the agent itself fetches while the job runs is not read, and
+        the control's name does not claim it."""
+        name = "no pull request, issue or comment starts the job, and it takes no code or text from one"
+        ident = "no-outsider-input"
+        events = job.triggers()
+        outsider = sorted(events & UNTRUSTED_TRIGGERS)
+        if outsider:
+            return Control(name, NOT_MET, f"it can be started by {', '.join(outsider)}", ident)
+        unsure: list[str] = []
+        other = sorted(events - self._WRITE_ACCESS_EVENTS)
+        if not events:
+            unsure.append("the checker found no event that starts the job")
+        elif other:
+            unsure.append(f"it can be started by {', '.join(other)}, and the checker does not know what "
+                          f"{'that event carries' if len(other) == 1 else 'those events carry'}")
+        if job.reusable:
+            unsure.append("its steps are in the reusable workflow it calls, which the checker does not read")
+        checkouts = 0
+        for step in job.steps:
+            where = f"step '{one_line(step.name, 80)}'"
+            if step.uses_action("actions/checkout"):
+                checkouts += 1
+                given = step.raw.get("with")
+                if given is not None and not isinstance(given, dict):
+                    unsure.append(f"{where} takes its inputs from an expression, so the checker cannot tell what "
+                                  "it checks out")
+                    continue
+                ref, repository = str(step.with_.get("ref") or ""), str(step.with_.get("repository") or "")
+                if PR_HEAD_REF_RE.search(f"{ref} {repository}"):
+                    return Control(name, NOT_MET, f"{where} checks out a pull request's code", ident)
+                if repository:
+                    unsure.append(f"{where} checks out another repository ({one_line(repository, 120)})")
+                elif "${{" in ref:
+                    unsure.append(f"{where} checks out a ref that is computed when the job runs "
+                                  f"({one_line(ref, 120)})")
+            elif PR_FETCH_CMD_RE.search(step.text()):
+                return Control(name, NOT_MET, f"{where} fetches a pull request's code", ident)
+        for value in (self.wf.raw.get("env"), job.raw):
+            for body in expressions(value):
+                field = self._untrusted_text(body)
+                if field:
+                    return Control(name, NOT_MET, f"it reads {field}, which someone without write access can "
+                                                  "write", ident)
+        if unsure:
+            return Control(name, CANNOT_TELL, "; ".join(unsure), ident)
+        took = {0: "it has no checkout step", 1: "its checkout step takes the ref the event names"}.get(
+            checkouts, f"its {checkouts} checkout steps take the ref the event names or a fixed one")
+        return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
 
     # -------------------------------------------------------------- GHA-006/014/015/016
     def release_rules(self, job: Job) -> None:

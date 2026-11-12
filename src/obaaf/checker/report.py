@@ -39,6 +39,17 @@ def _controls(f) -> str:
     return "; ".join(f"{c.name}: {c.verdict}" + (f" ({c.detail})" if c.detail else "") for c in f.controls)
 
 
+def _control_lines(f) -> list[str]:
+    """One line for each control: the verdict first, in a column, then the control and what the
+    checker found."""
+    return [one_line(f"          {c.verdict:<11}  {c.name}" + (f" ({c.detail})" if c.detail else ""))
+            for c in f.controls]
+
+
+def _control_dict(c) -> dict:
+    return {**({"id": c.id} if c.id else {}), "name": c.name, "verdict": c.verdict, "detail": c.detail}
+
+
 def _lifecycle_lines(f) -> list[str]:
     """What the report says under a finding about where it stands: who accepted it and until when,
     why an entry that names it does not count, and what was established about its controls."""
@@ -50,11 +61,14 @@ def _lifecycle_lines(f) -> list[str]:
         lines.append(one_line(f"        Not accepted: the {_entry_name(made)} that names this finding does not "
                               f"count, because {'; '.join(made.problems)}."))
     if f.controls:
+        needed = "it is cleared when this is verified" if len(f.controls) == 1 else \
+            f"it is cleared when all {len(f.controls)} are verified"
         if f.state == UNDECIDED:
-            lines.append(one_line("        Cannot tell: no control that would clear this finding is known to be "
-                                  f"missing, but not all could be verified, so it counts. {_controls(f)}."))
+            lines.append("        Cannot tell: no control that would clear this finding is known to be missing, "
+                         f"but not all could be verified, so it counts ({needed}):")
         else:
-            lines.append(one_line(f"        Controls: {_controls(f)}."))
+            lines.append(f"        Controls ({needed}):")
+        lines += _control_lines(f)
     return lines
 
 
@@ -91,7 +105,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
-        if _remediation(catalog, f.rule) == "architecture":
+        if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
                          f"one-line change. See {where_to}.")
@@ -233,8 +247,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 **({"kind": f.kind} if f.kind else {}),
                 **({"facts": f.facts} if f.facts else {}),
                 **({"acceptance": f.acceptance.as_dict()} if f.acceptance is not None else {}),
-                **({"controls": [{"name": c.name, "verdict": c.verdict, "detail": c.detail} for c in f.controls]}
-                   if f.controls else {}),
+                **({"controls": [_control_dict(c) for c in f.controls]} if f.controls else {}),
             }
             # A fixed finding is not a finding to act on. It is listed under "fixed", so a consumer
             # that counts "findings" does not count it.
@@ -248,7 +261,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
         payload["fixed"] = [
             {"rule": f.rule, "title": catalog.rules[f.rule]["title"], "severity": f.severity, "path": f.path,
              "line": f.line, "job": f.job, "step": f.step, "message": f.message,
-             "controls": [{"name": c.name, "verdict": c.verdict, "detail": c.detail} for c in f.controls]}
+             "controls": [_control_dict(c) for c in f.controls]}
             for f in cleared]
     if result.baseline_used:
         # Present only with --baseline, so existing consumers see no change.

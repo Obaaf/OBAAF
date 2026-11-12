@@ -218,7 +218,7 @@ class StateTest(unittest.TestCase):
         self.assertIn("Baseline: 1 finding(s) accepted by the baseline, 2 new.", text)
         self.assertIn(f"Accepted by {OWNER} until {SOON}: {REASON}", text)
         self.assertIn("Cannot tell: no control that would clear this finding is known to be missing", text)
-        self.assertIn("the environment is limited to main: cannot tell (settings were not read)", text)
+        self.assertIn("          cannot tell  the environment is limited to main (settings were not read)", text)
         self.assertIn("Cannot tell: for 1 finding(s)", text)
         self.assertIn("Fixed: 1 finding(s) are cleared by controls the checker verified", text)
         self.assertIn("fixed: OBAAF-GHA-005 .github/workflows/agent.yml:9 [job a] - egress is enforced: verified "

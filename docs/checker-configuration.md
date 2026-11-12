@@ -137,7 +137,44 @@ Every finding is in one of four states. JSON output gives the state of each find
 | **fixed** | Every control that clears the finding was read and verified by the checker. It is listed at the end of the report with the controls. | No |
 | **cannot tell** (`cannot-tell` in JSON) | No control that would clear it is known to be missing, but the checker could not read what decides at least one of them. | Yes. The checker never assumes a control it cannot read. |
 
-No rule reports controls yet, so today every finding is new or accepted. The states "fixed" and "cannot tell" are there for the rules that will: a secret in an agent job (OBAAF-GHA-005) and an agent job with no egress restriction (OBAAF-GHA-020) are the first two planned.
+Two rules report controls: a secret in an agent job (OBAAF-GHA-005) and an agent job with no egress restriction (OBAAF-GHA-020). Every other finding is new or accepted.
+
+<a id="controls"></a>
+### Controls that clear a finding
+
+Under a finding that has controls the report lists each one with a verdict:
+
+- **verified**: the checker read what decides it, and it holds.
+- **not met**: the checker read it, and it does not hold.
+- **cannot tell**: the checker could not read what decides it. This is never treated as a pass.
+
+A finding is fixed when every control is verified. If none is known to be missing and at least one could not be read, the finding is "cannot tell". If any is not met, it is new. Controls do not change which finding an acceptance names, so a finding can be accepted whatever its controls say.
+
+```text
+.github/workflows/agent.yml
+     5  HIGH   OBAAF-GHA-005  Secret available to an agent job  [job agent]
+        Agent job 'agent' receives MODEL_API_KEY.
+        Controls (it is cleared when all 4 are verified):
+          verified     each of the job's secrets is listed in protected_secrets, and the job declares the environment named there (MODEL_API_KEY in environment 'main-only')
+          cannot tell  the secrets are stored only in that environment, and only protected branches may use it (where a secret is stored and which branches may use environment 'main-only' are repository settings, which obaaf check does not read; obaaf audit reads environments and their branch rules)
+          verified     no pull request, issue or comment starts the job, and it takes no code or text from one (started only by workflow_dispatch; its checkout step takes the ref the event names)
+          not met      a control the checker recognises limits the job's network access to an allow-list (no blocking egress control in the job)
+```
+
+**Neither finding can be cleared today.** For OBAAF-GHA-005 the second control is a repository setting, which `obaaf check` does not read, and for both findings no egress control is reported as verified yet. Until that changes, the controls say what is in place and what is missing, and the finding is accepted with an owner, a reason and an expiry date, or it fails the check. JSON output gives the controls of each finding as `controls`, each with an `id` that stays the same when the wording changes.
+
+What each control is, and what the checker reads to decide it:
+
+| Control (`id`) | Verified when | Not met when | Cannot tell when |
+| --- | --- | --- | --- |
+| `secrets-protected` | Every secret the job references matches an entry in [`protected_secrets`](#protected-secrets), and the job declares the environment the entry names (any environment, for an entry that names none). This is what OBAAF-GHA-024 checks for the secrets that are listed. | A secret is not listed; the job can take every secret (`toJSON(secrets)`, `secrets[...]`, `secrets: inherit`); the job declares no environment, or another one; the job calls a reusable workflow, which cannot declare an environment. | The job's environment is an expression. |
+| `environment-restricted` | Never, today. | | Always. Where a secret is stored, and which branches may use an environment, are repository settings. [`obaaf audit`](settings-audit.md) reads environments and their branch rules; `obaaf check` does not use what it reads yet. |
+| `no-outsider-input` | Only `push`, `workflow_dispatch`, `schedule` or `release` can start the job, every `actions/checkout` step takes the ref the event names or a fixed one, and no expression in the job reads a field someone without write access can write. | A pull request, an issue, a comment or another outsider's event can start the job; a step checks out or fetches a pull request's code; an expression reads such a field (a commit message, for example). | Another event can start the job (`workflow_call`, `repository_dispatch`, `merge_group`, a run that follows another run); a checkout names another repository or a ref computed when the job runs; the job calls a reusable workflow. |
+| `egress-enforced` | Never, today. | The job has no blocking egress control, has one behind an `if:`, or only declares a policy in `OBAAF_EGRESS`. | A step uses `step-security/harden-runner` with `egress-policy: block` and no `if:`. Whether that limits the agent depends on its version, on its starting before the agent, and on the job being unable to undo it with sudo or a container, none of which the checker reads yet. |
+
+What the third control does not read, so that "verified" is not taken for more than it is: what a script, an action other than `actions/checkout` or the agent itself fetches while the job runs (issue text fetched with `gh`, a web page); a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; and the content of a local action. A proxy that holds the model key is not counted as a control: none has been tested.
+
+Which events can start a job is read from the tokens of the job's `if:`. Only a comparison of `github.event_name` with a text (`==` or `!=`, either way round), on its own or joined to other conditions by `&&` and `||`, rules an event out. A negation, a comparison of a comparison, a function, and words inside a string rule nothing out. An `if:` that has `${{ }}` and anything outside it, even a space or the line break of a `|` block, is a text to GitHub and is always true, so it rules nothing out either.
 
 ### An acceptance needs an owner, a reason and an expiry date
 
@@ -275,7 +312,7 @@ steps that run an agent, and lane overrides and ignore entries name a stage as `
 
 ## Egress
 
-`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020` and the agent lane templates for how egress is enforced.
+`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020`, [the controls the checker reads](#controls) and the agent lane templates for how egress is enforced.
 
 ## Reference
 

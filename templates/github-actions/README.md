@@ -48,7 +48,7 @@ The build job runs on GitHub-hosted runners, which start every job on a fresh ma
 
 ## Egress
 
-GitHub-hosted runners have no native egress allow-list, so the agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). Because the monitor is optional, `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job until the policy is enforced. Enforce it by making the monitor unconditional, or by running the agent on ephemeral runners behind a network policy; in the second case, record that with an expiring ignore entry in `.github/obaaf.yml`.
+GitHub-hosted runners have no native egress allow-list, so the agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). Because the monitor is optional, `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job, with its egress control "not met". Making the monitor unconditional changes that to "cannot tell", not to a pass: the checker does not yet verify a monitor's version, that it starts before the agent, or that the job cannot undo it. Whichever enforces the policy (the monitor, or ephemeral runners behind a network policy), record it with an ignore entry in `.github/obaaf.yml` that names an owner, a reason and an expiry date.
 
 ## Other files
 
