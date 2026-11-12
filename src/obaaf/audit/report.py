@@ -111,7 +111,9 @@ def _environment_text(env: dict) -> str:
     elif env["branch_policies"] is None:
         branches = "only selected branches or tags may deploy (the patterns were not read)"
     else:
-        branches = "may deploy: " + (_list([p["name"] for p in env["branch_policies"]])
+        # A pattern is for branches or for tags, and the same text means different things: "v*" as a tag
+        # pattern admits a release tag, as a branch pattern it admits any branch someone names v-something.
+        branches = "may deploy: " + (_list([f"{p['type'] or 'pattern'} {p['name']}" for p in env["branch_policies"]])
                                      if env["branch_policies"] else "nothing (no pattern is set)")
     if not env["reviewers"]:
         review = "no required reviewers"

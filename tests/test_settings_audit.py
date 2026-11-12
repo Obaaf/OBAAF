@@ -174,8 +174,13 @@ class ReadWithoutATokenTest(unittest.TestCase):
 
 class RecordedFromGitHubTest(unittest.TestCase):
     """GitHub's own answers, not hand-written ones: what api.github.com sent a caller with no token on
-    2026-11-12 at 01:33 UTC, in https://github.com/Obaaf/OBAAF/actions/runs/43135263367, for this repository
-    and for the first adopter's. Both repositories are public and so is everything in the answers.
+    2026-11-12, as this repository's live workflow printed it. Both repositories are public, and so is
+    everything in the answers.
+
+    - live-obaaf-no-token: this repository at 06:32 UTC,
+      https://github.com/Obaaf/OBAAF/actions/runs/43168837657
+    - live-expectrail-no-token: the first adopter's at 01:33 UTC,
+      https://github.com/Obaaf/OBAAF/actions/runs/43135263367
 
     Only what anyone may read is covered. No answer to an administrator's token has been recorded yet."""
 
@@ -203,17 +208,21 @@ class RecordedFromGitHubTest(unittest.TestCase):
         main = s["branches"]["value"]["main"]
         self.assertTrue(main["protected"])
         self.assertEqual(len(main["public_protection"]["required_status_checks"]["contexts"]), 8)
-        self.assertEqual(s["environments"]["value"], [
-            {"name": "github-pages", "deployment_branches": "selected", "wait_timer": 0, "reviewers": [],
-             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": True,
-             "branch_policies": [{"name": "main", "type": "branch"}]},
-            {"name": "pypi", "deployment_branches": "any", "wait_timer": 0,
-             "reviewers": [{"type": "User", "name": "seanudeke", "id": 55066947}],
-             "prevent_self_review": False, "other_protection_rules": [], "can_admins_bypass": True}])
-        self.assertIn('"pypi": any branch or tag may deploy; reviewers: seanudeke (self-review allowed); '
-                      "administrators may bypass these rules: yes", text)
+        pages, pypi = s["environments"]["value"]
+        self.assertEqual(pages, {
+            "name": "github-pages", "deployment_branches": "selected", "wait_timer": 0, "reviewers": [],
+            "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": True,
+            "branch_policies": [{"name": "main", "type": "branch"}]})
+        self.assertEqual([r["name"] for r in pypi.pop("reviewers")], ["FehintolaObafemi", "Ofonna-N", "seanudeke"])
+        self.assertEqual(pypi, {
+            "name": "pypi", "deployment_branches": "selected", "wait_timer": 0, "prevent_self_review": True,
+            "other_protection_rules": [], "can_admins_bypass": False,
+            "branch_policies": [{"name": "v*", "type": "tag"}]})
+        # A pattern is said to be for tags or for branches: "v*" means different things as each.
+        self.assertIn('"pypi": may deploy: tag v*; reviewers: FehintolaObafemi, Ofonna-N, seanudeke '
+                      "(self-review prevented); administrators may bypass these rules: no\n", text)
         # Nothing for an administrator to bypass, so nothing is said about it.
-        self.assertIn('"github-pages": may deploy: main; no required reviewers\n', text)
+        self.assertIn('"github-pages": may deploy: branch main; no required reviewers\n', text)
 
     def test_a_repository_protected_by_a_ruleset_as_anyone_sees_it(self):
         snap, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
@@ -235,7 +244,8 @@ class RecordedFromGitHubTest(unittest.TestCase):
                                                          "contexts": [], "checks": []}}})
         self.assertIn("main: GitHub calls it protected; no required checks shown in this view", text)
         self.assertIn('"unity": any branch or tag may deploy; reviewers: seanudeke (self-review allowed); '
-                      "administrators may bypass these rules: yes", text)
+                      "administrators may bypass these rules: yes\n", text)
+        self.assertIn('"main-only": may deploy: branch main; no required reviewers\n', text)
 
     def test_every_required_check_of_a_rule_is_named_in_the_report(self):
         # The first report from this recording cut the rule off after three names and part of a fourth.
