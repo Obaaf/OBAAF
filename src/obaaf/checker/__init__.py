@@ -296,6 +296,8 @@ class CheckResult:
     baseline_format: str = ""                                # the format of the baseline that was applied
     baseline_path: str = ""
     checked: str = ""                                        # the path the command line asked to check
+    options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
+    today: date | None = None                                # the day acceptances were judged against
 
     @property
     def workflow_files(self) -> list[str]:
@@ -491,7 +493,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
     if is_repo:
         findings.extend(rules_mod.repo_findings(root, rels, catalog))
-    _apply_ignores(findings, config, today or date.today())
+    today = today or date.today()
+    _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
     notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
     notes += declared.notes()
@@ -501,7 +504,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         cov.extend(jenkins_mod.coverage(result, findings))
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
-                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries)
+                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
 
 
 def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present: bool,

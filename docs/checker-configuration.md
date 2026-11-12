@@ -128,7 +128,7 @@ The rule checks the workflow files against what you declared. It cannot see that
 <a id="lifecycle"></a>
 ## What happens to a finding
 
-Every finding is in one of four states. JSON output gives the state of each finding as `state`. The text report prints a line under a finding when there is something to say about it: who accepted it and until when, why an entry that names it does not count, or what was established about its controls. A finding with no such line is new. Findings ignored by configuration are listed at the end, one line each.
+Every finding is in one of four states. JSON output gives the state of each finding as `state`. The text report prints a line under a finding when there is something to say about it: who accepted it and until when, why an entry that names it does not count, or what was established about its controls. A finding with no such line is new. Findings ignored by configuration are listed at the end, one line each, with who accepted them and until when. Every report [begins with the accepted risk](#accepted-risk).
 
 | State | What it means | Does it fail the check? |
 | --- | --- | --- |
@@ -196,6 +196,46 @@ An entry that lacks one of these, has expired, or is dated too far ahead accepts
         Not accepted: the baseline entry that names this finding does not count, because it expired on 2026-10-01.
 ```
 
+<a id="accepted-risk"></a>
+### The report begins with the accepted risk
+
+An accepted finding does not fail the check, so a gate can be green with any amount of accepted risk behind it. The first thing each report says is therefore how much is accepted, at what severity, by whom and until when. "0 new" comes after that.
+
+```text
+Accepted risk: 38 finding(s) are accepted and do not fail the check (19 high, 19 low).
+  @my-org/build: 36 (18 high, 18 low); the first expires 2027-03-31
+  @octocat: 2 (1 high, 1 low); the first expires 2026-12-01
+  36 accepted by baseline entries, 2 by ignore entries in the checker configuration.
+  Nearest expiry: 2026-12-01 (in 19 days).
+Expiring soon: 2 acceptance(s) expire within 30 days, the first on 2026-12-01 (in 19 days). From the day after its date an accepted finding counts again and can fail the check: fix it, or renew the acceptance in a reviewed change.
+  2026-12-01  @octocat  OBAAF-GHA-005 .github/workflows/agent.yml:12 [job triage]  (ignore entry)
+  2026-12-01  @octocat  OBAAF-GHA-020 .github/workflows/agent.yml:12 [job triage]  (ignore entry)
+Other findings: 0 new, 0 cannot tell, 0 fixed by controls the checker verified.
+```
+
+What the lines mean:
+
+- **Accepted risk** counts the findings whose state is accepted, whether a baseline entry or an ignore entry accepted them. A finding named by an entry that does not count is not accepted: it is counted as new, or as cannot tell when it has controls and none of them is known to be missing. With nothing accepted the line reads `Accepted risk: none.`
+- **One line for each owner**, with the number of findings they accepted, by severity, and the first date on which one of their acceptances runs out. The owner who accepted most comes first. Two spellings are one owner when they differ only in the case of the letters A to Z, because `@Octocat` and `@octocat` are one account to GitHub, or in how an accented letter is stored; the owner is shown as spelt on the first of their findings in order of file and line. Nothing else is merged: the checker does not know that two different names are one person, and it does not add up two addresses that only look alike. The text report lists ten owners and says how many more there are; JSON lists all of them.
+- **Expiring soon** lists the acceptances that run out within 30 days, the soonest first, ten at most in text. An acceptance is valid on its date and stops on the day after. Nothing else warns: on that day the finding counts again, and a gate that passed fails. `--expiry-warning DAYS` changes the window, and `--expiry-warning 0` turns the list off. The list never changes the exit status.
+- **Other findings** gives the other three states in one line: new, cannot tell, and fixed.
+- **Baseline entries that no longer match a finding** and **Errors**, when there are any, are each counted in one more line, because both can fail a check whose findings are all accepted. The entries are listed further down and the errors straight after these lines. Something the checker could not read fails the check whatever `--fail-on` says.
+
+These lines do not say whether the check passed. The exit status does: the report is not given `--fail-on`, and never has been.
+
+The days are counted from the day the check ran (`asOf` in JSON), and every acceptance in a report is judged on that one day, also when the check crosses midnight. The lines the report had before are still there, below these, with four differences. A finding ignored by configuration is listed with its owner (`ignored: RULE path:line - accepted by OWNER until DATE: REASON`). The `obaaf baseline migrate` command printed for an old baseline repeats the options the check was given, where a line told the reader to add them. Where a file's path heads its findings, a character that does not print (a line break, a tab, a no-break space) is written as an escape, as everywhere in the report; the path is then printed without quotes only if what is left is made of visible ASCII characters and nothing else (letters, digits and punctuation, no space), and in quotes otherwise. Every line of text that the checker writes in its own words has a space in it and none begins with a quotation mark, so a directory named like a line of the report cannot pass for one, whether it is written with spaces or with characters that only look blank. And the Jenkins coverage lines show a line break or another character that does not print as an escape, as the rest of the report already did. The older line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged, and its "new" is every finding the baseline does not accept, the ones the checker cannot tell about included, so M can be larger than the count of new findings in the first lines.
+
+**JSON** has the same numbers in `acceptedRisk`, before the findings: `asOf`, `total`, `bySeverity`, `bySource` (`baseline` and `ignore`), `owners` (each with `owner`, `total`, `bySeverity` and `nearestExpiry`), `nearestExpiry`, `daysToNearestExpiry`, and `expiringSoon` (`withinDays`, `total`, and `findings`, each with its rule, severity, path, line, job, owner, expiry date, `daysLeft` and source). The `acceptance` of a finding has `daysLeft` when it is valid. Every field earlier versions wrote is still there under the same name.
+
+**SARIF** says it in four places, because readers of SARIF differ in what they read:
+
+- The run's `properties` hold `obaaf-accepted-risk`, the same object as `acceptedRisk` in JSON, and `obaaf-summary`.
+- The run's `invocations[0].toolExecutionNotifications` begins with the accepted risk as a sentence. After it come, when there are any: a warning for acceptances expiring soon, one error for each thing the checker could not read (and `executionSuccessful` is then `false`), a warning for a baseline in the old format and for each baseline entry that no longer matches a finding, and the notes.
+- An accepted finding is a result with a suppression: `"suppressions": [{"kind": "external", "status": "accepted", "justification": "Accepted by @my-org/build until 2027-03-31: ..."}]`, and the owner, reason, date and days left as data in `properties` under `obaaf-acceptance`. Every other result has `"suppressions": []`, which is how SARIF says a result is not suppressed; that includes a finding named by an entry that does not count.
+- The result's message says the same in words after the finding's own sentence, then why an entry does not count, then the controls with their verdicts. The controls are also data, in `properties` under `obaaf-controls`.
+
+**What GitHub code scanning shows of this.** GitHub's page on [its SARIF support](https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning) (read on 2026-11-12) lists the fields code scanning uses, and says the rest are ignored. Suppressions, invocations and their notifications, `baselineState`, and the property bags of a run and of a result are not on the list. So, going by that page, an accepted finding uploaded to code scanning is an open alert like any other, and what tells a reader that it was accepted is the sentence in its message; the accepted-risk total, the expiry warning, the notes and a file that could not be read are not shown there at all. No upload was made to check this. Two things follow. Dismissing an alert in GitHub and accepting a finding in OBAAF are separate records, and only the second has an expiry date that fails a gate. And a team that reads only code scanning should keep the step that runs `obaaf check` able to fail, because that is how a file the checker could not read shows: the command exits 1 for one whatever `--fail-on` says.
+
 <a id="baseline"></a>
 ## Adopting the checker without hiding regressions
 
@@ -208,7 +248,7 @@ obaaf check . --write-baseline .github/obaaf-baseline.json \
 obaaf check . --baseline .github/obaaf-baseline.json --fail-on low
 ```
 
-With `--baseline`, a finding that a valid baseline entry accepts is still reported, with who accepted it and until when. It is marked `(baseline)` in text, `"baselined": true` and `"state": "accepted"` in JSON and `baselineState: unchanged` in SARIF, and it does not fail the check. Every other finding at or above `--fail-on` fails it. So does a baseline entry at or above `--fail-on` that no longer matches any finding: run `--write-baseline` again and commit the result, so the improvement is locked in and the finding cannot come back unnoticed.
+With `--baseline`, a finding that a valid baseline entry accepts is still reported, with who accepted it and until when. It is marked `(baseline)` in text, `"baselined": true` and `"state": "accepted"` in JSON, and `baselineState: unchanged` with an accepted [suppression](#accepted-risk) in SARIF, and it does not fail the check. Every other finding at or above `--fail-on` fails it. So does a baseline entry at or above `--fail-on` that no longer matches any finding: run `--write-baseline` again and commit the result, so the improvement is locked in and the finding cannot come back unnoticed.
 
 An entry looks like this:
 
@@ -244,7 +284,7 @@ The baseline is a list of accepted risks, so review changes to it like changes t
 <a id="baseline-migrate"></a>
 ### A baseline written by 0.2.0 or 0.3.0
 
-Those versions wrote `obaaf-baseline/v0.1` files, whose entries name no owner, reason or expiry date. The file is still read, and each entry still finds its finding, but none of them accepts one: with `--fail-on low` the check fails until the file is converted. The report says so once, with the command:
+Those versions wrote `obaaf-baseline/v0.1` files, whose entries name no owner, reason or expiry date. The file is still read, and each entry still finds its finding, but none of them accepts one: with `--fail-on low` the check fails until the file is converted. The report says so once, with the command, which repeats the `--config` and `--platform` the check was given:
 
 ```bash
 obaaf baseline migrate .github/obaaf-baseline.json \
