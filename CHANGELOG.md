@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
+**Upgrading from 0.2.0: a gate that passed can fail without the workflows having changed.** Several changes make the checker report what it missed before. The largest are "Lanes" and "Expressions" below. Among the smaller ones: a repository that has a Jenkinsfile now has it checked along with its workflows, and an agent command line with options before the prompt flag, such as `claude --model x -p ...`, now makes a job an agent job (both under "Jenkins (advisory)"); an unknown setting in `.github/obaaf.yml` is refused ("Protected secrets"); and a path with nothing to check is an error, not a pass ("Checker"). Baselines are new in this release. One written from `main` before the release can go stale under "Lanes" or "Expressions" and has to be regenerated with `--write-baseline`.
+
 ### Lanes
 
 A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it and in a second review of the fix.
@@ -59,6 +63,7 @@ Other changes in behaviour: any string given for `secrets:` on a reusable-workfl
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
+- New documents: [docs/landscape.md](docs/landscape.md) compares OBAAF with other tools that check workflows and repository settings, with what the five that could be run found on the same repositories, and says where OBAAF stands; [docs/egress-control.md](docs/egress-control.md) is the design of a control that limits an agent command's network access, not built yet; [docs/flagship.md](docs/flagship.md) is the plan both belong to.
 
 ### Platform scope
 
@@ -71,12 +76,14 @@ Other changes in behaviour: any string given for `secrets:` on a reusable-workfl
 
 ### Changed
 
+- `jsonschema` 4.26.0 or later is required (was 4.18).
 - PyPI publish dogfoods FR6: `.github/obaaf-policy.yaml` (`require_sdks: false`, environment `pypi`, `runner_environments: [github-hosted]`); the publish job checks out the default branch, installs the reviewed CLI via `./actions/setup-obaaf`, and replaces the `gh attestation verify` type-only loop with `obaaf verify release`. Residual vs the template lane: no `workflow_run` split and no pre-approval summary job.
 
 ### Jenkins (advisory)
 
 - `obaaf check` now reads Jenkinsfiles (`Jenkinsfile`, `Jenkinsfile.<name>`, `Jenkinsfile-<name>`, `<name>.jenkinsfile`, and globs in `jenkins.files`) alongside workflows, or alone with `--platform jenkins`. A syntax-only parser reads the Groovy without running any of it (D-034). Fifteen rules, OBAAF-JEN-001 to OBAAF-JEN-015, cover credentials that change requests or an agent can reach, builds on the controller and shared agents, agent stages that push or publish, pipeline code from unapproved revisions, approvals, host access from containers and pods, agent egress, unpinned images, libraries and agent CLIs, Groovy-interpolated untrusted text and secrets, moving artifact references, publishing after a failed check, missing release verification, signing keys, and webhook tokens in the file. Each maps to profile requirements and agent controls in the catalog.
 - Every Jenkinsfile gets a coverage result per rule (pass, fail, ignored, unknown, not applicable) in text and JSON output, with the reason for each unknown. Controller settings and shared-library code are reported as unknown, never as a pass, and the report states that exit 0 is not a conformance decision (D-036). See [docs/jenkins.md](docs/jenkins.md).
+- `templates/jenkins/obaaf-audit.Jenkinsfile` runs the audit as a Jenkins job.
 - New configuration: `jenkins.files`, `jenkins.exclude` and `agents.steps`; lane overrides and ignore entries take a Jenkins stage as `file#stage` and `job: <stage>`. `--lanes` lists Jenkins stages.
 - OBAAF-REPO-001 also covers Jenkinsfiles, and is retitled "CI definition files have no code owner".
 - Release lane on Jenkins (D-037): `templates/jenkins/obaaf-release-build.Jenkinsfile` builds a protected tag with no credentials in a project that builds only tags; `obaaf-release-publish.Jenkinsfile`, a separate job read from the default branch with no parameters, finds the tag build that started it, signs SLSA provenance and the build record through a key service, verifies, waits for a named approver and verifies again before uploading. A `signing: keys` policy example is included.

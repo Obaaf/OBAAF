@@ -6,7 +6,7 @@
 
 The checker puts each job in every lane it belongs to (untrusted, agent, effect, release; a job in none of them is trusted) and runs each lane's rules on the jobs in that lane. A job that runs an agent and publishes is in the agent lane and in the release lane, and gets the rules of both. The agent controls run only on jobs in the agent lane. It recognizes an agent by the action a job `uses:`, or by an agent CLI in a `run:` script. The recognized actions and commands live in `src/obaaf/data/detection.yaml`.
 
-The unreleased checker also reads repository `.sh` and `.bash` wrappers to find an agent CLI:
+The checker also reads repository `.sh` and `.bash` wrappers to find an agent CLI:
 
 ```yaml
 jobs:
@@ -95,7 +95,7 @@ obaaf check . --fail-on authority:medium   # fail only on authority findings at 
 
 `--fail-on` also accepts a plain severity (`high`, `medium`, `low`) or `never`. A bare category (`authority` or `hygiene`) means that category at low severity and above.
 
-In the unreleased checker, GHA-008 stays high for agent, release and effect jobs.
+GHA-008 stays high for agent, release and effect jobs.
 It is low for other jobs only when their token permissions are explicit and
 limited, no secrets are referenced, and no privileged outside event can start
 them. Other jobs retain medium pinning findings. Low severity still recommends
@@ -156,7 +156,7 @@ ignore:
 ```
 
 This is also how to record a reviewed runner pool without suppressing findings
-for other jobs. In the unreleased checker, GHA-013 distinguishes:
+for other jobs. GHA-013 distinguishes:
 
 - A known self-hosted pool, including a literal matrix containing one: high for
   untrusted or agent work.
@@ -171,9 +171,10 @@ Do not use an ignore entry merely to obtain a green check.
 
 ## Trying unreleased checker changes
 
-PyPI 0.1.0 does not contain the changes described above, category-only gates, or
-the earlier script-aware detection improvements. Use a separate environment and
-install a reviewed, full Git commit SHA when piloting unreleased code:
+A release on PyPI does not contain changes merged after it; the changelog's
+"Unreleased" section lists them. Everything described on this page is in version
+0.3.0. Use a separate environment and install a reviewed, full Git commit SHA
+when piloting unreleased code:
 
 ```bash
 python -m pip install "obaaf @ git+https://github.com/Obaaf/OBAAF.git@<reviewed-full-commit-sha>"
@@ -182,12 +183,12 @@ obaaf check . --fail-on never
 obaaf check . --fail-on authority:medium
 ```
 
-Replace the placeholder with an actual reviewed commit. Until a version bump,
-source installs still report `0.1.0`; record the source SHA as well as the version.
+Replace the placeholder with an actual reviewed commit. A source install reports
+the version of the last release until the version is changed, so record the source
+SHA as well as the version.
 For GitHub Actions, `Obaaf/OBAAF/actions/setup-obaaf@<reviewed-full-commit-sha>`
 installs that exact checkout using its dependency constraints. A new PyPI release
-is a separate maintainer action after validation; these changes are not yet
-published there.
+is a separate maintainer action after validation.
 
 ## Jenkins
 
