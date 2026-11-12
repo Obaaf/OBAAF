@@ -5,7 +5,7 @@
 # and no caches. Its network egress is meant to reach only an inference proxy
 # that holds the model credential; that is declared here but enforced only if
 # you turn on the egress monitor or run the job behind a network policy
-# (OBAAF-GHA-020), and the proxy is planned for OBAAF 0.2 (docs/inference-proxy.md).
+# (OBAAF-GHA-020), and OBAAF ships no proxy yet (docs/inference-proxy.md).
 # Its only output is a proposal bundle (a patch, comment text or label changes),
 # which obaaf-agent-apply.yml applies after a maintainer approves who neither
 # requested the work nor wrote its inputs.

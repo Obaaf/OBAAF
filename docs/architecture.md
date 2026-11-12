@@ -70,7 +70,7 @@ Principals are ordered Public ⊑ Contributor ⊑ Maintainer ⊑ Release (Paper 
 
 From Paper 1, section 8.4, and Paper 2, section 10:
 
-- **Harm at the adversary's own level.** A steered agent can still post a misleading comment or waste its budget. Comment checks and label allow-lists limit this, and so will the inference proxy's budget once the proxy exists (version 0.2).
+- **Harm at the adversary's own level.** A steered agent can still post a misleading comment or waste its budget. Comment checks and label allow-lists limit this, and so will the inference proxy's budget once a proxy exists (none is built yet).
 - **Endorsement failure.** A reviewer can approve a malicious proposal. Records make agent-authored changes identifiable so they can get extra scrutiny.
 - **Labeling errors.** Labels must match repository settings, such as who may comment.
 - **Compromise of the CI platform, the model provider or developer machines**, and publishers that ship malware on purpose.

@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 # CC BY 4.0 (see LICENSING.md). The package ships both, so its combined SPDX
 # expression is "Apache-2.0 AND CC-BY-4.0".
 license = "Apache-2.0 AND CC-BY-4.0"
-license-files = ["LICENSE", "LICENSE-docs"]
+license-files = ["LICENSE", "LICENSE-docs", "NOTICE"]
 authors = [
   { name = "Ofonna Nweze" },
   { name = "Osita Sean Keluo-Udeke" },

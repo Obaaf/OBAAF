@@ -27,7 +27,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-017 | What starts the agent lane | Proposed |
 | D-018 | The effect lane opens pull requests only | Proposed |
 | D-019 | `cache-mode: none` for release, agent and effect jobs | Proposed |
-| D-020 | The inference proxy is specified now and built in version 0.2 | Proposed |
+| D-020 | The inference proxy is specified now and built in version 0.2 | Proposed; not built as of 0.3 |
 | D-021 | Checker severities and the CI failure threshold | Proposed |
 | D-022 | Retired | Retired, 2026-10-07 |
 | D-023 | Version 0.1's agent and release lanes need a public repository or GitHub Enterprise Cloud | Proposed |
@@ -132,7 +132,7 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 
 ### D-020 Inference proxy
 
-**Decision.** Version 0.1 specifies the proxy's contract ([docs/inference-proxy.md](docs/inference-proxy.md)) and ships a stub agent that calls no model, so the lanes can be tested end to end. A reference proxy is planned for version 0.2. **Reason.** R3 and FR7 keep the model credential outside the agent job; a proxy is a server that needs its own design review. **Status.** Proposed.
+**Decision.** Version 0.1 specifies the proxy's contract ([docs/inference-proxy.md](docs/inference-proxy.md)) and ships a stub agent that calls no model, so the lanes can be tested end to end. A reference proxy is planned for version 0.2. **Reason.** R3 and FR7 keep the model credential outside the agent job; a proxy is a server that needs its own design review. **Status.** Proposed. Not built in 0.2 or 0.3; the flagship plan first tests the proxies that other tools ship (docs/flagship.md, slice 2a.2).
 
 ### D-021 Checker severities
 

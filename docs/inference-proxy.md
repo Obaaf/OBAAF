@@ -1,6 +1,6 @@
 # The inference proxy
 
-The agent lane gives the agent no secrets (R2, FR7), so it cannot hold the credential for the model API. Paper 1's design puts that credential in an **inference proxy** outside the agent's reach (R3), and limits the agent's network egress to the proxy (R7). This page specifies the proxy's contract. Version 0.1 does not include a proxy; a reference implementation is planned for version 0.2 (DECISIONS.md, D-020). Until then, the agent template runs a stub agent that calls no model.
+The agent lane gives the agent no secrets (R2, FR7), so it cannot hold the credential for the model API. Paper 1's design puts that credential in an **inference proxy** outside the agent's reach (R3), and limits the agent's network egress to the proxy (R7). This page specifies the proxy's contract. OBAAF does not include a proxy. A reference implementation was planned for version 0.2 and has not been built (DECISIONS.md, D-020); the [flagship plan](flagship.md) first tests the proxies that other tools ship (slice 2a.2). Until one exists, the agent template runs a stub agent that calls no model.
 
 ## What the proxy does
 
@@ -34,7 +34,7 @@ Agent jobs must reach only the proxy and the package sources the task needs (R7)
 
 Declare the policy in the job's `OBAAF_EGRESS` variable; the agent-run record copies it. A declaration alone enforces nothing, so `obaaf check` reports agent jobs whose egress is only declared, or limited by a monitor that runs only under a condition, as well as agent jobs with no policy at all (`OBAAF-GHA-020`, low).
 
-## Open design points for version 0.2
+## Open design points
 
 - Confirm the most reliable way to tell a job token from other tokens, and how to bind a request to one run.
 - Decide whether the proxy should run as a small cloud service, a container a studio hosts, or both.
