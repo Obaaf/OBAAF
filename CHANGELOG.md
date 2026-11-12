@@ -4,6 +4,19 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Settings audit
+
+- New command `obaaf audit`: reads the GitHub settings that workflows depend on and records them in a snapshot file (`obaaf-settings-snapshot/v0.1`). It reads rulesets and who may bypass them, the rules in force on the default branch, classic branch protection, environments and which branches may deploy to them, the names of environment, repository and organisation secrets, Actions permissions, the workflow token's default permissions, approval for fork pull requests, Actions policies, and how many accounts hold each role. **It applies no rule yet**: it reports what the settings are, not whether they are right.
+- Every setting is recorded as read, partly read, not read or not applicable. A setting that was not read is listed by name with the reason and with what GitHub's reference says a caller needs; it is never left out. An answer that does not have the documented shape is recorded as not read: a field whose absence could pass for "none" must be there. In a value, `null` means not known, a part that does not apply is left out, and a known "none" is written out.
+- Read-only by construction: the client sends GET requests and has no other verb. A token is taken from the environment (`GH_TOKEN`, `GITHUB_TOKEN` or `--token-env NAME`), never from the command line, and is sent only to the API address the audit was started with. It is in no output, and is cut out of any answer that echoes it. With no token the audit reads what GitHub shows anyone about a public repository and asks for nothing else.
+- An empty list of who may bypass a ruleset is never recorded as "nobody": GitHub shows the real list only to a caller with write access to the ruleset, and it is not established what it sends anyone else. The audit can show that someone may bypass; it cannot yet show that nobody may.
+- `obaaf audit --from-snapshot FILE` reports from a saved snapshot with no network, after checking the file against a schema that covers every value. `--fail-on-unread` exits 1 when a setting that applies was not read in full. Reading nothing at all (repository not found, rate limited at the first request) exits 1, and so does any failure the command did not foresee.
+- Tested from recordings written by hand from the examples in GitHub's REST reference. Run against GitHub itself by a workflow in this repository, with the workflow's own token and with no token: the settings GitHub shows anyone were read, and the administrative ones were refused and reported as not read. It has not been run with a token that can read the administrative settings. See [docs/settings-audit.md](docs/settings-audit.md).
+
+## [0.3.0] - 2026-11-12
+
+**Upgrading from 0.2.0: a gate that passed can fail without the workflows having changed.** Several changes make the checker report what it missed before. The largest are "Lanes" and "Expressions" below. Among the smaller ones: a repository that has a Jenkinsfile now has it checked along with its workflows, and an agent command line with options before the prompt flag, such as `claude --model x -p ...`, now makes a job an agent job (both under "Jenkins (advisory)"); an unknown setting in `.github/obaaf.yml` is refused ("Protected secrets"); and a path with nothing to check is an error, not a pass ("Checker"). Baselines are new in this release. One written from `main` before the release can go stale under "Lanes" or "Expressions" and has to be regenerated with `--write-baseline`.
+
 ### Lanes
 
 A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it and in a second review of the fix.
@@ -43,15 +56,6 @@ Several spellings that no rule reported are now reported. They were found by rea
 
 Other changes in behaviour: any string given for `secrets:` on a reusable-workflow call counts as `inherit`; `secrets["KEY"]` (double quotes, which GitHub rejects) and an index that is not a name count as every secret; an expression with no closing `}}` is read to the end of its text; text inside a string, such as `format('secrets.KEY')`, is no longer mistaken for a secret reference (OBAAF-GHA-010 still reports a field named inside a string, as before). Because `obaaf attest` records the secrets a job can read and `obaaf verify release` checks that record, a job that names a secret only in a place that was not read before is now recorded as holding it. Findings for workflows that use none of these spellings are unchanged (checked on this repository's workflows, fixtures and templates, and on Expectrail).
 
-### Settings audit
-
-- New command `obaaf audit`: reads the GitHub settings that workflows depend on and records them in a snapshot file (`obaaf-settings-snapshot/v0.1`). It reads rulesets and who may bypass them, the rules in force on the default branch, classic branch protection, environments and which branches may deploy to them, the names of environment, repository and organisation secrets, Actions permissions, the workflow token's default permissions, approval for fork pull requests, Actions policies, and how many accounts hold each role. **It applies no rule yet**: it reports what the settings are, not whether they are right.
-- Every setting is recorded as read, partly read, not read or not applicable. A setting that was not read is listed by name with the reason and with what GitHub's reference says a caller needs; it is never left out. An answer that does not have the documented shape is recorded as not read: a field whose absence could pass for "none" must be there. In a value, `null` means not known, a part that does not apply is left out, and a known "none" is written out.
-- Read-only by construction: the client sends GET requests and has no other verb. A token is taken from the environment (`GH_TOKEN`, `GITHUB_TOKEN` or `--token-env NAME`), never from the command line, and is sent only to the API address the audit was started with. It is in no output, and is cut out of any answer that echoes it. With no token the audit reads what GitHub shows anyone about a public repository and asks for nothing else.
-- An empty list of who may bypass a ruleset is never recorded as "nobody": GitHub shows the real list only to a caller with write access to the ruleset, and it is not established what it sends anyone else. The audit can show that someone may bypass; it cannot yet show that nobody may.
-- `obaaf audit --from-snapshot FILE` reports from a saved snapshot with no network, after checking the file against a schema that covers every value. `--fail-on-unread` exits 1 when a setting that applies was not read in full. Reading nothing at all (repository not found, rate limited at the first request) exits 1, and so does any failure the command did not foresee.
-- Tested from recordings written by hand from the examples in GitHub's REST reference. Run against GitHub itself by a workflow in this repository, with the workflow's own token and with no token: the settings GitHub shows anyone were read, and the administrative ones were refused and reported as not read. It has not been run with a token that can read the administrative settings. See [docs/settings-audit.md](docs/settings-audit.md).
-
 ### Protected secrets
 
 - GHA-024 hardening, after an independent review: a computed secret index (`secrets[format(...)]`, `secrets[matrix.k]`) counts as every secret for all rules; the `secrets` context matches in any case; overlapping `protected_secrets` entries all apply; environment names compare case-insensitively; reusable-workflow callers get advice they can follow, and `secrets: inherit` is no longer reported; globs need three letters or digits; unknown configuration settings are refused. The published test set shows the configuration a fixture is checked with.
@@ -68,6 +72,7 @@ Other changes in behaviour: any string given for `secrets:` on a reusable-workfl
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
+- New documents: [docs/landscape.md](docs/landscape.md) compares OBAAF with other tools that check workflows and repository settings, with what the five that could be run found on the same repositories, and says where OBAAF stands; [docs/egress-control.md](docs/egress-control.md) is the design of a control that limits an agent command's network access, not built yet; [docs/flagship.md](docs/flagship.md) is the plan both belong to.
 
 ### Platform scope
 
@@ -80,12 +85,14 @@ Other changes in behaviour: any string given for `secrets:` on a reusable-workfl
 
 ### Changed
 
+- `jsonschema` 4.26.0 or later is required (was 4.18).
 - PyPI publish dogfoods FR6: `.github/obaaf-policy.yaml` (`require_sdks: false`, environment `pypi`, `runner_environments: [github-hosted]`); the publish job checks out the default branch, installs the reviewed CLI via `./actions/setup-obaaf`, and replaces the `gh attestation verify` type-only loop with `obaaf verify release`. Residual vs the template lane: no `workflow_run` split and no pre-approval summary job.
 
 ### Jenkins (advisory)
 
 - `obaaf check` now reads Jenkinsfiles (`Jenkinsfile`, `Jenkinsfile.<name>`, `Jenkinsfile-<name>`, `<name>.jenkinsfile`, and globs in `jenkins.files`) alongside workflows, or alone with `--platform jenkins`. A syntax-only parser reads the Groovy without running any of it (D-034). Fifteen rules, OBAAF-JEN-001 to OBAAF-JEN-015, cover credentials that change requests or an agent can reach, builds on the controller and shared agents, agent stages that push or publish, pipeline code from unapproved revisions, approvals, host access from containers and pods, agent egress, unpinned images, libraries and agent CLIs, Groovy-interpolated untrusted text and secrets, moving artifact references, publishing after a failed check, missing release verification, signing keys, and webhook tokens in the file. Each maps to profile requirements and agent controls in the catalog.
 - Every Jenkinsfile gets a coverage result per rule (pass, fail, ignored, unknown, not applicable) in text and JSON output, with the reason for each unknown. Controller settings and shared-library code are reported as unknown, never as a pass, and the report states that exit 0 is not a conformance decision (D-036). See [docs/jenkins.md](docs/jenkins.md).
+- `templates/jenkins/obaaf-audit.Jenkinsfile` runs the audit as a Jenkins job.
 - New configuration: `jenkins.files`, `jenkins.exclude` and `agents.steps`; lane overrides and ignore entries take a Jenkins stage as `file#stage` and `job: <stage>`. `--lanes` lists Jenkins stages.
 - OBAAF-REPO-001 also covers Jenkinsfiles, and is retitled "CI definition files have no code owner".
 - Release lane on Jenkins (D-037): `templates/jenkins/obaaf-release-build.Jenkinsfile` builds a protected tag with no credentials in a project that builds only tags; `obaaf-release-publish.Jenkinsfile`, a separate job read from the default branch with no parameters, finds the tag build that started it, signs SLSA provenance and the build record through a key service, verifies, waits for a named approver and verifies again before uploading. A `signing: keys` policy example is included.

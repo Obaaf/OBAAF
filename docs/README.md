@@ -15,6 +15,7 @@
 | [Glossary](glossary.md) | Everyone | Plain-language meanings of the terms used here |
 | [Landscape](landscape.md) | Everyone | Other tools that check GitHub Actions and repository settings, what each found on the same repositories, dated and sourced |
 | [Flagship plan](flagship.md) | Maintainers | The plan and progress of the work to make the core hold up in real use |
+| [Egress control: design](egress-control.md) | Maintainers, security engineers | The design of the action that limits an agent command's network access: what it wraps, what it adds, what it will not stop, and the escape tests it has to pass. Not built yet |
 
 The specifications themselves are in [`spec/`](../spec/), generated from the data in [`src/obaaf/data/`](../src/obaaf/data/).
 
