@@ -6,6 +6,7 @@
 | [Guides F1–F9](guides/) | Studios | How to fix each self-assessment item, by control family |
 | [GitHub settings](github-settings.md) | Build engineers | Repository settings the templates depend on, and plan limits |
 | [Templates](../templates/github-actions/README.md) | Build engineers | Installing and adapting the GitHub Actions workflows |
+| [Settings audit](settings-audit.md) | Build engineers | `obaaf audit`: what it reads of a repository's GitHub settings, what it needs to read each one, and how it records what it could not read |
 | [Inference proxy](inference-proxy.md) | Build engineers | The contract for keeping model credentials out of agent jobs |
 | [Architecture](architecture.md) | Reviewers | Components, lanes, trust levels, what enforces what, limits |
 | [Records and attestations](attestations.md) | Reviewers, platforms | The snapshot, agent-run, approval and build-record formats |

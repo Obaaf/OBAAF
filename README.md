@@ -77,6 +77,11 @@ block changes. See [checker configuration](docs/checker-configuration.md) for
 agent declarations, category gates, and how to pilot unreleased changes that
 are not yet in the PyPI package.
 
+Some of what decides whether a workflow is safe is in repository settings, which no workflow file shows:
+rulesets, environments, Actions settings. `obaaf audit` reads them through GitHub's API, read-only, and lists
+by name whatever it could not read. It records settings and applies no rule yet, and it is not in a release
+yet: see [the settings audit](docs/settings-audit.md).
+
 **Reviewers.** Read [the architecture](docs/architecture.md), [the decisions log](DECISIONS.md), and [how each requirement is tested](docs/traceability.md).
 
 ## Tests
