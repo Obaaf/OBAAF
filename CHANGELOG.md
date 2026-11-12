@@ -6,16 +6,28 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Lanes
 
-A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it.
+A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it and in a second review of the fix.
 
 - **A job that runs an agent and publishes** was checked as an agent job only: the release rules (OBAAF-GHA-006, 014, 015, 016, 017) did not run on it. It is now in both lanes.
 - **A job declared an agent job that also publishes** was checked as a release job only, and the declaration was dropped: no OBAAF-GHA-003, 005 or 020. The same held for any declared lane on a job the checker had already placed in another. A declaration now adds a lane and never replaces one.
-- **A declaration could remove a finding.** Declaring a pull request job `release` or `effect` moved it out of the untrusted lane and dropped OBAAF-GHA-011. So did adding an upload step. A job on pull request triggers is now in the untrusted lane whatever else it is.
+- **A declaration could remove a finding.** Declaring a pull request job `release` or `effect` moved it out of the untrusted lane and dropped OBAAF-GHA-011. So did adding an upload step. A job that runs only for pull requests (`pull_request`, `merge_group`) is now in the untrusted lane whatever else it is.
+- **A job that uses a release environment and can be started by a pull request or another untrusted event** was not a release job: an environment whose name says release, production, publish, deploy or a store made a job a release job only when no untrusted trigger could start it, which is the case OBAAF-GHA-015 exists for. With `on: pull_request_target` and `environment: production` the job was shown as `trusted (default)`. The environment now decides on its own.
 - **An agent started from a repository script** was detected only in jobs with no other lane. It is now detected in any job.
 - **Two declarations for one job.** A lane in `.github/obaaf.yml` hid the job's own `OBAAF_LANE`, a per-job entry hid a per-file entry, and a job's `OBAAF_LANE` hid the workflow's. All of them now count.
-- **A declared value that is not a lane** (`OBAAF_LANE: Agent`, a misspelling, an expression) was ignored without a word. Case and surrounding space no longer matter, and any other value that is not a lane is listed in the report's notes, as is a `lanes:` entry for a job or file the checker did not find. Notes do not change the exit code.
+- **A declaration that did nothing was ignored without a word.** Case and surrounding space no longer matter (`OBAAF_LANE: Agent` is `agent`, in a workflow, in `lanes:` and for a Jenkins stage). Every other declaration that does nothing is listed in the report's notes: a value that is not a lane (a misspelling, an expression, an empty value), `OBAAF_LANE` on a step, and a `lanes:` entry for a job, Jenkins stage or file the checker did not find. Notes do not change the exit code.
+- **One workflow checked with the repository's configuration** (`obaaf check .github/workflows/ci.yml --config .github/obaaf.yml`) lost its `lanes:` entries, because the checker called the file `ci.yml` and the configuration calls it `.github/workflows/ci.yml`. Both names now match.
+- **A note could be silenced.** The note about a job whose name suggests agent work was printed only for jobs in no lane, so declaring `untrusted` removed it. It is now printed for any such job that is not in the agent lane, and reads "are not in the agent lane".
+- **`lanes:` that is not a mapping** (`lanes: 5`, a list) stopped the checker with a Python traceback. It is now a configuration error, like any other setting the checker cannot read.
+- **A step name that contains a line break** could make one line of `--lanes` or of the text report look like two, the second of them invented. Text taken from the files checked is now printed on one line, with the line break shown as `\n`. The JSON and SARIF output carry the text unchanged.
 
-What an adopter will see: new findings on jobs that are in more than one lane, and `--lanes` lines that name the extra lanes (`agent (…; also release: …)`). Findings and messages for jobs in one lane are unchanged, so baselines still match. A `lanes:` entry with a value OBAAF does not know now produces a note. The Jenkins analyser assigns lanes with its own code and is not changed.
+What an adopter will see on upgrading:
+
+- New findings on jobs that are in more than one lane, and on jobs that use a release environment and can be started by a pull request or another untrusted event. `--lanes` names the extra lanes: `agent (…; also release: …)`.
+- For a job whose lanes did not change, the same findings with the same messages, so baseline entries still match. Two things are kept as they were for that reason: a job that is declared into a lane it is also inferred into shows the declaration as the reason, and OBAAF-GHA-017, which is reported once per workflow, stays on the first publishing job that is not also an agent or effect job when there is one.
+- One exception: a declaration that was ignored because of its case or spacing (`OBAAF_LANE: Agent`) is read now. If the job was already in that lane, its agent findings quote the declaration as the reason (`set by OBAAF_LANE`) where they quoted what the job runs, and a baseline entry for them has to be regenerated.
+- New notes for declarations that do nothing. Notes appear in the text and JSON output and with `--lanes`; the SARIF output does not carry notes yet.
+
+The Jenkins analyser keeps its own lane code: a stage has one declared lane, the configuration before the stage's own `OBAAF_LANE`, and what the stage's steps do is still decided step by step.
 
 ### Expressions
 

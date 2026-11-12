@@ -7,6 +7,7 @@ import json
 from obaaf import __version__
 from obaaf.catalog import Catalog, load
 from obaaf.checker import CheckResult, SEVERITY_ORDER
+from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
 SECURITY_SEVERITY = {"high": "8.0", "medium": "5.0", "low": "2.0", "info": "0.0"}
@@ -27,22 +28,25 @@ def _remediation(catalog: Catalog, rule_id: str) -> str:
 
 
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True) -> str:
+    """The report a person reads. Text that comes from the files checked (paths, job and step names
+    inside messages, notes) is printed with `one_line`, so a name that contains a line break cannot
+    look like another line of the report. The JSON and SARIF forms carry the text as it is."""
     catalog = catalog or load()
     lines = []
     for error in result.errors:
-        lines.append(f"error: {error}")
+        lines.append(f"error: {one_line(error)}")
     active = result.active()
     current = None
     for f in active:
         if f.path != current:
             current = f.path
             lines.append("")
-            lines.append(current)
+            lines.append(one_line(current))
         rule = catalog.rules[f.rule]
-        where = f"{f.scope or 'job'} {f.job}" if f.job else ""
+        where = one_line(f"{f.scope or 'job'} {f.job}") if f.job else ""
         lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else "")
                      + ("  (baseline)" if f.baselined else ""))
-        lines.append(f"        {f.message}")
+        lines.append(f"        {one_line(f.message)}")
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
@@ -69,7 +73,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
     if a['info'] or h['info']:
         lines.append(f"Informational findings (not gated): {a['info']} authority, {h['info']} hygiene.")
     for f in suppressed:
-        lines.append(f"  ignored: {f.rule} {f.path}:{f.line} - {f.suppressed}")
+        lines.append(one_line(f"  ignored: {f.rule} {f.path}:{f.line} - {f.suppressed}"))
     if result.baseline_used:
         accepted = sum(1 for f in active if f.baselined)
         lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
@@ -79,12 +83,13 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
                          "with --write-baseline so the improvement is locked in.")
             for entry in result.baseline_stale:
                 where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
-                lines.append(f"  no longer found: {entry.get('rule')} {entry.get('path')}{where} - {entry.get('message', '')}")
+                lines.append(one_line(f"  no longer found: {entry.get('rule')} {entry.get('path')}{where} - "
+                                      f"{entry.get('message', '')}"))
     if result.notes:
         lines.append("")
         lines.append("Notes (advisory; they do not affect the result):")
         for note in result.notes:
-            lines.append(f"  - {note}")
+            lines.append(f"  - {one_line(note)}")
     return "\n".join(lines).lstrip("\n") + "\n"
 
 

@@ -4,8 +4,9 @@
 # reviewed and extended with each new class of flaw.
 #
 # A workflow can always state a job's lane explicitly with the environment
-# variable OBAAF_LANE (untrusted, agent, effect, release or trusted), which
-# overrides every pattern below.
+# variable OBAAF_LANE (untrusted, agent, effect, release or trusted). The
+# declared lane is added to the lanes the patterns below put the job in; it
+# never takes a job out of one.
 
 version: 0.1.0
 

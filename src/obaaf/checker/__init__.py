@@ -27,7 +27,7 @@ from obaaf.checker.rules import Finding
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
 # Words in a job id or name that suggest it runs an AI agent, used only to warn
-# when such a job was left in the trusted lane (never to classify it).
+# when such a job is not in the agent lane (never to classify it).
 _AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|cline|\bllm\b|\bai[-_ ]|autofix|auto[- ]fix",
                          re.I)
 
@@ -267,7 +267,10 @@ class Config:
         agents = data.get("agents") or {}
         if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
             raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
-        return cls(lanes=dict(data.get("lanes") or {}), agents=dict(agents), ignore=list(ignore),
+        lanes = data.get("lanes")
+        if lanes is not None and not isinstance(lanes, dict):
+            raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")
+        return cls(lanes=dict(lanes or {}), agents=dict(agents), ignore=list(ignore),
                    path=str(path), jenkins=dict(jenkins),
                    protected_secrets=parse_protected_secrets(data.get("protected_secrets"), path))
 
@@ -394,9 +397,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     rels: list[str] = []
     agent_lane_present = False
     suspect_jobs: list[tuple[str, str]] = []
-    lane_problems: list[str] = []
-    jobs_read: dict[str, set] = {}
-    unreadable: set[str] = set()
+    declared = _LaneDeclarations(config, is_repo, platform)
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
@@ -407,16 +408,17 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         workflow = wf_mod.parse(rel, text)
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
-            unreadable.add(rel)
+            declared.unreadable(rel, path)
             continue
-        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
+        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
+                        aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
-        lane_problems.extend(workflow.lane_problems)
-        jobs_read[rel] = set(workflow.jobs)
+        declared.workflow(workflow, path)
         for job in workflow.jobs.values():
             if job.in_lane("agent"):
                 agent_lane_present = True
-            elif job.lane == "trusted" and _AGENT_HINT.search(f"{job.id} {job.name}"):
+            elif _AGENT_HINT.search(f"{job.id} {job.name}"):
+                # Whatever other lane the job is in: a declaration must not be a way to silence this.
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets).run()
@@ -449,7 +451,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         jenkins_results.append(result)
         if result.error:
             errors.append(f"{rel}: {result.error}")
+            declared.unreadable(rel)
             continue
+        declared.jenkinsfile(rel, result)
         findings.extend(result.findings)
         agent_lane_present = agent_lane_present or result.agent_present
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
@@ -458,7 +462,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     _apply_ignores(findings, config, today or date.today())
     findings.sort(key=Finding.sort_key)
     notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
-    notes += _lane_declaration_notes(config, lane_problems, jobs_read, unreadable, is_repo)
+    notes += declared.notes()
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -489,37 +493,82 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
         shown = "; ".join(f"{w} {j}" if j.startswith("stage ") else f"{w} job '{j}'" for w, j in suspect_jobs[:5])
         more = f", and {len(suspect_jobs) - 5} more" if len(suspect_jobs) > 5 else ""
         notes.append(
-            f"{len(suspect_jobs)} job(s) have a name that suggests agent work but stayed in the trusted lane "
+            f"{len(suspect_jobs)} job(s) have a name that suggests agent work but are not in the agent lane "
             f"({shown}{more}). If any runs an AI agent, declare it with agents.commands or OBAAF_LANE so the agent "
             "controls apply.")
     return notes
 
 
-def _lane_declaration_notes(config: "Config", problems: list[str], jobs_read: dict[str, set],
-                            unreadable: set[str], is_repo: bool) -> list[str]:
-    """Lane declarations that did nothing: a value that is not a lane, or a configured lane for a
-    job the checker did not find. A declaration can only add rules, so one that silently does
-    nothing leaves a job with fewer rules than its author meant it to have."""
-    notes = [f"Lane declaration ignored: {problem}." for problem in problems]
-    for key in config.lanes:
-        path, _, job = str(key).partition("#")
-        if not path.endswith((".yml", ".yaml")) or path in unreadable:
-            continue  # a Jenkins stage, or a file already reported as an error
-        if path in jobs_read:
-            if job and job not in jobs_read[path]:
-                notes.append(f"Lane declaration ignored: lanes: '{key}' in the checker configuration names a job "
-                             f"that {path} does not have; the declaration changes nothing.")
-        elif is_repo:
-            notes.append(f"Lane declaration ignored: lanes: '{key}' in the checker configuration names a workflow "
-                         "file the checker did not read; the declaration changes nothing.")
-    return notes
+class _LaneDeclarations:
+    """Lane declarations that did nothing, for the notes: a value that is not a lane, OBAAF_LANE on
+    a step, or a configured lane for a job, stage or file the checker did not find. A declaration can
+    only add rules, so one that silently does nothing leaves a job with fewer rules than its author
+    meant it to have."""
+
+    def __init__(self, config: "Config", is_repo: bool, platform: str) -> None:
+        self.config, self.is_repo, self.platform = config, is_repo, platform
+        self.problems: list[str] = []
+        self.known: dict[str, tuple[str, set]] = {}    # path -> ("job" or "stage", the names it has)
+        self.unread: set[str] = set()
+
+    def aliases(self, rel: str, path: Path) -> tuple:
+        """Other paths the configuration may know a workflow by. A workflow checked on its own is
+        `ci.yml` to the checker and `.github/workflows/ci.yml` in the repository's configuration."""
+        parent = path.resolve().parent
+        if self.is_repo or parent.name != "workflows" or parent.parent.name != ".github":
+            return ()
+        alias = f".github/workflows/{path.name}"
+        return () if alias == rel else (alias,)
+
+    def unreadable(self, rel: str, path: Path | None = None) -> None:
+        """A file already reported as an error: say nothing more about its declarations."""
+        self.unread.update((rel, *(self.aliases(rel, path) if path else ())))
+
+    def workflow(self, workflow, path: Path) -> None:
+        self.problems.extend(workflow.lane_problems)
+        jobs = workflow.raw.get("jobs")
+        # Every job the file names, including one the checker could not read and reported as an error.
+        names = {str(name) for name in jobs} if isinstance(jobs, dict) else set(workflow.jobs)
+        for known_as in (workflow.path, *self.aliases(workflow.path, path)):
+            self.known[known_as] = ("job", names)
+
+    def jenkinsfile(self, rel: str, result) -> None:
+        self.known[rel] = ("stage", set(result.stage_keys))
+
+    def _looked_for(self, path: str) -> bool:
+        """Whether this run looked for files of the kind `path` names at all."""
+        workflow_like = path.endswith((".yml", ".yaml"))
+        return self.platform == "auto" or (self.platform == "github") == workflow_like
+
+    def notes(self) -> list[str]:
+        found = list(self.problems)
+        for key, value in self.config.lanes.items():
+            path, sep, part = str(key).partition("#")
+            shown = wf_mod.one_line(key, 120)
+            if path in self.unread:
+                continue
+            read = path in self.known
+            if not read and not (self.is_repo and self._looked_for(path)):
+                continue    # the configuration covers more than the files this run was given
+            if wf_mod.declared_lane(value) is None:
+                found.append(wf_mod.not_a_lane(f"the checker configuration sets lanes: '{shown}'", value))
+            if not read:
+                found.append(f"lanes: '{shown}' in the checker configuration names a file the checker did not "
+                             "read; the declaration changes nothing")
+            elif sep and part not in self.known[path][1]:
+                kind = self.known[path][0]
+                found.append(f"lanes: '{shown}' in the checker configuration names a {kind} that "
+                             f"{wf_mod.one_line(path, 120)} does not have; the declaration changes nothing")
+        return [f"Lane declaration ignored: {problem}." for problem in dict.fromkeys(found)]
 
 
-def lanes(target: Path, config: Config | None = None, platform: str = "auto") -> list[tuple[str, str, str, str]]:
+def lanes(target: Path, config: Config | None = None, platform: str = "auto",
+          notes: list | None = None) -> list[tuple[str, str, str, str]]:
     """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
-    checker classified them."""
+    checker classified them. Lane declarations that did nothing are added to `notes` when it is given."""
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
+    declared = _LaneDeclarations(config, is_repo, platform)
     if is_repo and platform != "github" and target.resolve() == root:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
                                              list(config.jenkins.get("exclude") or []))
@@ -529,14 +578,23 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto") ->
         rel = path.relative_to(root).as_posix()
         workflow = wf_mod.parse(rel, path.read_text(encoding="utf-8", errors="replace"))
         if workflow.error:
+            declared.unreadable(rel, path)
             continue
-        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents)
+        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
+                        aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
+        declared.workflow(workflow, path)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
     catalog = load()
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()
         result = jenkins_mod.analyze(rel, path.read_bytes(), catalog, root, extra_agents=config.agents,
                                      lane_overrides=config.lanes)
+        if result.error:
+            declared.unreadable(rel)
+        else:
+            declared.jenkinsfile(rel, result)
         out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
+    if notes is not None:
+        notes.extend(declared.notes())
     return out

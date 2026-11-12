@@ -22,6 +22,7 @@ from obaaf.checker.jenkins.model import (
 )
 from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Prop, Str, path_of
 from obaaf.checker.rules import Finding
+from obaaf.checker.workflow import declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -300,8 +301,11 @@ class JenkinsRules:
 
     def lane_of(self, ctx) -> str | None:
         label = stage_label(ctx.stage)
-        override = self.lane_overrides.get(f"{self.path}#{label}") or (
-            self.lane_overrides.get(f"{self.path}#{ctx.stage[-1]}") if ctx.stage else None)
+        configured = [self.lane_overrides.get(f"{self.path}#{label}"),
+                      self.lane_overrides.get(f"{self.path}#{ctx.stage[-1]}") if ctx.stage else None]
+        # Read as the workflow checker reads them: case and space do not matter, and a value that is
+        # not a lane does not hide the stage's own OBAAF_LANE.
+        override = next((lane for lane in map(declared_lane, configured) if lane), None)
         return override or ctx.lane
 
     def _ai(self, info: Info) -> str | None:

@@ -72,6 +72,7 @@ class FileResult:
     agent_present: bool = False
     suspect_stages: list = field(default_factory=list)
     lanes: list = field(default_factory=list)       # (stage, lane, reason)
+    stage_keys: set = field(default_factory=set)    # the names a `lanes:` entry may give a stage
 
 
 def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_agents: dict | None = None,
@@ -113,6 +114,7 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         else:
             lane, reason = "unknown", "its condition cannot be evaluated" if crs else "runs no build code"
         result.lanes.append((stage_label(stage), lane, reason))
+        result.stage_keys.update((stage_label(stage), *stage[-1:]))
         if ai:
             result.agent_present = True
         elif stage and _AGENT_HINT.search(" ".join(stage)):

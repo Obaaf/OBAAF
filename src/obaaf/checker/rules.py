@@ -708,7 +708,11 @@ class WorkflowRules:
                           j, lambda dep: {self._verify_kind(s) for s in dep.steps})) - {None}]
         if not unverified:
             return
-        job = unverified[0]
+        # One finding for the workflow. It is reported on the first publishing job that is a release
+        # job before anything else, as it was when a job had one lane, so an accepted finding stays
+        # where the baseline has it; a job that is also an agent or effect job is named only when
+        # there is no other.
+        job = next((j for j in unverified if j.lane == "release"), unverified[0])
         self.add("OBAAF-GHA-017", job.line,
                  f"Job '{job.id}' publishes artifacts, but no job in this workflow signs provenance for them.", job)
 

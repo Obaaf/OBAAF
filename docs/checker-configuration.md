@@ -58,7 +58,11 @@ jobs:
       OBAAF_LANE: agent        # untrusted, agent, effect, release, or trusted
 ```
 
-A declaration adds a lane. It never takes a job out of a lane the checker inferred, so it can add rules and cannot remove any: declaring `release` on a job that runs an agent leaves it an agent job and makes it a release job as well, and declaring `trusted` changes nothing. Case and surrounding space do not matter (`Agent` is `agent`). A value that is not a lane, for example a misspelling or an expression, is listed in the notes at the end of the report as a declaration that was ignored; it is never dropped without a word.
+A declaration adds a lane. It never takes a job out of a lane the checker inferred, so it can add rules and cannot remove any: declaring `release` on a job that runs an agent leaves it an agent job and makes it a release job as well. Declaring `trusted` adds no lane and removes none; on a job the checker puts in a lane anyway, the reason shown for that lane ends with `declared trusted, which cannot override what the job does`. Case and surrounding space do not matter (`Agent` is `agent`).
+
+`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, not in a step's. A declaration that does nothing is listed in the notes at the end of the report as ignored, never dropped without a word: a value that is not a lane (a misspelling, an expression, an empty value), or `OBAAF_LANE` on a step. `obaaf check . --lanes` prints the same notes.
+
+When a job is in a lane both because of what it does and because it was declared, the declaration is the reason shown (`set by OBAAF_LANE`, `set in the checker configuration`).
 
 ## Lane overrides
 
@@ -68,7 +72,9 @@ lanes:
   "release.yml#publish": release
 ```
 
-A lane override only adds rules, like `OBAAF_LANE`: the job is put in the lane you name as well as the lanes the checker inferred, and if `OBAAF_LANE` names another lane the job is in that one too. A key without `#job` applies to every job in the file. Use the workflow path shown by `--lanes`, for example `.github/workflows/release.yml#publish`, when checking a repository root. An entry that names a job the file does not have, or a workflow file the checker did not read, is listed in the notes as ignored.
+A lane override only adds rules, like `OBAAF_LANE`: the job is put in the lane you name as well as the lanes the checker inferred, and if `OBAAF_LANE` names another lane the job is in that one too. A key without `#job` applies to every job in the file. Use the workflow path shown by `--lanes`, for example `.github/workflows/release.yml#publish`, when checking a repository root. The same key applies when you check that one file on its own (`obaaf check .github/workflows/release.yml --config .github/obaaf.yml`).
+
+An entry that does nothing is listed in the notes as ignored: one whose value is not a lane, one that names a job or Jenkins stage the file does not have, and, when a repository is checked, one that names a file the checker did not read. `lanes:` itself must be a mapping; anything else is a configuration error and the check does not run.
 
 `obaaf check . --lanes` shows the first lane a job is in, in the order agent, effect, release, untrusted, and names the others after it: `ci.yml#ship: agent (uses openai/codex-action; also release: uploads or publishes artifacts)`.
 

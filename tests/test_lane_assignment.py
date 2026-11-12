@@ -258,5 +258,296 @@ class WhatIsShownTest(unittest.TestCase):
         self.assertEqual(messages, {"Agent job 'work' (set by OBAAF_LANE) holds write permissions: contents."})
 
 
+# The cases below come from the second review of this change (2026-11-12): a reviewer who did not
+# write it generated 9,240 workflows and compared the old and the new checker on each.
+
+JENKINSFILE = """pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Build') {
+      steps {
+        sh './build.sh'
+      }
+    }
+  }
+}
+"""
+
+
+def repo(tmp, workflow, config=None, name="wf.yml", jenkinsfile=None):
+    (tmp / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+    path = tmp / ".github" / "workflows" / name
+    path.write_text(workflow, encoding="utf-8")
+    if config is not None:
+        (tmp / ".github" / "obaaf.yml").write_text(config, encoding="utf-8")
+    if jenkinsfile is not None:
+        (tmp / "Jenkinsfile").write_text(jenkinsfile, encoding="utf-8")
+    return path
+
+
+def ignored(result_or_notes):
+    notes = getattr(result_or_notes, "notes", result_or_notes)
+    return [note for note in notes if note.startswith("Lane declaration ignored")]
+
+
+class AcceptedFindingsStayWhereTheBaselineHasThemTest(unittest.TestCase):
+    TWO_PUBLISHERS = (f"on: push\njobs:\n"
+                      f"  bot:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n    steps:\n"
+                      f"      - uses: openai/codex-action@{SHA}\n      - run: npm publish\n"
+                      f"  ship:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n    steps:\n"
+                      f"      - run: npm publish\n")
+
+    def test_the_provenance_finding_stays_on_the_job_that_only_publishes(self):
+        # One OBAAF-GHA-017 per workflow. `bot` is now a release job as well as an agent job, and
+        # comes first, but the finding an adopter accepted is the one on `ship`.
+        with TempDir() as tmp:
+            found = [f for f in check(tmp, self.TWO_PUBLISHERS).findings if f.rule == "OBAAF-GHA-017"]
+        self.assertEqual([(f.job, f.message) for f in found], [
+            ("ship", "Job 'ship' publishes artifacts, but no job in this workflow signs provenance for them.")])
+
+    def test_the_provenance_finding_is_reported_when_only_an_agent_job_publishes(self):
+        only_bot = self.TWO_PUBLISHERS[:self.TWO_PUBLISHERS.index("  ship:")]
+        with TempDir() as tmp:
+            found = [f.job for f in check(tmp, only_bot).findings if f.rule == "OBAAF-GHA-017"]
+        self.assertEqual(found, ["bot"])
+
+    def test_a_workflow_wide_trusted_under_a_declared_agent_job_adds_nothing_to_the_message(self):
+        # Nothing was inferred here, so there is nothing that `trusted` failed to override.
+        wf = ("on: push\nenv: {OBAAF_LANE: trusted}\njobs:\n  bot:\n    runs-on: ubuntu-latest\n"
+              "    permissions: {contents: write}\n    env: {OBAAF_LANE: agent}\n    steps:\n      - run: ./bot\n")
+        expected = "Agent job 'bot' (set by OBAAF_LANE) holds write permissions: contents."
+        with TempDir() as tmp:
+            self.assertIn(expected, {f.message for f in check(tmp, wf).findings})
+            config = checker.Config(lanes={"wf.yml": "trusted", "wf.yml#bot": "agent"})
+            plain = wf.replace("env: {OBAAF_LANE: trusted}\n", "").replace("    env: {OBAAF_LANE: agent}\n", "")
+            self.assertIn("Agent job 'bot' (set in the checker configuration) holds write permissions: contents.",
+                          {f.message for f in check(tmp, plain, config=config).findings})
+
+    def test_a_declaration_that_decides_nothing_is_not_called_an_override(self):
+        # The job's own declaration comes first, as it always did; the workflow's `trusted` is not
+        # what the job was declared, so the agent action's lane carries no note about it.
+        wf = job(AGENT, env="OBAAF_LANE: agent").replace("permissions: {}\n", "permissions: {}\nenv: {OBAAF_LANE: trusted}\n")
+        with TempDir() as tmp:
+            messages = {f.message for f in check(tmp, wf).findings if f.rule == "OBAAF-GHA-003"}
+        self.assertEqual(messages, {"Agent job 'work' (set by OBAAF_LANE) holds write permissions: contents."})
+
+    def test_a_declaration_in_another_case_reads_like_the_exact_one(self):
+        # `Agent` was ignored before and is read now, so the job's messages quote the declaration,
+        # exactly as they do for `agent`. This is the one message change an upgrade can bring to a
+        # job whose lanes did not change, and the changelog says so.
+        with TempDir() as tmp:
+            exact = {f.message for f in check(tmp, job(AGENT, env="OBAAF_LANE: agent")).findings}
+            other = {f.message for f in check(tmp, job(AGENT, env="OBAAF_LANE: Agent")).findings}
+        self.assertEqual(exact, other)
+
+
+class AReleaseEnvironmentMakesAReleaseJobWhateverStartsItTest(unittest.TestCase):
+    def lanes_and_rules(self, on):
+        wf = job("      - run: ./deploy.sh\n", on=on, extra="    environment: production\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf)
+            return checker.lanes(path)[0][2:], rules(checker.check(path))
+
+    def test_a_job_that_pull_requests_can_start(self):
+        (lane, reason), found = self.lanes_and_rules("[push, pull_request]")
+        self.assertEqual(lane, "release")
+        self.assertIn("uses the 'production' environment", reason)
+        self.assertIn("also untrusted: builds pull requests", reason)
+        self.assertIn("OBAAF-GHA-015", found)
+
+    def test_a_job_that_a_privileged_trigger_can_start(self):
+        for on in ("pull_request_target", "issue_comment", "[push, workflow_run]"):
+            with self.subTest(on=on):
+                (lane, _), found = self.lanes_and_rules(on)
+                self.assertEqual(lane, "release")
+                self.assertIn("OBAAF-GHA-015", found)
+
+    def test_a_job_started_by_a_push_is_as_before(self):
+        (lane, reason), found = self.lanes_and_rules("push")
+        self.assertEqual((lane, reason), ("release", "uses the 'production' environment"))
+        self.assertNotIn("OBAAF-GHA-015", found)
+
+    def test_declaring_the_lane_and_inferring_it_give_the_same_rules(self):
+        inferred = self.lanes_and_rules("pull_request_target")[1]
+        wf = job("      - run: ./deploy.sh\n", on="pull_request_target", env="OBAAF_LANE: release",
+                 extra="    environment: live\n")
+        with TempDir() as tmp:
+            declared = rules(check(tmp, wf))
+        self.assertEqual(inferred, declared)
+
+
+class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
+    PLAIN = job("      - run: ./work.sh\n")
+
+    def test_configured_keys_that_match_nothing(self):
+        keys = ["wf#work", ".github/workflows/wf.yml #work", ".github/workflows/wf.YML#work", "work",
+                ".github/workflows/wf.yml#"]
+        config = "lanes:\n" + "".join(f"  '{key}': agent\n" for key in keys)
+        with TempDir() as tmp:
+            repo(tmp, self.PLAIN, config)
+            notes = ignored(checker.check(tmp))
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertEqual(len([note for note in notes if f"'{key}'" in note]), 1, notes)
+
+    def test_an_empty_value(self):
+        for env in ("OBAAF_LANE: ''", "OBAAF_LANE: null"):
+            with self.subTest(env=env), TempDir() as tmp:
+                notes = ignored(check(tmp, job("      - run: ./work.sh\n", env=env)))
+                self.assertEqual(len(notes), 1, notes)
+                self.assertIn("an empty value", notes[0])
+        with TempDir() as tmp:
+            repo(tmp, self.PLAIN, "lanes:\n  .github/workflows/wf.yml#work:\n")
+            notes = ignored(checker.check(tmp))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("an empty value", notes[0])
+
+    def test_obaaf_lane_on_a_step(self):
+        wf = job("      - run: ./work.sh\n        env: {OBAAF_LANE: agent}\n")
+        with TempDir() as tmp:
+            result = check(tmp, wf)
+        self.assertNotIn("OBAAF-GHA-003", rules(result))
+        notes = ignored(result)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("job 'work', step 1 sets OBAAF_LANE", notes[0])
+
+    def test_one_workflow_checked_with_the_repository_configuration(self):
+        # The configuration names files from the repository root; a file checked on its own must
+        # not lose its declared lane because the checker calls it by a shorter path.
+        config = ("lanes:\n  .github/workflows/wf.yml#work: agent\n  .github/workflows/wf.yml#wrok: agent\n"
+                  "  .github/workflows/other.yml#work: agnet\n")
+        with TempDir() as tmp:
+            path = repo(tmp, self.PLAIN, config)
+            result = checker.check(path, config=checker.Config.load(tmp))
+            lane = checker.lanes(path, config=checker.Config.load(tmp))[0][2]
+            code, out, err = run_cli("check", path, "--config", tmp / ".github" / "obaaf.yml", "--lanes")
+        self.assertIn("OBAAF-GHA-003", rules(result))
+        self.assertEqual(lane, "agent")
+        notes = ignored(result)
+        self.assertEqual(len(notes), 1, notes)        # the job this file does not have, and no other file's entry
+        self.assertIn("wf.yml#wrok", notes[0])
+        self.assertIn("wf.yml#work: agent (set in the checker configuration)", out)
+        self.assertIn("wf.yml#wrok", err)
+
+    def test_jenkins_stages(self):
+        config = "lanes:\n  Jenkinsfile#Nope: agent\n  Jenkinsfile#Build: agnet\n"
+        with TempDir() as tmp:
+            repo(tmp, self.PLAIN, config, jenkinsfile=JENKINSFILE)
+            notes = ignored(checker.check(tmp))
+            (tmp / ".github" / "obaaf.yml").write_text("lanes:\n  Jenkinsfile#Build: agent\n")
+            fine = ignored(checker.check(tmp))
+        self.assertEqual(len(notes), 2, notes)
+        self.assertTrue(any("'Jenkinsfile#Nope'" in n and "names a stage that Jenkinsfile does not have" in n
+                            for n in notes), notes)
+        self.assertTrue(any("'Jenkinsfile#Build'" in n and "'agnet', which is not a lane" in n for n in notes), notes)
+        self.assertEqual(fine, [])
+
+    def test_a_jenkins_stage_lane_is_read_like_a_workflow_lane(self):
+        from obaaf.checker import jenkins
+        from obaaf.catalog import load
+        declared = JENKINSFILE.replace("steps {", "environment { OBAAF_LANE = 'agent' }\n      steps {")
+        for overrides, text in (({"Jenkinsfile#Build": " Agent"}, JENKINSFILE),
+                                ({"Jenkinsfile#Build": "agnet"}, declared)):
+            with self.subTest(overrides=overrides):
+                result = jenkins.analyze("Jenkinsfile", text.encode(), load(), None, lane_overrides=overrides)
+                self.assertEqual([lane for _, lane, _ in result.lanes], ["agent"])
+
+    def test_no_note_about_files_the_run_did_not_look_for(self):
+        config = "lanes:\n  .github/workflows/wf.yml#work: agent\n  Jenkinsfile#Build: agent\n"
+        with TempDir() as tmp:
+            repo(tmp, self.PLAIN, config, jenkinsfile=JENKINSFILE)
+            for platform in ("auto", "github", "jenkins"):
+                with self.subTest(platform=platform):
+                    self.assertEqual(ignored(checker.check(tmp, platform=platform)), [])
+
+    def test_no_second_report_for_a_job_already_reported_as_an_error(self):
+        wf = "on: push\njobs:\n  build: hello\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n"
+        with TempDir() as tmp:
+            repo(tmp, wf, "lanes:\n  .github/workflows/wf.yml#build: agent\n")
+            result = checker.check(tmp)
+        self.assertTrue(any("job 'build' is not a mapping" in error for error in result.errors), result.errors)
+        self.assertEqual(ignored(result), [])
+
+    def test_lanes_prints_the_notes(self):
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(job("      - run: ./work.sh\n", env="OBAAF_LANE: agnet"))
+            code, out, err = run_cli("check", path, "--lanes")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "wf.yml#work: trusted (default)\n")
+        self.assertIn("note: Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'", err)
+
+    def test_declaring_another_lane_does_not_silence_the_note_about_an_agent_like_name(self):
+        wf = job("      - run: ./review.sh\n", env="OBAAF_LANE: untrusted").replace("  work:", "  claude-review:")
+        with TempDir() as tmp:
+            notes = check(tmp, wf).notes
+        self.assertTrue(any("suggests agent work but are not in the agent lane" in n and "claude-review" in n
+                            for n in notes), notes)
+
+
+class WhatIsPrintedCannotBeForgedOrFloodedTest(unittest.TestCase):
+    FORGING = ("on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    permissions: {contents: write}\n    steps:\n"
+               "      - name: \"x'; also release: uploads or publishes artifacts)\\nfake.yml#other: trusted (default\"\n"
+               "        run: claude -p hello\n")
+
+    def test_a_step_name_with_a_line_break_stays_on_its_line(self):
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(self.FORGING)
+            _, lanes_out, _ = run_cli("check", path, "--lanes")
+            _, report, _ = run_cli("check", path, "--fail-on", "never")
+            _, as_json, _ = run_cli("check", path, "--fail-on", "never", "--format", "json")
+        self.assertEqual(len(lanes_out.splitlines()), 1, lanes_out)
+        self.assertTrue(lanes_out.startswith("wf.yml#b: agent (runs an agent CLI in 'x'; also release"), lanes_out)
+        self.assertIn("\\nfake.yml#other", lanes_out)
+        self.assertFalse([line for line in report.splitlines() if line.startswith("fake.yml")], report)
+        # The structured form carries the name as it is; a baseline keys on that.
+        self.assertIn("\\nfake.yml#other", as_json)
+
+    def test_a_configuration_key_with_a_line_break(self):
+        with TempDir() as tmp:
+            repo(tmp, job("      - run: make\n"))
+            config = checker.Config(lanes={"x.yml#a\nLane declaration ignored: nothing to see": "agent"})
+            notes = ignored(checker.check(tmp, config=config))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertNotIn("\n", notes[0])
+
+    def test_a_very_long_value_is_cut(self):
+        with TempDir() as tmp:
+            notes = ignored(check(tmp, job("      - run: make\n"), config=checker.Config(lanes={"wf.yml#work": "a" * 200_000})))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertLess(len(notes[0]), 400)
+        self.assertIn("(200000 characters)", notes[0])
+
+    def test_values_are_shown_as_they_were_written(self):
+        shown = {False: "'false'", True: "'true'", 5: "'5'", "": "an empty value", None: "an empty value",
+                 ("agent", "release"): "a list", "\u0430gent": "'\\u0430gent'"}
+        for value, text in shown.items():
+            value = list(value) if isinstance(value, tuple) else value
+            with self.subTest(value=value), TempDir() as tmp:
+                notes = ignored(check(tmp, job("      - run: make\n"), config=checker.Config(lanes={"wf.yml#work": value})))
+                self.assertEqual(len(notes), 1, notes)
+                self.assertIn(f"to {text}, which is not a lane", notes[0])
+
+
+class AConfigurationThatCannotBeReadIsAnErrorTest(unittest.TestCase):
+    def test_lanes_that_is_not_a_mapping(self):
+        for value in ("5", "true", "[a, b]", "[[wf.yml, agent]]", "agent"):
+            with self.subTest(value=value), TempDir() as tmp:
+                repo(tmp, job("      - run: make\n"), f"lanes: {value}\n")
+                with self.assertRaises(checker.ConfigError):
+                    checker.Config.load(tmp)
+                code, out, err = run_cli("check", tmp)
+                self.assertEqual(code, 2)
+                self.assertIn("lanes must be a mapping", err)
+                self.assertNotIn("Traceback", out + err)
+
+    def test_lanes_left_empty_is_no_declaration(self):
+        with TempDir() as tmp:
+            repo(tmp, job("      - run: make\n"), "lanes:\n")
+            self.assertEqual(checker.Config.load(tmp).lanes, {})
+
+
 if __name__ == "__main__":
     unittest.main()

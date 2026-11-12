@@ -648,52 +648,104 @@ def declared_lane(value) -> str | None:
     return lane if lane in LANES else None
 
 
-def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: dict | None = None) -> None:
+def one_line(text, limit: int | None = None) -> str:
+    """`text` as it can be printed on one line. Line breaks, other control characters and invisible
+    characters are shown as escapes, so a name that contains a line break cannot look like another
+    line of a report. A text longer than `limit` is cut, and its length given."""
+    out = "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in str(text))
+    if limit and len(out) > limit:
+        out = f"{out[:limit]}... ({len(out)} characters)"
+    return out
+
+
+def shown_value(value) -> str:
+    """A declared value as a note names it: what the author wrote, on one line and bounded."""
+    if value is None or value == "":
+        return "an empty value"
+    if isinstance(value, bool):
+        return f"'{str(value).lower()}'"
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return "a list"
+    if isinstance(value, dict):
+        return "a mapping"
+    text = str(value)
+    if not text.isascii():
+        # A look-alike letter reads exactly like the lane it imitates; the escape shows the difference.
+        text = text.encode("unicode_escape").decode("ascii")
+    return f"'{one_line(text, 60)}'"
+
+
+def not_a_lane(where: str, value) -> str:
+    """The note for a declaration whose value names no lane."""
+    return (f"{where} to {shown_value(value)}, which is not a lane ({', '.join(LANES)}); "
+            "the declaration changes nothing")
+
+
+_UNSET = object()
+
+
+def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: dict | None = None,
+             aliases: tuple = ()) -> None:
     """Put each job in every lane it belongs to.
 
     Inference comes first, and each lane is decided on its own: a job that runs an agent and
     publishes is in the agent lane and in the release lane, and gets the rules of both. A lane
     declared with OBAAF_LANE or in the checker configuration is added to those. A declaration never
-    takes a job out of a lane, so it can add rules and cannot remove any. A declared value that is
-    not a lane is recorded in `workflow.lane_problems`, never dropped without a word.
+    takes a job out of a lane, so it can add rules and cannot remove any. A declaration that does
+    nothing (a value that is not a lane, OBAAF_LANE on a step) is recorded in
+    `workflow.lane_problems`, never dropped without a word.
+
+    `aliases` are other paths the configuration may know this file by: a workflow checked on its
+    own is `ci.yml` to the checker and `.github/workflows/ci.yml` in the repository's configuration.
     """
     detection = load_catalog().detection
     overrides = overrides or {}
     extra_agents = extra_agents or {}
     workflow.lane_problems = []
+    paths = tuple(dict.fromkeys((workflow.path, *aliases)))
+
+    def problem(text: str) -> None:
+        if text not in workflow.lane_problems:
+            workflow.lane_problems.append(text)
+
     for job in workflow.jobs.values():
         job.lanes = _inferred_lanes(job, detection, extra_agents)
         job.lane_notes = []
-        config_key = f"{workflow.path}#{job.id}"
-        declarations = [
-            (overrides.get(config_key), "set in the checker configuration",
-             f"the checker configuration sets lanes: '{config_key}'"),
-            (overrides.get(workflow.path), "set in the checker configuration",
-             f"the checker configuration sets lanes: '{workflow.path}'"),
-            (job.env.get("OBAAF_LANE"), "set by OBAAF_LANE", f"{workflow.path}: job '{job.id}' sets OBAAF_LANE"),
-            (workflow.env.get("OBAAF_LANE"), "set by OBAAF_LANE", f"{workflow.path} sets OBAAF_LANE"),
+        configured = [f"{path}#{job.id}" for path in paths] + list(paths)
+        declarations = [(overrides.get(key, _UNSET), "set in the checker configuration",
+                         f"the checker configuration sets lanes: '{one_line(key, 120)}'") for key in configured]
+        declarations += [
+            (job.env.get("OBAAF_LANE", _UNSET), "set by OBAAF_LANE",
+             f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE"),
+            (workflow.env.get("OBAAF_LANE", _UNSET), "set by OBAAF_LANE",
+             f"{one_line(workflow.path, 120)} sets OBAAF_LANE"),
         ]
         declared: dict = {}
-        trusted_why = None
+        # The first declaration that names a lane, in the order above: the configuration before
+        # OBAAF_LANE, the job before the workflow. It was the only one read when a job had one lane.
+        first = None
         for value, why, where in declarations:
-            if value is None or value == "":
+            if value is _UNSET:
                 continue
             lane = declared_lane(value)
             if lane is None:
-                problem = (f"{where} to {str(value)!r}, which is not a lane ({', '.join(LANES)}); "
-                           "the declaration changes nothing")
-                if problem not in workflow.lane_problems:
-                    workflow.lane_problems.append(problem)
-            elif lane == "trusted":
-                trusted_why = trusted_why or why
-            else:
-                # The first declaration of a lane gives the reason that is shown, as it did when a
-                # job had one lane: the configuration before OBAAF_LANE, the job before the workflow.
+                problem(not_a_lane(where, value))
+                continue
+            first = first or (lane, why)
+            if lane != "trusted":
+                # The first declaration of a lane gives the reason that is shown.
                 declared.setdefault(lane, why)
+        inferred = bool(job.lanes)
         job.lanes.update(declared)
-        if trusted_why and job.lanes:
+        trusted_why = first[1] if first and first[0] == "trusted" else None
+        if trusted_why and inferred:
             job.lane_notes.append("declared trusted, which cannot override what the job does")
         job.settle_lane(trusted_why or "default")
+        for step in job.steps:
+            if "OBAAF_LANE" in step.env:
+                problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}', step {step.index + 1} sets "
+                        "OBAAF_LANE, which is read on a job or on the whole workflow and not on a step; "
+                        "the declaration changes nothing")
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
@@ -709,7 +761,9 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
     env_name = (job.environment or "").lower()
     if job.upload_steps(detection):
         lanes["release"] = "uploads or publishes artifacts"
-    elif re.search(r"release|prod|publish|store|steam|itch|deploy", env_name) and not (triggers & UNTRUSTED_TRIGGERS):
+    elif re.search(r"release|prod|publish|store|steam|itch|deploy", env_name):
+        # Whatever starts the job: a job that a pull request or a comment can start and that uses
+        # the production environment is the case OBAAF-GHA-015 exists for.
         lanes["release"] = f"uses the '{job.environment}' environment"
     if triggers and triggers <= PR_TRIGGERS | {"merge_group"} | ({"push"} if "pull_request" in triggers else set()):
         lanes["untrusted"] = "builds pull requests"
