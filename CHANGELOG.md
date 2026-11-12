@@ -63,7 +63,7 @@ Other changes in behaviour: any string given for `secrets:` on a reusable-workfl
 ### Project
 
 - Governance is adopted rather than draft, and the project now accepts outside contributions under CONTRIBUTING.md; the code of conduct is the Contributor Covenant 2.1 in CODE_OF_CONDUCT.md (D-038).
-- New documents: [docs/landscape.md](docs/landscape.md) compares OBAAF with other tools that check workflows and repository settings, with what each found on the same repositories, and says where OBAAF stands; [docs/egress-control.md](docs/egress-control.md) is the design of a control that limits an agent command's network access, not built yet; [docs/flagship.md](docs/flagship.md) is the plan both belong to.
+- New documents: [docs/landscape.md](docs/landscape.md) compares OBAAF with other tools that check workflows and repository settings, with what the five that could be run found on the same repositories, and says where OBAAF stands; [docs/egress-control.md](docs/egress-control.md) is the design of a control that limits an agent command's network access, not built yet; [docs/flagship.md](docs/flagship.md) is the plan both belong to.
 
 ### Platform scope
 
