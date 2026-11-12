@@ -127,9 +127,11 @@ def cmd_check(args) -> int:
     except baseline_mod.BaselineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    if args.write_baseline and Path(args.write_baseline).exists():
+    if args.write_baseline and Path(args.write_baseline).is_file():
         # Entries of the file being replaced that are still valid keep their own owner, reason
         # and expiry date; writing a baseline never renews an acceptance behind its owner's back.
+        # Only a regular file is read: a pipe or a device (/dev/stdout, /dev/null) holds no baseline
+        # to keep, and reading one may never end.
         try:
             previous = baseline_mod.load(Path(args.write_baseline))
         except baseline_mod.BaselineError as exc:
@@ -160,7 +162,11 @@ def cmd_check(args) -> int:
         text = report.to_sarif(result)
     else:
         text = report.to_text(result, show_fixes=not args.no_fixes)
-    _write(text, args.output)
+    try:
+        _write(text, args.output)
+    except OSError as exc:
+        print(f"error: cannot write the report to {args.output}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     if args.write_baseline:
         if result.errors:
             print("error: not writing a baseline while some CI definitions could not be read", file=sys.stderr)
@@ -735,8 +741,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--write-baseline", metavar="FILE",
                    help="write the baseline to FILE. Entries of FILE that are still valid keep their owner, "
                         "reason and expiry date; every other finding is newly accepted with --owner, --reason and "
-                        "--expires, and without them nothing is written (exit 2). Left out: findings ignored by "
-                        "configuration, and findings named by an ignore entry that has expired or does not count")
+                        "--expires, and without them nothing is written (exit 2). Findings ignored by "
+                        "configuration are left out, and a finding named by an ignore entry that has expired or "
+                        "does not count is not newly accepted")
     x.add_argument("--owner", metavar="OWNER", help="with --write-baseline: who accepts the findings (@user, "
                                                     "@org/team or an e-mail address)")
     x.add_argument("--reason", metavar="TEXT", help="with --write-baseline: why they are accepted")

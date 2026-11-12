@@ -485,10 +485,11 @@ class WorkflowRules:
         if not job.in_lane("agent"):
             return
         perms = job.permissions
-        # Why the job is an agent job (which action or command, or a declaration) is part of the
-        # finding, as the text the checker shows for it: an acceptance of one agent holding write
-        # access must not cover another agent put in its place. It is text the checker wrote, so
-        # rewording it changes the finding; that ends when agents are named data.
+        # Why the job is an agent job is part of the finding, as the text the checker shows for it,
+        # so that an acceptance stops covering the job when the recognised action, the step or the
+        # declaration changes. The text does not tell every agent apart (another command in a step
+        # of the same name, any agent in a declared job), and rewording it changes the finding;
+        # both end when agents are named data.
         why = job.reason_for('agent')
         if perms is None:
             self.add("OBAAF-GHA-003", job.line,
@@ -853,6 +854,29 @@ class WorkflowRules:
                  "Job '{job}' publishes artifacts, but no job in this workflow signs provenance for them.", job)
 
 
+def _line_digests(text: str, hidden: list) -> list[str]:
+    """For each hidden character, a digest of the line it is on. A line here ends only at a line
+    feed. The line numbers the scanner reports come from `str.splitlines`, which also ends a line at
+    a form feed, a vertical tab, a lone carriage return, U+0085, U+2028 and several more; text after
+    one of those is still beside the character for a reader and for a direction override, so it is
+    part of what is digested. A carriage return before the line feed is left out, so a file saved
+    with other line endings is the same file."""
+    starts, at = [], 0
+    for line in text.splitlines(keepends=True):
+        starts.append(at)
+        at += len(line)
+    digests = []
+    for h in hidden:
+        offset = starts[h.line - 1] + h.column - 1
+        begin = text.rfind("\n", 0, offset) + 1
+        end = text.find("\n", offset)
+        line = text[begin: len(text) if end == -1 else end]
+        if line.endswith("\r"):
+            line = line[:-1]
+        digests.append(hashlib.sha256(line.encode("utf-8", "surrogatepass")).hexdigest()[:32])
+    return digests
+
+
 # ------------------------------------------------------------------- repository
 def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> list[Finding]:
     findings: list[Finding] = []
@@ -897,10 +921,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
             # up or down is the same finding; a character on other text is another one, because where
             # a direction override or an invisible instruction sits is what it does. The message
             # shows the first three with their line and column, and the count of all of them.
-            lines = text.splitlines()
-            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) on a line with sha256 "
-                           + hashlib.sha256(lines[h.line - 1].encode("utf-8", "surrogatepass")).hexdigest()[:32]
-                           for h in hidden)
+            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) on a line with sha256 {digest}"
+                           for h, digest in zip(hidden, _line_digests(text, hidden)))
             add("OBAAF-INS-001", rel, hidden[0].line, "{count} hidden character(s): {characters}{more}.",
                 count=Note(str(len(hidden))), more=Note(more), characters=Fact(marks, detail))
     return findings

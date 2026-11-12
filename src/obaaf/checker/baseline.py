@@ -209,38 +209,43 @@ def _accepts(entry: dict, f) -> bool:
 
 
 def _match(findings: list, entries: list[dict], entry_key, finding_key, today: date, legacy: bool) -> list[dict]:
-    """Give each finding the entry that names it, valid entries first, and return the entries left over.
+    """Give each finding an entry that names it, and return the entries left over.
 
-    Entries are counted: two findings that are the same in everything but their line need two
-    entries. A suppressed finding uses up its entry without being marked, so an entry for a finding
-    that has since been given an ignore entry is accounted for and not stale. A fixed finding takes
-    no entry, so its entry is left over and has to be removed.
+    A finding takes a valid entry that accepts it at its severity, the least severe such entry, so
+    that a more severe one is left for a more severe finding. Failing that it takes an entry that
+    names it and does not accept it (not valid, or accepted at a lower severity), and the finding
+    carries what is wrong with that entry. Entries are counted: two findings that are the same in
+    everything but their line need two entries. A suppressed finding uses up its entry without being
+    marked, so an entry for a finding that has since been given an ignore entry is accounted for and
+    not stale. A fixed finding takes no entry, so its entry is left over and has to be removed.
     """
-    by_key: dict[str, list] = {}
-    for entry in entries:
+    # identity -> (valid, severity rank) -> the entries, last in the file first, so that `pop` gives
+    # the first. Looking through at most eight groups keeps the cost of a finding the same however
+    # many findings share its identity.
+    by_key: dict[str, dict[tuple, list]] = {}
+    for entry in reversed(entries):
         if legacy:
             made = acceptance_mod.Acceptance(acceptance_mod.BASELINE, problems=[V1_PROBLEM])
         else:
             made = acceptance_mod.make(acceptance_mod.BASELINE, entry.get("owner"), entry.get("reason"),
                                        entry.get("expires"), today)
-        by_key.setdefault(entry_key(entry), []).append((entry, made))
-    for candidates in by_key.values():
-        # Taken from the end of the list: valid entries first, and each kind in the file's order.
-        candidates.reverse()
-        candidates.sort(key=lambda pair: pair[1].valid)       # stable
+        rank = 0 if legacy else SEVERITIES[entry["severity"]]
+        by_key.setdefault(entry_key(entry), {}).setdefault((made.valid, rank), []).append((entry, made))
     used: set[int] = set()
     for f in sorted(findings, key=lambda f: not f.suppressed):
         if f.state == FIXED:
             continue
-        candidates = by_key.get(finding_key(f))
-        if not candidates:
+        groups = by_key.get(finding_key(f))
+        if not groups:
             continue
-        # The next entry that accepts the finding at its severity, or failing that the next entry.
-        # Looked for from the end of the list, so that many findings with one identity cost one
-        # step each and not a pass over every entry.
-        at = next((i for i in range(len(candidates) - 1, -1, -1) if legacy or _accepts(candidates[i][0], f)), None)
-        fitting = at is not None
-        entry, made = candidates.pop(at if fitting else -1)
+        need = 0 if legacy else SEVERITIES.get(f.severity, max(SEVERITIES.values()))
+        fitting = next(((valid, rank) for valid in (True, False) for rank in range(need, len(SEVERITIES))
+                        if groups.get((valid, rank))), None)
+        # No entry is severe enough: the finding takes the nearest one, a valid one first.
+        chosen = fitting or max((group for group, held in groups.items() if held), default=None)
+        if chosen is None:
+            continue
+        entry, made = groups[chosen].pop()
         used.add(id(entry))
         if f.suppressed:
             continue

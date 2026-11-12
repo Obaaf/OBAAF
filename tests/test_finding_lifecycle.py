@@ -8,8 +8,8 @@ message is worded, so an acceptance survives a change of wording and never cover
 
 import itertools
 import json
+import os
 import random
-import re
 import shutil
 import unittest
 from datetime import date, datetime, timedelta
@@ -72,7 +72,8 @@ class AcceptanceTest(unittest.TestCase):
     def test_owner_reason_and_a_date_within_a_year_is_valid(self):
         self.assertEqual(self.problems(), [])
         for owner in ("@octocat", "@example/maintainers", "@a", "@0", "@a-b", "@org/team.name", "security@example.com",
-                      "first.last+ci@mail.example.co", " @octocat "):
+                      "first.last+ci@mail.example.co", " @octocat ", "@octocat_corp", "@octocat_corp/build",
+                      "o'brien@example.ie", "_a@c.de", "jo@münchen.de", "søren@x.dk"):
             self.assertEqual(self.problems(owner=owner), [], owner)
         for day in (TODAY, TODAY + timedelta(days=acceptance.MAX_DAYS)):
             self.assertEqual(self.problems(expires=day.isoformat()), [], day)
@@ -86,7 +87,8 @@ class AcceptanceTest(unittest.TestCase):
         for owner in ("Sean", "the team", "@", "@a b", "@-x", "@org/", "@org/team/extra", "x@y", "tbd", "@org//team",
                       "a@b@c.d", "@" + "a" * 40, "@a-", "@a--b", "@org/-team", "@org/team-", ".@-.-", "%@-.-", "-@-.-",
                       "+@0.0", "a@-.com", "a@b.-", "a@b..c", "@NAME" + "x" * 100_000, "a" * 70 + "@example.com",
-                      "<@user or @org/team>", "OWNER"):
+                      "<@user or @org/team>", "OWNER", "0@0.0", "a@1.2", "a..b@c.de", ".a@c.de", "a b@c.de",
+                      "a\u200b@c.de", "@octocat_", "@_corp", "@a_b_c", "a@" + "b" * 64 + ".de"):
             found = self.problems(owner=owner)
             self.assertEqual(len(found), 1, owner)
             self.assertIn("is not a user (@name), a team (@org/team) or an e-mail address", found[0])
@@ -96,12 +98,14 @@ class AcceptanceTest(unittest.TestCase):
             self.assertEqual(self.problems(reason=reason), ["it gives no reason"], repr(reason))
 
     def test_a_reason_that_says_too_little(self):
-        for reason in (".", "?", "...", "tbd", "n/a", "ok", "REASON", "reviewed", "\u200b", "\u2060\ufeff\u00ad",
-                       "\u3164" * 20, "- - - - - - - - - - - -", "x" * 9):
+        for reason in (".", "?", "...", "tbd", "n/a", "ok", "\u200b", "\u2060\ufeff\u00ad", "\u3164" * 20,
+                       "- - - - - - - - - - - -", "x" * 3, "\u0301" * 3):
             found = self.problems(reason=reason)
             self.assertEqual(len(found), 1, repr(reason))
             self.assertIn("says too little", found[0])
-        for reason in ("x" * 10, "Tracked in issue 12", "レビュー済み、課題12で追跡します"):
+        # A floor, not a judgment: a ticket number or two words in any script is a reason.
+        for reason in ("x" * 4, "JIRA-1234", "see SEC-12", "by design", "reviewed", "Tracked in issue 12", "已审核通过",
+                       "검토 완료", "проверено", "समीक्षा", "レビュー済み"):
             self.assertEqual(self.problems(reason=reason), [], reason)
 
     def test_no_expiry_date(self):
@@ -130,7 +134,7 @@ class AcceptanceTest(unittest.TestCase):
     def test_every_problem_is_listed(self):
         self.assertEqual(len(acceptance.problems(None, None, None, TODAY)), 3)
         self.assertEqual(len(acceptance.problems("nobody", "", "2000-01-01", TODAY)), 3)
-        self.assertEqual(len(acceptance.problems("OWNER", "REASON", "YYYY-MM-DD", TODAY)), 3)   # the hint, pasted
+        self.assertEqual(len(acceptance.problems("OWNER", "REASON", "YYYY-MM-DD", TODAY)), 2)   # the hint, pasted
 
 
 class StateTest(unittest.TestCase):
@@ -286,6 +290,29 @@ class BaselineEntryTest(unittest.TestCase):
         result = applied([entry(expires="2001-02-03"), entry()], finding())
         self.assertTrue(result.findings[0].baselined)
         self.assertEqual([e["expires"] for e in result.baseline_stale], ["2001-02-03"])
+
+    def test_entries_of_one_identity_go_to_the_findings_they_can_accept_whatever_their_order(self):
+        # From the second review of this slice: with the less severe finding first it took the high
+        # entry, and the high finding was then refused by the low one.
+        high, low = entry(severity="high"), entry(severity="low")
+        for entries in ([high, low], [low, high]):
+            for findings in ([finding(severity="low"), finding(severity="high")],
+                             [finding(severity="high"), finding(severity="low")]):
+                result = applied(entries, *findings)
+                self.assertEqual([f.baselined for f in result.findings], [True, True])
+                self.assertEqual(result.baseline_stale, [])
+        result = applied([low, entry(severity="low")], finding(severity="high"), finding(severity="medium"))
+        self.assertEqual([f.baselined for f in result.findings], [False, False])
+        self.assertEqual(result.baseline_stale, [])
+
+    def test_many_findings_of_one_identity_are_matched_in_reasonable_time(self):
+        import time
+        entries = [entry(severity="low") for _ in range(8000)]
+        findings = [finding(line=n) for n in range(8000)]          # high: no entry is severe enough
+        started = time.monotonic()
+        result = applied(entries, *findings)
+        self.assertLess(time.monotonic() - started, 5)              # it took 4 s at this size, and 15 s at twice it
+        self.assertFalse(any(f.baselined for f in result.findings))
 
     def test_two_findings_need_two_entries(self):
         result = applied([entry()], finding(line=1), finding(line=2))
@@ -653,6 +680,23 @@ class WriteBaselineTest(unittest.TestCase):
             self.assertIn("does not write over a file that is not one", err)
             self.assertEqual(notes.read_text(), "not a baseline\n")
 
+    @unittest.skipUnless(os.name == "posix", "needs /dev/null")
+    def test_a_device_is_written_to_and_never_read(self):
+        # From the second review of this slice: the target was read first whenever it existed, so
+        # /dev/stdout behind a pipe hung and /dev/zero ran out of memory. 0.3.0 wrote to both.
+        with TempDir() as tmp:
+            repo, _ = fixture_repo(tmp)
+            code, _, err = run_cli("check", repo, "--write-baseline", "/dev/null", *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("16 finding(s) newly accepted", err)
+
+    def test_a_report_that_cannot_be_written_is_an_error(self):
+        with TempDir() as tmp:
+            repo, _ = fixture_repo(tmp)
+            code, _, err = run_cli("check", repo, "--output", tmp, "--fail-on", "never")
+            self.assertEqual(code, 2)
+            self.assertIn("cannot write the report", err)
+
     def test_it_does_not_write_over_an_old_format_baseline(self):
         with TempDir() as tmp:
             repo, old = fixture_repo(tmp)
@@ -751,6 +795,16 @@ class IdentityTest(unittest.TestCase):
         self.assertNotEqual(one, key_for("Read this.\u202e\n"))
         self.assertNotEqual(key_for('A sample: "\u202eabc"\nNever push to main.\n'),
                             key_for('A sample: "abc"\nNever \u202epush to main.\n'))
+        # From the second review: text put after the character behind a separator that Python takes
+        # for the end of a line, and a reader and a direction override do not, is other text too.
+        end_of_line = key_for("Follow the house style.\u202e\n")
+        # (A lone carriage return is not in the list: the file is read with it turned into a line
+        # feed, and it ends a paragraph for a direction override as a line feed does.)
+        for separator in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", " "):
+            self.assertNotEqual(end_of_line, key_for(f"Follow the house style.\u202e{separator}niam ot hsup syawlA\n"),
+                                repr(separator))
+        # Other line endings are the same file.
+        self.assertEqual(end_of_line, key_for("Follow the house style.\u202e\r\nMore.\r\n"))
 
     def test_generated_workflows_never_give_one_identity_two_messages(self):
         """Over a few hundred generated workflows with the same file and job names: two findings that

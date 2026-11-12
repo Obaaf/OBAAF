@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 from obaaf import __version__
 from obaaf.catalog import Catalog, load
@@ -121,9 +122,10 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
                          "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
                          "accepts these findings, why and until when:")
-            checked = f" {result.checked}" if result.checked not in ("", ".") else ""
-            lines.append(one_line(f"    obaaf baseline migrate {result.baseline_path or 'FILE'}{checked} --owner OWNER "
-                                  "--reason REASON --expires YYYY-MM-DD"))
+            checked = f" {shlex.quote(result.checked)}" if result.checked not in ("", ".") else ""
+            lines.append(one_line(f"    obaaf baseline migrate {shlex.quote(result.baseline_path or 'FILE')}{checked} "
+                                  "--owner OWNER --reason REASON --expires YYYY-MM-DD"))
+            lines.append("  Give it the --config and --platform this check was given, if any.")
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
