@@ -52,40 +52,58 @@ HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
 CONTROL_STEP_KEYS = {"wait", "wait-all", "cancel"}
 
 
-_STATUS_FUNCTIONS = frozenset({"always", "failure", "cancelled", "success"})
+_LOUD_STATUS_RE = re.compile(r"(always|failure|cancelled)\s*\(", re.I)
+_SUCCESS_RE = re.compile(r"success\s*\(", re.I)
 
 
 def runs_after_failure(cond) -> bool:
     """Whether an `if:` can let a step or job run although an earlier step, or a job it needs,
     failed or was skipped.
 
-    Without a status function GitHub adds an implicit `success() &&`, and the answer is no. With
-    `always()`, `failure()` or `cancelled()` anywhere it is yes. `success()` keeps the implicit
-    meaning only where it is itself one of the conditions joined by `&&` at the top of the
-    expression (`success() && x`); anywhere else (`success() || x`, `!success()`,
-    `success() == false`, as an argument) the job or step can run regardless. The condition is read
-    from its tokens, so a word inside a string is not a call, and no spelling of a call is missed.
+    Without a status function GitHub adds an implicit `success() &&`, and the answer is no. The
+    answer is yes when `always(`, `failure(` or `cancelled(` appears anywhere in the text, inside a
+    string or outside `${{ }}` included: where the text is not what its tokens look like, a status
+    function is taken for the worst. `success()` keeps the implicit meaning only when the text is
+    one expression and every `success(` in it is a call that is itself one of the conditions joined
+    by `&&` at the top (`success() && x`). Anywhere else (`success() || x`, `!success()`,
+    `success() == false`, as an argument, inside a string, beside text outside `${{ }}`) the job or
+    step is taken to run regardless.
     """
     text = str(cond or "")
-    body = condition_expression(text)
-    toks = expr_mod.tokens(text if body is None else body)
-    calls = [toks[i][1].lower() for i in range(len(toks) - 1)
-             if toks[i][0] == "id" and toks[i][1].lower() in _STATUS_FUNCTIONS and toks[i + 1] == ("op", "(")]
-    if not calls:
+    if _LOUD_STATUS_RE.search(text):
+        return True
+    written = len(_SUCCESS_RE.findall(text))
+    if not written:
         return False
-    if body is None or any(name != "success" for name in calls) or not _balanced(toks):
-        # Text GitHub reads as a string is not the expression its tokens look like, so a status
-        # function anywhere in it is taken for the worst.
+    try:
+        body = condition_expression(text)
+    except (expr_mod.TooComplex, RecursionError):
+        return True
+    if body is None or body.count("'") % 2:
+        return True         # not one expression, or one that ends inside a string
+    toks = expr_mod.tokens(body)
+    if not _balanced(toks):
         return True
     close = expr_mod._closers(toks)
-    lo, hi = 0, len(toks)
-    while hi - lo >= 2 and toks[lo] == ("op", "(") and close[lo] == hi - 1:
-        lo, hi = lo + 1, hi - 1         # parentheses around the whole condition change nothing
+    lo, hi = _unwrapped(toks, close, 0, len(toks))
     if len(_split(toks, close, lo, hi, "|")) > 1:
         return True
-    plain = [toks[a:b] for a, b in _split(toks, close, lo, hi, "&")]
-    return sum(1 for part in plain
-               if len(part) == 3 and part[0][1].lower() == "success" and part[1:] == [("op", "("), ("op", ")")]) != len(calls)
+    plain = 0
+    for a, b in _split(toks, close, lo, hi, "&"):
+        a, b = _unwrapped(toks, close, a, b)
+        if b - a == 3 and toks[a][0] == "id" and toks[a][1].lower() == "success" \
+                and toks[a + 1:b] == [("op", "("), ("op", ")")]:
+            plain += 1
+    # Every `success(` the text holds must be one of those calls. One more, in a string or anywhere
+    # else, and the condition is not the plain form.
+    return plain != written
+
+
+def _unwrapped(toks: list, close: list, lo: int, hi: int) -> tuple[int, int]:
+    """toks[lo:hi] without parentheses that enclose all of it, which change nothing."""
+    while hi - lo >= 2 and toks[lo] == ("op", "(") and close[lo] == hi - 1:
+        lo, hi = lo + 1, hi - 1
+    return lo, hi
 
 
 # Event fields an outsider can write (OBAAF-GHA-010). Matched inside ${{ }}.
@@ -241,7 +259,10 @@ def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, dept
     path, equal, value = test
     if path == _EVENT_NAME:
         named = {"workflow_run", TRUSTED_WORKFLOW_RUN} if value == "workflow_run" else {value}
-        return events & named if equal else events - named
+        # In a workflow another workflow calls, `github.event_name` is the caller's event, which the
+        # checker does not know, so no test of it rules `workflow_call` out.
+        called = events & {"workflow_call"}
+        return (events & named if equal else events - named) | called
     if path == _RUN_EVENT and equal:
         # True only for a run that followed a run started by `value`. Other events are left in:
         # the test is false on them, and leaving them in can only add findings.
@@ -266,8 +287,8 @@ def condition_expression(cond: str) -> str | None:
 def _narrowed(cond: str, events: frozenset) -> frozenset:
     try:
         body = condition_expression(cond)
-        if body is None:
-            return events
+        if body is None or body.count("'") % 2:
+            return events       # not one expression, or one that ends inside a string
         toks = expr_mod.tokens(body)
         if not _balanced(toks):
             return events
@@ -381,8 +402,18 @@ class Step:
 
     @property
     def with_(self) -> dict:
+        """The step's inputs, by name in lower case. GitHub hands an action its inputs as
+        environment variables named in upper case, so `REF:` and `ref:` are the same input. Two
+        names that differ only in case are reported as a problem when the file is read; here their
+        values are joined, so a rule that searches a value sees both."""
         value = self.raw.get("with")
-        return value if isinstance(value, dict) else {}
+        if not isinstance(value, dict):
+            return {}
+        out: dict = {}
+        for name, given in value.items():
+            key = str(name).lower()
+            out[key] = f"{out[key]} {given}" if key in out else given
+        return out
 
     @property
     def env(self) -> dict:
@@ -760,9 +791,29 @@ def parse(path: str, text: str) -> Workflow:
     return workflow
 
 
+def _same_input_twice(step_raw: dict) -> str | None:
+    """Two names under `with:` that differ only in case, if the step has such a pair. They are one
+    input to GitHub, and which value it takes is not something the checker can tell."""
+    given = step_raw.get("with")
+    seen: dict = {}
+    for name in (given if isinstance(given, dict) else ()):
+        key = str(name).lower()
+        if key in seen:
+            return f"'{one_line(seen[key], 60)}' and '{one_line(name, 60)}'"
+        seen[key] = name
+    return None
+
+
 def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     """Flatten a job's steps, including the steps inside `parallel` groups, in order."""
     groups = 0
+
+    def inputs_checked(raw: dict, number: int) -> None:
+        twice = _same_input_twice(raw)
+        if twice:
+            workflow.problems.append(f"job '{job.id}', step {number} gives the same input twice under names "
+                                     f"that differ only in case ({twice}), so the checker cannot tell which "
+                                     "value GitHub uses")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "
@@ -777,9 +828,11 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                 continue
             for sub in inner:
                 if isinstance(sub, dict):
+                    inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True))
             continue
+        inputs_checked(step_raw, number)
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
             workflow.problems.append(f"job '{job.id}', step {number} has no 'run' or 'uses' and is not a step form "
                                      "the checker knows, so it cannot check what the step does")

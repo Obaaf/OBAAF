@@ -124,12 +124,33 @@ class SecretInAgentJobTest(unittest.TestCase):
         self.assertEqual(control(f, "secrets-protected").verdict, NOT_MET)
         self.assertIn("'main-only'", control(f, "secrets-protected").detail)
 
+    def test_with_no_environment_the_setting_is_not_met_either(self):
+        f = one(check(agent_workflow(environment=None)), "OBAAF-GHA-005")
+        self.assertEqual(control(f, "environment-restricted").verdict, NOT_MET)
+        self.assertIn("the job declares no environment", control(f, "environment-restricted").detail)
+
+    def test_an_environment_written_as_a_number_is_cannot_tell(self):
+        """`010` is 8 to the YAML reader the checker uses and need not be to GitHub's."""
+        config = {"lanes": CONFIG["lanes"], "protected_secrets": {"*_API_KEY": "8"}}
+        f = one(check(agent_workflow(environment="010"), config=config), "OBAAF-GHA-005")
+        self.assertEqual(control(f, "secrets-protected").verdict, CANNOT_TELL)
+
+    def test_names_that_differ_only_in_the_case_of_other_letters_are_cannot_tell(self):
+        config = {"lanes": CONFIG["lanes"], "protected_secrets": {"*_API_KEY": "strasse"}}
+        f = one(check(agent_workflow(environment="stra\u00dfe"), config=config), "OBAAF-GHA-005")
+        self.assertEqual(control(f, "secrets-protected").verdict, CANNOT_TELL)
+        f = one(check(agent_workflow(environment="STRASSE"), config=config), "OBAAF-GHA-005")
+        self.assertEqual(control(f, "secrets-protected").verdict, VERIFIED)
+
     def test_an_environment_named_by_an_expression_is_cannot_tell(self):
         f = one(check(agent_workflow(environment="${{ inputs.environment }}")), "OBAAF-GHA-005")
         self.assertEqual(control(f, "secrets-protected").verdict, CANNOT_TELL)
 
     def test_the_first_control_agrees_with_gha_024(self):
-        """It is verified exactly when every secret is listed and OBAAF-GHA-024 has nothing to say."""
+        """For a job that has steps and a plainly written environment, it is verified exactly when
+        every secret is listed and OBAAF-GHA-024 has nothing to say. (A job that calls a reusable
+        workflow and writes a matching `environment:` gets nothing from OBAAF-GHA-024 and "not met"
+        here, which is the control being right: a caller cannot declare an environment.)"""
         cases = itertools.product((("MODEL_API_KEY",), ("MODEL_API_KEY", "HELDOUT_TOKEN"), ("OTHER",), ("OTHER", "X_API_KEY")),
                                   (None, "main-only", "Main-Only", "staging", "${{ inputs.e }}"))
         for secrets, environment in cases:
@@ -226,9 +247,53 @@ class OutsiderInputTest(unittest.TestCase):
             with self.subTest(inputs=inputs):
                 self.assertEqual(self.verdict(steps=steps).verdict, CANNOT_TELL)
 
-    def test_a_fixed_ref_is_verified(self):
+    def test_a_fixed_ref_is_verified_and_said_to_be_fixed(self):
         steps = f"      - uses: actions/checkout@{SHA}\n        with: {{ref: {'c' * 40}}}"
-        self.assertEqual(self.verdict(steps=steps).verdict, VERIFIED)
+        made = self.verdict(steps=steps)
+        self.assertEqual(made.verdict, VERIFIED)
+        self.assertIn("1 checkout step(s) take a ref written in the workflow", made.detail)
+        self.assertNotIn("the ref the event names", made.detail)
+
+    def test_an_input_name_in_another_case_is_the_same_input(self):
+        """Found by the review of this slice. GitHub hands an action its inputs in upper case, so
+        `REF:` is `ref:`. Before, no rule that reads a step's inputs saw it."""
+        for inputs in ("{REF: refs/pull/7/head}", "{Ref: refs/pull/7/merge}", "{ref: REFS/PULL/7/head}",
+                       "{ref: pull/7/head}"):
+            steps = f"      - uses: actions/checkout@{SHA}\n        with: {inputs}"
+            with self.subTest(inputs=inputs):
+                self.assertEqual(self.verdict(steps=steps).verdict, NOT_MET)
+        steps = f"      - uses: actions/checkout@{SHA}\n        with: {{Repository: example/fork, REF: main}}"
+        self.assertEqual(self.verdict(steps=steps).verdict, CANNOT_TELL)
+
+    def test_other_rules_read_inputs_in_any_case_too(self):
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  build:\n    runs-on: ubuntu-24.04\n"
+                f"    steps:\n      - uses: actions/checkout@{SHA}\n"
+                "        with: {REF: '${{ github.event.pull_request.head.sha }}', Allow-Unsafe-PR-Checkout: true,\n"
+                "               Persist-Credentials: false}\n")
+        found = {f.rule for f in check(text, config={}).findings}
+        self.assertTrue({"OBAAF-GHA-002", "OBAAF-GHA-019"} <= found, found)
+        self.assertNotIn("OBAAF-GHA-011", found)
+
+    def test_the_same_input_twice_in_two_cases_is_an_error(self):
+        steps = f"      - uses: actions/checkout@{SHA}\n        with: {{ref: main, REF: refs/pull/7/head}}"
+        result = check(agent_workflow(steps=steps))
+        self.assertTrue(any("gives the same input twice" in error for error in result.errors), result.errors)
+        self.assertEqual(control(one(result, "OBAAF-GHA-005"), "no-outsider-input").verdict, NOT_MET)
+
+    def test_a_condition_without_braces_is_read_for_outsider_text(self):
+        """Found by the review of this slice: an `if:` is an expression without `${{ }}` too."""
+        made = self.verdict(on="push", cond="contains(github.event.head_commit.message, '/agent')")
+        self.assertEqual(made.verdict, NOT_MET)
+        self.assertIn("github.event.head_commit.message", made.detail)
+        steps = ("      - run: make\n        if: github.event.head_commit.author.name != 'bot'")
+        self.assertEqual(self.verdict(on="push", steps=steps).verdict, NOT_MET)
+
+    def test_more_ways_a_script_names_a_pull_requests_code(self):
+        for run in ("git pull origin pull/7/head", "git pull origin refs/pull/7/merge", "gh pr diff 7 | git apply",
+                    "gh -R o/r pr checkout 7", "hub pr checkout 7",
+                    "curl -sL https://github.com/o/r/pull/7.patch | git am"):
+            with self.subTest(run=run):
+                self.assertEqual(self.verdict(steps=f"      - run: {json.dumps(run)}").verdict, NOT_MET)
 
     def test_text_an_outsider_writes_is_not_met(self):
         made = self.verdict(on="push", job_extra="    env: {MESSAGE: '${{ github.event.head_commit.message }}'}")
@@ -244,6 +309,7 @@ class OutsiderInputTest(unittest.TestCase):
         f = one(check(text), "OBAAF-GHA-005")
         self.assertEqual(control(f, "no-outsider-input").verdict, CANNOT_TELL)
         self.assertEqual(control(f, "secrets-protected").verdict, NOT_MET)   # a caller cannot declare an environment
+        self.assertEqual(control(f, "environment-restricted").verdict, NOT_MET)
 
 
 class EgressTest(unittest.TestCase):
@@ -264,15 +330,47 @@ class EgressTest(unittest.TestCase):
         f = self.egress(steps=steps)
         self.assertEqual((f.kind, f.state, verdicts(f)), ("conditional", "new", {"egress-enforced": NOT_MET}))
 
-    def test_a_monitor_that_always_runs_is_cannot_tell_wherever_it_is(self):
-        monitor = f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block}}"
-        agent = f"      - uses: actions/checkout@{SHA}"
-        for steps in (monitor + "\n" + agent, agent + "\n" + monitor):
+    MONITOR = f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block}}"
+    CHECKOUT = f"      - uses: actions/checkout@{SHA}"
+
+    def test_a_monitor_that_always_runs_as_the_first_step_is_cannot_tell(self):
+        f = self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT)
+        self.assertEqual((f.kind, f.state, verdicts(f)),
+                         ("unverified-monitor", "cannot-tell", {"egress-enforced": CANNOT_TELL}))
+        self.assertIn(f"step-security/harden-runner@{SHA}", f.message)
+
+    def test_a_monitor_that_starts_after_other_steps_is_not_met(self):
+        f = self.egress(steps=self.CHECKOUT + "\n" + self.MONITOR)
+        self.assertEqual((f.kind, f.state, verdicts(f)), ("late-monitor", "new", {"egress-enforced": NOT_MET}))
+        self.assertIn("as step 2, so the steps before it run without it", f.message)
+
+    def test_an_acceptance_covers_the_monitor_as_written_and_no_other(self):
+        """Accepting "cannot tell" for one monitor must not cover the same job after the monitor is
+        moved, repinned, given other inputs or allowed to fail."""
+        from obaaf.checker import baseline
+        accepted = baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT))
+        changed = {
+            "another ref": self.MONITOR.replace(SHA, "v1"),
+            "another allow-list": self.MONITOR.replace("{egress-policy: block}",
+                                                       "{egress-policy: block, allowed-endpoints: '*:*'}"),
+            "sudo left on": self.MONITOR.replace("{egress-policy: block}", "{egress-policy: block, disable-sudo: false}"),
+            "may fail": self.MONITOR + "\n        continue-on-error: true",
+        }
+        for what, monitor in changed.items():
+            with self.subTest(what=what):
+                self.assertNotEqual(baseline.key(self.egress(steps=monitor + "\n" + self.CHECKOUT)), accepted)
+        self.assertNotEqual(baseline.key(self.egress(steps=self.CHECKOUT + "\n" + self.MONITOR)), accepted)
+        same = (self.MONITOR + "\n" + self.CHECKOUT + "\n      - run: make",                  # a step after it
+                self.MONITOR.replace("egress-policy", "EGRESS-POLICY") + "\n" + self.CHECKOUT)     # the same input
+        for steps in same:
+            self.assertEqual(baseline.key(self.egress(steps=steps)), accepted)
+
+    def test_a_policy_computed_when_the_job_runs_is_cannot_tell_and_the_same_finding_as_before(self):
+        for inputs in ("{egress-policy: '${{ inputs.policy }}'}", "'${{ fromJSON(inputs.monitor) }}'"):
+            steps = f"      - uses: step-security/harden-runner@{SHA}\n        with: {inputs}"
             f = self.egress(steps=steps)
-            with self.subTest(first=steps.startswith(monitor)):
-                self.assertEqual((f.kind, f.state, verdicts(f)),
-                                 ("unverified-monitor", "cannot-tell", {"egress-enforced": CANNOT_TELL}))
-                self.assertIn("step-security/harden-runner", f.message)
+            with self.subTest(inputs=inputs):
+                self.assertEqual((f.kind, f.facts, verdicts(f)), ("none", {}, {"egress-enforced": CANNOT_TELL}))
 
     def test_audit_mode_is_not_a_blocking_monitor(self):
         steps = f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: audit}}"
@@ -400,10 +498,40 @@ class TriggersAreReadFromTokensTest(unittest.TestCase):
                 self.assertIsNone(workflow.error)
                 self.assertEqual(workflow.jobs["agent"].triggers() == {"workflow_dispatch"}, narrowed)
 
-    def test_a_word_in_a_string_is_not_a_status_function(self):
-        self.assertFalse(wf_mod.runs_after_failure("contains(github.ref, 'always()')"))
-        self.assertTrue(wf_mod.runs_after_failure("${{ success() }} "))
-        self.assertFalse(wf_mod.runs_after_failure("(success() && inputs.x)"))
+    def test_a_status_function_counts_wherever_the_text_has_it(self):
+        """Found by the review of this slice: with the text read as tokens only, a quote outside
+        `${{ }}` hid the call that follows it, and a call inside a string was not one. GitHub may
+        read either as a call, so both count."""
+        for cond in ("it's ${{ always() }}", "'${{ always() }}' == 'true'", "don't skip ${{ !cancelled() }}",
+                     "x' ${{ success() }} '", "${{ true }}' ${{ always() }}", "${{ 'always()' }}",
+                     "${{ '!success()' }}", "${{ 'success() || true' }}", "contains(github.ref, 'always()')",
+                     "success() && contains(github.ref, 'success()')", "${{ success() }} ", "success() && 'a",
+                     "success() && (", "success() == true", "Always ()", "FAILURE()"):
+            with self.subTest(cond=cond):
+                self.assertTrue(wf_mod.runs_after_failure(cond))
+        for cond in ("", None, True, "success()", "${{ success() }}", "success() && inputs.x", "(success() && inputs.x)",
+                     "(success()) && inputs.x", "inputs.x && SUCCESS()", "needs.a.result == 'success'",
+                     "github.event_name == 'push'", "${{ inputs.x }} "):
+            with self.subTest(cond=cond):
+                self.assertFalse(wf_mod.runs_after_failure(cond))
+
+    def test_a_condition_too_long_to_read_is_an_error_and_not_a_traceback(self):
+        text = ("on: [push]\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    if: " + json.dumps("${{ ' }} '" * 3000 + "}}")
+                + "\n    steps: [{run: 'true'}]\n")
+        result = check(text, config={})
+        self.assertTrue(any("too many unfinished" in error for error in result.errors), result.errors)
+
+    def test_a_called_workflow_keeps_workflow_call_whatever_it_tests(self):
+        """`github.event_name` in a called workflow is the caller's event."""
+        for cond in ("github.event_name == 'pull_request_target'", "'push' == github.event_name",
+                     "github.event_name != 'workflow_call'", "github.event_name == 'workflow_call'"):
+            with self.subTest(cond=cond):
+                self.assertIn("workflow_call", self.narrow(cond, {"workflow_call", "push"}))
+
+    def test_a_string_with_no_end_narrows_nothing(self):
+        for cond in ("github.event_name == 'push", "github.event_name == '", "${{ github.event_name == 'push }}"):
+            with self.subTest(cond=cond):
+                self.assertEqual(self.narrow(cond), self.EVENTS)
 
     def test_other_rules_see_the_events_too(self):
         """OBAAF-GHA-001: the secret reaches a job a pull request can start."""
