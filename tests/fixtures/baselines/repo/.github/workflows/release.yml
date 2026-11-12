@@ -1,0 +1,17 @@
+# A fixture for the baseline tests, not a workflow to copy: a release job with nothing in front of it.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+        with:
+          persist-credentials: false
+      - run: gh release upload "$GITHUB_REF_NAME" dist/*
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}

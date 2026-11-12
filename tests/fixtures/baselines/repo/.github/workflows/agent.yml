@@ -1,0 +1,26 @@
+# A fixture for the baseline tests, not a workflow to copy: an agent job that holds secrets.
+name: agent
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  triage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.TRIAGE_TOKEN }}
+  declared:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      OBAAF_LANE: agent
+      OBAAF_EGRESS: api.example.com
+      MODEL_KEY: ${{ secrets.MODEL_API_KEY }}
+    steps:
+      - run: python -m agents.triage

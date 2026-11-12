@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 from obaaf import __version__
 from obaaf.catalog import Catalog, load
 from obaaf.checker import CheckResult, SEVERITY_ORDER
+from obaaf.checker import acceptance as acceptance_mod
+from obaaf.checker import baseline as baseline_mod
+from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -25,6 +29,42 @@ def _category(catalog: Catalog, rule_id: str) -> str:
 
 def _remediation(catalog: Catalog, rule_id: str) -> str:
     return catalog.rules[rule_id].get("remediation") or "config"
+
+
+def _entry_name(made) -> str:
+    return "baseline entry" if made.source == acceptance_mod.BASELINE else "ignore entry"
+
+
+def _controls(f) -> str:
+    return "; ".join(f"{c.name}: {c.verdict}" + (f" ({c.detail})" if c.detail else "") for c in f.controls)
+
+
+def _lifecycle_lines(f) -> list[str]:
+    """What the report says under a finding about where it stands: who accepted it and until when,
+    why an entry that names it does not count, and what was established about its controls."""
+    lines = []
+    made = f.acceptance
+    if made is not None and made.valid and f.baselined:
+        lines.append(one_line(f"        Accepted by {made.owner} until {made.expires}: {made.reason}"))
+    elif made is not None and not made.valid:
+        lines.append(one_line(f"        Not accepted: the {_entry_name(made)} that names this finding does not "
+                              f"count, because {'; '.join(made.problems)}."))
+    if f.controls:
+        if f.state == UNDECIDED:
+            lines.append(one_line("        Cannot tell: no control that would clear this finding is known to be "
+                                  f"missing, but not all could be verified, so it counts. {_controls(f)}."))
+        else:
+            lines.append(one_line(f"        Controls: {_controls(f)}."))
+    return lines
+
+
+def summary(result: CheckResult) -> dict:
+    """How many findings are in each state. Findings ignored by configuration are accepted ones."""
+    out = {NEW: 0, ACCEPTED: 0, UNDECIDED: 0, FIXED: 0}
+    for f in result.findings:
+        out[f.state] += 1
+    return {"new": out[NEW], "accepted": out[ACCEPTED], "cannotTell": out[UNDECIDED], "fixed": out[FIXED],
+            "notAccepted": len(result.not_accepted())}
 
 
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True) -> str:
@@ -47,6 +87,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else "")
                      + ("  (baseline)" if f.baselined else ""))
         lines.append(f"        {one_line(f.message)}")
+        lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
             lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
@@ -77,6 +118,14 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
     if result.baseline_used:
         accepted = sum(1 for f in active if f.baselined)
         lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
+        if result.baseline_format == baseline_mod.FORMAT_V1:
+            lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
+                         "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
+                         "accepts these findings, why and until when:")
+            checked = f" {shlex.quote(result.checked)}" if result.checked not in ("", ".") else ""
+            lines.append(one_line(f"    obaaf baseline migrate {shlex.quote(result.baseline_path or 'FILE')}{checked} "
+                                  "--owner OWNER --reason REASON --expires YYYY-MM-DD"))
+            lines.append("  Give it the --config and --platform this check was given, if any.")
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
@@ -84,13 +133,40 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             for entry in result.baseline_stale:
                 where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
                 lines.append(one_line(f"  no longer found: {entry.get('rule')} {entry.get('path')}{where} - "
-                                      f"{entry.get('message', '')}"))
+                                      f"{_entry_text(entry)}"))
+    refused = result.not_accepted()
+    if refused:
+        lines.append(f"Not accepted: {len(refused)} finding(s) are named by an ignore or baseline entry that does "
+                     "not count. An acceptance needs an owner, a reason and an expiry date that has not passed "
+                     f"and is at most {acceptance_mod.MAX_DAYS} days ahead; until it has them the finding counts.")
+    undecided = [f for f in active if f.state == UNDECIDED]
+    if undecided:
+        lines.append(f"Cannot tell: for {len(undecided)} finding(s) a control that would clear it could not be "
+                     "verified. They count as findings; the checker does not assume a control it cannot read.")
+    cleared = result.cleared()
+    if cleared:
+        lines.append(f"Fixed: {len(cleared)} finding(s) are cleared by controls the checker verified (not counted "
+                     "above):")
+        for f in cleared:
+            where = f" [{f.scope or 'job'} {f.job}]" if f.job else ""
+            lines.append(one_line(f"  fixed: {f.rule} {f.path}:{f.line}{where} - {_controls(f)}"))
     if result.notes:
         lines.append("")
         lines.append("Notes (advisory; they do not affect the result):")
         for note in result.notes:
             lines.append(f"  - {one_line(note)}")
     return "\n".join(lines).lstrip("\n") + "\n"
+
+
+def _entry_text(entry: dict) -> str:
+    """What a baseline entry is about, for the line that says it no longer matches a finding."""
+    if entry.get("message"):
+        return str(entry["message"])
+    parts = [str(entry["kind"])] if entry.get("kind") else []
+    facts = entry.get("facts")
+    for name, value in (facts.items() if isinstance(facts, dict) else ()):
+        parts.append(f"{name}: {', '.join(str(v) for v in value) if isinstance(value, list) else value}")
+    return "; ".join(parts) or "the finding it names"
 
 
 def _jenkins_coverage_text(result: CheckResult) -> list[str]:
@@ -152,14 +228,31 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
                 "suppressed": f.suppressed,
                 **({"scope": f.scope} if f.scope else {}),
                 **({"baselined": f.baselined} if result.baseline_used else {}),
+                # Added in 0.4: where the finding stands, and what identifies it for an acceptance.
+                "state": f.state,
+                **({"kind": f.kind} if f.kind else {}),
+                **({"facts": f.facts} if f.facts else {}),
+                **({"acceptance": f.acceptance.as_dict()} if f.acceptance is not None else {}),
+                **({"controls": [{"name": c.name, "verdict": c.verdict, "detail": c.detail} for c in f.controls]}
+                   if f.controls else {}),
             }
-            for f in result.findings
+            # A fixed finding is not a finding to act on. It is listed under "fixed", so a consumer
+            # that counts "findings" does not count it.
+            for f in result.findings if f.state != FIXED
         ],
         "notes": list(result.notes),
+        "summary": summary(result),
     }
+    cleared = result.cleared()
+    if cleared:
+        payload["fixed"] = [
+            {"rule": f.rule, "title": catalog.rules[f.rule]["title"], "severity": f.severity, "path": f.path,
+             "line": f.line, "job": f.job, "step": f.step, "message": f.message,
+             "controls": [{"name": c.name, "verdict": c.verdict, "detail": c.detail} for c in f.controls]}
+            for f in cleared]
     if result.baseline_used:
         # Present only with --baseline, so existing consumers see no change.
-        payload["baseline"] = {"stale": result.baseline_stale}
+        payload["baseline"] = {"stale": result.baseline_stale, "format": result.baseline_format}
     if result.jenkins_files:
         # Added in 0.3: present only when Jenkinsfiles were checked, so existing consumers see no change.
         payload["jenkins"] = {"advisory": True, "files": result.jenkins, "coverage": result.coverage}
@@ -169,12 +262,13 @@ def to_json(result: CheckResult, catalog: Catalog | None = None) -> str:
 def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
     """SARIF 2.1.0, suitable for GitHub code scanning (upload-sarif)."""
     catalog = catalog or load()
-    used = sorted({f.rule for f in result.findings})
+    reported = [f for f in result.findings if f.state != FIXED]
+    used = sorted({f.rule for f in reported})
     rule_index = {rid: i for i, rid in enumerate(used)}
     rules = []
     for rid in used:
         rule = catalog.rules[rid]
-        severity = max((f.severity for f in result.findings if f.rule == rid),
+        severity = max((f.severity for f in reported if f.rule == rid),
                        key=SEVERITY_ORDER.__getitem__)
         cat = _category(catalog, rid)
         tags = [f"obaaf-{cat}", "security", "supply-chain"] + list(rule.get("requirements", [])) \
@@ -193,7 +287,7 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
                            "obaaf-category": cat, "obaaf-remediation": _remediation(catalog, rid)},
         })
     results = []
-    for f in result.findings:
+    for f in reported:
         entry = {
             "ruleId": f.rule,
             "ruleIndex": rule_index[f.rule],
@@ -205,8 +299,10 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
                     "region": {"startLine": max(1, f.line)},
                 }
             }],
-            "properties": {"security-severity": SECURITY_SEVERITY[f.severity]},
+            "properties": {"security-severity": SECURITY_SEVERITY[f.severity], "obaaf-state": f.state},
         }
+        if f.acceptance is not None and not f.acceptance.valid:
+            entry["properties"]["obaaf-not-accepted"] = "; ".join(f.acceptance.problems)
         if f.suppressed:
             entry["suppressions"] = [{"kind": "external", "justification": f.suppressed}]
         if result.baseline_used and not f.suppressed:

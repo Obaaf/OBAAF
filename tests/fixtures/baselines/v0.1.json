@@ -1,0 +1,138 @@
+{
+  "format": "obaaf-baseline/v0.1",
+  "tool": "obaaf 0.3.0",
+  "findings": [
+    {
+      "fingerprint": "sha256:e4bc57dde4d9a6592ede690421fc993faf54a9c80dda6efd9d8b4ad6d4ee4c5a",
+      "rule": "OBAAF-REPO-001",
+      "severity": "medium",
+      "path": ".github/CODEOWNERS",
+      "message": "The repository has no CODEOWNERS file."
+    },
+    {
+      "fingerprint": "sha256:4e41c5a260e0639ffdcc4f27edee5eb56a8b84f3ec58a9e6222be57925d2c210",
+      "rule": "OBAAF-GHA-001",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "declared",
+      "message": "Job 'declared' receives MODEL_API_KEY and can be started by issue_comment."
+    },
+    {
+      "fingerprint": "sha256:3b42875e6813c7d79e29c2861991d5d24881d4a703c6abb74af277b89deda2a4",
+      "rule": "OBAAF-GHA-005",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "declared",
+      "message": "Agent job 'declared' receives MODEL_API_KEY."
+    },
+    {
+      "fingerprint": "sha256:9c03af9e2a2b4d5f8e7f41d84dea39eecf56f7f4d61d27dd4cad51715b8f9c36",
+      "rule": "OBAAF-GHA-020",
+      "severity": "low",
+      "path": ".github/workflows/agent.yml",
+      "job": "declared",
+      "message": "Agent job 'declared': it declares OBAAF_EGRESS (api.example.com) but nothing in the job enforces it. Make sure the runner's network enforces the policy."
+    },
+    {
+      "fingerprint": "sha256:85798cde9ad0ad7547c29c5a964b6cdeff714e95dd1fca8809338654adbea331",
+      "rule": "OBAAF-GHA-001",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "message": "Job 'triage' receives ANTHROPIC_API_KEY, TRIAGE_TOKEN and can be started by issue_comment."
+    },
+    {
+      "fingerprint": "sha256:4034633ae66d07c26e169e6b8bd8c4f0f1979b92ba02af0199fa71b5e5b3bc97",
+      "rule": "OBAAF-GHA-003",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "message": "Agent job 'triage' (uses anthropics/claude-code-action) holds write permissions: contents."
+    },
+    {
+      "fingerprint": "sha256:354d5b2466241ba579c1fc0385f6628d02f85baca24242dc46b73d6f675bdcb0",
+      "rule": "OBAAF-GHA-005",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "message": "Agent job 'triage' receives ANTHROPIC_API_KEY, TRIAGE_TOKEN."
+    },
+    {
+      "fingerprint": "sha256:9ef020d6e50f653fd55c278776bc38f33be61d38f30e250c466cabc0ba6d56ff",
+      "rule": "OBAAF-GHA-008",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "step": "anthropics/claude-code-action@v1",
+      "message": "Action 'anthropics/claude-code-action@v1' is pinned to 'v1', not a full commit SHA."
+    },
+    {
+      "fingerprint": "sha256:affe6ee49a4cce507a5ee6e48e18e72c491aff976e6cef8b5cacd38c946e6b48",
+      "rule": "OBAAF-GHA-008",
+      "severity": "high",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "step": "actions/checkout@v7",
+      "message": "Action 'actions/checkout@v7' is pinned to 'v7', not a full commit SHA."
+    },
+    {
+      "fingerprint": "sha256:d03c7b409936f0fe47b2d651cefefa07c0f6570f23ccf1ae612d65289fcb5665",
+      "rule": "OBAAF-GHA-011",
+      "severity": "medium",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "step": "actions/checkout@v7",
+      "message": "Step 'actions/checkout@v7' persists the job token for later steps."
+    },
+    {
+      "fingerprint": "sha256:7c652656c0014b3e3ec9aeac99767434b5406b3ec08fe9a3ff6aa79bf48b2f75",
+      "rule": "OBAAF-GHA-020",
+      "severity": "low",
+      "path": ".github/workflows/agent.yml",
+      "job": "triage",
+      "message": "Agent job 'triage' shows no egress restriction (no OBAAF_EGRESS declaration and no blocking egress monitor)."
+    },
+    {
+      "fingerprint": "sha256:d2526157a935d61f253319ba50cb03bc7eb3863752502f489841a19574a964a3",
+      "rule": "OBAAF-GHA-001",
+      "severity": "low",
+      "path": ".github/workflows/ci.yml",
+      "job": "test",
+      "message": "Job 'test' receives CODECOV_TOKEN and runs on pull requests. Forks get no secrets, but branches pushed by anyone with write access do."
+    },
+    {
+      "fingerprint": "sha256:28ad147a586a47bee734579cd14e92d5691af273f2da35090fc3efdad50c7017",
+      "rule": "OBAAF-GHA-006",
+      "severity": "low",
+      "path": ".github/workflows/release.yml",
+      "job": "publish",
+      "message": "Release job 'publish' does not set cache-mode: none, so a cache step added later would read caches other workflows wrote."
+    },
+    {
+      "fingerprint": "sha256:f967acc7da973dcfe8a1e0e3675fa00703065949948c9003a1c20c4f13010e40",
+      "rule": "OBAAF-GHA-014",
+      "severity": "medium",
+      "path": ".github/workflows/release.yml",
+      "job": "publish",
+      "step": "step 2",
+      "message": "Release job 'publish' uploads in 'step 2' without a protected environment."
+    },
+    {
+      "fingerprint": "sha256:8526b2e420b4b5dc8d1efb46378b83f338f031abc9115a4889c9d8a2768d7ccf",
+      "rule": "OBAAF-GHA-016",
+      "severity": "high",
+      "path": ".github/workflows/release.yml",
+      "job": "publish",
+      "step": "step 2",
+      "message": "Step 'step 2' uploads without an earlier check that stops it when verification fails."
+    },
+    {
+      "fingerprint": "sha256:d57b28e70f584b7e4549b4e71fc60dc0f86cf7b741ccac6f76b3a14f7d006a59",
+      "rule": "OBAAF-GHA-017",
+      "severity": "medium",
+      "path": ".github/workflows/release.yml",
+      "job": "publish",
+      "message": "Job 'publish' publishes artifacts, but no job in this workflow signs provenance for them."
+    }
+  ]
+}
