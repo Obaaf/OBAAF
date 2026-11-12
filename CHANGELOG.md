@@ -66,6 +66,8 @@ GitHub hands an action its inputs as environment variables named in upper case, 
 ### Release policy
 
 - This repository's own release policy now sets `agents.since` to the commit of release 0.3.0, the first release that passed the full `obaaf verify release` gate. Once this is on `main`, a release checks commits from OBAAF's agent lane (a record trailer, a record file, or the effect lane's identity) from that commit to the released one, and no longer over the whole history (D-025). There were none in the history up to 0.3.0. Commits written with an AI assistant and merged through ordinary review are not what this check counts. Nothing changes for adopters.
+- **The version on `main` is now a development number, `0.4.0.dev0`.** It said 0.3.0 while holding changes 0.3.0 does not have, so `obaaf --version` and the `tool` field of every report from an install of `main` named a release they did not come from. The generated documents and the self-assessment form now say when they were generated from a development version instead of saying it is in use with pilot teams. Nothing changes for anyone who installs a release.
+- **The release workflow refuses a tag that does not name the version it built.** A tag `v0.4.0` on a commit whose package still says `0.4.0.dev0` now stops in the first job, before anything is signed or uploaded. Without it, forgetting to set the version would have uploaded a development version to PyPI, which keeps every upload.
 
 ### Fixed
 

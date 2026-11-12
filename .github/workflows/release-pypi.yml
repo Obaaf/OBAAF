@@ -50,6 +50,22 @@ jobs:
             --actor "$GITHUB_ACTOR" --out "$RUNNER_TEMP/build-record.json"
           mkdir -p "$RUNNER_TEMP/obaaf-attest"
           cp "$RUNNER_TEMP/build-record.json" "$RUNNER_TEMP/obaaf-attest/build-record.json"
+      - name: Refuse a tag that does not name the version that was built
+        # Between two releases the version on main is a .devN number. A tag pushed without
+        # setting the release version first would upload that development version, and PyPI
+        # keeps every upload for good. Checked on the wheel that was built, before anything
+        # is signed or uploaded.
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$("$RUNNER_TEMP/clean/bin/python" -c 'import obaaf; print(obaaf.__version__)')"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::The tag is $TAG and the package built from it says $version. Set __version__ in src/obaaf/__init__.py to the release version in the commit you tag (docs/releasing.md)."
+            exit 1
+          fi
+          echo "The tag $TAG names the version that was built."
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: obaaf-dist, path: dist, if-no-files-found: error, retention-days: 7 }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
