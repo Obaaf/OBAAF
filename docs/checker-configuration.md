@@ -137,7 +137,48 @@ Every finding is in one of four states. JSON output gives the state of each find
 | **fixed** | Every control that clears the finding was read and verified by the checker. It is listed at the end of the report with the controls. | No |
 | **cannot tell** (`cannot-tell` in JSON) | No control that would clear it is known to be missing, but the checker could not read what decides at least one of them. | Yes. The checker never assumes a control it cannot read. |
 
-No rule reports controls yet, so today every finding is new or accepted. The states "fixed" and "cannot tell" are there for the rules that will: a secret in an agent job (OBAAF-GHA-005) and an agent job with no egress restriction (OBAAF-GHA-020) are the first two planned.
+Two rules report controls: a secret in an agent job (OBAAF-GHA-005) and an agent job with no egress restriction (OBAAF-GHA-020). Every other finding is new or accepted.
+
+<a id="controls"></a>
+### Controls that clear a finding
+
+Under a finding that has controls the report lists each one with a verdict:
+
+- **verified**: the checker read what decides it, and it holds.
+- **not met**: the checker read it, and it does not hold.
+- **cannot tell**: the checker could not read what decides it. This is never treated as a pass.
+
+A finding is fixed when every control is verified. If none is known to be missing and at least one could not be read, the finding is "cannot tell". If any is not met, it is new. Controls do not change which finding an acceptance names, so a finding can be accepted whatever its controls say.
+
+```text
+.github/workflows/agent.yml
+     5  HIGH   OBAAF-GHA-005  Secret available to an agent job  [job agent]
+        Agent job 'agent' receives MODEL_API_KEY.
+        Controls (it is cleared when all 4 are verified):
+          verified     each of the job's secrets is listed in protected_secrets, and the job declares the environment named there (MODEL_API_KEY in environment 'main-only')
+          cannot tell  the secrets are stored only in that environment, and only protected branches may use it (where a secret is stored and which branches may use environment 'main-only' are repository settings, which obaaf check does not read; obaaf audit reads environments and their branch rules)
+          verified     no pull request, issue or comment starts the job, and its checkout steps and the event fields it reads take nothing from one (started only by workflow_dispatch; 1 checkout step(s) take the ref the event names)
+          not met      a control the checker recognises limits the job's network access to an allow-list (no blocking egress control in the job)
+```
+
+**Neither finding can be cleared today.** For OBAAF-GHA-005 the second control is a repository setting, which `obaaf check` does not read, and for both findings no egress control is reported as verified yet. Until that changes, the controls say what is in place and what is missing, and the finding is accepted with an owner, a reason and an expiry date, or it fails the check. JSON output gives the controls of each finding as `controls`, each with an `id` that stays the same when the wording changes.
+
+What each control is, and what the checker reads to decide it:
+
+| Control (`id`) | Verified when | Not met when | Cannot tell when |
+| --- | --- | --- | --- |
+| `secrets-protected` | Every secret the job references matches an entry in [`protected_secrets`](#protected-secrets), and the job declares the environment the entry names (any environment, for an entry that names none). This is what OBAAF-GHA-024 checks for the secrets that are listed. | A secret is not listed; the job can take every secret (`toJSON(secrets)`, `secrets[...]`, `secrets: inherit`); the job declares no environment, or another one; the job calls a reusable workflow, which cannot declare an environment. | The job's environment is an expression, is not written as text (a number, true or false, a list or a mapping: YAML readers do not agree on how numbers are spelt), or differs from the one named only in the case of letters outside ASCII. |
+| `environment-restricted` | Never, today. | The job declares no environment, or calls a reusable workflow: its secrets then come from the repository or organization. | In every other case. Where a secret is stored, and which branches may use an environment, are repository settings. [`obaaf audit`](settings-audit.md) reads environments and their branch rules; `obaaf check` does not use what it reads yet. |
+| `no-outsider-input` | Only `push`, `workflow_dispatch`, `schedule` or `release` can start the job; every `actions/checkout` step takes the ref the event names or one written out in the workflow; and no `${{ }}` in the job, and no `if:` of the job or its steps, reads a field someone without write access can write (the fields OBAAF-GHA-010 lists). | A pull request, an issue, a comment or another outsider's event can start the job, a run that follows any other run included; a checkout step names a pull request's ref; a script uses a command the checker knows to fetch a pull request's code (`gh pr checkout`, `gh pr diff`, `git fetch` or `git pull` of `pull/N/head`, a `.patch` address); an expression or condition reads such a field (a commit message, for example). | Another event can start the job (`workflow_call`, `repository_dispatch`, `merge_group`, a run that the job's `if:` limits to runs started by `push`, `release`, `workflow_dispatch` or `schedule`), or no event was found; a checkout names another repository or a ref computed when the job runs, or takes its inputs from an expression; the job calls a reusable workflow. |
+| `egress-enforced` | Never, today. | The job has no blocking egress control, has one behind an `if:`, starts one anywhere but as its first step on its own (after other steps, in a `parallel` group or in the background, other steps can run without it), or only declares a policy in `OBAAF_EGRESS`. | The job's first step uses `step-security/harden-runner` with `egress-policy: block` and no `if:`. Whether that limits the agent depends on its version and on the job being unable to undo it with sudo or a container, which the checker does not read yet. Also when a monitor's `egress-policy` is computed when the job runs. |
+
+What the third control does not read, so that "verified" is not taken for more than it is. Its name says what it covers: the events, the checkout steps and the event fields. It does not cover what a script, an action other than `actions/checkout` or the agent itself fetches while the job runs (issue text fetched with `gh`, a web page, a pull request fetched by a command the checker does not know); a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; a value another job hands over through `needs.*.outputs`; or the content of a local action. A proxy that holds the model key is not counted as a control: none has been tested.
+
+A baseline entry that accepts OBAAF-GHA-020 for a monitor the checker cannot verify is for the workflow file as it stood, byte for byte; the finding shows the first 32 characters of the file's SHA-256. Any later change to that file makes the finding a new one, to be looked at again. That is blunt on purpose: the checker cannot verify the monitor, so it does not judge which changes to it matter. An [ignore entry](#ignore) names the rule, the file and the job and holds until its date; use one if the finding should stay accepted while the file changes.
+
+Which events can start a job is read from the tokens of the job's `if:`. Only a comparison of `github.event_name` with a text (`==` or `!=`, either way round), on its own or joined to other conditions by `&&` and `||`, rules an event out. A negation, a comparison of a comparison, a function, and words inside a string rule nothing out. An `if:` that has `${{ }}` and anything outside it, even a space or the line break of a `|` block, is a text to GitHub and is always true, so it rules nothing out either. In a workflow that other workflows call, `github.event_name` is the caller's event, so no test rules `workflow_call` out. A job that needs another job is limited to the events that job runs on, unless its `if:` has `always(`, `failure(` or `cancelled(` anywhere in it, or `success()` anywhere but as one of the conditions joined by `&&`.
+
+Input names under `with:` are read with A to Z in either case, as GitHub reads them: `REF:` is the `ref` input. A step that gives the same input twice in two spellings is reported as an error, because the checker cannot tell which value GitHub uses. So is an input name with a letter outside ASCII, because it is not established what GitHub's upper-casing makes of one.
 
 ### An acceptance needs an owner, a reason and an expiry date
 
@@ -275,7 +316,7 @@ steps that run an agent, and lane overrides and ignore entries name a stage as `
 
 ## Egress
 
-`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020` and the agent lane templates for how egress is enforced.
+`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020`, [the controls the checker reads](#controls) and the agent lane templates for how egress is enforced.
 
 ## Reference
 

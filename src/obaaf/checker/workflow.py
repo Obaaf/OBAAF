@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -51,20 +52,59 @@ HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
 CONTROL_STEP_KEYS = {"wait", "wait-all", "cancel"}
 
 
+_LOUD_STATUS_RE = re.compile(r"(always|failure|cancelled)\s*\(", re.I)
+_SUCCESS_RE = re.compile(r"success\s*\(", re.I)
+
+
 def runs_after_failure(cond) -> bool:
     """Whether an `if:` can let a step or job run although an earlier step, or a job it needs,
     failed or was skipped.
 
-    Without a status function GitHub adds an implicit `success() &&`. With `always()`,
-    `failure()` or `cancelled()`, or with `success()` inside an `||` or negated, the job or step
-    can run regardless.
+    Without a status function GitHub adds an implicit `success() &&`, and the answer is no. The
+    answer is yes when `always(`, `failure(` or `cancelled(` appears anywhere in the text, inside a
+    string or outside `${{ }}` included: where the text is not what its tokens look like, a status
+    function is taken for the worst. `success()` keeps the implicit meaning only when the text is
+    one expression and every `success(` in it is a call that is itself one of the conditions joined
+    by `&&` at the top (`success() && x`). Anywhere else (`success() || x`, `!success()`,
+    `success() == false`, as an argument, inside a string, beside text outside `${{ }}`) the job or
+    step is taken to run regardless.
     """
-    text = str(cond or "").strip()
-    if text.startswith("${{") and text.endswith("}}"):
-        text = text[3:-2].strip()
-    if re.search(r"\b(always|failure|cancelled)\s*\(", text, re.I):
+    text = str(cond or "")
+    if _LOUD_STATUS_RE.search(text):
         return True
-    return bool(re.search(r"\bsuccess\s*\(", text, re.I) and ("||" in text or re.search(r"!\s*success", text, re.I)))
+    written = len(_SUCCESS_RE.findall(text))
+    if not written:
+        return False
+    try:
+        body = condition_expression(text)
+    except (expr_mod.TooComplex, RecursionError):
+        return True
+    if body is None or body.count("'") % 2:
+        return True         # not one expression, or one that ends inside a string
+    toks = expr_mod.tokens(body)
+    if not _balanced(toks):
+        return True
+    close = expr_mod._closers(toks)
+    lo, hi = _unwrapped(toks, close, 0, len(toks))
+    if len(_split(toks, close, lo, hi, "|")) > 1:
+        return True
+    plain = 0
+    for a, b in _split(toks, close, lo, hi, "&"):
+        a, b = _unwrapped(toks, close, a, b)
+        if b - a == 3 and toks[a][0] == "id" and toks[a][1].lower() == "success" \
+                and toks[a + 1:b] == [("op", "("), ("op", ")")]:
+            plain += 1
+    # Every `success(` the text holds must be one of those calls. One more, in a string or anywhere
+    # else, and the condition is not the plain form.
+    return plain != written
+
+
+def _unwrapped(toks: list, close: list, lo: int, hi: int) -> tuple[int, int]:
+    """toks[lo:hi] without parentheses that enclose all of it, which change nothing."""
+    while hi - lo >= 2 and toks[lo] == ("op", "(") and close[lo] == hi - 1:
+        lo, hi = lo + 1, hi - 1
+    return lo, hi
+
 
 # Event fields an outsider can write (OBAAF-GHA-010). Matched inside ${{ }}.
 UNTRUSTED_FIELDS = [
@@ -113,30 +153,159 @@ PR_FETCH_CMD_RE = re.compile(
 )
 
 
-def _narrow(events: set[str], cond: str) -> set[str]:
-    """Narrow a job's possible triggers by simple tests on github.event_name in its `if:`."""
-    expr = cond.strip()
-    if expr.startswith("${{") and expr.endswith("}}"):
-        expr = expr[3:-2]
-    # A negated status function (`!cancelled()`, common beside `needs.x.result == 'success'`) says
-    # nothing about the event, so it cannot invert an event test; drop it before looking for others.
-    expr = re.sub(r"!\s*(?:always|cancelled|failure|success)\s*\(\s*\)", "true", expr, flags=re.I)
-    if re.search(r"!(?!=)", expr):
-        return events  # a negation can invert any test below; do not narrow
-    eq_rx = re.compile(r"github\.event_name\s*==\s*['\"]([A-Za-z_]+)['\"]", re.I)
-    ne_rx = re.compile(r"github\.event_name\s*!=\s*['\"]([A-Za-z_]+)['\"]", re.I)
-    disjuncts = expr.split("||")
-    pinned = [{e.lower() for e in eq_rx.findall(d)} for d in disjuncts]
-    if all(pinned):
-        # Every alternative requires a specific event, so only those events reach the job.
-        events &= set().union(*pinned)
-    if len(disjuncts) == 1:
-        events -= {e.lower() for e in ne_rx.findall(expr)}
-    run_rx = re.compile(r"github\.event\.workflow_run\.event\s*==\s*['\"]([A-Za-z_]+)['\"]", re.I)
-    run_events = [{e.lower() for e in run_rx.findall(d)} for d in disjuncts]
-    if "workflow_run" in events and all(run_events) and set().union(*run_events) <= _TRUSTED_RUN_EVENTS:
-        events = (events - {"workflow_run"}) | {TRUSTED_WORKFLOW_RUN}
+def _balanced(toks: list) -> bool:
+    """Whether every parenthesis and bracket is closed by its own kind, in order. GitHub refuses an
+    expression where they are not, so nothing is concluded from one."""
+    stack: list[str] = []
+    for kind, text in toks:
+        if kind != "op":
+            continue
+        if text in "([":
+            stack.append(text)
+        elif text in ")]":
+            if not stack or stack.pop() != ("(" if text == ")" else "["):
+                return False
+    return not stack
+
+
+def _split(toks: list, close: list, lo: int, hi: int, op: str) -> list[tuple[int, int]]:
+    """The parts of toks[lo:hi] between each `||` or `&&` (`op` is `|` or `&`) that is not inside
+    parentheses or brackets."""
+    parts, start, i = [], lo, lo
+    while i < hi:
+        token = toks[i]
+        if token in (("op", "("), ("op", "[")):
+            i = min(close[i], hi) + 1
+        elif token == ("op", op) and i + 1 < hi and toks[i + 1] == ("op", op):
+            parts.append((start, i))
+            start = i = i + 2
+        else:
+            i += 1
+    parts.append((start, hi))
+    return parts
+
+
+def _plain_path(toks: list, lo: int, hi: int) -> tuple | None:
+    """The names of a context reference that is all of toks[lo:hi] (`github.event_name`,
+    `github['event_name']`), in lower case; None for anything else."""
+    if lo >= hi or toks[lo][0] != "id":
+        return None
+    names, i = [toks[lo][1]], lo + 1
+    while i < hi:
+        if toks[i] == ("op", ".") and i + 1 < hi and toks[i + 1][0] == "id":
+            names.append(toks[i + 1][1])
+            i += 2
+        elif toks[i] == ("op", "[") and i + 2 < hi and toks[i + 1][0] == "str" and toks[i + 2] == ("op", "]"):
+            names.append(toks[i + 1][1])
+            i += 3
+        else:
+            return None
+    if not all(name.isascii() for name in names):
+        return None
+    return tuple(name.lower() for name in names)
+
+
+def _event_test(toks: list, lo: int, hi: int) -> tuple[tuple, bool, str] | None:
+    """(path, equal, value) when toks[lo:hi] is exactly one comparison of a context reference with a
+    string, `==` or `!=`, either way round. GitHub compares strings without regard to case, so the
+    value is returned in lower case; a value with a letter outside ASCII is not read, because what
+    GitHub's comparison makes of it has not been established."""
+    if hi - lo < 4:
+        return None
+    if toks[hi - 1][0] == "str" and toks[hi - 2] == ("op", "=") and toks[hi - 3] in (("op", "="), ("op", "!")):
+        path, operator, value = _plain_path(toks, lo, hi - 3), toks[hi - 3][1], toks[hi - 1][1]
+    elif toks[lo][0] == "str" and toks[lo + 1] in (("op", "="), ("op", "!")) and toks[lo + 2] == ("op", "="):
+        path, operator, value = _plain_path(toks, lo + 3, hi), toks[lo + 1][1], toks[lo][1]
+    else:
+        return None
+    if path is None or not value.isascii():
+        return None
+    return path, operator == "=", value.lower()
+
+
+_EVENT_NAME = ("github", "event_name")
+_RUN_EVENT = ("github", "event", "workflow_run", "event")
+_MAX_CONDITION_DEPTH = 200
+
+
+def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, depth: int = 0) -> frozenset:
+    """The events, out of `events`, on which the condition toks[lo:hi] can be true.
+
+    It is read as GitHub evaluates it: `||` binds loosest, then `&&`, then a comparison. Only a
+    part that is exactly `github.event_name == '<event>'` (or `!=`), or
+    `github.event.workflow_run.event == '<event>'`, rules an event out. Any other part (a function,
+    a negation, a comparison of a comparison, text inside a string) is taken to be true on every
+    event, so the answer can name an event the job never runs on and cannot leave out one it does.
+    """
+    if depth > _MAX_CONDITION_DEPTH:
+        return events
+    parts = _split(toks, close, lo, hi, "|")
+    if len(parts) > 1:
+        out: frozenset = frozenset()
+        for a, b in parts:
+            out |= _admitted(toks, close, a, b, events, depth + 1)
+        return out
+    parts = _split(toks, close, lo, hi, "&")
+    if len(parts) > 1:
+        out = events
+        for a, b in parts:
+            out &= _admitted(toks, close, a, b, events, depth + 1)
+        return out
+    if hi - lo >= 2 and toks[lo] == ("op", "(") and close[lo] == hi - 1:
+        return _admitted(toks, close, lo + 1, hi - 1, events, depth + 1)
+    test = _event_test(toks, lo, hi)
+    if test is None:
+        return events
+    path, equal, value = test
+    if path == _EVENT_NAME:
+        named = {"workflow_run", TRUSTED_WORKFLOW_RUN} if value == "workflow_run" else {value}
+        # In a workflow another workflow calls, `github.event_name` is the caller's event, which the
+        # checker does not know, so no test of it rules `workflow_call` out.
+        called = events & {"workflow_call"}
+        return (events & named if equal else events - named) | called
+    if path == _RUN_EVENT and equal:
+        # True only for a run that followed a run started by `value`. Other events are left in:
+        # the test is false on them, and leaving them in can only add findings.
+        return events - {"workflow_run" if value in _TRUSTED_RUN_EVENTS else TRUSTED_WORKFLOW_RUN}
     return events
+
+
+def condition_expression(cond: str) -> str | None:
+    """The expression an `if:` holds, or None when GitHub does not evaluate the text as one
+    expression. Without `${{` the whole text is the expression. With it, the text must be exactly one
+    `${{ ... }}`: anything outside it, even a space or the line break a block scalar adds, makes the
+    value a string, and a string that is not empty counts as true whatever it says."""
+    if expr_mod.OPEN not in cond:
+        return cond
+    if not (cond.startswith(expr_mod.OPEN) and cond.endswith(expr_mod.CLOSE)):
+        return None
+    body = cond[len(expr_mod.OPEN):-len(expr_mod.CLOSE)]
+    return body if expr_mod.bodies(cond)[0] == body else None
+
+
+@lru_cache(maxsize=4096)
+def _narrowed(cond: str, events: frozenset) -> frozenset:
+    try:
+        body = condition_expression(cond)
+        if body is None or body.count("'") % 2:
+            return events       # not one expression, or one that ends inside a string
+        toks = expr_mod.tokens(body)
+        if not _balanced(toks):
+            return events
+        atoms = events | ({TRUSTED_WORKFLOW_RUN} if "workflow_run" in events else frozenset())
+        out = _admitted(toks, expr_mod._closers(toks), 0, len(toks), atoms)
+    except (expr_mod.TooComplex, RecursionError):
+        return events
+    # A run that follows another run is one event with two origins. When both can start the job it
+    # is listed as `workflow_run`, the wider of the two.
+    return out - {TRUSTED_WORKFLOW_RUN} if "workflow_run" in out else out
+
+
+def _narrow(events: set[str], cond: str) -> set[str]:
+    """Narrow a job's possible triggers by the tests on the event in its `if:`. The condition is
+    read from its tokens (see `_admitted`), never by searching its text, so words inside a string, a
+    comparison of a comparison, or text outside `${{ }}` cannot make an event disappear."""
+    return set(_narrowed(cond, frozenset(events)))
 
 
 def expressions(value: Any, _seen: set | None = None) -> Iterator[str]:
@@ -233,8 +402,21 @@ class Step:
 
     @property
     def with_(self) -> dict:
+        """The step's inputs, by name with ASCII letters in lower case. GitHub hands an action its
+        inputs as environment variables named in upper case, so `REF:` and `ref:` are the same
+        input. Only A to Z are folded: what GitHub's upper-casing makes of any other letter is not
+        established, so a name with one is left as written and reported as a problem when the file
+        is read. So are two names that are the same input. Here the values of such a pair are
+        joined, which lets a rule that searches a value see both and can make a rule that compares
+        the whole value miss; the problem, which fails the check, is what covers that."""
         value = self.raw.get("with")
-        return value if isinstance(value, dict) else {}
+        if not isinstance(value, dict):
+            return {}
+        out: dict = {}
+        for name, given in value.items():
+            key = input_name(name)
+            out[key] = f"{out[key]} {given}" if key in out else given
+        return out
 
     @property
     def env(self) -> dict:
@@ -519,6 +701,7 @@ class Workflow:
     error: str | None = None
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list[str] = field(default_factory=list)  # lane declarations that name no lane
+    digest: str = ""            # sha256 of the file's bytes, when it was read from a file
 
     @property
     def triggers(self) -> dict[str, Any]:
@@ -612,9 +795,41 @@ def parse(path: str, text: str) -> Workflow:
     return workflow
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def input_name(name) -> str:
+    """An input's name as the rules look it up: A to Z in lower case, every other character as
+    written (the Kelvin sign is not `k`, and `\u017f` is not `s`)."""
+    return str(name).translate(_ASCII_LOWER)
+
+
+def _input_problem(step_raw: dict) -> str | None:
+    """What is wrong with the names under a step's `with:`, if anything: two names that are one
+    input to GitHub, or a name with a letter outside ASCII, which GitHub's upper-casing may or may
+    not turn into another input's name. Either way the checker cannot tell what the action is given."""
+    given = step_raw.get("with")
+    seen: dict = {}
+    for name in (given if isinstance(given, dict) else ()):
+        if isinstance(name, str) and not name.isascii():
+            return (f"has an input name with a letter outside ASCII ('{one_line(name, 60)}'), and the checker "
+                    "cannot tell which input GitHub takes it for")
+        key = input_name(name)
+        if key in seen:
+            return (f"gives the same input twice under two spellings ('{one_line(seen[key], 60)}' and "
+                    f"'{one_line(name, 60)}'), so the checker cannot tell which value GitHub uses")
+        seen[key] = name
+    return None
+
+
 def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     """Flatten a job's steps, including the steps inside `parallel` groups, in order."""
     groups = 0
+
+    def inputs_checked(raw: dict, number: int) -> None:
+        problem = _input_problem(raw)
+        if problem:
+            workflow.problems.append(f"job '{job.id}', step {number} {problem}")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "
@@ -629,9 +844,11 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                 continue
             for sub in inner:
                 if isinstance(sub, dict):
+                    inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True))
             continue
+        inputs_checked(step_raw, number)
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
             workflow.problems.append(f"job '{job.id}', step {number} has no 'run' or 'uses' and is not a step form "
                                      "the checker knows, so it cannot check what the step does")
