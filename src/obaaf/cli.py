@@ -115,16 +115,31 @@ def cmd_check(args) -> int:
         print("error: use --baseline or --write-baseline, not both", file=sys.stderr)
         return EXIT_USAGE
     from obaaf.checker import baseline as baseline_mod
-    entries = None
-    if args.baseline:
-        try:
-            entries = baseline_mod.load(Path(args.baseline))
-        except baseline_mod.BaselineError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return EXIT_USAGE
+    accepting = [name for name in ("owner", "reason", "expires") if getattr(args, name) is not None]
+    if accepting and not args.write_baseline:
+        print(f"error: --{accepting[0]} says who accepts the findings written by --write-baseline; it does "
+              "nothing without it", file=sys.stderr)
+        return EXIT_USAGE
+    applied = previous = None
+    try:
+        if args.baseline:
+            applied = baseline_mod.load(Path(args.baseline))
+        if args.write_baseline and Path(args.write_baseline).exists():
+            # Entries of the file being replaced that are still valid keep their own owner, reason
+            # and expiry date; writing a baseline never renews an acceptance behind its owner's back.
+            previous = baseline_mod.load(Path(args.write_baseline))
+    except baseline_mod.BaselineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if previous is not None and previous.legacy:
+        print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with "
+              f"'obaaf baseline migrate {args.write_baseline} --owner @NAME --reason \"...\" --expires "
+              "YYYY-MM-DD', which carries over the findings it covers and accepts nothing new; or write the "
+              "new baseline to another file.", file=sys.stderr)
+        return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
-    if entries is not None:
-        baseline_mod.apply(result, entries)
+    if applied is not None:
+        baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
         # Checking nothing must not look like a pass (an empty or mistyped path).
         kinds = {"github": "GitHub Actions workflows", "jenkins": "Jenkinsfiles"}.get(
@@ -144,12 +159,29 @@ def cmd_check(args) -> int:
         if result.errors:
             print("error: not writing a baseline while some CI definitions could not be read", file=sys.stderr)
             return EXIT_FAIL
-        Path(args.write_baseline).write_text(baseline_mod.build(result), encoding="utf-8")
-        print(f"Baseline written to {args.write_baseline}.", file=sys.stderr)
-        expired = [f for f in result.findings if baseline_mod.expired_ignore(f)]
-        if expired:
-            print(f"warning: {len(expired)} finding(s) whose ignore entry has expired were not written to the "
-                  "baseline; renew or remove those ignore entries.", file=sys.stderr)
+        from datetime import date
+        from obaaf.checker import acceptance as acceptance_mod
+        findings, kept, fresh = baseline_mod.plan(result, previous)
+        if fresh:
+            wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
+            if wrong:
+                print(f"error: writing this baseline would accept {len(fresh)} finding(s) that no valid entry "
+                      "accepts today. Say who accepts them, why and until when: --owner @NAME --reason \"...\" "
+                      f"--expires YYYY-MM-DD. As given, the acceptance would not count, because "
+                      f"{'; '.join(wrong)}. Nothing was written.", file=sys.stderr)
+                return EXIT_USAGE
+        made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
+        Path(args.write_baseline).write_text(
+            baseline_mod.build(findings, kept, made.owner or "", made.reason or "", made.expires or ""),
+            encoding="utf-8")
+        print(f"Baseline written to {args.write_baseline}: {len(fresh)} finding(s) newly accepted"
+              + (f" by {made.owner} until {made.expires}" if fresh else "")
+              + f", {len(kept)} kept with the owner, reason and expiry date they had.", file=sys.stderr)
+        waiting = [f for f in result.findings if not f.suppressed and f not in findings
+                   and f.acceptance is not None and f.acceptance.source == acceptance_mod.IGNORE]
+        if waiting:
+            print(f"warning: {len(waiting)} finding(s) whose ignore entry has expired or does not count were "
+                  "not written to the baseline; renew, complete or remove those ignore entries.", file=sys.stderr)
         return EXIT_OK
     if result.errors:
         return EXIT_FAIL
@@ -157,6 +189,77 @@ def cmd_check(args) -> int:
         return EXIT_FAIL
     if result.stale_gating(args.fail_on, load()):
         return EXIT_FAIL
+    return EXIT_OK
+
+
+def cmd_baseline_migrate(args) -> int:
+    """Turn an obaaf-baseline/v0.1 file into the current format. It carries over the findings the old
+    file covers that are still found, with the owner, reason and expiry date given here, and accepts
+    nothing the old file did not cover."""
+    from datetime import date
+
+    from obaaf import checker
+    from obaaf.checker import acceptance as acceptance_mod
+    from obaaf.checker import baseline as baseline_mod
+    from obaaf.checker import workflow as wf_mod
+    from obaaf.checker.workflow import one_line
+
+    target = Path(args.path)
+    try:
+        old = baseline_mod.load(Path(args.file))
+    except baseline_mod.BaselineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if not old.legacy:
+        print(f"{args.file} is already an {baseline_mod.FORMAT} baseline; nothing to do.", file=sys.stderr)
+        return EXIT_OK
+    if not target.exists():
+        print(f"error: {target} not found", file=sys.stderr)
+        return EXIT_USAGE
+    wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
+    if wrong:
+        print("error: say who accepts the findings, why and until when: --owner @NAME --reason \"...\" "
+              f"--expires YYYY-MM-DD. As given, the acceptance would not count, because {'; '.join(wrong)}.",
+              file=sys.stderr)
+        return EXIT_USAGE
+    base = target.parent if target.is_file() else wf_mod.locate(target)[0]
+    try:
+        config = checker.Config.load(base, args.config)
+    except (checker.ConfigError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    result = checker.check(target, config=config, platform=args.platform)
+    if result.errors:
+        for error in result.errors:
+            print(f"error: {one_line(error)}", file=sys.stderr)
+        print("error: not converting the baseline while some CI definitions could not be read", file=sys.stderr)
+        return EXIT_FAIL
+    baseline_mod.apply(result, old)
+    covered = [f for f in result.findings
+               if f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE]
+    gone = result.baseline_stale
+    if old.entries and not covered:
+        print(f"error: none of the {len(old.entries)} entries of {args.file} matches a finding in {target}. An "
+              "old-format entry matches on the exact wording of its finding, so check that this is the "
+              "repository the baseline was written for, with the configuration it was written with. Nothing "
+              "was written.", file=sys.stderr)
+        return EXIT_FAIL
+    made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
+    out = Path(args.output or args.file)
+    out.write_text(baseline_mod.build(covered, None, made.owner, made.reason, made.expires), encoding="utf-8")
+    others = [f for f in baseline_mod.acceptable(result) if f not in covered]
+    print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
+          file=sys.stderr)
+    if gone:
+        print(f"{len(gone)} old entr{'y matches' if len(gone) == 1 else 'ies match'} no finding any more and "
+              f"{'was' if len(gone) == 1 else 'were'} dropped:", file=sys.stderr)
+        for entry in gone:
+            where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
+            print(one_line(f"  {entry.get('rule')} {entry.get('path')}{where} - {entry.get('message', '')}"),
+                  file=sys.stderr)
+    if others:
+        print(f"{len(others)} finding(s) were not in the old baseline and are not accepted by the new one; "
+              "they count when the check runs.", file=sys.stderr)
     return EXIT_OK
 
 
@@ -607,8 +710,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help="findings recorded in this baseline are reported but do not fail the check; any other "
                         "finding does, and so does a baseline entry that no longer matches (regenerate it)")
     x.add_argument("--write-baseline", metavar="FILE",
-                   help="write every finding not ignored by configuration to FILE as the new baseline, and exit 0")
+                   help="write every finding not ignored by configuration to FILE as the new baseline, and exit 0. "
+                        "Findings that no valid entry of FILE accepts are accepted with --owner, --reason and "
+                        "--expires; entries of FILE that are still valid keep their own")
+    x.add_argument("--owner", metavar="OWNER", help="with --write-baseline: who accepts the findings (@user, "
+                                                    "@org/team or an e-mail address)")
+    x.add_argument("--reason", metavar="TEXT", help="with --write-baseline: why they are accepted")
+    x.add_argument("--expires", metavar="YYYY-MM-DD",
+                   help="with --write-baseline: the day the acceptance ends, at most 366 days ahead")
     x.set_defaults(func=cmd_check)
+
+    # baseline
+    b = sub.add_parser("baseline", help="baseline files for obaaf check").add_subparsers(dest="sub", required=True)
+    x = b.add_parser("migrate", help="convert an obaaf-baseline/v0.1 file to the current format, saying who "
+                                     "accepts its findings, why and until when")
+    x.add_argument("file", help="the old baseline (replaced in place unless --output is given)")
+    x.add_argument("path", nargs="?", default=".", help="what the baseline was written for: a repository root "
+                                                        "(default), a workflow file or a Jenkinsfile")
+    x.add_argument("--owner", required=True, metavar="OWNER", help="@user, @org/team or an e-mail address")
+    x.add_argument("--reason", required=True, metavar="TEXT")
+    x.add_argument("--expires", required=True, metavar="YYYY-MM-DD", help="at most 366 days ahead")
+    x.add_argument("--output", "-o", help="write the new baseline here and leave the old file as it is")
+    x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
+    x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
+    x.set_defaults(func=cmd_baseline_migrate)
 
     # snapshot
     x = sub.add_parser("snapshot", help="agent lane: capture and label the inputs an agent will read (R1)")

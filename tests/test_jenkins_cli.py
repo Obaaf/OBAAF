@@ -3,6 +3,7 @@
 import json
 import textwrap
 import unittest
+from datetime import date
 
 from helpers import TempDir, run_cli
 
@@ -139,8 +140,8 @@ class ConfigurationTest(unittest.TestCase):
         with TempDir() as tmp:
             write(tmp, "Jenkinsfile", RISKY)
             write(tmp, "obaaf.yml", "ignore:\n  - rule: OBAAF-JEN-009\n    path: Jenkinsfile\n    job: Test\n"
-                                    "    reason: reviewed\n    until: 2999-01-01\n")
-            result = checker.check(tmp)
+                                    "    owner: '@platform-team'\n    reason: reviewed\n    until: 2026-06-30\n")
+            result = checker.check(tmp, today=date(2026, 1, 15))
             finding = next(f for f in result.findings if f.rule == "OBAAF-JEN-009")
             self.assertIsNotNone(finding.suppressed)
             row = next(r for r in result.coverage if r["rule"] == "OBAAF-JEN-009")

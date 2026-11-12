@@ -1,0 +1,10 @@
+# A fixture for the baseline tests, not a workflow to copy: a pull request job that is given a secret.
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${{ secrets.CODECOV_TOKEN }}" | wc -c

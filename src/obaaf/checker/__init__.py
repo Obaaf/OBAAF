@@ -17,12 +17,13 @@ from pathlib import Path
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
+from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker import rules as rules_mod
 from obaaf.checker import workflow as wf_mod
-from obaaf.checker.rules import Finding
+from obaaf.checker.rules import FIXED, Finding
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
@@ -258,11 +259,11 @@ class Config:
             if not re.sub(r"[*?/\[\]!]", "", str(entry["path"])).strip("."):
                 raise ConfigError(f"{path}: ignore path {entry['path']!r} matches everything; name the "
                                   "workflow file the finding is in")
-            try:
-                until = entry["until"]
-                until if isinstance(until, date) else date.fromisoformat(str(until))
-            except ValueError as exc:
-                raise ConfigError(f"{path}: ignore entry 'until' must be a date (YYYY-MM-DD): {exc}") from exc
+            if acceptance_mod.parse_date(entry["until"]) is None:
+                # A date and nothing else: a time of day cannot be compared with today, and other
+                # spellings of a date were read by some Python versions and not by others.
+                raise ConfigError(f"{path}: ignore entry 'until' must be a date (YYYY-MM-DD), not "
+                                  f"{str(entry['until'])[:40]!r}")
         jenkins = data.get("jenkins") or {}
         if not isinstance(jenkins, dict) or not isinstance(jenkins.get("files") or [], list) or \
                 not isinstance(jenkins.get("exclude") or [], list):
@@ -291,13 +292,26 @@ class CheckResult:
     jenkins: list[dict] = field(default_factory=list)        # per Jenkinsfile: kind, digest, file-wide unknowns
     baseline_used: bool = False                              # set by baseline.apply
     baseline_stale: list[dict] = field(default_factory=list) # baseline entries no finding matched
+    baseline_format: str = ""                                # the format of the baseline that was applied
+    baseline_path: str = ""
 
     @property
     def workflow_files(self) -> list[str]:
         return [f for f in self.files if f not in set(self.jenkins_files)]
 
     def active(self) -> list[Finding]:
-        return [f for f in self.findings if not f.suppressed]
+        """Findings that are neither ignored by configuration nor fixed by verified controls."""
+        return [f for f in self.findings if not f.suppressed and f.state != FIXED]
+
+    def cleared(self) -> list[Finding]:
+        """Findings whose every control the checker verified. They are shown, and fail nothing."""
+        return [f for f in self.findings if f.state == FIXED]
+
+    def not_accepted(self) -> list[Finding]:
+        """Findings that an ignore entry or a baseline entry names without accepting them: the entry
+        lacks an owner, a reason or an expiry date, has expired, or expires too far ahead."""
+        return [f for f in self.findings
+                if f.state != FIXED and f.acceptance is not None and not f.acceptance.valid]
 
     def at_or_above(self, severity: str) -> list[Finding]:
         threshold = SEVERITY_ORDER[severity]
@@ -339,19 +353,25 @@ class CheckResult:
 
 
 def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None:
+    """Apply the configuration's ignore entries. An entry is an acceptance, and only a valid one
+    (owner, reason, an expiry date not passed and at most a year ahead) ignores a finding. An entry
+    that matches and is not valid is attached to the finding, so the report can say what it lacks."""
     for finding in findings:
         for entry in config.ignore:
             if entry["rule"] != finding.rule or not fnmatch.fnmatch(finding.path, str(entry["path"])):
                 continue
             if entry.get("job") and entry["job"] != finding.job:
                 continue
-            until = entry["until"]
-            until = until if isinstance(until, date) else date.fromisoformat(str(until))
+            until = acceptance_mod.parse_date(entry["until"])
+            made = acceptance_mod.make(acceptance_mod.IGNORE, entry.get("owner"), entry["reason"], until, today)
+            if made.valid:
+                finding.suppressed = f"{entry['reason']} (until {until.isoformat()})"
+                finding.acceptance = made
+                break
             if until < today:
                 finding.message += f" (An ignore entry for this finding expired on {until.isoformat()}.)"
-                continue
-            finding.suppressed = f"{entry['reason']} (until {until.isoformat()})"
-            break
+            if finding.acceptance is None:
+                finding.acceptance = made
 
 
 PLATFORMS = ("auto", "github", "jenkins")

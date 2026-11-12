@@ -321,6 +321,7 @@ class ConfigurationTest(unittest.TestCase):
             (tmp / ".github" / "CODEOWNERS").write_text("/.github/ @studio/build\n")
             config = tmp / ".github" / "obaaf.yml"
             config.write_text("ignore:\n  - rule: OBAAF-GHA-013\n    path: .github/workflows/ci.yml\n"
+                              "    owner: '@studio/build'\n"
                               "    reason: Ephemeral runners, see issue 9\n    until: 2027-01-31\n")
             before = checker.check(tmp, today=date(2026, 12, 1))
             suppressed = [f for f in before.findings if f.rule == "OBAAF-GHA-013"]

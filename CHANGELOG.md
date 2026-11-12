@@ -4,6 +4,30 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+**Upgrading from 0.3.0: a gate that uses a baseline or an ignore entry will fail until each acceptance names an owner.** Nothing about the workflows has to change, and one command converts a baseline. See "The lifecycle of a finding" below. Not released; Expectrail and anyone else pinned to a commit or to 0.3.0 see no change until they move.
+
+### The lifecycle of a finding
+
+The first adopter's gate asked one question of every finding, "is it new?", and the answer was always to accept it: all 38 findings in its baseline were accepted in a file that names nobody, gives no reason and never expires, and the file was regenerated three times in a day to add more. This changes what accepting a finding takes, and what a finding is.
+
+- **A finding is new, accepted, fixed, or one the checker cannot tell about.** Text output says which under the finding; JSON output has `state` on every finding and a `summary` of the counts. "Fixed" means every control that clears the finding was read and verified, and "cannot tell" means one of them could not be read; a finding the checker cannot tell about fails the check like a new one. No rule reports controls yet, so today every finding is new or accepted. The two states are in place for the rules that will (OBAAF-GHA-005 and 020 first).
+- **An acceptance needs an owner, a reason and an expiry date, in an `ignore` entry and in a baseline entry alike.** The owner is a user (`@name`), a team (`@org/team`) or an e-mail address. The date must not have passed and must be at most 366 days ahead. An entry that lacks one of the three, has expired, or is dated further ahead accepts nothing: its finding counts as new, and the report says under the finding what the entry lacks.
+- **`ignore` entries need `owner:`.** A configuration written for 0.3.0 still loads, and its entries ignore nothing until an owner is added to each. `until: 2999-01-01` no longer works either. An `until` that is not a plain date (`2027-01-31T10:00:00Z`, `20270131`) is now a configuration error on every Python version; a time of day there used to end in a traceback when the entry matched a finding.
+- **New baseline format, `obaaf-baseline/v0.2`.** An entry holds what the finding is (rule, file, job, step, which of the rule's cases, and the values it is about, such as the secrets a job receives), the severity it was accepted at, and the owner, reason and expiry date. It has no fingerprint and no message: the fields a reviewer reads are the acceptance. Entries no longer depend on how a message is worded, so a release that rewords a message does not break a baseline. An entry does not cover a finding that has become more severe than the entry says. Jenkins findings are still identified by their message.
+- **`obaaf-baseline/v0.1` files (written by 0.2.0 and 0.3.0) are still read, and accept nothing.** Each entry still finds its finding, so the report can say what the file used to cover, but with `--fail-on low` the check fails until the file is converted. `obaaf baseline migrate FILE --owner … --reason … --expires …` converts it: it carries over the findings the old file covers that are still found, and accepts nothing else.
+- **`--write-baseline` takes `--owner`, `--reason` and `--expires`, and never renews an acceptance by itself.** Entries of the file it replaces that are still valid keep their own owner, reason and date. Only findings that no valid entry accepts get the ones given on the command line, and without them nothing is written. It refuses to write over a v0.1 file.
+- **JSON output** keeps every field it had. New: `state`, `kind`, `facts`, `acceptance` and `controls` on a finding, `summary`, `baseline.format`, and `fixed` (findings cleared by verified controls, which are no longer in `findings`). SARIF results carry `obaaf-state`.
+
+What an adopter will see on upgrading:
+
+- With a v0.1 baseline: every finding the baseline covered is reported as new, with the line "Not accepted: the baseline entry that names this finding does not count", and the report ends with the `obaaf baseline migrate` command to run. After converting, the same findings are accepted again, each with an owner, a reason and a date.
+- With `ignore` entries: each finding an entry used to ignore is reported, with "because it names no owner", until `owner:` is added.
+- With neither: no change in findings or exit codes. Messages are word for word what they were (compared on this repository, its fixtures and templates, and Expectrail at `16edb91`).
+
+### Fixed
+
+- `obaaf check --write-baseline` ended in a Python traceback when a job id contained a lone surrogate character (a name YAML can spell and Unicode cannot encode). The baseline is now written, as valid UTF-8, and read back.
+
 ## [0.3.0] - 2026-11-12
 
 **Upgrading from 0.2.0: a gate that passed can fail without the workflows having changed.** Several changes make the checker report what it missed before. The largest are "Lanes" and "Expressions" below. Among the smaller ones: a repository that has a Jenkinsfile now has it checked along with its workflows, and an agent command line with options before the prompt flag, such as `claude --model x -p ...`, now makes a job an agent job (both under "Jenkins (advisory)"); an unknown setting in `.github/obaaf.yml` is refused ("Protected secrets"); and a path with nothing to check is an error, not a pass ("Checker"). Baselines are new in this release. One written from `main` before the release can go stale under "Lanes" or "Expressions" and has to be regenerated with `--write-baseline`.
