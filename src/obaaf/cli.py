@@ -610,6 +610,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write every finding not ignored by configuration to FILE as the new baseline, and exit 0")
     x.set_defaults(func=cmd_check)
 
+    # audit: repository settings, read through the GitHub API (obaaf.audit)
+    from obaaf.audit.cli import add_parser as add_audit_parser
+
+    add_audit_parser(sub)
+
     # snapshot
     x = sub.add_parser("snapshot", help="agent lane: capture and label the inputs an agent will read (R1)")
     x.add_argument("--event", required=True, help="path to the event payload ($GITHUB_EVENT_PATH)")
