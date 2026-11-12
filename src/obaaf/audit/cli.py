@@ -72,6 +72,8 @@ def _token(args, api: str, default_api: str) -> tuple[str | None, str]:
     """The token to send, if any, and where it came from. The value is never printed."""
     if args.no_token:
         return None, ""
+    if args.token_env is not None and not args.token_env.strip():
+        raise UsageError("--token-env takes the name of an environment variable")
     names = (args.token_env,) if args.token_env else (TOKEN_ENV_DEFAULTS if api == default_api else ())
     for name in names:
         value = os.environ.get(name, "").strip()

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Decide whether a live run of `obaaf audit` passed (used by settings-audit-live.yml).
 
-    python scripts/check_live_audit.py SNAPSHOT --report REPORT.txt --exit-code N [--read KEY ...]
-                                       [--rate-limit-ok] [--unreadable-ok] [--notice-if-no-ruleset]
+    python scripts/check_live_audit.py SNAPSHOT --report REPORT.txt --exit-code N --repo OWNER/REPO
+                                       [--read KEY ...] [--rate-limit-ok] [--unreadable-ok]
+                                       [--notice-if-no-ruleset]
 
-It fails when the snapshot is not valid, when the command's exit code does not fit the snapshot, when the
+It fails when the snapshot is not valid, when it is a snapshot of another repository than the one asked for, when the command's exit code does not fit the snapshot, when the
 report is not exactly the report of that snapshot (a crash after the snapshot was written, or a report of
 something else), when any answer had a shape the reader did not expect, or when a setting named with
 --read was not read. Finding an unexpected shape is what the live run is for, so nothing excuses one.
@@ -38,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("snapshot")
     parser.add_argument("--report", required=True, help="the text report the command printed")
     parser.add_argument("--exit-code", required=True, type=int, help="the command's exit code")
+    parser.add_argument("--repo", required=True, metavar="OWNER/REPO", help="the repository the command was asked for")
     parser.add_argument("--read", nargs="*", default=[], metavar="KEY", help="settings that must have been read")
     parser.add_argument("--rate-limit-ok", action="store_true")
     parser.add_argument("--unreadable-ok", action="store_true")
@@ -66,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     repository_read = settings["repository"]["status"] == "read"
     problems = [f"{key}: an answer did not have the documented shape: {part['reason']}"
                 for key, part in found if part["reason_code"] == "unexpected"]
+    asked = args.repo.lower()
+    if asked not in (snapshot["repository"].lower(), str(snapshot.get("requested_as", "")).lower()):
+        problems.append("the snapshot is of another repository than the one the command was asked for")
     if args.exit_code != (0 if repository_read else 1):
         problems.append(f"the command exited {args.exit_code}, which does not fit a snapshot in which the "
                         f"repository was {'read' if repository_read else 'not read'}")

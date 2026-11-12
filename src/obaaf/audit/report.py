@@ -108,8 +108,11 @@ def _classic_text(rule: dict) -> str:
             # A group GitHub did not list is null, which is "not known", not "nobody".
             unknown = [group for group in ("users", "teams", "apps") if allowed[group] is None]
             named = sum(len(allowed[group] or []) for group in ("users", "teams", "apps"))
-            approvals += f", {_count(named, 'name')} may bypass it" if named else ", nobody listed may bypass it"
-            approvals += f" ({', '.join(unknown)} not given)" if unknown else ""
+            if len(unknown) == 3:
+                approvals += ", who may bypass it not given"
+            else:
+                approvals += f", {_count(named, 'name')} may bypass it" if named else ", nobody listed may bypass it"
+                approvals += f" ({', '.join(unknown)} not given)" if unknown else ""
     admins = "administrators are held to it" if rule["enforce_admins"] else "administrators are not held to it"
     force = {True: "; force pushes allowed", None: "; force pushes: not given"}.get(rule["allow_force_pushes"], "")
     return f"{approvals}; {_check_names(checks) if checks['required'] else 'no required checks'}; {admins}{force}"
@@ -193,7 +196,7 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
         return [f"{quoted(name)}: " + (_list(secrets, 12) if secrets else "no secrets")
                 for name, secrets in value.items()]
     if key in ("repository_secrets", "organization_secrets"):
-        return [_list(value, 12) if value else "none"]
+        return [_list(value, 12) if value else "none" if whole else "none was read"]
     if key == "actions_permissions":
         if not value["enabled"]:
             return ["GitHub Actions is turned off for this repository"]

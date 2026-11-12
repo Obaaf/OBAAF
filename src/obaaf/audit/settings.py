@@ -182,9 +182,13 @@ def _outcome(setting: Setting, value, problems: list[dict], total: int) -> dict:
         return _read(value)
     problems = _in_order(problems)
     if len({p["key"] for p in problems}) >= total:
-        first = problems[0]
-        reason = first["reason"] if total <= 1 else f"none of {total} could be read; the first: {first['reason']}"
-        return _unread(setting, first["reason_code"], reason, first.get("accepted_permissions", ""))
+        # One reason has to stand for all of them. A refusal says more than a rate limit that came after
+        # it, or than "not asked because something else was not read", so one of those is not chosen
+        # while there is anything else: a refused setting must not look as if only the limit stopped it.
+        telling = [p for p in problems if p["reason_code"] not in ("rate_limited", "depends")]
+        one = (telling or problems)[0]
+        reason = one["reason"] if total <= 1 else f"none of {total} could be read; one of them: {one['reason']}"
+        return _unread(setting, one["reason_code"], reason, one.get("accepted_permissions", ""))
     return _partial(setting, value, problems)
 
 
@@ -499,7 +503,7 @@ class _Reader:
         value, problems = {}, []
         for branch in self.branches:
             answer = self.client.get(f"{self.base}/branches/{_segment(branch)}/protection")
-            if answer.status == 404 and answer.message == "Branch not protected":
+            if answer.status == 404 and answer.exact == "Branch not protected":
                 # GitHub's reference documents the 404 but not this message; it is what GitHub sends to a
                 # caller who may read branch protection when the branch has none. Any other 404 stays unread.
                 value[branch] = {"exists": False}

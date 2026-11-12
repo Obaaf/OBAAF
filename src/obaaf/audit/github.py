@@ -60,7 +60,8 @@ def check_api_url(url: str) -> str:
         host, port = parts.hostname or "", parts.port
     except ValueError:
         parts, host, port = None, "", None
-    plain_address = (parts is not None and host and url == url.strip() and "@" not in parts.netloc
+    plain_address = (parts is not None and host and url == url.strip() and len(url) <= 300
+                     and "@" not in parts.netloc
                      and "?" not in url and "#" not in url and "\\" not in url
                      and (port is None or 0 < port < 65536))
     if not plain_address:
@@ -189,7 +190,8 @@ class Answer:
     code: str = ""       # "", or one of the reason codes in obaaf.audit.settings.REASONS
     why: str = ""        # plain words for a person
     accepted: str = ""   # GitHub's X-Accepted-GitHub-Permissions header, when it sent one
-    message: str = ""    # GitHub's own error message, cleaned
+    message: str = ""    # GitHub's own error message, cleaned for display
+    exact: str = ""      # the same message exactly as it came; the one to compare, never the one to print
     more: bool = False   # a Link header named a next page
 
     @property
@@ -209,16 +211,16 @@ def plain(text: object, limit: int = 200) -> str:
     return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
 
 
-# Characters that are not the ASCII double quote and read as one: primes, low and reversed quotes, the
-# full-width quote. Curly quotes are caught by their Unicode category below.
-QUOTE_LOOKALIKES = "″‶„‚〝〞〟＂ʺ˝״"
+# Characters that are not the ASCII double quote and read as one: curly and low double quotes, double
+# primes, the ditto mark, the full-width quote. Single quotes and apostrophes are left alone; names have them.
+QUOTE_LOOKALIKES = frozenset(map(chr, (0x201C, 0x201D, 0x201E, 0x201F, 0x2033, 0x2036, 0x301D, 0x301E, 0x301F,
+                                       0xFF02, 0x02BA, 0x02DD, 0x02EE, 0x05F4, 0x3003)))
 
 
 def quoted(name: object, limit: int = 60) -> str:
     """A name from outside, in double quotes, which it cannot close early to imitate the rest of its line.
-    A character that looks like a quotation mark without being one becomes a question mark."""
-    cleaned = "".join("?" if unicodedata.category(ch) in ("Pi", "Pf") or ch in QUOTE_LOOKALIKES else ch
-                      for ch in plain(name, limit))
+    A character that looks like a double quotation mark without being one becomes a question mark."""
+    cleaned = "".join("?" if ch in QUOTE_LOOKALIKES else ch for ch in plain(name, limit))
     return '"' + cleaned.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -343,8 +345,8 @@ class Client:
             return Answer(0, code="network", why=f"no answer from {host} ({plain(raw.error)})")
         if len(raw.body) > MAX_BODY_BYTES:
             return Answer(raw.status, code="unexpected", why="the answer was larger than 5 MB and was not read")
-        message = plain(data["message"], 160) if isinstance(data, dict) and isinstance(data.get("message"),
-                                                                                      str) else ""
+        exact = data["message"] if isinstance(data, dict) and isinstance(data.get("message"), str) else ""
+        message = plain(exact, 160)
         accepted = plain(raw.headers.get("x-accepted-github-permissions", ""), 200)
         said = f"; GitHub said {quoted(message, 160)}" if message else ""
         limited = raw.status == 429 or (raw.status == 403 and (
@@ -368,7 +370,7 @@ class Client:
         if raw.status == 404:
             return Answer(404, code="not_found",
                           why="GitHub answered 404, which it also sends when the caller may not see something" + said,
-                          accepted=accepted, message=message)
+                          accepted=accepted, message=message, exact=exact)
         if raw.status >= 500:
             return Answer(raw.status, code="server_error", why=f"GitHub had an error (HTTP {raw.status})" + said,
                           message=message)

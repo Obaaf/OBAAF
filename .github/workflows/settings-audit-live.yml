@@ -52,7 +52,8 @@ jobs:
             > audit-live/with-token.txt || code=$?
           cat audit-live/with-token.txt
           python scripts/check_live_audit.py audit-live/with-token.json --report audit-live/with-token.txt \
-            --exit-code "$code" --read repository rulesets branch_rules branches environments
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" \
+            --read repository rulesets branch_rules branches environments
 
       # With no token GitHub allows 60 requests an hour for each IP address, and hosted runners share
       # addresses, so being rate limited here is expected now and then and is not a failure.
@@ -63,7 +64,8 @@ jobs:
             --record audit-live/no-token > audit-live/no-token.txt || code=$?
           cat audit-live/no-token.txt
           python scripts/check_live_audit.py audit-live/no-token.json --report audit-live/no-token.txt \
-            --exit-code "$code" --rate-limit-ok --read repository rulesets branch_rules branches environments
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" --rate-limit-ok \
+            --read repository rulesets branch_rules branches environments
 
       # This repository has no rulesets, so the part of the reader that reads them would never meet
       # GitHub here. Expectrail/Expectrail, the first adopter, is public and has them. It is read with
@@ -78,8 +80,8 @@ jobs:
             --record audit-live/rulesets > audit-live/rulesets.txt || code=$?
           cat audit-live/rulesets.txt
           python scripts/check_live_audit.py audit-live/rulesets.json --report audit-live/rulesets.txt \
-            --exit-code "$code" --rate-limit-ok --unreadable-ok --notice-if-no-ruleset \
-            --read repository rulesets branch_rules branches environments
+            --exit-code "$code" --repo Expectrail/Expectrail --rate-limit-ok --unreadable-ok \
+            --notice-if-no-ruleset --read repository rulesets branch_rules branches environments
 
       # What GitHub answered to the two runs with no token is public data. It is printed on one line
       # each so that it can be kept as a test recording.

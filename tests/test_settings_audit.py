@@ -1423,7 +1423,7 @@ class LiveCheckScriptTest(unittest.TestCase):
             (tmp / "s.json").write_text(json.dumps(snap), encoding="utf-8")
             (tmp / "r.txt").write_text(printed, encoding="utf-8")
             return self.script.main([str(tmp / "s.json"), "--report", str(tmp / "r.txt"), "--exit-code", str(code),
-                                     *args])
+                                     "--repo", snap["repository"], *args])
 
     READ = ("--read", "repository", "rulesets", "branch_rules", "branches", "environments")
 
@@ -1465,9 +1465,11 @@ class LiveCheckScriptTest(unittest.TestCase):
     def test_a_snapshot_that_is_not_valid_fails(self):
         self.assertEqual(self.check(recording("public-no-token"), *self.READ,
                                     mangle=lambda s: s["settings"].pop("rulesets")), 1)
-        self.assertEqual(self.script.main(["/nonexistent.json", "--report", "/nonexistent.txt", "--exit-code", "0"]), 1)
+        self.assertEqual(self.script.main(["/nonexistent.json", "--report", "/nonexistent.txt", "--exit-code", "0",
+                                           "--repo", REPO]), 1)
         with mock.patch("sys.stderr"):
-            self.assertEqual(self.script.main(["x", "--report", "y", "--exit-code", "0", "--read", "nonsense"]), 2)
+            self.assertEqual(self.script.main(["x", "--report", "y", "--exit-code", "0", "--repo", REPO,
+                                               "--read", "nonsense"]), 2)
 
 
 class LiveWorkflowTest(unittest.TestCase):
@@ -1619,7 +1621,7 @@ class AbsentIsNotTheComfortableValueTest(unittest.TestCase):
                     status=403, body={"message": f"no {number}"})
             return take(entries, token=token)[0]["settings"]
         self.assertEqual(both(False), both(True))
-        self.assertIn("the first: this caller is not allowed to read it (HTTP 403); GitHub said \"no 42\"",
+        self.assertIn("one of them: this caller is not allowed to read it (HTTP 403); GitHub said \"no 42\"",
                       both(True)["rulesets"]["reason"])
         ordered = settings_mod._in_order([{"key": k} for k in ("b", "10", "9", "a", "٣")])
         self.assertEqual([p["key"] for p in ordered], ["9", "10", "a", "b", "٣"])
@@ -1633,8 +1635,10 @@ class WhatThePrintedReportSaysTest(unittest.TestCase):
         self.assertEqual(github.plain("a  　 b"), "a b")
 
     def test_a_character_that_looks_like_a_closing_quote_cannot_end_a_quoted_name_early(self):
-        for mark in "”“’»„＂″":
+        for mark in "”“„＂″ˮ〃":
             self.assertEqual(github.quoted(f"prod{mark}: reviewers: sec"), '"prod?: reviewers: sec"', repr(mark))
+        # An apostrophe, straight or curly, is part of a name and stays.
+        self.assertEqual(github.quoted("Sean’s env, l'autre"), '"Sean’s env, l\'autre"')
 
     def test_a_count_is_a_number_and_true_is_not_one(self):
         self.assertEqual(report._rule_text({"type": "pull_request", "parameters": {"required_approving_review_count": True}}),
@@ -1672,6 +1676,19 @@ class WhatThePrintedReportSaysTest(unittest.TestCase):
         self.assertIn("1 approval required, 1 name may bypass it (teams, apps not given);",
                       line({"users": [{"login": "octocat"}]}))
 
+    def test_no_groups_given_is_not_nobody_and_secrets_partly_read_are_not_none(self):
+        entries = replace(recording("admin-token"), f"{R}/branches/main/protection", status=200, body={
+            "enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False},
+            "required_pull_request_reviews": {"required_approving_review_count": 1,
+                                              "bypass_pull_request_allowances": {}}})
+        snap, _ = take(entries, token=TOKEN)
+        self.assertIn('"main": 1 approval required, who may bypass it not given; no required checks', report.to_text(snap))
+        snap["settings"]["repository_secrets"] = {"status": "partial", "value": [], "needs": "x", "problems": [
+            {"key": "k", "what": "a page of them", "reason_code": "server_error", "reason": "GitHub had an error"}]}
+        self.assertEqual(snapshot_mod.problems(snap), [])
+        self.assertIn("  Names of the repository's secrets\n      none was read\n      NOT READ: a page of them",
+                      report.to_text(snap))
+
     def test_a_policy_with_conditions_of_another_shape_does_not_hide_the_others(self):
         entries = recording("admin-token")
         entry_for(entries, f"{R}/actions/policies/7")["body"]["conditions"] = {"workflow_path": ["not", "a", "mapping"]}
@@ -1689,6 +1706,65 @@ class WhatThePrintedReportSaysTest(unittest.TestCase):
         env = entry_for(entries, f"{R}/environments?per_page=100")["body"]["environments"][0]
         env["deployment_branch_policy"] = {"protected_branches": True, "custom_branch_policies": False}
         self.assertIn("only branches GitHub counts as protected may deploy", report.to_text(take(entries)[0]))
+
+
+class TextForDisplayIsNotTextForDecisionsTest(unittest.TestCase):
+    """The third review pass: a fix that cleaned text for the terminal also changed what a decision compared."""
+
+    def test_branch_not_protected_counts_only_exactly_as_github_sends_it(self):
+        path = f"{R}/branches/main/protection"
+        entries = recording("admin-token")
+        self.assertEqual(entry_for(entries, path)["body"]["message"], "Branch not protected")
+        self.assertEqual(take(entries, token=TOKEN)[0]["settings"]["branch_protection"]["value"], {"main": {"exists": False}})
+        for message in ("Branch  not  protected", "Branch not　protected", "Branch not protected ",
+                        "branch not protected", "Branch not protected​"):
+            changed = replace(entries, path, body={"message": message})
+            entry = take(changed, token=TOKEN)[0]["settings"]["branch_protection"]
+            self.assertEqual((entry["status"], entry["reason_code"]), ("unread", "not_found"), repr(message))
+
+    def test_no_request_path_and_no_recorded_value_is_built_from_cleaned_text(self):
+        # A name with two spaces is a different name from the one with one; only the report may merge them.
+        entries = recording("public-no-token")
+        envs = entry_for(entries, f"{R}/environments?per_page=100")["body"]["environments"]
+        envs[1]["name"] = "pre  prod x"
+        policies = entry_for(entries, f"{R}/environments/release/deployment-branch-policies?per_page=100")
+        policies["path"] = f"{R}/environments/pre%20%20prod%C2%A0x/deployment-branch-policies?per_page=100"
+        snap, transport = take(entries)
+        self.assertEqual(transport.missing, [])
+        self.assertEqual(snap["settings"]["environments"]["value"][1]["name"], "pre  prod x")
+        self.assertIn('"pre prod x": may deploy', report.to_text(snap))
+
+
+class OneReasonForManyPartsTest(unittest.TestCase):
+    """The third review pass: when no part of a setting was read, the one reason recorded must not be a rate
+    limit while another part was refused outright."""
+
+    def entries(self):
+        entries = replace(recording("public-no-token"), f"{R}/rulesets/73?includes_parents=true", status=404,
+                          body={"message": "Not Found"})
+        return replace(entries, f"{R}/rulesets/42?includes_parents=true", status=429, body={"message": "slow down"})
+
+    def test_a_refusal_is_not_hidden_behind_a_rate_limit_that_sorts_first(self):
+        # The reader asks for 42 first and is limited there, so 73 is never asked: with the listing the other
+        # way round 73 is refused and then 42 is limited. Either way the limit must not be the whole story
+        # when something was refused.
+        entries = self.entries()
+        entry_for(entries, f"{R}/rulesets{LIST}")["body"].sort(key=lambda r: -r["id"])
+        rulesets = take(entries)[0]["settings"]["rulesets"]
+        self.assertEqual((rulesets["status"], rulesets["reason_code"]), ("unread", "not_found"))
+        self.assertIn("none of 2 could be read; one of them: GitHub answered 404", rulesets["reason"])
+        only_limited = take(self.entries())[0]["settings"]["rulesets"]
+        self.assertEqual((only_limited["status"], only_limited["reason_code"]), ("unread", "rate_limited"))
+
+    def test_and_the_live_check_then_fails_even_where_a_rate_limit_is_allowed(self):
+        entries = self.entries()
+        entry_for(entries, f"{R}/rulesets{LIST}")["body"].sort(key=lambda r: -r["id"])
+        snap, _ = take(entries)
+        check = LiveCheckSecondReviewTest()
+        check.script = _load_check_script()
+        code, said = check.check(snap, report.to_text(snap), *LiveCheckScriptTest.READ, "--rate-limit-ok")
+        self.assertEqual(code, 1)
+        self.assertIn("rulesets was not read (not_found)", said)
 
 
 class WhatTheClientRefusesTest(unittest.TestCase):
@@ -1744,6 +1820,18 @@ class CommandLineSecondReviewTest(unittest.TestCase):
         self.assertNotIn("AUDIT_TOKEN", err)
         self.assertIn("named by --token-env does not hold a token", err)
 
+    def test_an_empty_name_for_token_env_does_not_fall_back_to_the_default_variables(self):
+        for name in ("", "  "):
+            code, out, err, transport = cli(recording("admin-token"), "--repo", REPO, "--token-env", name,
+                                            env={"GH_TOKEN": TOKEN})
+            self.assertEqual((code, out, transport.seen), (2, "", []), repr(name))
+
+    def test_an_api_address_too_long_for_a_snapshot_is_a_usage_error_not_a_bug(self):
+        long_address = "https://ghe.example/" + "a" * 300
+        code, out, err, transport = cli(recording("admin-token"), "--repo", REPO, "--api-url", long_address)
+        self.assertEqual((code, out, transport.seen), (2, "", []))
+        self.assertNotIn("bug", err)
+
     def test_a_name_the_terminal_cannot_show_is_written_as_an_escape_not_a_failure(self):
         entries = recording("public-no-token")
         entry_for(entries, f"{R}/environments?per_page=100")["body"]["environments"][0]["name"] = "прод-環境"
@@ -1769,7 +1857,8 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
     def setUpClass(cls):
         cls.script = _load_check_script()
 
-    def check(self, snap, printed, *args, code=0):
+    def check(self, snap, printed, *args, code=0, repo=None):
+        args = ("--repo", repo or snap["repository"], *args)
         with TempDir() as tmp:
             (tmp / "s.json").write_text(json.dumps(snap), encoding="utf-8")
             (tmp / "r.txt").write_text(printed, encoding="utf-8")
@@ -1789,6 +1878,16 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
             code, said = self.check(snap, printed, *self.READ)
             self.assertEqual(code, 1, printed[-40:])
             self.assertIn("is not the report of the snapshot", said)
+
+    def test_the_snapshot_must_be_of_the_repository_the_step_asked_for(self):
+        snap, _ = take(recording("public-no-token"))
+        text = report.to_text(snap)
+        code, said = self.check(snap, text, *self.READ, repo="Expectrail/Expectrail")
+        self.assertEqual(code, 1)
+        self.assertIn("another repository than the one the command was asked for", said)
+        self.assertEqual(self.check(snap, text, *self.READ, repo=REPO.upper())[0], 0)
+        moved = {**snap, "requested_as": "old-owner/old-name"}
+        self.assertEqual(self.check(moved, report.to_text(moved), *self.READ, repo="old-owner/old-name")[0], 0)
 
     def test_a_rate_limit_excuses_only_what_it_stopped(self):
         # Rulesets are not found, and only then is the limit reached: the 404 is a fault of its own.
@@ -1830,7 +1929,10 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         text = (ROOT / ".github" / "workflows" / "settings-audit-live.yml").read_text(encoding="utf-8")
         last = text.split("obaaf audit --repo Expectrail/Expectrail")[1].split("- name:")[0]
         self.assertIn("--read repository rulesets branch_rules branches environments", last)
-        self.assertIn("--unreadable-ok --notice-if-no-ruleset", last)
+        self.assertIn("--unreadable-ok", last)
+        self.assertIn("--notice-if-no-ruleset", last)
+        self.assertEqual(text.count("--repo Expectrail/Expectrail"), 2)   # the command, and its check
+        self.assertEqual(text.count('--repo "$GITHUB_REPOSITORY"'), 4)
 
 
 class DocumentedSettingsTest(unittest.TestCase):

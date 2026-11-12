@@ -88,7 +88,7 @@ steps:
       GITHUB_TOKEN: ${{ github.token }}
 ```
 
-[`.github/workflows/settings-audit-live.yml`](../.github/workflows/settings-audit-live.yml) is this repository's own use of it. To read the settings marked "Token" in the table from a workflow, the token has to come from somewhere else (a fine-grained personal access token or a GitHub App with the read permissions named there, stored as a secret in an environment limited to the default branch). OBAAF does not create tokens and does not ask for more than read access.
+[`.github/workflows/settings-audit-live.yml`](../.github/workflows/settings-audit-live.yml) is this repository's own use of it. A report printed in a job is in that job's log, which anyone can read for a public repository: with a token that may read the collaborators, the report says how many accounts hold each role (never who they are). To read the settings marked "Token" in the table from a workflow, the token has to come from somewhere else (a fine-grained personal access token or a GitHub App with the read permissions named there, stored as a secret in an environment limited to the default branch). OBAAF does not create tokens and does not ask for more than read access.
 
 ## What it reads
 
@@ -180,7 +180,7 @@ Inside a value, three things are kept apart, so that a rule cannot take "not kno
 
 Two cases of the first: a rule's `parameters` are `null` when GitHub sent none (as it does for a rule such as `deletion`, which has none) and an empty object only when GitHub sent one; and an environment's `can_admins_bypass` is `null` when GitHub did not say.
 
-The `settings` part depends only on the settings and on what the caller may see: values are cut down to what matters and put in a fixed order, so the same settings read with the same access give the same `settings`, whenever they are read and in whatever order GitHub lists them. Every snapshot is checked against the schema before it is written or reported; a setting whose value the schema refuses is recorded as not read. The rest of the file (`taken_at`, `requests`, `viewer`) differs from run to run.
+The `settings` part depends only on the settings and on what the caller may see: values are cut down to what matters and put in a fixed order, so the same settings read with the same access give the same `settings`, whenever they are read and in whatever order GitHub lists rulesets, rules, environments, reviewers, checks and secrets. The one exception is inside a rule's `parameters` and a ruleset's or policy's `conditions`, which are kept as GitHub sent them, lists in GitHub's order. Every snapshot is checked against the schema before it is written or reported; a setting whose value the schema refuses is recorded as not read. The rest of the file (`taken_at`, `requests`, `viewer`) differs from run to run.
 
 What is in it that you might not want to publish: the names of secrets (never their values; GitHub does not return them), and the logins and team names that the settings themselves name: environment reviewers, and the people, teams and apps on classic branch protection's push and review-bypass lists. For a public repository the environment reviewers are already public; the secret names and the classic protection lists are not. There is no token in it, and no list of collaborators, only how many hold each role.
 
@@ -200,11 +200,16 @@ Said plainly, so that nobody assumes otherwise:
 - Organisation and enterprise settings, except rulesets and Actions policies from those levels that apply to this repository.
 - Anything on GitHub Enterprise Server. `--api-url` exists, and has not been tried against one.
 
+Two limits of the command itself:
+
+- **There is no time limit for an audit as a whole**, only 60 seconds for each answer. A repository with many rulesets and environments means many requests; a workflow should set its own `timeout-minutes`.
+- **The report does not wrap its own lines.** Every name is cut to a fixed length and cannot hold a line break or a control character, but a long line still wraps in a narrow terminal, and text at the start of a wrapped line can look like a line of the report. Read a report on a snapshot you do not trust with that in mind, or use `--format json`.
+
 ## Things the audit takes on trust
 
 Each of these is a place where GitHub's reference did not settle the question. None has been confirmed against a live repository with an administrator's token.
 
-- **A 404 from classic branch protection** means "this branch has no classic protection" only when GitHub's message is exactly "Branch not protected". GitHub's reference documents the 404 but not the message. Any other 404 is recorded as not read.
+- **A 404 from classic branch protection** means "this branch has no classic protection" only when GitHub's message is exactly "Branch not protected", compared as it came, character for character. GitHub's reference documents the 404 but not the message. Any other 404 is recorded as not read.
 - **Sections missing from a classic branch protection** (required checks, required reviews, push restrictions) are recorded as not required. This is the one place where an absence is read as a value: GitHub leaves a section out when it is not configured, and the reading chosen is the one that reports less protection, never more. The list of who may bypass required reviews is the exception: when it is absent it is recorded as not known. The answer must still say whether administrators are held to the rule, or it is not taken for a protection at all.
 - **`deployment_branch_policy: null`** means any branch or tag may deploy. GitHub's reference says so for setting the value ("To allow all branches to deploy, set to `null`"), not for reading it.
 - **An empty bypass list** is not believed from anyone, as described [above](#the-bypass-list).
