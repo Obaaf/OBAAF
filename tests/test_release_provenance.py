@@ -8,7 +8,12 @@ before uploading.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 import yaml
 
@@ -146,6 +151,112 @@ class ObafReleasePolicyTest(unittest.TestCase):
         self.assertNotIn("0123456789abcdef", text)   # the placeholder from before release 0.3.0
         self.assertNotIn("OWNER/REPO", text)
         self.assertNotIn("obaaf-release.yml", text)
+
+
+class VersionAndTagTest(unittest.TestCase):
+    """The build job refuses a version that is not the tag, and a development version bound for PyPI.
+
+    Between two releases the version on main is a .devN number, so a tag pushed without setting the
+    release version would upload one. The step is read from the workflow and its script is run here."""
+
+    NAME = "Refuse a version that is not the tag, or a development version bound for PyPI"
+    TEST_PYPI = "https://test.pypi.org/legacy/"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        cls.steps = cls.jobs["build"]["steps"]
+        cls.index = _step_index(cls.steps, lambda s: s.get("name") == cls.NAME)
+        cls.step = cls.steps[cls.index]
+
+    def test_the_step_cannot_be_skipped_or_passed_over(self):
+        self.assertEqual(sorted(self.step), ["env", "name", "run"])   # no `if`, no `continue-on-error`, no `shell`
+        self.assertNotIn("continue-on-error", self.jobs["build"])
+        # Everything from outside arrives through the environment. Pasted into the script, a ref name
+        # such as v$(command) would be run.
+        self.assertEqual(self.step["env"], {"REF_TYPE": "${{ github.ref_type }}", "REF_NAME": "${{ github.ref_name }}",
+                                            "INDEX": "${{ github.event.inputs.repository-url }}"})
+        self.assertNotIn("${{", self.step["run"])
+        # The same input decides where the publish job uploads.
+        upload = self.jobs["publish"]["steps"][-1]
+        self.assertIn("gh-action-pypi-publish", upload["uses"])
+        self.assertEqual(upload["with"]["repository-url"], self.step["env"]["INDEX"])
+
+    def test_nothing_leaves_the_build_job_before_it_and_no_later_job_runs_without_it(self):
+        def uploads(steps):
+            return [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]
+
+        self.assertEqual(uploads(self.steps[:self.index]), [])
+        self.assertEqual(len(uploads(self.steps[self.index + 1:])), 2)
+        self.assertEqual(self.jobs["attest"]["needs"], "build")
+        self.assertEqual(self.jobs["publish"]["needs"], ["build", "attest"])
+        for job in ("attest", "publish"):
+            self.assertNotIn("if", self.jobs[job], job)   # `if: always()` would run it after a failed build
+
+    def run_step(self, version: str, ref_type: str, ref_name: str, index: str = "") -> tuple[int, str, list[str]]:
+        """Run the step's script as the runner would, with a stand-in for the interpreter of the clean
+        environment that answers ``version`` (or fails when it is empty). Returns the exit code, what was
+        printed, and the files the script left in its working directory."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stand_in = Path(tmp) / "runner" / "clean" / "bin" / "python"
+            stand_in.parent.mkdir(parents=True)
+            stand_in.write_text('#!/bin/sh\n[ -n "$STAND_IN_VERSION" ] || exit 3\nprintf "%s\\n" "$STAND_IN_VERSION"\n',
+                                encoding="utf-8")
+            stand_in.chmod(0o755)
+            work = Path(tmp) / "work"
+            work.mkdir()
+            env = {"PATH": os.environ.get("PATH", ""), "RUNNER_TEMP": str(Path(tmp) / "runner"),
+                   "REF_TYPE": ref_type, "REF_NAME": ref_name, "INDEX": index, "STAND_IN_VERSION": version}
+            done = subprocess.run(["bash", "-e", "-c", self.step["run"]], env=env, cwd=work, capture_output=True,
+                                  text=True, timeout=60, check=False)
+            return done.returncode, done.stdout + done.stderr, sorted(p.name for p in work.iterdir())
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "the step is a bash script")
+    def test_what_the_script_lets_through_and_what_it_stops(self):
+        cases = [
+            # version, ref type, ref name, index, passes
+            ("0.4.0", "tag", "v0.4.0", "", True),                           # a release, tagged as itself
+            ("0.4.0", "tag", "v0.4.0", self.TEST_PYPI, True),
+            ("0.4.0.dev0", "tag", "v0.4.0", "", False),                     # the version was not set before tagging
+            ("0.4.0.dev0", "tag", "v0.4.0", self.TEST_PYPI, False),
+            ("0.4.0", "tag", "v0.4", "", False),                            # the tag is the mistake
+            ("0.4.0", "tag", "V0.4.0", "", False),
+            ("0.4.0", "tag", "0.4.0", "", False),
+            ("0.4.0", "tag", "v0.4.0 ", "", False),
+            ("0.4.0", "tag", "v0.4.1", "", False),
+            ("0.4.0", "tag", "", "", False),
+            ("0.4.0.dev0", "tag", "v0.4.0.dev0", "", False),                # a development version, bound for PyPI
+            ("0.4.0.dev0", "tag", "v0.4.0.dev0", self.TEST_PYPI, True),     # a rehearsal on another index
+            ("0.4.0.dev0", "branch", "main", "", False),                    # run by hand from a branch
+            ("0.4.0.dev0", "branch", "main", self.TEST_PYPI, True),
+            ("0.4.0", "branch", "main", "", True),                          # `obaaf verify release` refuses this one later
+            ("0.4.0", "branch", "v0.4.1", "", True),                        # a branch named like a tag is not a tag
+            ("", "tag", "v0.4.0", "", False),                               # the version could not be read
+            ("", "branch", "main", self.TEST_PYPI, False),
+        ]
+        for version, ref_type, ref_name, index, passes in cases:
+            with self.subTest(version=version, ref_type=ref_type, ref_name=ref_name, index=index):
+                code, said, _ = self.run_step(version, ref_type, ref_name, index)
+                self.assertEqual(code == 0, passes, said)
+                if version and not passes:
+                    self.assertIn("::error::", said)
+                    self.assertIn("Nothing was uploaded", said)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "the step is a bash script")
+    def test_a_ref_name_is_compared_and_never_run(self):
+        # Git allows all of these in a tag's name.
+        for ref_name in ("v$(touch made-by-the-tag)", "v`touch made-by-the-tag`", "v0.4.0;touch${IFS}made-by-the-tag",
+                         "v0.4.0\"&&touch${IFS}made-by-the-tag&&\""):
+            with self.subTest(ref_name=ref_name):
+                code, said, left = self.run_step("0.4.0", "tag", ref_name)
+                self.assertNotEqual(code, 0, said)
+                self.assertEqual(left, [], said)
+
+    def test_the_runbook_says_what_the_step_does(self):
+        text = (ROOT / "docs" / "releasing.md").read_text(encoding="utf-8")
+        self.assertIn("`obaaf docs build`", text)
+        self.assertIn("never to PyPI", text)
+        self.assertIn("`v` followed by the version", text)
 
 
 class ReleasePypiCheckerTest(unittest.TestCase):

@@ -41,13 +41,19 @@ class GeneratedDocumentsTest(unittest.TestCase):
 class WhichVersionTheDocumentsSayTest(unittest.TestCase):
     """Between two releases the version is a .devN number, and nothing generated calls that a release."""
 
-    def test_the_version_is_one_the_tools_can_read(self):
+    def test_the_version_is_a_release_or_the_development_number_before_one(self):
         from obaaf import __version__
 
-        # A release (0.4.0) or the development number before it (0.4.0.dev0). Nothing else is used here,
-        # and the notes below and the SARIF report's semanticVersion both rely on this shape.
+        # 0.4.0, or 0.4.0.dev0 on the way to it. A new shape (a release candidate, say) needs its own wording
+        # in the notes below and its own line in the release workflow's check before it is used.
         self.assertRegex(__version__, r"\A\d+\.\d+\.\d+(\.dev\d+)?\Z")
-        self.assertEqual(render.is_release(), ".dev" not in __version__)
+
+    def test_a_release_is_three_numbers_and_nothing_else(self):
+        for version in ("0.3.0", "1.10.2"):
+            self.assertTrue(render.is_release(version), version)
+        for version in ("0.4.0.dev0", "0.4.1.dev12", "1.0.0rc1", "1.0.0a1", "0.4.0dev0", "0.4.0-dev0",
+                        "0.4.0.DEV0", "0.4", "0.4.0.1", "0.4.0 "):
+            self.assertFalse(render.is_release(version), version)
 
     def test_a_release_is_described_as_before(self):
         self.assertEqual(
@@ -57,16 +63,17 @@ class WhichVersionTheDocumentsSayTest(unittest.TestCase):
         self.assertEqual(
             render.form_note("0.3.0"),
             "OBAAF 0.3.0, in use with pilot teams. It may change in OBAAF 0.4 based on pilot feedback.")
-        self.assertTrue(render.is_release("0.3.0"))
-        self.assertTrue(render.is_release("1.10.2"))
+        self.assertIn("OBAAF 1.10, in active adoption", render.draft_note("1.10.2"))
+        self.assertIn("in OBAAF 1.11 based on", render.form_note("1.10.2"))
 
     def test_a_development_version_is_not_described_as_a_release(self):
-        for version, line in (("0.4.0.dev0", "0.4"), ("1.10.0.dev3", "1.10")):
-            self.assertFalse(render.is_release(version))
-            for note in (render.draft_note(version), render.form_note(version)):
-                self.assertIn(version, note)
-                self.assertIn("not", note)
-                self.assertIn(f"before OBAAF {line} is released", note)
+        # The release it leads to is named in full: 0.4.1.dev0 comes before 0.4.1, and 0.4 is already out.
+        for version, leads_to in (("0.4.0.dev0", "0.4.0"), ("0.4.1.dev2", "0.4.1"), ("1.10.0.dev3", "1.10.0")):
+            draft, form = render.draft_note(version), render.form_note(version)
+            self.assertIn(f"a development version of OBAAF ({version}), not by a release", draft)
+            self.assertIn(f"OBAAF {version}, a development version and not a release", form)
+            for note in (draft, form):
+                self.assertIn(f"before OBAAF {leads_to} is released", note)
                 # What is said of a release must not be said of the code between two of them.
                 self.assertNotIn("pilot", note)
                 self.assertNotIn("adoption", note)
@@ -81,15 +88,22 @@ class WhichVersionTheDocumentsSayTest(unittest.TestCase):
         self.assertIn(f"Form version {__version__}.", form)
         self.assertNotIn("{{", form.split("<script", 1)[0])   # no placeholder left unfilled in the page
 
-    def test_the_release_workflow_refuses_a_tag_that_is_not_the_version(self):
-        text = (ROOT / ".github" / "workflows" / "release-pypi.yml").read_text(encoding="utf-8")
-        build, rest = text.split("\n  attest:", 1)
-        # In the first job, on a tag, before the artifacts are handed to the jobs that sign and upload.
-        self.assertIn("if: github.ref_type == 'tag'", build)
-        self.assertIn('if [ "v$version" != "$TAG" ]; then', build)
-        self.assertLess(build.index('if [ "v$version" != "$TAG" ]; then'), build.index("actions/upload-artifact"))
-        self.assertIn("TAG: ${{ github.ref_name }}", build)   # through the environment, never pasted into the script
-        self.assertNotIn("${{ github.ref_name }}", build.split("run: |")[-1])
+    def test_a_report_does_not_claim_a_release_that_does_not_exist(self):
+        import json
+
+        from obaaf import __version__, checker
+        from obaaf.checker import report
+
+        # SARIF wants Semantic Versioning, which writes a development version as a pre-release.
+        self.assertEqual(report.semantic_version("0.4.0.dev0"), "0.4.0-dev.0")
+        self.assertEqual(report.semantic_version("1.10.2.dev13"), "1.10.2-dev.13")
+        self.assertEqual(report.semantic_version("0.3.0"), "0.3.0")
+        risky = ROOT / "tests" / "fixtures" / "workflows" / "risky" / "pwn-request.yml"
+        driver = json.loads(report.to_sarif(checker.check(risky)))["runs"][0]["tool"]["driver"]
+        self.assertEqual(driver["version"], __version__)
+        self.assertEqual(driver["semanticVersion"], report.semantic_version(__version__))
+        if not render.is_release():
+            self.assertNotRegex(driver["semanticVersion"], r"\A\d+\.\d+\.\d+\Z")
 
 
 class LinksTest(unittest.TestCase):
