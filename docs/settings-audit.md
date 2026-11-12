@@ -17,11 +17,11 @@ obaaf audit --repo OWNER/REPO    # or name it
 
 With no token this reads what GitHub shows anyone about a public repository: the repository itself, its rulesets and their rules, the rules in force on the default branch, whether GitHub calls that branch protected, and its environments with the branches that may deploy to each. Everything else is listed under **NOT READ** with what GitHub's reference says a token would need.
 
-This is what it printed for this repository on 2026-11-12, with no token, in [its own workflow](https://github.com/Obaaf/OBAAF/actions/runs/43129074849) (the list of what was not requested is shortened here):
+This is what it printed for this repository on 2026-11-12, with no token, in [its own workflow](https://github.com/Obaaf/OBAAF/actions/runs/43169162230) (the list of what was not requested is shortened here):
 
 ```text
 Settings audit of Obaaf/OBAAF
-Read 2026-11-12 00:41 UTC from https://api.github.com, without a token.
+Read 2026-11-12 06:35 UTC from https://api.github.com, without a token.
 This command reads and records settings. It does not judge them yet: no rule runs on what it read.
 
 NOT READ: 9 of 15. Nothing is known about these; they were not checked.
@@ -40,14 +40,14 @@ READ: 5 of 15
   Each audited branch, as anyone may see it
       main: GitHub calls it protected; required checks: Build resource site, actionlint, package, setup-action (macos-latest), setup-action (ubuntu-latest), setup-action (windows-latest), test (3.10), test (3.13)
   Environments: reviewers and which branches may deploy
-      "github-pages": may deploy: main; no required reviewers
-      "pypi": any branch or tag may deploy; reviewers: seanudeke (self-review allowed)
+      "github-pages": may deploy: branch main; no required reviewers
+      "pypi": may deploy: tag v*; reviewers: FehintolaObafemi, Ofonna-N, seanudeke (self-review prevented); administrators may bypass these rules: no
 
 DOES NOT APPLY: 1 of 15
   Who may bypass each ruleset
       no ruleset applies to this repository
 
-15 settings: 5 read, 0 partly read, 9 not read, 1 that do not apply. 6 requests sent, all GET.
+15 settings: 5 read, 0 partly read, 9 not read, 1 that do not apply. 7 requests sent, all GET.
 ```
 
 With a token it tries everything in [the table below](#what-it-reads). The token is taken from the environment, never from the command line:
@@ -112,7 +112,7 @@ Each setting has a stable key, which is its name in the snapshot. "Anyone" means
 | `actions_policies` | Actions policies (workflow execution protections): who and which events may start which workflows, including policies from the organisation or enterprise that apply here | `/repos/{owner}/{repo}/actions/policies`, `/repos/{owner}/{repo}/actions/policies/{id}` | Token: "Administration" (**write**). See [below](#what-needs-more-than-read) |
 | `collaborators` | How many accounts hold each role. Counts only; the list is not kept | `/repos/{owner}/{repo}/collaborators` | Token of someone with write, maintain or admin access, by the reference. On 2026-11-12 GitHub also answered this repository's own workflow token |
 
-Without a token the audit does not ask for the settings marked "Token": the answer is known, and each request would count against the 60 an hour GitHub allows an address with no token. They are recorded as not read, with the reason `no_token`. A run with no token sends five requests, plus one for each ruleset and one for each environment that limits deployment to named branches (six for this repository).
+Without a token the audit does not ask for the settings marked "Token": the answer is known, and each request would count against the 60 an hour GitHub allows an address with no token. They are recorded as not read, with the reason `no_token`. A run with no token sends five requests, plus one for each ruleset and one for each environment that limits deployment to named branches or tags (seven for this repository).
 
 Lists are asked for 100 entries at a time, by page number. A list counts as read only when a page with fewer than 100 entries and no link to a next page ends it, and, where GitHub says how many entries there are, when that number matches. A list of more than 1,000 entries is recorded as not read.
 
@@ -206,7 +206,7 @@ Each of these is a place where GitHub's reference did not settle the question. N
 - **Sections missing from a classic branch protection** (required checks, required reviews, push restrictions) are recorded as not required. This is the one place where an absence is read as a value: GitHub leaves a section out when it is not configured, and the reading chosen is the one that reports less protection, never more. The list of who may bypass required reviews is the exception: when it is absent it is recorded as not known. The answer must still say whether administrators are held to the rule, or it is not taken for a protection at all.
 - **`deployment_branch_policy: null`** means any branch or tag may deploy. GitHub's reference says so for setting the value ("To allow all branches to deploy, set to `null`"), not for reading it.
 - **An empty bypass list** is not believed from anyone, as described [above](#the-bypass-list).
-- **Collaborator roles** are read from each collaborator's `permissions` object (admin, maintain, push, triage, pull). That response's schema was not re-read on 2026-11-12; if the object is missing the count is recorded as not read (`unexpected`).
+- **Collaborator roles** are read from each collaborator's `permissions` object (admin, maintain, push, triage, pull). That response's schema was not re-read on 2026-11-12; if the object is missing the count is recorded as not read (`unexpected`). Seen on 2026-11-12 with the workflow's token: this repository's three collaborators, all administrators, were counted as "3 accounts: 3 admin".
 - **What "protected" means** on the public view of a branch is not relied on. The flag is recorded as GitHub gives it. Seen on 2026-11-12: a branch protected only by a ruleset came back with `protected: true`, a `protection` object that says `enabled: false`, and an empty list of required checks, while the ruleset requires eleven. So the checks in this view are those of a classic protection rule only, and the report says "no required checks shown in this view" rather than "none". The checks a ruleset requires are under "Rules in force on each audited branch".
 - **"Administrators may bypass these rules"** on an environment is GitHub's `can_admins_bypass` field as it came, which GitHub sent to a caller with no token on 2026-11-12. The report says it only for an environment that has a reviewer, a wait timer or another protection rule. Whether it also lets an administrator past the limit on which branches may deploy is not something the audit claims.
 
@@ -214,7 +214,8 @@ Each of these is a place where GitHub's reference did not settle the question. N
 ## What has been run, and what has not
 
 - **Run:** the tests in `tests/test_settings_audit.py`. They drive the reader from recordings in `tests/fixtures/settings/`. Three of the recordings were **written by hand** from the example responses in GitHub's REST reference: one for a caller with no token, one for a workflow's token and one for an administrator's. Two are **GitHub's own answers** to a caller with no token, for this repository and for the first adopter's, kept from the workflow run of 2026-11-12 01:33 UTC named below. So everything a token is needed for, and above all everything an administrator's token would show, is still tested only against hand-written answers. The real HTTP client is tested against a server on the test machine: that it sends GET with no body, sends the token only when it has one, does not follow a redirect to another host, and survives an answer that breaks off.
-- **Run on GitHub:** the workflow above, on this repository, on 2026-11-12 ([run 43129074849](https://github.com/Obaaf/OBAAF/actions/runs/43129074849), on the first version of the reader). With no token it read the five public settings in six requests, as shown at the top of this page. With the workflow's own token it read the same and the collaborator count, and GitHub refused the other eight with HTTP 403, "Resource not accessible by integration", naming the permission it would accept (`administration=read`, `environments=read`, `secrets=read`, and `administration=write` for Actions policies). No answer had an unexpected shape. The workflow runs again whenever the reader changes; the pull request that changes it links the run.
+- **Run on GitHub:** the workflow above, four times on 2026-11-12, each on the reader as it then was (runs [43129074849](https://github.com/Obaaf/OBAAF/actions/runs/43129074849), [43135263367](https://github.com/Obaaf/OBAAF/actions/runs/43135263367), [43168837657](https://github.com/Obaaf/OBAAF/actions/runs/43168837657) and [43169162230](https://github.com/Obaaf/OBAAF/actions/runs/43169162230)). What follows is the last, at 06:35 UTC. On this repository with no token it read the five public settings in seven requests, as shown at the top of this page. With the workflow's own token it read the same and the collaborator count, and GitHub refused the other eight with HTTP 403, "Resource not accessible by integration", naming the permission it would accept (`administration=read`, `environments=read`, `secrets=read`, and `administration=write` for Actions policies). On the first adopter's repository, with no token, it read the ruleset that protects `main` with its eleven required checks, the rules in force on `main` and three environments, and recorded the ruleset's bypass list as not read. From the second run on, the job reads the adopter's repository as well and fails if any answer has an unexpected shape; those three runs passed.
+- **What the live runs changed.** Reading the reports of the second and third runs found four faults in the report that the hand-written recordings had not shown: a rule was cut off after 60 characters, so three of eleven required checks were named; a pattern for tags was printed like one for branches; nothing said whether administrators may bypass an environment's reviewers; and a branch protected only by a ruleset was described as having no required checks. All four are fixed and the answers behind them are now test recordings. The workflow runs again whenever the reader changes; the pull request that changes it links the run.
 - **Not run:** the audit with a token that has administrative read access, so every setting marked "Token" above except the collaborator count has only been read from hand-written recordings; a repository with classic branch protection read in full; a private repository; GitHub Enterprise Server.
 
 ## Sources
