@@ -1,0 +1,13 @@
+name: CI
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+        env:
+          COVERAGE_TOKEN: ${{ secrets.COVERAGE_TOKEN }}
