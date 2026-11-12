@@ -202,7 +202,7 @@ Said plainly, so that nobody assumes otherwise:
 
 Two limits of the command itself:
 
-- **There is no time limit for an audit as a whole**, only 60 seconds for each answer. A repository with many rulesets and environments means many requests; a workflow should set its own `timeout-minutes`.
+- **There is no time limit for an audit as a whole**, only 60 seconds for the body of each answer and 20 seconds for each wait on the connection. A repository with many rulesets and environments means many requests; a workflow should set its own `timeout-minutes`.
 - **The report does not wrap its own lines.** Every name is cut to a fixed length and cannot hold a line break or a control character, but a long line still wraps in a narrow terminal, and text at the start of a wrapped line can look like a line of the report. Read a report on a snapshot you do not trust with that in mind, or use `--format json`.
 
 ## Things the audit takes on trust
