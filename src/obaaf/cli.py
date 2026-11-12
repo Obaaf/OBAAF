@@ -961,9 +961,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _printable_streams() -> None:
     """Make standard output and standard error write a character they cannot encode as an escape.
-    A report names owners, jobs and paths in any script, and a name can hold half of a surrogate
-    pair. Where the output is ASCII, or for that half pair anywhere, Python would otherwise end the
-    command in a traceback, and a report must not be lost over one character."""
+    A report names owners, jobs and paths in any script. Where the output is ASCII, Python would
+    otherwise end the command in a traceback at the first letter outside it, and a report must not
+    be lost over one character."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:

@@ -121,10 +121,13 @@ def _owner_key(name: str) -> str:
 def _path_header(path) -> str:
     """A file's path as the line that heads its findings. That line starts in the first column, where
     every line the checker writes in its own words also starts, and each of those has a space in it.
-    So a path with a space is put in quotes: a directory named like a line of the report cannot pass
-    for one."""
+    A path is printed as it is only when every character in it is a visible ASCII character, which
+    leaves nothing that can stand for a space: not a space, and not one of the characters outside
+    ASCII that print as a blank (U+2800, U+3164 and others; there is no complete list to rely on).
+    Any other path is put in quotes, so its line begins with a quotation mark and no line of the
+    checker's does."""
     shown = one_line(path)
-    return f'"{shown}"' if " " in shown else shown
+    return shown if shown and all("!" <= ch <= "~" for ch in shown) else f'"{shown}"'
 
 
 def _source(f) -> str:
@@ -141,9 +144,11 @@ def accepted_risk(result: CheckResult, expiring_within: int = EXPIRY_WARNING_DAY
     It counts the findings whose state is `accepted`: a valid ignore entry or a valid baseline entry
     names them, so they do not fail the check. Each owner is listed with how many findings they
     accepted, at what severity, and the first date on which one of their acceptances runs out.
-    Owners are grouped without regard to case (@Octocat and @octocat are one account to GitHub) and
-    shown as first written. `expiringSoon` lists the acceptances that run out within
-    `expiring_within` days of the day the check ran; 0 turns that list off.
+    Two spellings are one owner when they differ only in the case of A to Z (@Octocat and @octocat
+    are one account to GitHub) or in how an accented letter is stored (`_owner_key`); the owner is
+    shown as spelt on the first of their findings in the report's order. `expiringSoon` lists the
+    acceptances that run out within `expiring_within` days of the day the check ran; 0 turns that
+    list off.
     """
     today = today or result.today or date.today()
     accepted = [f for f in result.findings if f.state == ACCEPTED]
@@ -504,7 +509,7 @@ def _sarif_message(f) -> str:
                                f"because {'; '.join(made.problems)}"))
     if f.controls:
         parts.append(_sentence(f"Controls: {_controls(f)}"))
-    return " ".join(parts)
+    return " ".join(part for part in parts if part)
 
 
 def _notification(kind: str, level: str, text) -> dict:

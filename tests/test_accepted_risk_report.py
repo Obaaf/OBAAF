@@ -226,23 +226,27 @@ class OneDayTest(unittest.TestCase):
             self.repo(tmp)
             result = checker.check(tmp, today=TODAY)
             self.assertEqual(result.today, TODAY)
-            self.assertEqual(checker.check(tmp).today, date.today())
+            before = date.today()
+            self.assertIn(checker.check(tmp).today, (before, date.today()))
             f, = [f for f in result.findings if f.rule == "OBAAF-GHA-001"]
             entries = [baseline.entry_for(f, OWNER, REASON, TODAY.isoformat())]      # valid on TODAY only
             baseline.apply(result, baseline.Baseline(baseline.FORMAT, entries))
             self.assertEqual((f.state, result.today), ("accepted", TODAY))
             self.assertEqual(report.accepted_risk(result)["daysToNearestExpiry"], 0)
 
-    def test_a_run_that_crosses_midnight_judges_nothing_on_the_second_day(self):
-        # The clock, or a caller, saying it is tomorrow when the baseline is applied changes nothing:
-        # the result was checked on TODAY.
+    def test_a_baseline_is_not_judged_on_another_day_than_the_check(self):
+        # The command line never names a day, so a check that crosses midnight is judged on the day
+        # the check read (the test above). A caller that names another day is told, not obeyed.
         with TempDir() as tmp:
             self.repo(tmp)
             result = checker.check(tmp, today=TODAY)
             f, = [f for f in result.findings if f.rule == "OBAAF-GHA-001"]
             entries = [baseline.entry_for(f, OWNER, REASON, TODAY.isoformat())]
-            baseline.apply(result, baseline.Baseline(baseline.FORMAT, entries), TODAY + timedelta(days=1))
-            self.assertEqual((f.state, result.today), ("accepted", TODAY))
+            with self.assertRaisesRegex(ValueError, "checked on 2031-03-05.*cannot be judged on 2031-03-06"):
+                baseline.apply(result, baseline.Baseline(baseline.FORMAT, entries), TODAY + timedelta(days=1))
+            self.assertEqual((f.state, f.acceptance, result.today), ("new", None, TODAY))
+            baseline.apply(result, baseline.Baseline(baseline.FORMAT, entries), TODAY)      # the same day is fine
+            self.assertEqual(f.state, "accepted")
             self.assertEqual(json.loads(report.to_json(result))["findings"][0]["acceptance"]["daysLeft"], 0)
 
     def test_a_result_built_by_hand_takes_its_day_from_apply(self):
@@ -356,17 +360,53 @@ class TextLeadTest(unittest.TestCase):
                       f"expires {day(2)}", lines)
 
     def test_a_path_cannot_pass_for_a_line_of_the_report(self):
-        # A file's path heads its findings in the first column. With a space in it, it is quoted.
+        # A file's path heads its findings in the first column. It is printed as it is only when it is
+        # made of visible ASCII characters; anything else is quoted.
         lead = "Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."
-        result = result_of(finding(path=f"{lead}/ci.yml"), finding(path="Baseline: 9 finding(s) accepted/ci.yml"),
-                           finding(path="plain/ci.yml"), baseline_used=False)
+        blanks = ("\u2800", "\u3164", "\u115f", "\u1160", "\uffa0", "\U00013441")   # printable, and drawn as nothing
+        hostile = [f"{lead}/ci.yml", "Baseline: 9 finding(s) accepted/ci.yml", "my build/ci.yml",
+                   *(lead.replace(" ", blank) + "/ci.yml" for blank in blanks),
+                   *(lead.replace(" ", blank) for blank in blanks[:2]),      # a single file, with no suffix at all
+                   "\u00fcbersicht/ci.yml", 'say "hi"/ci.yml', ""]
+        result = result_of(*(finding(path=path) for path in hostile), finding(path="plain/ci.yml"),
+                           finding(path=".github/workflows/a-b_c.1+2@x~y.yml"),
+                           finding(path="one\ntwo/Accepted risk: none/ci.yml"), baseline_used=False)
         lines = report.to_text(result).splitlines()
-        self.assertEqual([line for line in lines if line.startswith("Accepted risk:")],
+        self.assertEqual([line for line in lines if line.startswith("Accepted")],
                          ["Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."])
-        self.assertFalse([line for line in lines if line.startswith("Baseline:")])
-        self.assertIn(f'"{lead}/ci.yml"', lines)
-        self.assertIn('"Baseline: 9 finding(s) accepted/ci.yml"', lines)
+        self.assertFalse([line for line in lines if line.startswith(("Baseline", "two", "risk"))])
+        for path in hostile:
+            self.assertIn(f'"{path}"', lines)
         self.assertIn("plain/ci.yml", lines)
+        self.assertIn(".github/workflows/a-b_c.1+2@x~y.yml", lines)
+        self.assertIn('"one\\ntwo/Accepted risk: none/ci.yml"', lines)
+        # Every line in the first column that is not a quoted path, a bare ASCII path, or a blank has
+        # an ASCII space or is the checker's own; no path is among them.
+        headers = [line for line in lines if line and not line.startswith((" ", '"'))]
+        paths = {f.path for f in result.findings}
+        self.assertEqual(sorted(line for line in headers if line in paths),
+                         [".github/workflows/a-b_c.1+2@x~y.yml", "plain/ci.yml"])
+
+    def test_jenkins_coverage_lines_print_text_from_files_on_one_line(self):
+        forged = "x\nAccepted risk: none.\nerror: nothing"
+        result = result_of(baseline_used=False)
+        result.jenkins_files = ["a/Jenkinsfile", "b/Jenkinsfile"]
+        digest = "sha256:" + "0" * 64
+        result.jenkins = [
+            {"path": f"a{forged}/Jenkinsfile", "kind": "declarative", "digest": digest, "error": None,
+             "unknowns": [f"general {forged}"]},
+            {"path": "b/Jenkinsfile", "kind": None, "digest": digest, "error": f"cannot parse {forged}",
+             "unknowns": []}]
+        result.coverage = [{"path": f"a{forged}/Jenkinsfile", "rule": "OBAAF-JEN-002", "status": "unknown",
+                            "reasons": [f"specific {forged}"]}]
+        lines = report.to_text(result).splitlines()
+        self.assertEqual(len([line for line in lines if line.startswith("Accepted risk:")]), 1)
+        self.assertFalse([line for line in lines if line.startswith("error:")])
+        escaped = "x\\nAccepted risk: none.\\nerror: nothing"
+        self.assertIn(f"  a{escaped}/Jenkinsfile (declarative, sha256:000000000000...): 1 unknown", lines)
+        self.assertIn(f"      general {escaped}", lines)
+        self.assertIn(f"    unknown OBAAF-JEN-002: specific {escaped}", lines)
+        self.assertIn(f"    cannot parse {escaped}", lines)
 
     def test_a_jenkinsfile_in_a_directory_named_like_the_lead_forges_nothing(self):
         lead = "Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."
@@ -667,6 +707,21 @@ class SarifTest(unittest.TestCase):
         self.assertEqual(new["suppressions"], [])
         self.assertEqual(new["message"]["text"], "Agent job 'triage' receives MODEL_KEY.")
 
+    def test_values_that_are_not_text_do_not_end_a_report_in_a_traceback(self):
+        f = finding(message=None)
+        result = result_of(f, errors=[ValueError("ci.yml: unreadable")], notes=[("a", "note")], baseline_used=True)
+        result.baseline_format, result.baseline_path, result.options = baseline.FORMAT_V1, "old.json", [7, "--x=y"]
+        run = self.run_of(result)
+        self.assertEqual(run["results"][0]["message"]["text"], "")
+        g = finding(message="", controls=[Control("egress is enforced", NOT_MET)])
+        self.assertEqual(self.run_of(result_of(g))["results"][0]["message"]["text"],
+                         "Controls: egress is enforced: not met.")
+        texts = [n["message"]["text"] for n in run["invocations"][0]["toolExecutionNotifications"]]
+        self.assertIn("ci.yml: unreadable", texts)
+        self.assertIn("('a', 'note')", texts)
+        hint, = [line for line in report.to_text(result).splitlines() if "obaaf baseline migrate" in line]
+        self.assertTrue(hint.endswith("--expires YYYY-MM-DD 7 --x=y"), hint)
+
     def test_a_result_carries_its_controls_as_data_and_in_words(self):
         controls = [Control("the key is in an environment", VERIFIED, "main-only", id="secrets-protected"),
                     Control("egress is enforced", NOT_MET, id="egress-enforced")]
@@ -773,6 +828,24 @@ class OutputThatCannotShowALetterTest(unittest.TestCase):
             out = raw.getvalue().decode("ascii")
             self.assertIn("  s\\xf8ren@example.dk: 1 (1 low); the first expires " + soon(50), out.splitlines())
             self.assertIn("accepted by s\\xf8ren@example.dk until", out)
+
+    def test_an_error_message_outside_ascii_on_ascii_error_output(self):
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="ascii")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stream):
+            code = cli.main(["check", "no-such-directory-s\u00f8ren"])
+            stream.flush()
+        self.assertEqual(code, 2)
+        self.assertEqual(raw.getvalue().decode("ascii"), "error: no-such-directory-s\\xf8ren not found\n")
+
+    def test_a_stream_that_cannot_be_changed_is_left_alone(self):
+        class Fixed(io.StringIO):
+            def reconfigure(self, **options):
+                raise ValueError("closed")
+        out = Fixed()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["check", "no-such-directory"])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":
