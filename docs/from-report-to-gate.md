@@ -1,18 +1,20 @@
 # From a report to a gate
 
-How a team moves `obaaf check` from something it reads to something that fails a build, without a day on which every existing finding blocks every pull request. Each step is a command and the exit status it ends with. `tests/test_adoption_path.py` runs the steps in this order on a small repository, so the page cannot drift from the tool.
+How a team moves `obaaf check` from something it reads to something that fails a build, without a day on which every existing finding blocks every pull request. Each step is a command and the exit status it ends with. `tests/test_adoption_path.py` runs the commands of steps 1, 2, 4 and 5 in this order on a small repository and checks the status of each; it does not check every sentence here.
 
 OBAAF is 0.x. The commands here are those of the code on `main` after release 0.3.0; that release has no `--owner`, `--reason` or `--expires`. Before you move to a newer version, read [Upgrading](upgrading.md).
 
 ## The exit status
 
+Of `obaaf check` when it reports, that is, without `--lanes` or `--write-baseline`:
+
 | Status | Meaning |
 | --- | --- |
-| 0 | Nothing at or above `--fail-on` is new, and every file was read |
+| 0 | Nothing at or above `--fail-on` counts (a finding counts when it is new or when the checker cannot tell), and every file was read |
 | 1 | A finding at or above `--fail-on` is not accepted; or a baseline entry at or above it no longer matches a finding; or a file could not be read |
 | 2 | The command could not run: an option, the configuration or a baseline is wrong, or there is nothing to check |
 
-A file the checker could not read ends the check with 1 whatever `--fail-on` says, `never` included. A check that did not read a workflow has not passed it.
+A file the checker could not read ends the check with 1 whatever `--fail-on` says, `never` included. A check that did not read a workflow has not passed it. The dates in this page's commands are examples: an expiry date has to lie ahead, at most 366 days, so use your own.
 
 ## 1. Read the report, and fail nothing
 
@@ -20,7 +22,7 @@ A file the checker could not read ends the check with 1 whatever `--fail-on` say
 obaaf check . --fail-on never
 ```
 
-Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, the requirement it threatens and the fix.
+Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, the requirement it threatens where it has one, and the fix.
 
 Put this in CI first if you like. A step that runs it never fails a build for a finding, and still fails when a workflow cannot be read.
 
@@ -30,7 +32,7 @@ Put this in CI first if you like. A step that runs it never fails a build for a 
 obaaf check . --lanes
 ```
 
-Status 0. One line for each job with the lane the checker put it in. If a job runs an AI agent and is not listed as `agent`, declare it: `OBAAF_LANE: agent` in the job's `env`, or an entry under `lanes:` in `.github/obaaf.yml` ([configuration guide](checker-configuration.md#telling-the-checker-about-your-agents)). An agent job gets the agent rules; a job the checker takes for an ordinary one does not, and its report is shorter than it should be.
+Status 0, always, once the configuration is read: `--lanes` lists and judges nothing. It does not say when a workflow could not be read, and it prints nothing and still ends with 0 for a directory with no workflows, so run step 1 first and look for errors there. One line for each job with the lane the checker put it in. If a job runs an AI agent and is not listed as `agent`, declare it: `OBAAF_LANE: agent` in the job's `env`, or an entry under `lanes:` in `.github/obaaf.yml` ([configuration guide](checker-configuration.md#telling-the-checker-about-your-agents)). An agent job gets the agent rules; a job the checker takes for an ordinary one does not, and its report is shorter than it should be.
 
 Do this before step 4. A declaration that does nothing (`OBAAF_LANE: agnet`) is itself a finding, `OBAAF-CFG-001`, and `--lanes` prints it as a note on standard error. If it is still there when you write the baseline, the baseline accepts it, and the findings it hides are never seen.
 
@@ -47,6 +49,8 @@ obaaf check . --write-baseline .github/obaaf-baseline.json \
 
 Status 0, and a line on standard error that says how many findings were newly accepted, by whom and until when. Without `--owner`, `--reason` and `--expires` the status is 2 and nothing is written: an acceptance needs an owner (`@user`, `@org/team` or an e-mail address), a reason, and an expiry date at most 366 days ahead.
 
+One case ends with 0 and leaves a finding out. A finding named by an `ignore` entry that has expired, or that lacks an owner, is not written to the baseline: the command warns on standard error, and step 5 then fails on that finding. Complete or remove the entry first.
+
 Commit the file and put it under CODEOWNERS. It is a list of accepted risks: review a change to it like a change to a workflow.
 
 ## 5. Fail on anything new
@@ -59,6 +63,7 @@ Status 0 today. This is the gate. From now on:
 
 - **A new finding at medium or high fails the check** (status 1). Fix it, or accept it by running step 4 again: entries that are still valid keep their own owner, reason and date, and only the new finding takes the ones you give.
 - **A finding you fixed fails it too**, once, at or above `--fail-on`: its entry no longer matches anything, and the report lists it under "no longer found". Run step 4 again to drop the entry. The fix is then locked in: the same finding coming back is new.
+- **Changing a step can make an accepted finding on it new.** A step with no `name` or `id` is known by the action it uses, version included. Pin `actions/checkout@v4` to a commit SHA and every accepted finding on that step counts as new, and its old entry as no longer found; running step 4 again then accepts it with the owner, reason and date you give that day, not the ones it had. Give the step a `name` before you accept a finding on it ([configuration guide](checker-configuration.md#baseline), "A step by its name"), and read the diff of the baseline.
 - **An entry whose date has passed accepts nothing.** Its finding counts as new on the day after. The report lists acceptances that run out within 30 days as "expiring soon" (`--expiry-warning DAYS` changes the window), which changes no exit status: it is there to be read before the day the gate goes red.
 
 `--fail-on authority:medium` gates on the findings about who can change, build, release or sign, and leaves pinning and hardening for later.
@@ -66,7 +71,7 @@ Status 0 today. This is the gate. From now on:
 ## 6. Tighten
 
 - `--fail-on low`, when the medium findings are under control.
-- Shorter dates. Writing the baseline again never renews an entry that is still valid: it keeps its owner, reason and date. To extend one, change its date in the file, where a reviewer sees the change; once it has run out, step 4 writes it again with the owner, reason and date you give.
+- Shorter dates. Writing the baseline again never renews an entry that is still valid and still matches its finding: it keeps its owner, reason and date. To extend one, change its date in the file, where a reviewer sees the change; once it has run out, step 4 writes it again with the owner, reason and date you give.
 - Fewer entries. The first lines of every report say how many findings are accepted, at what severity, by which owner, and when the first one runs out. That number is the thing to bring down.
 
 ## Code scanning is not the gate

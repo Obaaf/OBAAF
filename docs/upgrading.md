@@ -5,7 +5,7 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 ## Versions, and what to pin
 
 - **A release** has three numbers (`0.3.0`). It is on PyPI (`pip install obaaf==0.3.0`) and has a tag (`v0.3.0`).
-- **Between releases** the code on `main` calls itself a development number (`0.4.0.dev0` on the way to 0.4.0). It is not a release, and it changes without notice. The reports and the generated documents say which version wrote them.
+- **Between releases** the code on `main` calls itself a development number (`0.4.0.dev0` on the way to 0.4.0). It is not a release, and it changes without notice. The JSON and SARIF reports, a baseline file and the generated documents say which version wrote them; the text report does not (`obaaf --version` does).
 - **Pin what your gate runs**: a release from PyPI, or the `setup-obaaf` action at a full commit SHA. A gate that follows `main` can fail because OBAAF changed, on a day nobody chose.
 - How a release is made is in [releasing.md](releasing.md). What each release changed is in the [changelog](../CHANGELOG.md).
 
@@ -14,7 +14,7 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 Move the pin in a pull request of its own, so that the gate runs once with the new version and nothing else changes with it.
 
 1. Read the section below for the version you are moving to.
-2. With the new version, run the report without failing anything: `obaaf check . --fail-on never`. Read its first lines and anything marked "Not accepted".
+2. With the new version, run the report without failing anything: `obaaf check . --fail-on never`, with `--baseline FILE` if your gate uses one. Read its first lines and anything marked "Not accepted".
 3. Run your gate's own command and look at the exit status. If it is 1, the report says why: each finding that counts says under it what its acceptance lacks, and an old baseline is named with the command that converts it.
 4. Do what the section says: convert the baseline, complete the `ignore` entries, correct the declarations.
 5. Run the gate's command again. Commit the pin together with the changed baseline and configuration, and have the baseline reviewed like a workflow.
@@ -30,11 +30,12 @@ Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit 
 | A baseline written by 0.2.0 or 0.3.0 (`obaaf-baseline/v0.1`) | It is still read and accepts nothing: every finding it covered counts as new, marked "Not accepted" | `obaaf baseline migrate FILE --owner OWNER --reason REASON --expires YYYY-MM-DD`, once. It carries over the findings the old file covers and accepts nothing new |
 | An `ignore` entry with no `owner:` | It ignores nothing, and the finding is reported with "because it names no owner" | Add `owner:` (`@user`, `@org/team` or an e-mail address) |
 | An `ignore` entry whose reason has fewer than four letters or digits, or whose `until` is more than 366 days ahead | It ignores nothing, and the report says which | Give a reason; bring the date within a year |
-| An `ignore` entry whose `until` is not a plain date (`2027-01-31T10:00:00Z`) | A configuration error, exit status 2 | Write `YYYY-MM-DD` |
+| An `ignore` entry whose `until` is a date in another spelling (`20270131`) | A configuration error, exit status 2. (A time of day, `2027-01-31T10:00:00Z`, ended 0.3.0 in a traceback when the entry matched a finding; it is the same error now) | Write `YYYY-MM-DD` |
 | A lane declaration that does nothing: `OBAAF_LANE: agnet`, `OBAAF_LANE` in a step's `env`, a `lanes:` entry for a job that is not there | 0.3.0 listed it in a note. It is the finding `OBAAF-CFG-001`, high in most cases, and fails the default gate | Correct or delete it, then run `obaaf check . --lanes`. Correcting it can bring the findings it was hiding. To keep it, accept it in the baseline; an `ignore` entry cannot accept this rule and is a configuration error if it names it |
 | An agent job whose egress control is a blocking `step-security/harden-runner` step | 0.3.0 reported no `OBAAF-GHA-020` for it. It is now reported: "cannot tell" when the step is the job's first, "not met" otherwise | Accept it with an owner, a reason and a date. No egress control is credited yet |
 | A job whose `if:` only looked like a test of the event (the test inside a string, compared with `false`, or outside `${{ }}`) | It is now checked for every event that can start it, and can have findings it did not have | Fix the findings, or write the `if:` as a plain comparison of `github.event_name` |
 | An input written in another case under `with:` (`REF:` for `ref:`) | It is read as the input it is, so a rule that looks at it now sees it | Fix the finding |
+| A step that gives one input twice under two spellings (`ref:` and `REF:`) | An error for the file, and exit status 1 whatever `--fail-on` says: the checker cannot tell which value GitHub uses | Keep one of the two |
 
 The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycle of a finding", "A lane declaration that does nothing is a finding", "Controls", "Which events can start a job" and "Inputs in any case".
 
@@ -44,7 +45,7 @@ The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycl
 - **The `ignored:` lines** read `ignored: RULE path:line - accepted by OWNER until DATE: REASON`.
 - **A path is printed in quotes** where it heads its findings, unless it is made of visible ASCII characters with no space.
 - **The notes no longer list lane declarations that do nothing**; they are findings. In JSON they are in `findings` and no longer in `notes`.
-- **JSON keeps every field it had.** New: `acceptedRisk` and `summary` before the findings; `state`, `kind`, `facts`, `acceptance` and `controls` on a finding; `fixed`, a list of findings cleared by controls the checker verified, which are no longer in `findings`.
+- **JSON keeps every top-level field and every field of a finding.** New: `acceptedRisk` and `summary` before the findings; `state`, `kind`, `facts` and `acceptance` on a finding, and `controls` where it has any; `fixed`, when there are any, a list of findings cleared by controls the checker verified, which are no longer in `findings`. The entries under `baseline.stale` are the baseline's own entries, so with a converted baseline they have `kind`, `facts`, `owner`, `reason` and `expires` and no longer `fingerprint` or `message`; the `no longer found:` lines of the text report end differently for the same reason.
 - **SARIF**: an accepted finding has a suppression, and its message says who accepted it. Errors and notes are notifications of the run.
 - **`--write-baseline`** needs `--owner`, `--reason` and `--expires` for anything it newly accepts (exit status 2 without them), and does not write over a file that is not a baseline.
 
@@ -71,11 +72,11 @@ It answers "4 finding(s) carried over" and "1 finding(s) were not in the old bas
     12  HIGH   OBAAF-CFG-001  Lane declaration that does nothing  [job triage]
 ```
 
-Correct `agnet` to `agent`. The job is an agent job now, and the gate ends with status 1 for three findings nobody had seen: `OBAAF-GHA-003` (the agent job can write), `OBAAF-GHA-005` (a secret in an agent job) and `OBAAF-GHA-020` (no egress restriction). Fix what can be fixed, and accept the rest in the same baseline:
+Correct `agnet` to `agent`. The job is an agent job now, and the gate ends with status 1 for three findings nobody had seen: `OBAAF-GHA-003` (the agent job can write), `OBAAF-GHA-005` (a secret in an agent job) and `OBAAF-GHA-020` (no egress restriction). In a real upgrade you would fix what can be fixed first. Here nothing is fixed and all three are accepted, to show what the command does:
 
 ```bash
 obaaf check . --write-baseline .github/obaaf-baseline.json \
-  --owner @my-org/build --reason "Agent job needs an egress control; issue 31" --expires 2027-01-31
+  --owner @my-org/build --reason "Agent job found on upgrade; its controls are tracked in issue 31" --expires 2027-01-31
 ```
 
 "3 finding(s) newly accepted by @my-org/build until 2027-01-31, 4 kept with the owner, reason and expiry date they had." The gate passes, and its first line says what that pass rests on: "Accepted risk: 7 finding(s) are accepted and do not fail the check (3 high, 2 medium, 2 low)".

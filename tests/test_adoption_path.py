@@ -1,10 +1,11 @@
-"""The two paths the documents describe, run as they are written.
+"""The two paths the documents describe, run in the order they are written.
 
 `docs/from-report-to-gate.md` takes a team from reading the report to a check that fails a build, and
 `docs/upgrading.md` takes a repository from release 0.3.0 to the code after it. Each gives a command
-and the exit status it ends with. These tests run the same steps in the same order on the small
-repository in `tests/fixtures/adoption`, whose baseline was written by the real 0.3.0, so neither
-page can say something the tool does not do.
+and the exit status it ends with. These tests run the commands in the pages' order on the small
+repository in `tests/fixtures/adoption`, whose baseline was written by the real 0.3.0, and check the
+status of each. They do not run 0.3.0, and they do not check every sentence of the pages: an
+independent review found seven untrue ones while this file passed.
 """
 
 import json
@@ -24,8 +25,11 @@ OWNER = "@my-org/build"
 DOCS = (ROOT / "docs" / "from-report-to-gate.md", ROOT / "docs" / "upgrading.md")
 
 
+TODAY = date.today()        # read once, so a run that crosses midnight compares like with like
+
+
 def day(ahead: int) -> str:
-    return (date.today() + timedelta(days=ahead)).isoformat()
+    return (TODAY + timedelta(days=ahead)).isoformat()
 
 
 def repository(tmp, baseline: bool):
@@ -119,6 +123,54 @@ class FromAReportToAGateTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads((tmp / "obaaf.sarif").read_text(encoding="utf-8"))["version"], "2.1.0")
 
+    def test_a_baseline_written_before_the_lanes_are_right_accepts_the_wrong_declaration(self):
+        # Step 2 comes before step 4 for this reason: the declaration that does nothing is a
+        # finding like any other, so a baseline written while it is there accepts it, and the
+        # agent findings it hides are never seen.
+        with TempDir() as tmp:
+            repository(tmp, baseline=False)
+            self.assertEqual(accept(tmp, "Inherited on adoption; tracked in issue 12", day(120))[0], 0)
+            entries = json.loads((tmp / BASELINE).read_text(encoding="utf-8"))["findings"]
+            code, out, _ = run_cli("check", tmp, "--baseline", tmp / BASELINE, "--fail-on", "medium")
+        self.assertEqual([entry["kind"] for entry in entries if entry["rule"] == "OBAAF-CFG-001"], ["job-not-a-lane"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("OBAAF-GHA-003", out)
+
+    def test_lanes_ends_with_zero_and_says_nothing_of_a_workflow_it_could_not_read(self):
+        with TempDir() as tmp:
+            repository(tmp, baseline=False)
+            (tmp / ".github" / "workflows" / "broken.yml").write_text("on: [push\njobs: {", encoding="utf-8")
+            code, out, err = run_cli("check", tmp, "--lanes")
+            report = run_cli("check", tmp, "--fail-on", "never")[0]
+        self.assertEqual(code, 0)
+        self.assertNotIn("broken.yml", out + err)
+        self.assertEqual(report, 1)
+
+    def test_a_finding_left_out_of_the_baseline_because_its_ignore_entry_does_not_count(self):
+        with TempDir() as tmp:
+            repository(tmp, baseline=False)
+            edit(tmp, "triage.yml", "OBAAF_LANE: agnet", "OBAAF_LANE: trusted")
+            (tmp / ".github" / "obaaf.yml").write_text(
+                f"ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/ci.yml\n"
+                f"    reason: The vendor publishes no commit SHAs\n    until: {day(90)}\n", encoding="utf-8")
+            code, _, err = accept(tmp, "Inherited on adoption; tracked in issue 12", day(120))
+            gate = run_cli("check", tmp, "--baseline", tmp / BASELINE, "--fail-on", "medium")[0]
+        self.assertEqual(code, 0)
+        self.assertIn("warning: 1 finding(s) whose ignore entry has expired or does not count were not written", err)
+        self.assertEqual(gate, 1)
+
+    def test_pinning_the_action_of_an_unnamed_step_makes_its_accepted_finding_new(self):
+        with TempDir() as tmp:
+            repository(tmp, baseline=False)
+            edit(tmp, "triage.yml", "OBAAF_LANE: agnet", "OBAAF_LANE: trusted")
+            self.assertEqual(accept(tmp, "Inherited on adoption; tracked in issue 12", day(120))[0], 0)
+            edit(tmp, "ci.yml", "actions/checkout@v4", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683")
+            code, out, _ = run_cli("check", tmp, "--baseline", tmp / BASELINE, "--fail-on", "medium", "--format", "json")
+            data = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertEqual([f["rule"] for f in data["findings"] if f["state"] == "new"], ["OBAAF-GHA-011"])
+        self.assertEqual(sorted(entry["rule"] for entry in data["baseline"]["stale"]), ["OBAAF-GHA-008", "OBAAF-GHA-011"])
+
     def test_an_acceptance_that_has_run_out_counts_again_and_is_announced_before(self):
         with TempDir() as tmp:
             repository(tmp, baseline=False)
@@ -183,11 +235,14 @@ class UpgradingFromRelease030Test(unittest.TestCase):
                  "    reason: %s\n    until: %s\n%s")
         cases = {
             "no owner": (entry % ("The vendor publishes no commit SHAs", day(90), ""), 1, "because it names no owner"),
-            "a short reason": (entry % ("ok", day(90), f"    owner: '{OWNER}'\n"), 1, "Not accepted"),
+            "a short reason": (entry % ("ok", day(90), f"    owner: '{OWNER}'\n"), 1,
+                               "because its reason says too little (fewer than 4 letters or digits)"),
             "a date too far ahead": (entry % ("The vendor publishes no commit SHAs", day(400), f"    owner: '{OWNER}'\n"),
-                                     1, "Not accepted"),
+                                     1, "more than 366 days ahead"),
             "a time of day": (entry % ("The vendor publishes no commit SHAs", "2027-01-31T10:00:00Z",
                                        f"    owner: '{OWNER}'\n"), 2, "must be a date"),
+            "a date in another spelling": (entry % ("The vendor publishes no commit SHAs", "20270131",
+                                                    f"    owner: '{OWNER}'\n"), 2, "must be a date"),
             "the lane rule": (f"ignore:\n  - rule: OBAAF-CFG-001\n    path: .github/workflows/triage.yml\n"
                               f"    reason: The job is not an agent\n    until: {day(90)}\n    owner: '{OWNER}'\n",
                               2, "an ignore entry cannot accept OBAAF-CFG-001"),
@@ -226,7 +281,9 @@ class TheCommandsOnThePagesExistTest(unittest.TestCase):
     def test_the_pages_say_what_the_tests_above_establish(self):
         gate, upgrading = (path.read_text(encoding="utf-8") for path in DOCS)
         for text in ("tests/test_adoption_path.py", "| 0 |", "| 1 |", "| 2 |", "`never` included",
-                     "Without `--owner`, `--reason` and `--expires` the status is 2", "no longer found"):
+                     "Without `--owner`, `--reason` and `--expires` the status is 2", "no longer found",
+                     "`--lanes` lists and judges nothing", "is not written to the baseline",
+                     "A step with no `name` or `id` is known by the action it uses"):
             with self.subTest(page="from-report-to-gate.md", text=text):
                 self.assertIn(text, gate)
         for text in ("4 finding(s) carried over", "1 finding(s) were not in the old baseline",
