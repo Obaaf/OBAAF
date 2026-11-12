@@ -18,6 +18,7 @@ from helpers import TempDir, run_cli
 from obaaf import checker, cli
 from obaaf.checker import acceptance, baseline, report
 from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED, Control, Finding
+from obaaf.checker.workflow import one_line
 
 # A day that is never the day the tests run, so a report that read the clock instead of the day the
 # check ran would be caught.
@@ -373,11 +374,20 @@ class TextLeadTest(unittest.TestCase):
                            finding(path="one\ntwo/Accepted risk: none/ci.yml"),
                            finding(path="line\nbreak\u00a0and\ttab.yml"), baseline_used=False)
         lines = report.to_text(result).splitlines()
-        self.assertEqual([line for line in lines if line.startswith("Accepted")],
-                         ["Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."])
-        self.assertFalse([line for line in lines if line.startswith(("Baseline", "two", "risk"))])
+        # Lines in the first column that are not in quotes: the checker's own, and paths made of
+        # visible ASCII. None of them has a character outside ASCII, so none has one that prints as
+        # a blank, and the only one that begins like the lead and has a space is the lead.
+        unquoted = [line for line in lines if line and not line.startswith((" ", '"'))]
+        self.assertFalse([line for line in unquoted if not line.isascii()])
+        self.assertEqual([line for line in unquoted if line.startswith("Accepted") and " " in line], [lead])
+        self.assertFalse([line for line in unquoted if line.startswith(("Baseline", "two", "risk"))])
         for path in hostile:
-            self.assertIn(f'"{path}"', lines)
+            # Which characters print depends on the Unicode tables of the Python that runs the check:
+            # U+13441 is a blank letter from Python 3.12 on and not a character at all before, where
+            # it is written as an escape like anything else that does not print.
+            shown = one_line(path)
+            self.assertIn(f'"{path}"' if shown == path else shown, lines)
+            self.assertTrue(shown == path or (shown.isascii() and " " not in shown), shown)
         self.assertIn("plain/ci.yml", lines)
         self.assertIn(".github/workflows/a-b_c.1+2@x~y.yml", lines)
         self.assertIn('"one\\ntwo/Accepted risk: none/ci.yml"', lines)
