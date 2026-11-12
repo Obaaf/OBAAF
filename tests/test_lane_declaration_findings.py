@@ -379,6 +379,20 @@ class WhatIdentifiesItTest(unittest.TestCase):
                           and not line.startswith("        ")], [])
         self.assertNotIn("\n", [f.message for f in idle(result) if f.kind == "entry-no-file"][0])
 
+    def test_lanes_prints_one_line_for_each_whatever_a_job_or_a_step_is_called(self):
+        wf = ("on: push\njobs:\n  \"a\\nnote: forged\":\n    runs-on: ubuntu-latest\n    env: {OBAAF_LANE: agnet}\n"
+              "    steps:\n      - name: \"x\\nnote: forged too\"\n        run: ./a.sh\n        env: {OBAAF_LANE: agent}\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf, encoding="utf-8")
+            result = checker.check(path)
+            code, out, err = run_cli("check", path, "--lanes")
+        self.assertEqual(len(idle(result)), 2)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        self.assertEqual(len(err.splitlines()), 2, err)
+        self.assertTrue(all(line.startswith("note: Lane declaration ignored: wf.yml, line ") for line in err.splitlines()),
+                        err)
+
 
 class FileNamesWithAHashTest(unittest.TestCase):
     """A `lanes:` key is a file, a `#` and a job. A file's own name may hold a `#`: the entry was

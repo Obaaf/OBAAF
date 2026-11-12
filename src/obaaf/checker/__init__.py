@@ -692,9 +692,10 @@ class _LaneDeclarations:
         return out + self._entries(catalog)
 
     def notes(self, catalog: Catalog) -> list[str]:
-        """The same declarations as lines for `--lanes`, which lists lanes and reports no findings."""
-        return [f"Lane declaration ignored: {wf_mod.one_line(f.path, 120)}, line {f.line}: {f.message} "
-                f"(`obaaf check` reports it as {f.rule}, {f.severity}.)"
+        """The same declarations as lines for `--lanes`, which lists lanes and reports no findings.
+        Each is one line whatever a job or a step is called."""
+        return [f"Lane declaration ignored: {wf_mod.one_line(f.path, 120)}, line {f.line}: "
+                f"{wf_mod.one_line(f.message)} (`obaaf check` reports it as {f.rule}, {f.severity}.)"
                 for f in sorted(self.findings(catalog), key=Finding.sort_key)]
 
 
