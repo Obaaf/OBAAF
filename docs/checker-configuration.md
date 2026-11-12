@@ -144,7 +144,7 @@ No rule reports controls yet, so today every finding is new or accepted. The sta
 Accepting a finding is a decision somebody makes for a while. The checker enforces three things about it, in an ignore entry and in a baseline entry alike:
 
 - **an owner**: a user (`@octocat`), a team (`@my-org/build`) or an e-mail address, the forms a CODEOWNERS file takes. The checker checks the form only. It cannot tell whether the account exists, or that `@tbd` is nobody.
-- **a reason**, in words. The checker cannot judge a reason. It refuses one with fewer than four letters or digits, which rules out an empty one, a dot, `n/a` and `tbd`, and nothing more: `aaaa` is a reason to the checker.
+- **a reason**, in words. The checker cannot judge a reason. It refuses one with fewer than four letters or digits, which rules out an empty one, a dot, `n/a` and `tbd`, and nothing more: `aaaa` is a reason to the checker, and so are four letters of a script whose letters look like punctuation.
 - **an expiry date** (`YYYY-MM-DD`) that has not passed and is at most 366 days ahead. An acceptance is looked at again at least once a year; a date of 2999 would be a permanent acceptance with a date on it.
 
 An entry that lacks one of these, has expired, or is dated too far ahead accepts nothing. Its finding counts as new and fails the check like any other, and the report says under the finding what the entry lacks:

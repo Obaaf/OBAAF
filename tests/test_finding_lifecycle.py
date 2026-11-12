@@ -91,7 +91,8 @@ class AcceptanceTest(unittest.TestCase):
                       "a\u200b@c.de", "@octocat_", "@_corp", "@a_b_c", "a@" + "b" * 64 + ".de",
                       # From the third review: characters that show nothing, as a whole address or inside one.
                       "\u3164@\u3164.\u3164", "\u1160@\u115f.\uffa0", "a\u17b5@c.de", "a\u180b@c.de",
-                      "\ufe0f\ufe0fa@b.cd", "a@b\u200d.cd", "a@b.c\ufe0fd", "a\x00@c.de", "a@c.d\u3164"):
+                      "\ufe0f\ufe0fa@b.cd", "a@b\u200d.cd", "a@b.c\ufe0fd", "a\x00@c.de", "a@c.d\u3164",
+                      "\U00013441@\U00013441.\U00013441", "\U00013442@\U00013442.\U00013442"):
             found = self.problems(owner=owner)
             self.assertEqual(len(found), 1, owner)
             self.assertIn("is not a user (@name), a team (@org/team) or an e-mail address", found[0])
@@ -105,7 +106,9 @@ class AcceptanceTest(unittest.TestCase):
                        "- - - - - - - - - - - -", "x" * 3, "\u0301" * 3,
                        # From the third review: marks and selectors that show nothing, alone or after a letter.
                        "\ufe0f" * 4, "\u0301" * 4, "\u034f" * 4, "\U000e0100" * 4, "\u17b5" * 4, "\u180b" * 4,
-                       "a\ufe0f\ufe0f\ufe0f", "ab\u0301\u0301\u0301"):
+                       "a\ufe0f\ufe0f\ufe0f", "ab\u0301\u0301\u0301",
+                       # From the fourth review: two letters whose names say they are blank.
+                       "\U00013441" * 4, "\U00013442" * 4):
             found = self.problems(reason=reason)
             self.assertEqual(len(found), 1, repr(reason))
             self.assertIn("says too little", found[0])

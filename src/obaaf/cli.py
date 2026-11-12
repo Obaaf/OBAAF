@@ -767,6 +767,11 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
     x.set_defaults(func=cmd_baseline_migrate)
 
+    # audit: repository settings, read through the GitHub API (obaaf.audit)
+    from obaaf.audit.cli import add_parser as add_audit_parser
+
+    add_audit_parser(sub)
+
     # snapshot
     x = sub.add_parser("snapshot", help="agent lane: capture and label the inputs an agent will read (R1)")
     x.add_argument("--event", required=True, help="path to the event payload ($GITHUB_EVENT_PATH)")

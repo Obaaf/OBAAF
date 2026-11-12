@@ -30,8 +30,11 @@ _HANDLE = re.compile(r"^@[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}(?:_[A-Za-z0-9]{1,39}
 # through a ticket number or a few words in any script. Marks (accents and vowel signs written as
 # their own characters) are not counted: many of them show nothing, alone or after a letter.
 MIN_REASON = 4
-# Letters, by their Unicode category, that show nothing: the Hangul fillers.
-_BLANK_LETTERS = frozenset("\u115f\u1160\u3164\uffa0")
+# Letters, by their Unicode category, that show nothing: the Hangul fillers, and the two Egyptian
+# hieroglyphs that stand for an empty space (FULL BLANK and HALF BLANK). A search of every code
+# point that counts as a letter or digit, by name and by the default-ignorable ranges, found these
+# six and no others (Unicode 15.1).
+_BLANK_LETTERS = frozenset("\u115f\u1160\u3164\uffa0\U00013441\U00013442")
 # Punctuation an e-mail address may have before the @, beside letters and digits.
 _LOCAL_PUNCTUATION = frozenset("._%+-'!#$&*/=?^`{|}~")
 

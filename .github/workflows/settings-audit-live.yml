@@ -1,0 +1,105 @@
+# Runs the settings audit's reader against GitHub itself. The unit tests drive the reader from
+# hand-written recordings; this is where it meets the real API.
+# It is read-only: the audit sends GET requests only, and the job's token can read and nothing else.
+# It runs when the reader changes and on request. It is not a required check.
+name: Settings audit (live)
+
+on:
+  pull_request:
+    paths:
+      - "src/obaaf/audit/**"
+      - "src/obaaf/data/schemas/settings-snapshot.schema.json"
+      - "scripts/check_live_audit.py"
+      - ".github/workflows/settings-audit-live.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Read this repository's settings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+
+      # Each run below keeps the command's exit code and its report, and the check script fails the
+      # step unless both fit the snapshot. A command that crashed cannot pass by leaving a file behind.
+
+      # The workflow's own token reads little more of a public repository's settings than anyone can,
+      # but it has its own rate limit. What GitHub shows anyone must be read, and an answer that does
+      # not have the documented shape fails the job: that is the thing this job exists to find.
+      # GitHub's answers are not kept for this run. One of them is the list of collaborators.
+      - name: This repository, with the workflow's read-only token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p audit-live
+          code=0
+          obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out audit-live/with-token.json \
+            > audit-live/with-token.txt || code=$?
+          cat audit-live/with-token.txt
+          python scripts/check_live_audit.py audit-live/with-token.json --report audit-live/with-token.txt \
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" \
+            --read repository rulesets branch_rules branches environments
+
+      # With no token GitHub allows 60 requests an hour for each IP address, and hosted runners share
+      # addresses, so being rate limited here is expected now and then and is not a failure.
+      - name: This repository, with no token
+        run: |
+          code=0
+          obaaf audit --repo "$GITHUB_REPOSITORY" --no-token --snapshot-out audit-live/no-token.json \
+            --record audit-live/no-token > audit-live/no-token.txt || code=$?
+          cat audit-live/no-token.txt
+          python scripts/check_live_audit.py audit-live/no-token.json --report audit-live/no-token.txt \
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" --rate-limit-ok \
+            --read repository rulesets branch_rules branches environments
+
+      # This repository has no rulesets, so the part of the reader that reads them would never meet
+      # GitHub here. Expectrail/Expectrail, the first adopter, is public and has them. It is read with
+      # no token: the workflow's token is for this repository and is never sent for another one.
+      # That repository may be renamed or made private without this project knowing, so not being able
+      # to read it at all is not a failure. Once it has been read, what GitHub shows anyone must be read
+      # too; and if it no longer has a ruleset, a notice says that this step met none.
+      - name: A public repository that has rulesets, with no token
+        run: |
+          code=0
+          obaaf audit --repo Expectrail/Expectrail --no-token --snapshot-out audit-live/rulesets.json \
+            --record audit-live/rulesets > audit-live/rulesets.txt || code=$?
+          cat audit-live/rulesets.txt
+          python scripts/check_live_audit.py audit-live/rulesets.json --report audit-live/rulesets.txt \
+            --exit-code "$code" --repo Expectrail/Expectrail --rate-limit-ok --unreadable-ok \
+            --notice-if-no-ruleset --read repository rulesets branch_rules branches environments
+
+      # What GitHub answered to the two runs with no token is public data. It is printed on one line
+      # each so that it can be kept as a test recording.
+      - name: Print GitHub's answers to the runs with no token
+        if: always()
+        run: |
+          for name in no-token rulesets; do
+            if [ -f "audit-live/$name/responses.json" ]; then
+              python -c 'import json, sys; print("RECORDING " + sys.argv[1] + " " + json.dumps(json.load(open(sys.argv[2])), separators=(",", ":")))' \
+                "$name" "audit-live/$name/responses.json"
+            fi
+          done
+
+      - name: Keep the snapshots, the reports and the answers to the runs with no token
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-audit-live
+          path: audit-live/
+          if-no-files-found: warn
+          retention-days: 30
