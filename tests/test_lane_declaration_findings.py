@@ -522,9 +522,69 @@ class WhatAnIndependentReviewFoundTest(unittest.TestCase):
         self.assertEqual([(f.state, f.facts["stages"]) for f in idle(after)], [("new", ["Ship"])])
         self.assertEqual(len(after.baseline_stale), 1)
         self.assertEqual(idle(after)[0].message,
-                         "For the steps of stage 'Ship', OBAAF_LANE is set to 'agnet', which is not a lane "
+                         "For the steps in 'Ship', OBAAF_LANE is set to 'agnet', which is not a lane "
                          "(untrusted, agent, effect, release, trusted), so the declaration changes nothing.")
         self.assertEqual([f.facts["stages"] for f in idle(both)], [["Docs", "Ship"]])
+
+    def test_steps_outside_any_stage_are_not_a_stage_named_pipeline(self):
+        # The second reviewer: an acceptance written for a declaration outside any stage went on
+        # covering the same misspelling inside a stage that was given the name `pipeline`.
+        outside = "node {\n  withEnv(['OBAAF_LANE=agnet']) {\n    sh 'make'\n  }\n}\n"
+        inside = "node {\n  stage('pipeline') {\n    withEnv(['OBAAF_LANE=agnet']) {\n      sh './run-bot.sh'\n    }\n  }\n}\n"
+        with TempDir() as tmp:
+            first = idle(checker.check(repo(tmp, job(), jenkinsfile=outside)))[0]
+            second = idle(checker.check(repo(tmp, job(), jenkinsfile=inside)))[0]
+        self.assertEqual((first.facts["stages"], second.facts["stages"]), ([""], ["pipeline"]))
+        self.assertNotEqual(baseline.key(first), baseline.key(second))
+        self.assertIn("For the steps in the pipeline outside any stage, OBAAF_LANE is set to 'agnet'", first.message)
+        self.assertIn("For the steps in 'pipeline', OBAAF_LANE is set to 'agnet'", second.message)
+
+    def test_two_stages_with_one_name_are_one_stage_to_the_checker(self):
+        # As everywhere else in the Jenkins reader: `--lanes` lists them once, and a `lanes:` entry
+        # for the name covers both. A declaration is identified by the names of the stages it reaches.
+        text = ("node {\n  stage('Build') {\n    withEnv(['OBAAF_LANE=agnet']) {\n      sh 'make'\n    }\n  }\n"
+                "  stage('Build') {\n    sh './run-bot.sh'\n  }\n}\n")
+        with TempDir() as tmp:
+            repo(tmp, job(), jenkinsfile=text)
+            result = checker.check(tmp)
+            lanes = [row[1] for row in checker.lanes(tmp) if row[0] == "Jenkinsfile"]
+        self.assertEqual([f.facts["stages"] for f in idle(result)], [["Build"]])
+        self.assertEqual(lanes, ["stage Build"])
+
+    def test_a_stage_written_without_a_block_holds_no_step(self):
+        # The second reviewer, against the fix for stages with no step: an entry for `stage 'Fix'`
+        # passed unreported, and the step after it never entered the agent lane.
+        text = ("node {\n  stage 'Build'\n  sh 'make'\n  stage 'Fix'\n  sh 'run-my-bot --fix'\n}\n")
+        with TempDir() as tmp:
+            repo(tmp, job(), "lanes:\n  Jenkinsfile#Fix: agent\n", jenkinsfile=text)
+            result = checker.check(tmp)
+            code = run_cli("check", tmp, "--fail-on", "high")[0]
+        self.assertEqual([(f.kind, f.severity) for f in idle(result)], [("entry-no-stage", "high")])
+        self.assertEqual(code, 1)
+
+    def test_a_name_that_is_a_number_too_long_to_print(self):
+        number = "0x" + "F" * 5000
+        wf = (f"on: push\npermissions: {{}}\njobs:\n  work:\n    name: {number}\n    runs-on: ubuntu-latest\n"
+              f"    permissions: {{contents: read}}\n    steps:\n      - run: ./a.sh\n        name: {number}\n"
+              "        env:\n          OBAAF_LANE: agnet\n")
+        with TempDir() as tmp:
+            repo(tmp, wf)
+            result = checker.check(tmp)
+            codes = [run_cli("check", tmp, *options)[0]
+                     for options in ((), ("--format", "json"), ("--format", "sarif"), ("--lanes",))]
+            written = run_cli("check", tmp, "--write-baseline", tmp / "b.json", "--owner", OWNER, "--reason", REASON,
+                              "--expires", day(30))
+        self.assertEqual([(f.kind, f.step[:6]) for f in idle(result)], [("step-env", "0xffff")])
+        self.assertEqual(codes, [1, 1, 1, 0])
+        self.assertEqual(written[0], 0, written[2])
+
+    def test_a_long_misspelling_is_shown_as_it_is_written(self):
+        name = "obaaf" + " " * 300 + "lane"
+        with TempDir() as tmp:
+            found = idle(checker.check(repo(tmp, job(env=f"'{name}': agent"))))[0]
+        self.assertRegex(found.facts["name"], r"^sha256:[0-9a-f]{64} \(309 characters\)$")
+        self.assertIn("sets 'obaaf    ", found.message)
+        self.assertNotIn("sha256:", found.message)
 
     def test_an_entry_for_a_file_outside_the_run_whose_name_holds_a_hash(self):
         config = ("jenkins:\n  files: ['svc#1/Jenkinsfile']\n"
@@ -617,6 +677,8 @@ class WhatAnIndependentReviewFoundTest(unittest.TestCase):
         self.assertIn("1.5", result.jenkins_files)
         self.assertEqual([(f.line, f.kind) for f in idle(result)], [(4, "entry-no-file"), (6, "entry-no-file")])
         self.assertEqual([(f.line, f.kind) for f in idle(alone)], [(4, "entry-no-file"), (6, "entry-no-file")])
+        # Shown as YAML writes it, not as Python prints it.
+        self.assertEqual([f.facts["entry"] for f in idle(result)], ["1.5", "true"])
 
 
 class TheExampleConfigurationDeclaresNothingTest(unittest.TestCase):

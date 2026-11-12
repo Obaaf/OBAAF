@@ -389,7 +389,7 @@ class Step:
 
     @property
     def name(self) -> str:
-        return str(self.raw.get("name") or self.raw.get("id") or self.uses or f"step {self.index + 1}")
+        return as_text(self.raw.get("name") or self.raw.get("id") or self.uses or f"step {self.index + 1}")
 
     @property
     def uses(self) -> str | None:
@@ -487,7 +487,7 @@ class Job:
 
     @property
     def name(self) -> str:
-        return str(self.raw.get("name") or self.id)
+        return as_text(self.raw.get("name") or self.id)
 
     @property
     def env(self) -> dict:
@@ -970,7 +970,10 @@ class IdleDeclaration:
     lane: str | None = None
     service: str = ""             # the service whose env holds it
     name: str = ""                # the variable as it is written, when that is not OBAAF_LANE
-    stages: tuple = ()            # the Jenkins stages whose steps the declaration reaches
+    name_shown: str = ""          # and as a report prints it
+    # The Jenkins stages whose steps the declaration reaches, by label. Steps outside any stage are
+    # the empty label, which no stage can have.
+    stages: tuple = ()
     # Whether the job is already in the lane the declaration names, so nothing is missing because of it.
     redundant: bool = False
 
@@ -1033,10 +1036,12 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
         ]
         for name in misnamed_lane_variables(job.env):
             problem(IdleDeclaration.of("job-misnamed", job.env[name], path=workflow.path, job=job.id,
-                                       line=key_line(job.env, name, job.line), name=bounded(name)))
+                                       line=key_line(job.env, name, job.line), name=bounded(name),
+                                       name_shown=one_line(name, 60)))
         for name in misnamed_lane_variables(workflow.env):
             problem(IdleDeclaration.of("workflow-misnamed", workflow.env[name], path=workflow.path,
-                                       line=key_line(workflow.env, name, 1), name=bounded(name)))
+                                       line=key_line(workflow.env, name, 1), name=bounded(name),
+                                       name_shown=one_line(name, 60)))
         declared: dict = {}
         trusted_why = None
         for value, why, where in declarations:

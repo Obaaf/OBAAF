@@ -123,7 +123,8 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         # Each key is the file, a `#` and a name for the stage. The file's own name may hold a `#`.
         result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
         for pair in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
-            reached.setdefault(pair, []).append(stage_label(stage))
+            # Not `stage_label`, which calls the steps outside any stage "pipeline": a stage may be named that.
+            reached.setdefault(pair, []).append(" > ".join(stage))
         if ai:
             result.agent_present = True
         elif stage and _AGENT_HINT.search(" ".join(stage)):

@@ -561,8 +561,8 @@ _IDLE_TEMPLATES = {
                     "exactly so, so the declaration changes nothing.",
     "workflow-misnamed": "The workflow's env sets {name} to {value}. The variable that declares a lane is "
                          "OBAAF_LANE, spelled exactly so, so the declaration changes nothing.",
-    "jenkins-not-a-lane": f"For the steps of {{stages}}, OBAAF_LANE is set to {{value}}, {_NOT_A_LANE}.",
-    "jenkins-computed": "For the steps of {stages}, OBAAF_LANE is set to a value computed when the build runs, "
+    "jenkins-not-a-lane": f"For the steps in {{stages}}, OBAAF_LANE is set to {{value}}, {_NOT_A_LANE}.",
+    "jenkins-computed": "For the steps in {stages}, OBAAF_LANE is set to a value computed when the build runs, "
                         "which the checker cannot read as a lane, so the declaration changes nothing.",
     "step-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in the env of step '{{step}}', {_NOT_READ}.",
     "container-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in container.env, {_NOT_READ}.",
@@ -588,6 +588,10 @@ class _LaneDeclarations:
         self.config, self.root, self.is_repo, self.on_its_own = config, root, is_repo, on_its_own
         self.workflows_sought, self.jenkins_sought = workflows_sought, jenkins_sought
         self.problems: list = []                       # IdleDeclaration: written in a workflow or a Jenkinsfile
+        try:
+            self.resolved_root: Path | None = root.resolve()
+        except (OSError, RuntimeError):
+            self.resolved_root = None
         self.known: dict[str, tuple[str, set]] = {}    # path -> ("job" or "stage", the names it has)
         self.unread: set[str] = set()
 
@@ -628,13 +632,13 @@ class _LaneDeclarations:
         """Whether `path` is a file that exists and is of a kind this run did not look for at all
         (a Jenkinsfile when only workflows were checked, or the other way round)."""
         sought = self.workflows_sought if path.endswith((".yml", ".yaml")) else self.jenkins_sought
-        if sought:
+        if sought or self.resolved_root is None:
             return False
         try:
-            root = self.root.resolve()
-            target = (root / path).resolve()
-            return target.is_relative_to(root) and target.is_file()
-        except (OSError, ValueError):
+            target = self.resolved_root / path
+            # One look at the file system for a path that is not a file, which is nearly every one tried.
+            return target.is_file() and target.resolve().is_relative_to(self.resolved_root)
+        except (OSError, ValueError, RuntimeError):
             return False
 
     def _out_of_scope(self, key: str) -> bool:
@@ -679,7 +683,9 @@ class _LaneDeclarations:
         out: list[Finding] = []
         where = self.config_path()
         for key, value in self.config.lanes.items():
-            text = wf_mod.as_text(key)
+            # A key that is not text is shown as YAML writes it, not as Python does.
+            text = {True: "true", False: "false", None: "null"}.get(key, None) if isinstance(key, (bool, type(None))) \
+                else wf_mod.as_text(key)
             named: list = []
             # A key that is not text (`5:`, `true:`) is never looked up, so it names nothing.
             if isinstance(key, str):
@@ -719,10 +725,12 @@ class _LaneDeclarations:
             if found.kind == "service-env":
                 values["service"] = rules_mod.Fact(found.service, wf_mod.one_line(found.service, 60))
             if found.name:
-                values["name"] = rules_mod.Fact(found.name, f"'{wf_mod.one_line(found.name, 60)}'")
+                values["name"] = rules_mod.Fact(found.name, f"'{found.name_shown}'")
             if found.kind.startswith("jenkins-"):
+                # The labels are the checker's own, as `--lanes` prints them: a stage by its name, a
+                # stage in a stage as `Outer > Inner`, a method as `name()`, a post block as `post always`.
                 values["stages"] = rules_mod.Fact(list(found.stages), ", ".join(
-                    "the pipeline outside any stage" if stage == "pipeline" else f"stage '{wf_mod.one_line(stage, 80)}'"
+                    f"'{wf_mod.one_line(stage, 80)}'" if stage else "the pipeline outside any stage"
                     for stage in found.stages))
             out.append(self._finding(catalog, found.kind, found.path, found.line,
                                      found.lane == "trusted" or found.redundant, found.job, found.step, **values))
