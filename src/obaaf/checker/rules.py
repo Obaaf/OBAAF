@@ -13,7 +13,8 @@ from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, one_line, runs_after_failure,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, input_name, one_line,
+    runs_after_failure,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -162,21 +163,32 @@ def _bypasses_failure(raw) -> bool:
     return isinstance(raw, dict) and runs_after_failure(raw.get("if", ""))
 
 
-def _canonical(value, _open: tuple = ()) -> str:
-    """A value from a workflow file as text that is the same for the same value and different for a
-    different one: mappings by sorted key, every scalar with its type (`true` is not `'True'`). A
-    value that contains itself through a YAML alias is written as `<again>` where it recurs."""
+def _digest(*parts: str) -> str:
+    joined = "\x00".join(parts)
+    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _as_written(value, memo: dict, spelt: list) -> str:
+    """A digest of a value from a workflow file that is the same for the same value and different
+    for a different one: mappings by sorted key, every scalar with its type (`true` is not
+    `'True'`). Each mapping and list is digested once, however many YAML aliases lead to it, so a
+    file of nested aliases costs its size and not its expansion. `spelt` collects the scalars whose
+    spelling the value does not keep: a number or a date (`010`, `8` and `0o10` are one value to the
+    reader this checker uses, and need not be one to GitHub's)."""
     if isinstance(value, (dict, list)):
-        if id(value) in _open or len(_open) > 60:
-            return "<again>"
-        inside = (*_open, id(value))
-        if isinstance(value, dict):
-            return "{" + ",".join(sorted(f"{_canonical(k, inside)}:{_canonical(v, inside)}"
-                                         for k, v in value.items())) + "}"
-        return "[" + ",".join(_canonical(v, inside) for v in value) + "]"
-    if isinstance(value, tuple):
-        return "(" + ",".join(_canonical(v, _open) for v in value) + ")"
-    return f"{type(value).__name__}:{value!r}"
+        key = id(value)
+        if key not in memo:
+            memo[key] = "<again>"       # a value that contains itself; the YAML reader refuses those
+            if isinstance(value, dict):
+                inside = sorted(_digest(_as_written(k, memo, spelt), _as_written(v, memo, spelt))
+                                for k, v in value.items())
+                memo[key] = _digest("mapping", *inside)
+            else:
+                memo[key] = _digest("list", *(_as_written(v, memo, spelt) for v in value))
+        return memo[key]
+    if not isinstance(value, (str, bool, type(None))):
+        spelt.append(value)
+    return _digest(type(value).__name__, repr(value))
 
 
 class WorkflowRules:
@@ -589,7 +601,7 @@ class WorkflowRules:
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         known = [step for step in job.steps
                  if any(step.uses_action(a) for a in self.detection.get("egress_actions", []))]
-        monitors = [step for step in known if str(step.with_.get("egress-policy", "")).lower() == "block"]
+        monitors = [step for step in known if input_name(step.with_.get("egress-policy", "")) == "block"]
         enforced = [m for m in monitors if "if" not in m.raw]
         if enforced:
             first = enforced[0]
@@ -599,7 +611,9 @@ class WorkflowRules:
             # First means the first entry of `steps:` as written, started and finished before the
             # next one: not a member of a `parallel` group, and not a background step.
             if not (isinstance(steps, list) and steps and steps[0] is first.raw):
-                place = f"after {first.index} other step(s)" if first.group is None else "in a parallel group"
+                place = ("in a parallel group" if first.group is not None else
+                         f"after {first.index} other step(s)" if first.index else
+                         "after an entry of steps the checker could not read")
             elif first.background:
                 place = "in the background"
             else:
@@ -608,10 +622,7 @@ class WorkflowRules:
                 return (Control(name, NOT_MET, f"{where} starts the blocking egress monitor {place}, so other "
                                                "steps can run without it", ident),
                         "late-monitor", {"monitor": uses, "place": place})
-            # Every step of the job that uses a monitor, as written and where it stands: a second
-            # one in another mode, or any change to the first, makes it another finding.
-            written = hashlib.sha256(_canonical([(step.index, step.raw) for step in known]).encode(
-                "utf-8", "surrogatepass")).hexdigest()[:32]
+            written = self._monitors_as_written(known)
             detail = (f"{where} uses {one_line(first.action, 80)} in block mode as the job's first step, but the "
                       "checker does not read what makes that hold: its version, and that the job cannot undo it "
                       "with sudo or a container")
@@ -636,6 +647,22 @@ class WorkflowRules:
                             ident), kind, values)
         return Control(name, NOT_MET, "no blocking egress control in the job", ident), kind, values
 
+    def _monitors_as_written(self, known: list) -> str:
+        """What identifies the monitors of a job for an acceptance: every step that uses one, with
+        where it stands (its place, its `parallel` group, whether it runs in the background) and
+        every key and value as written. A second monitor in another mode, or any change to the
+        first, makes it another finding. Where a value's spelling is not kept (a number or a date),
+        or the steps cannot be read through, the whole file is part of it, so any change to the
+        file is a change."""
+        spelt: list = []
+        try:
+            memo: dict = {}
+            parts = [_digest(str(step.index), str(step.group), str(step.background),
+                             _as_written(step.raw, memo, spelt)) for step in known]
+        except RecursionError:
+            parts, spelt = [], [None]
+        return _digest(*parts, self.wf.text if spelt else "")[:32]
+
     def _secret_controls(self, job: Job, names: set) -> list[Control]:
         """Two controls about where an agent job's secrets come from. The first is read from the
         workflow and the checker configuration: every secret the job receives is listed in
@@ -652,15 +679,15 @@ class WorkflowRules:
         # `010` is the number 8 to this reader and may be the number 10, or text, to GitHub's, and
         # `0` or `false` may be a name to GitHub and is nothing here.
         odd = written is not None and not isinstance(written, str)
-        shown = one_line(written if odd else declared, 120)
+        shown = "the job's environment" if odd else f"environment '{one_line(declared, 120)}'"
 
         def both(verdict: str, detail: str, second: str = CANNOT_TELL) -> list[Control]:
             if second == NOT_MET:
                 about = "the job declares no environment, so its secrets come from the repository or organization"
             else:
-                about = (f"where a secret is stored and which branches may use environment '{shown}' are "
-                         "repository settings, which obaaf check does not read; obaaf audit reads environments "
-                         "and their branch rules")
+                about = (f"where a secret is stored and which branches may use {shown} are repository "
+                         "settings, which obaaf check does not read; obaaf audit reads environments and their "
+                         "branch rules")
             return [Control(scoped, verdict, detail, "secrets-protected"),
                     Control(setting, second, about, "environment-restricted")]
 
@@ -680,8 +707,9 @@ class WorkflowRules:
             return both(NOT_MET, "not listed in protected_secrets: "
                                  f"{', '.join(one_line(secret, 60) for secret in unlisted[:5])}{more}", second)
         if odd:
-            return both(CANNOT_TELL, f"the job's environment is written as a number or as true or false ({shown}), "
-                                     "and YAML readers do not agree on how those are spelt")
+            return both(CANNOT_TELL, "the job's environment is not written as text (it is a number, true or "
+                                     "false, a list or a mapping), so the checker cannot tell which name "
+                                     "GitHub takes it for")
         if not declared:
             return both(NOT_MET, "the job declares no environment", NOT_MET)
         if "${{" in declared:

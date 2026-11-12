@@ -136,7 +136,7 @@ class SecretInAgentJobTest(unittest.TestCase):
         self.assertEqual(control(f, "secrets-protected").verdict, CANNOT_TELL)
 
     def test_an_environment_written_as_zero_or_false_is_cannot_tell_too(self):
-        for written in ("0", "false", "{name: 0}", "1.5"):
+        for written in ("0", "false", "{name: 0}", "1.5", "[main-only]", "{name: [main-only]}", "2026-11-12"):
             f = one(check(agent_workflow(environment=written)), "OBAAF-GHA-005")
             with self.subTest(written=written):
                 self.assertEqual((control(f, "secrets-protected").verdict, control(f, "environment-restricted").verdict),
@@ -378,7 +378,7 @@ class EgressTest(unittest.TestCase):
                                    ("background", self.MONITOR + "\n        background: true\n" + self.CHECKOUT,
                                     "in the background"),
                                    ("after a step that is not a mapping", "      - oops\n" + self.MONITOR,
-                                    "after 0 other step(s)")):
+                                    "after an entry of steps the checker could not read")):
             result = check(agent_workflow(steps=steps))
             f = one(result, "OBAAF-GHA-020")
             with self.subTest(what=what):
@@ -411,9 +411,35 @@ class EgressTest(unittest.TestCase):
         sudo = [self.MONITOR.replace("{egress-policy: block}", f"{{egress-policy: block, disable-sudo: {value}}}")
                 for value in ("true", "'True'")]
         self.assertNotEqual(*(baseline.key(self.egress(steps=steps + "\n" + self.CHECKOUT)) for steps in sudo))
+        # Found by the third review. A second monitor beside the agent is not one after it.
+        after = self.MONITOR + "\n      - run: make" + audit
+        beside = (self.MONITOR + "\n      - parallel:\n          - run: make\n"
+                  f"          - uses: step-security/harden-runner@{SHA}\n            with: {{egress-policy: audit}}")
+        self.assertNotEqual(baseline.key(self.egress(steps=after)), baseline.key(self.egress(steps=beside)))
+        # And a number keeps no spelling (`010` is 8 to this reader, and need not be to GitHub's),
+        # so with one among the inputs any change to the file is a change.
+        for one_way, another in (("8", "010"), ("2400", "40:00"), ("1000.0", "1e3"), ("2001-01-01", "2001-1-1")):
+            keys = [baseline.key(self.egress(steps=self.MONITOR.replace(
+                "{egress-policy: block}", f"{{egress-policy: block, x: {value}}}") + "\n" + self.CHECKOUT))
+                for value in (one_way, another)]
+            with self.subTest(one_way=one_way, another=another):
+                self.assertNotEqual(*keys)
         # A step after the monitor that is not a monitor changes nothing.
         self.assertEqual(baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT + "\n      - run: make")),
                          accepted)
+
+    def test_aliases_nested_in_a_monitors_inputs_cost_their_size(self):
+        """Found by the third review: eleven levels of ten aliases each took longer than anyone
+        would wait, because every alias was written out again each time it was met."""
+        import time
+        anchors = "x1: &a1 [a, a, a, a, a, a, a, a, a, a]\n" + "".join(
+            f"x{n}: &a{n} [{', '.join([f'*a{n - 1}'] * 10)}]\n" for n in range(2, 12))
+        steps = (f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block, x: *a11}}\n"
+                 + self.CHECKOUT)
+        started = time.monotonic()
+        result = check(anchors + agent_workflow(steps=steps))
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(one(result, "OBAAF-GHA-020").kind, "unverified-monitor")
 
     def test_a_policy_computed_when_the_job_runs_is_cannot_tell_and_the_same_finding_as_before(self):
         for inputs in ("{egress-policy: '${{ inputs.policy }}'}", "'${{ fromJSON(inputs.monitor) }}'"):
