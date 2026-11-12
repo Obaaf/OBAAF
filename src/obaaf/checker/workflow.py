@@ -649,9 +649,11 @@ def declared_lane(value) -> str | None:
 
 
 def one_line(text, limit: int | None = None) -> str:
-    """`text` as it can be printed on one line. Line breaks, other control characters and invisible
-    characters are shown as escapes, so a name that contains a line break cannot look like another
-    line of a report. A text longer than `limit` is cut, and its length given."""
+    """`text` as it can be printed on one line. A line break, any other control character, and any
+    character Python does not count as printable are shown as escapes (`\\n`, `\\x1b`, `\\u200b`), so
+    a name that contains a line break cannot look like another line of a report. The escape is for a
+    reader and cannot be undone: a name that spells out `\\n` prints the same way. A text longer than
+    `limit` is cut, and its length given."""
     out = "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in str(text))
     if limit and len(out) > limit:
         out = f"{out[:limit]}... ({len(out)} characters)"
@@ -721,31 +723,65 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
              f"{one_line(workflow.path, 120)} sets OBAAF_LANE"),
         ]
         declared: dict = {}
-        # The first declaration that names a lane, in the order above: the configuration before
-        # OBAAF_LANE, the job before the workflow. It was the only one read when a job had one lane.
-        first = None
+        trusted_why = None
         for value, why, where in declarations:
             if value is _UNSET:
                 continue
             lane = declared_lane(value)
             if lane is None:
                 problem(not_a_lane(where, value))
-                continue
-            first = first or (lane, why)
-            if lane != "trusted":
-                # The first declaration of a lane gives the reason that is shown.
+            elif lane == "trusted":
+                trusted_why = trusted_why or why
+            else:
+                # The first declaration of a lane gives the reason that is shown, as it did when a
+                # job had one lane: the configuration before OBAAF_LANE, the job before the workflow.
                 declared.setdefault(lane, why)
-        inferred = bool(job.lanes)
-        job.lanes.update(declared)
-        trusted_why = first[1] if first and first[0] == "trusted" else None
-        if trusted_why and inferred:
+        if trusted_why and job.lanes and not declared:
+            # `trusted` is all the job was declared, and what it does puts it in a lane anyway.
             job.lane_notes.append("declared trusted, which cannot override what the job does")
+        job.lanes.update(declared)
         job.settle_lane(trusted_why or "default")
-        for step in job.steps:
-            if "OBAAF_LANE" in step.env:
-                problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}', step {step.index + 1} sets "
-                        "OBAAF_LANE, which is read on a job or on the whole workflow and not on a step; "
-                        "the declaration changes nothing")
+        for where in _stray_declarations(job.raw, skip=("env",)):
+            problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE in {where}, "
+                    "where it is not read (it is read in the job's env and in the workflow's env); "
+                    "the declaration changes nothing")
+    for where in _stray_declarations(workflow.raw, skip=("env", "jobs")):
+        problem(f"{one_line(workflow.path, 120)} sets OBAAF_LANE in {where}, where it is not read (it is read "
+                "in a job's env and in the workflow's env); the declaration changes nothing")
+
+
+def _stray_declarations(raw, skip: tuple = ()) -> list[str]:
+    """Where `raw` (a job or a workflow) sets OBAAF_LANE in a place the checker does not read it: a
+    step's env, a container's, a service's. `skip` names the top-level keys that are read elsewhere."""
+    found: list[str] = []
+    seen: set = set()
+
+    def walk(node, trail: tuple, depth: int) -> None:
+        if depth > 12 or not isinstance(node, (dict, list)) or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, trail + (index + 1,), depth + 1)
+            return
+        for key, value in node.items():
+            if key == "OBAAF_LANE":
+                if trail[:1] == ("steps",) and len(trail) > 1:
+                    where = f"step {trail[1]}"
+                else:
+                    where = one_line(".".join(str(part) for part in trail) or "the top level", 80)
+                if where not in found:
+                    found.append(where)
+            elif not (depth == 0 and key in skip):
+                walk(value, trail + (str(key),), depth + 1)
+
+    walk(raw, (), 0)
+    return found
+
+
+# An environment whose name says where releases go. `prod` and `itch` must start a word: `switch`
+# and `reproduce` are not release environments.
+RELEASE_ENVIRONMENT_RE = re.compile(r"release|publish|store|steam|deploy|(?<![a-z])prod|(?<![a-z])itch")
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
@@ -761,7 +797,7 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
     env_name = (job.environment or "").lower()
     if job.upload_steps(detection):
         lanes["release"] = "uploads or publishes artifacts"
-    elif re.search(r"release|prod|publish|store|steam|itch|deploy", env_name):
+    elif RELEASE_ENVIRONMENT_RE.search(env_name):
         # Whatever starts the job: a job that a pull request or a comment can start and that uses
         # the production environment is the case OBAAF-GHA-015 exists for.
         lanes["release"] = f"uses the '{job.environment}' environment"

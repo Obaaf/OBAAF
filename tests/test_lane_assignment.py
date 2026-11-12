@@ -323,9 +323,8 @@ class AcceptedFindingsStayWhereTheBaselineHasThemTest(unittest.TestCase):
             self.assertIn("Agent job 'bot' (set in the checker configuration) holds write permissions: contents.",
                           {f.message for f in check(tmp, plain, config=config).findings})
 
-    def test_a_declaration_that_decides_nothing_is_not_called_an_override(self):
-        # The job's own declaration comes first, as it always did; the workflow's `trusted` is not
-        # what the job was declared, so the agent action's lane carries no note about it.
+    def test_trusted_beside_another_declared_lane_is_not_called_an_override(self):
+        # The note is for a job that was declared trusted and nothing else.
         wf = job(AGENT, env="OBAAF_LANE: agent").replace("permissions: {}\n", "permissions: {}\nenv: {OBAAF_LANE: trusted}\n")
         with TempDir() as tmp:
             messages = {f.message for f in check(tmp, wf).findings if f.rule == "OBAAF-GHA-003"}
@@ -410,7 +409,19 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         self.assertNotIn("OBAAF-GHA-003", rules(result))
         notes = ignored(result)
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("job 'work', step 1 sets OBAAF_LANE", notes[0])
+        self.assertIn("job 'work' sets OBAAF_LANE in step 1, where it is not read", notes[0])
+
+    def test_obaaf_lane_anywhere_else_it_is_not_read(self):
+        # The step is named by its place in the file, the number an error about it would use.
+        wf = ("on: push\nservices-note: {env: {OBAAF_LANE: agent}}\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+              "    container: {image: 'node:22', env: {OBAAF_LANE: agent}}\n"
+              "    steps:\n      - not-a-step\n      - run: make\n        env: {OBAAF_LANE: agent}\n")
+        with TempDir() as tmp:
+            notes = ignored(check(tmp, wf))
+        self.assertEqual(len(notes), 3, notes)
+        self.assertTrue(any("job 'work' sets OBAAF_LANE in container.env" in note for note in notes), notes)
+        self.assertTrue(any("job 'work' sets OBAAF_LANE in step 2" in note for note in notes), notes)
+        self.assertTrue(any("wf.yml sets OBAAF_LANE in services-note.env" in note for note in notes), notes)
 
     def test_one_workflow_checked_with_the_repository_configuration(self):
         # The configuration names files from the repository root; a file checked on its own must
@@ -443,6 +454,20 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         self.assertTrue(any("'Jenkinsfile#Build'" in n and "'agnet', which is not a lane" in n for n in notes), notes)
         self.assertEqual(fine, [])
 
+    def test_a_list_of_files_gives_each_file_one_path(self):
+        # Two files with the same name: the repository form of the key belongs to neither.
+        with TempDir() as tmp:
+            paths = []
+            for side in ("a", "b"):
+                (tmp / side / ".github" / "workflows").mkdir(parents=True)
+                paths.append(tmp / side / ".github" / "workflows" / "ci.yml")
+                paths[-1].write_text(self.PLAIN)
+            config = checker.Config(lanes={".github/workflows/ci.yml#work": "agent",
+                                           "a/.github/workflows/ci.yml#work": "agent"})
+            result = checker.check(tmp, files=paths, config=config)
+        self.assertEqual({f.path for f in result.findings if f.rule == "OBAAF-GHA-003"}, {"a/.github/workflows/ci.yml"})
+        self.assertEqual(ignored(result), [])
+
     def test_a_jenkins_stage_lane_is_read_like_a_workflow_lane(self):
         from obaaf.checker import jenkins
         from obaaf.catalog import load
@@ -460,6 +485,14 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
             for platform in ("auto", "github", "jenkins"):
                 with self.subTest(platform=platform):
                     self.assertEqual(ignored(checker.check(tmp, platform=platform)), [])
+
+    def test_no_note_about_a_jenkinsfile_when_only_the_workflows_directory_is_checked(self):
+        config = "lanes:\n  Jenkinsfile#Build: agent\n"
+        with TempDir() as tmp:
+            repo(tmp, self.PLAIN, config, jenkinsfile=JENKINSFILE)
+            result = checker.check(tmp / ".github" / "workflows")
+        self.assertEqual(result.jenkins_files, [])
+        self.assertEqual(ignored(result), [])
 
     def test_no_second_report_for_a_job_already_reported_as_an_error(self):
         wf = "on: push\njobs:\n  build: hello\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n"
@@ -484,6 +517,110 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
             notes = check(tmp, wf).notes
         self.assertTrue(any("suggests agent work but are not in the agent lane" in n and "claude-review" in n
                             for n in notes), notes)
+
+
+SHIP = """pipeline {
+  agent any
+  %s
+  stages {
+    stage('Ship') {
+      %s
+      steps {
+        sh './ship.sh'
+      }
+    }
+  }
+}
+"""
+NESTED = """pipeline {
+  agent any
+  stages {
+    stage('Deploy') {
+      parallel {
+        stage('East') { steps { sh './ship.sh east' } }
+        stage('West') { steps { sh './ship.sh west' } }
+      }
+    }
+  }
+}
+"""
+
+
+def jenkins_rules(text, lanes=None):
+    from obaaf.catalog import load
+    from obaaf.checker import jenkins
+    result = jenkins.analyze("Jenkinsfile", text.encode(), load(), None, lane_overrides=lanes or {})
+    return {f.rule for f in result.findings}, result
+
+
+class AJenkinsStageDeclarationOnlyAddsRulesTest(unittest.TestCase):
+    RELEASE = "environment { OBAAF_LANE = 'release' }"
+    AGENT = "environment { OBAAF_LANE = 'agent' }"
+
+    def test_a_configured_lane_does_not_hide_the_stages_own(self):
+        # The second review's case: `lanes: {Jenkinsfile#Ship: trusted}` removed a high finding.
+        for own in (self.RELEASE, self.AGENT):
+            alone, _ = jenkins_rules(SHIP % ("", own))
+            self.assertTrue(alone, "the declared stage must have findings for this test to mean anything")
+            for configured in ("trusted", "untrusted", "agent", "release", "effect", "agnet"):
+                with self.subTest(own=own, configured=configured):
+                    found, _ = jenkins_rules(SHIP % ("", own), {"Jenkinsfile#Ship": configured})
+                    self.assertLessEqual(alone, found)
+
+    def test_a_stages_own_lane_does_not_hide_the_pipelines(self):
+        alone, _ = jenkins_rules(SHIP % (self.RELEASE, ""))
+        self.assertTrue(alone)
+        for inner in ("environment { OBAAF_LANE = 'trusted' }", self.AGENT):
+            with self.subTest(inner=inner):
+                found, _ = jenkins_rules(SHIP % (self.RELEASE, inner))
+                self.assertLessEqual(alone, found)
+
+    def test_both_declarations_count(self):
+        release, _ = jenkins_rules(SHIP % ("", self.RELEASE))
+        agent, _ = jenkins_rules(SHIP % ("", self.AGENT))
+        both, _ = jenkins_rules(SHIP % ("", self.RELEASE), {"Jenkinsfile#Ship": "agent"})
+        self.assertLessEqual(release | agent, both)
+
+    def test_a_key_for_the_file_or_for_an_outer_stage_reaches_the_stages_inside(self):
+        declared, _ = jenkins_rules(NESTED, {"Jenkinsfile#East": "release", "Jenkinsfile#West": "release"})
+        plain, _ = jenkins_rules(NESTED)
+        self.assertLess(plain, declared)
+        for key in ("Jenkinsfile", "Jenkinsfile#Deploy"):
+            with self.subTest(key=key):
+                found, result = jenkins_rules(NESTED, {key: "release"})
+                self.assertEqual(found, declared)
+                self.assertIn("Deploy", result.stage_keys)
+
+    def test_a_value_in_the_file_that_is_not_a_lane_is_reported(self):
+        with TempDir() as tmp:
+            repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = 'relaese' }"))
+            notes = ignored(checker.check(tmp))
+            (tmp / ".github" / "obaaf.yml").write_text("lanes:\n  Jenkinsfile#Deploy: release\n  Jenkinsfile: release\n")
+            (tmp / "Jenkinsfile").write_text(NESTED)
+            nested = ignored(checker.check(tmp))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("Jenkinsfile sets OBAAF_LANE to 'relaese', which is not a lane", notes[0])
+        self.assertEqual(nested, [])
+
+
+class AnEnvironmentNamedForReleasesTest(unittest.TestCase):
+    def lane(self, environment):
+        wf = job("      - run: ./go.sh\n", extra=f"    environment: {environment}\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf)
+            return checker.lanes(path)[0][2]
+
+    def test_names_that_say_release(self):
+        for name in ("prod", "production", "aws-prod", "Prod_EU", "release", "itch", "itch.io", "appstore",
+                     "steam", "deploy-preview", "publish"):
+            with self.subTest(name=name):
+                self.assertEqual(self.lane(name), "release")
+
+    def test_names_that_only_contain_the_letters(self):
+        for name in ("switch-tests", "reproduce", "nonprod", "kitchen", "staging", "ci"):
+            with self.subTest(name=name):
+                self.assertEqual(self.lane(name), "trusted")
 
 
 class WhatIsPrintedCannotBeForgedOrFloodedTest(unittest.TestCase):
@@ -544,9 +681,11 @@ class AConfigurationThatCannotBeReadIsAnErrorTest(unittest.TestCase):
                 self.assertNotIn("Traceback", out + err)
 
     def test_lanes_left_empty_is_no_declaration(self):
-        with TempDir() as tmp:
-            repo(tmp, job("      - run: make\n"), "lanes:\n")
-            self.assertEqual(checker.Config.load(tmp).lanes, {})
+        # As before this change: an empty value of any kind declares nothing.
+        for value in ("", "{}", "[]", "''", "false", "0"):
+            with self.subTest(value=value), TempDir() as tmp:
+                repo(tmp, job("      - run: make\n"), f"lanes: {value}\n")
+                self.assertEqual(checker.Config.load(tmp).lanes, {})
 
 
 if __name__ == "__main__":

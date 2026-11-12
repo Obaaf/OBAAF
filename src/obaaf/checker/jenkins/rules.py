@@ -286,10 +286,10 @@ class JenkinsRules:
             self.infos.append(info)
         # A stage declared as an agent lane (OBAAF_LANE or configuration) runs agents in every code step.
         for info in self.infos:
-            lane = self.lane_of(info.ctx)
-            if lane == "agent" and info.shell and not info.ai:
+            lanes = self.lanes_of(info.ctx)
+            if "agent" in lanes and info.shell and not info.ai:
                 info.ai = "the stage is declared an agent lane"
-            if lane == "release" and info.shell and not info.publish:
+            if "release" in lanes and info.shell and not info.publish:
                 info.publish = "the stage is declared a release lane"
         # Indexes, so no rule compares every step with every agent or stage.
         for info in self.infos:
@@ -299,14 +299,20 @@ class JenkinsRules:
             if info.publish:
                 self.publishing_stages.add(info.ctx.stage)
 
-    def lane_of(self, ctx) -> str | None:
-        label = stage_label(ctx.stage)
-        configured = [self.lane_overrides.get(f"{self.path}#{label}"),
-                      self.lane_overrides.get(f"{self.path}#{ctx.stage[-1]}") if ctx.stage else None]
-        # Read as the workflow checker reads them: case and space do not matter, and a value that is
-        # not a lane does not hide the stage's own OBAAF_LANE.
-        override = next((lane for lane in map(declared_lane, configured) if lane), None)
-        return override or ctx.lane
+    def lane_keys(self, stage: tuple) -> list[str]:
+        """The `lanes:` keys that apply to a step in `stage`: the file, the stage by its full label or
+        its own name, and every stage it is nested in."""
+        keys = [self.path, f"{self.path}#{stage_label(stage)}"]
+        for depth in range(1, len(stage) + 1):
+            keys += [f"{self.path}#{stage_label(stage[:depth])}", f"{self.path}#{stage[depth - 1]}"]
+        return list(dict.fromkeys(keys))
+
+    def lanes_of(self, ctx) -> set:
+        """Every lane declared for a step: in the configuration, and with OBAAF_LANE anywhere on the
+        way to the step. A declaration adds a lane and none hides another, as in a workflow; a value
+        that is not a lane adds nothing."""
+        values = [self.lane_overrides.get(key) for key in self.lane_keys(ctx.stage)] + list(ctx.lanes)
+        return {lane for lane in map(declared_lane, values) if lane}
 
     def _ai(self, info: Info) -> str | None:
         if info.use.name in self.detection.get("jenkins_agent_steps", []):

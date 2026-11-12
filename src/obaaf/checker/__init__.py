@@ -267,10 +267,10 @@ class Config:
         agents = data.get("agents") or {}
         if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
             raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
-        lanes = data.get("lanes")
-        if lanes is not None and not isinstance(lanes, dict):
+        lanes = data.get("lanes") or {}     # left empty, it declares nothing
+        if not isinstance(lanes, dict):
             raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")
-        return cls(lanes=dict(lanes or {}), agents=dict(agents), ignore=list(ignore),
+        return cls(lanes=dict(lanes), agents=dict(agents), ignore=list(ignore),
                    path=str(path), jenkins=dict(jenkins),
                    protected_secrets=parse_protected_secrets(data.get("protected_secrets"), path))
 
@@ -380,15 +380,17 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     jenkins_paths: list[Path] = []
     if files is None:
         root, files, jenkins_paths, is_repo = _resolve(target, platform)
+        on_its_own = not is_repo
     else:
-        root, is_repo = target, False
+        root, is_repo, on_its_own = target, False, False
         if platform != "github":
             jenkins_paths = [f for f in files if platform == "jenkins" or jenkins_mod.is_jenkinsfile(f)
                              or f.suffix.lower() == ".groovy"]
             files = [f for f in files if f not in jenkins_paths]
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
-    if is_repo and platform != "github" and target == root:
+    jenkins_sought = is_repo and platform != "github" and target == root
+    if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
                                              list(config.jenkins.get("exclude") or []))
     script_cmds = _script_commands(catalog, config)
@@ -397,7 +399,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     rels: list[str] = []
     agent_lane_present = False
     suspect_jobs: list[tuple[str, str]] = []
-    declared = _LaneDeclarations(config, is_repo, platform)
+    declared = _LaneDeclarations(config, is_repo, on_its_own, workflows_sought=platform != "jenkins",
+                                 jenkins_sought=jenkins_sought)
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
@@ -505,17 +508,20 @@ class _LaneDeclarations:
     only add rules, so one that silently does nothing leaves a job with fewer rules than its author
     meant it to have."""
 
-    def __init__(self, config: "Config", is_repo: bool, platform: str) -> None:
-        self.config, self.is_repo, self.platform = config, is_repo, platform
+    def __init__(self, config: "Config", is_repo: bool, on_its_own: bool, workflows_sought: bool,
+                 jenkins_sought: bool) -> None:
+        self.config, self.is_repo, self.on_its_own = config, is_repo, on_its_own
+        self.workflows_sought, self.jenkins_sought = workflows_sought, jenkins_sought
         self.problems: list[str] = []
         self.known: dict[str, tuple[str, set]] = {}    # path -> ("job" or "stage", the names it has)
         self.unread: set[str] = set()
 
     def aliases(self, rel: str, path: Path) -> tuple:
         """Other paths the configuration may know a workflow by. A workflow checked on its own is
-        `ci.yml` to the checker and `.github/workflows/ci.yml` in the repository's configuration."""
+        `ci.yml` to the checker and `.github/workflows/ci.yml` in the repository's configuration.
+        Only for a file given on its own: in a repository, or in a list of files, a file has one path."""
         parent = path.resolve().parent
-        if self.is_repo or parent.name != "workflows" or parent.parent.name != ".github":
+        if not self.on_its_own or parent.name != "workflows" or parent.parent.name != ".github":
             return ()
         alias = f".github/workflows/{path.name}"
         return () if alias == rel else (alias,)
@@ -530,15 +536,15 @@ class _LaneDeclarations:
         # Every job the file names, including one the checker could not read and reported as an error.
         names = {str(name) for name in jobs} if isinstance(jobs, dict) else set(workflow.jobs)
         for known_as in (workflow.path, *self.aliases(workflow.path, path)):
-            self.known[known_as] = ("job", names)
+            self.known[known_as] = ("job", names | self.known.get(known_as, ("job", set()))[1])
 
     def jenkinsfile(self, rel: str, result) -> None:
+        self.problems.extend(result.lane_problems)
         self.known[rel] = ("stage", set(result.stage_keys))
 
     def _looked_for(self, path: str) -> bool:
         """Whether this run looked for files of the kind `path` names at all."""
-        workflow_like = path.endswith((".yml", ".yaml"))
-        return self.platform == "auto" or (self.platform == "github") == workflow_like
+        return self.workflows_sought if path.endswith((".yml", ".yaml")) else self.jenkins_sought
 
     def notes(self) -> list[str]:
         found = list(self.problems)
@@ -568,8 +574,10 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     checker classified them. Lane declarations that did nothing are added to `notes` when it is given."""
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
-    declared = _LaneDeclarations(config, is_repo, platform)
-    if is_repo and platform != "github" and target.resolve() == root:
+    jenkins_sought = is_repo and platform != "github" and target.resolve() == root
+    declared = _LaneDeclarations(config, is_repo, not is_repo, workflows_sought=platform != "jenkins",
+                                 jenkins_sought=jenkins_sought)
+    if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
                                              list(config.jenkins.get("exclude") or []))
     script_cmds = _script_commands(load(), config)

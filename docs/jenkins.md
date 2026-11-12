@@ -164,7 +164,11 @@ ignore:
 ```
 
 In a Jenkinsfile, set a stage's lane in its `environment` (`OBAAF_LANE = 'agent'`) or with
-`withEnv(['OBAAF_LANE=agent'])`. A declared lane only adds rules.
+`withEnv(['OBAAF_LANE=agent'])`. A declared lane only adds rules, and every declaration counts: the
+pipeline's, each enclosing stage's, the stage's own, and a `lanes:` entry in the configuration for
+the file (`Jenkinsfile`), the stage (`Jenkinsfile#Ship`) or a stage it is nested in. None of them
+hides another, so a stage declared `release` in the file and `agent` in the configuration gets the
+rules of both. A value that is not a lane is listed in the report's notes.
 
 ## Running the audit in Jenkins
 

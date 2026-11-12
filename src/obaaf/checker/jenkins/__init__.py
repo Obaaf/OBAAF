@@ -22,6 +22,7 @@ from obaaf.checker.jenkins import parser as parser_mod
 from obaaf.checker.jenkins import rules as rules_mod
 from obaaf.checker.jenkins.model import CR_NO, CR_POSSIBLE, CR_YES
 from obaaf.checker.jenkins.rules import ALL, RULES, Unknown, stage_label
+from obaaf.checker.workflow import declared_lane, not_a_lane, one_line
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "Library", "Intermediate", "Saved",
              "DerivedDataCache", ".godot", "Binaries", "build", "dist", "target", ".gradle", ".idea", "vendor"}
@@ -73,6 +74,7 @@ class FileResult:
     suspect_stages: list = field(default_factory=list)
     lanes: list = field(default_factory=list)       # (stage, lane, reason)
     stage_keys: set = field(default_factory=set)    # the names a `lanes:` entry may give a stage
+    lane_problems: list = field(default_factory=list)   # OBAAF_LANE values in the file that name no lane
 
 
 def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_agents: dict | None = None,
@@ -114,7 +116,12 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         else:
             lane, reason = "unknown", "its condition cannot be evaluated" if crs else "runs no build code"
         result.lanes.append((stage_label(stage), lane, reason))
-        result.stage_keys.update((stage_label(stage), *stage[-1:]))
+        result.stage_keys.update(key.partition("#")[2] for key in engine.lane_keys(stage)[1:])
+        for value in dict.fromkeys(value for info in infos for value in info.ctx.lanes):
+            # One note for each value, not one for each stage it reaches.
+            problem = not_a_lane(f"{one_line(rel, 120)} sets OBAAF_LANE", value)
+            if declared_lane(value) is None and problem not in result.lane_problems:
+                result.lane_problems.append(problem)
         if ai:
             result.agent_present = True
         elif stage and _AGENT_HINT.search(" ".join(stage)):
