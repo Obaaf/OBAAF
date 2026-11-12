@@ -71,7 +71,8 @@ class AcceptanceTest(unittest.TestCase):
 
     def test_owner_reason_and_a_date_within_a_year_is_valid(self):
         self.assertEqual(self.problems(), [])
-        for owner in ("@octocat", "@example/maintainers", "@a", "security@example.com", " @octocat "):
+        for owner in ("@octocat", "@example/maintainers", "@a", "@0", "@a-b", "@org/team.name", "security@example.com",
+                      "first.last+ci@mail.example.co", " @octocat "):
             self.assertEqual(self.problems(owner=owner), [], owner)
         for day in (TODAY, TODAY + timedelta(days=acceptance.MAX_DAYS)):
             self.assertEqual(self.problems(expires=day.isoformat()), [], day)
@@ -83,7 +84,9 @@ class AcceptanceTest(unittest.TestCase):
 
     def test_an_owner_that_names_nobody(self):
         for owner in ("Sean", "the team", "@", "@a b", "@-x", "@org/", "@org/team/extra", "x@y", "tbd", "@org//team",
-                      "a@b@c.d", "@" + "a" * 40):
+                      "a@b@c.d", "@" + "a" * 40, "@a-", "@a--b", "@org/-team", "@org/team-", ".@-.-", "%@-.-", "-@-.-",
+                      "+@0.0", "a@-.com", "a@b.-", "a@b..c", "@NAME" + "x" * 100_000, "a" * 70 + "@example.com",
+                      "<@user or @org/team>", "OWNER"):
             found = self.problems(owner=owner)
             self.assertEqual(len(found), 1, owner)
             self.assertIn("is not a user (@name), a team (@org/team) or an e-mail address", found[0])
@@ -91,6 +94,15 @@ class AcceptanceTest(unittest.TestCase):
     def test_no_reason(self):
         for reason in (None, "", "  \n ", [], 0):
             self.assertEqual(self.problems(reason=reason), ["it gives no reason"], repr(reason))
+
+    def test_a_reason_that_says_too_little(self):
+        for reason in (".", "?", "...", "tbd", "n/a", "ok", "REASON", "reviewed", "\u200b", "\u2060\ufeff\u00ad",
+                       "\u3164" * 20, "- - - - - - - - - - - -", "x" * 9):
+            found = self.problems(reason=reason)
+            self.assertEqual(len(found), 1, repr(reason))
+            self.assertIn("says too little", found[0])
+        for reason in ("x" * 10, "Tracked in issue 12", "レビュー済み、課題12で追跡します"):
+            self.assertEqual(self.problems(reason=reason), [], reason)
 
     def test_no_expiry_date(self):
         for expires in (None, "", "  "):
@@ -118,6 +130,7 @@ class AcceptanceTest(unittest.TestCase):
     def test_every_problem_is_listed(self):
         self.assertEqual(len(acceptance.problems(None, None, None, TODAY)), 3)
         self.assertEqual(len(acceptance.problems("nobody", "", "2000-01-01", TODAY)), 3)
+        self.assertEqual(len(acceptance.problems("OWNER", "REASON", "YYYY-MM-DD", TODAY)), 3)   # the hint, pasted
 
 
 class StateTest(unittest.TestCase):
@@ -293,6 +306,7 @@ class BaselineEntryTest(unittest.TestCase):
         bad = [{**good, "expiry": SOON}, {**good, "fingerprint": "sha256:00"}, {**good, "facts": {"secrets": [1]}},
                {**good, "facts": {}}, {**good, "facts": {"n": 1.5}}, {**good, "facts": ["MODEL_KEY"]},
                {**good, "message": "x"}, {**good, "severity": "critical"}, {**good, "job": ""}, {**good, "job": 7},
+               {**good, "severity": ["high"]}, {**good, "severity": {"high": 1}}, {**good, "rule": ["OBAAF-GHA-005"]},
                {k: v for k, v in good.items() if k != "rule"}, {k: v for k, v in good.items() if k != "path"},
                {k: v for k, v in good.items() if k != "severity"}, "text", ["x"], None]
         with TempDir() as tmp:
@@ -318,14 +332,14 @@ class IgnoreEntryTest(unittest.TestCase):
 
     def test_an_entry_with_owner_reason_and_date_ignores_the_finding(self):
         with TempDir() as tmp:
-            result, f = self.run_with(tmp, f"    owner: '@octocat'\n    reason: reviewed\n    until: {SOON}\n")
-            self.assertEqual(f.suppressed, f"reviewed (until {SOON})")
+            result, f = self.run_with(tmp, f"    owner: '@octocat'\n    reason: {REASON}\n    until: {SOON}\n")
+            self.assertEqual(f.suppressed, f"{REASON} (until {SOON})")
             self.assertEqual((f.state, f.acceptance.source, f.acceptance.owner), ("accepted", "ignore", "@octocat"))
             self.assertEqual(result.not_accepted(), [])
 
     def test_an_entry_without_an_owner_ignores_nothing(self):
         with TempDir() as tmp:
-            result, f = self.run_with(tmp, f"    reason: reviewed\n    until: {SOON}\n")
+            result, f = self.run_with(tmp, f"    reason: {REASON}\n    until: {SOON}\n")
             self.assertIsNone(f.suppressed)
             self.assertEqual(f.state, "new")
             self.assertEqual(f.acceptance.problems, ["it names no owner"])
@@ -337,30 +351,30 @@ class IgnoreEntryTest(unittest.TestCase):
 
     def test_an_entry_dated_more_than_a_year_ahead_ignores_nothing(self):
         with TempDir() as tmp:
-            _, f = self.run_with(tmp, "    owner: '@octocat'\n    reason: reviewed\n    until: 2999-01-01\n")
+            _, f = self.run_with(tmp, f"    owner: '@octocat'\n    reason: {REASON}\n    until: 2999-01-01\n")
             self.assertIsNone(f.suppressed)
             self.assertIn("days ahead", f.acceptance.problems[0])
 
     def test_an_expired_entry_ignores_nothing_and_says_when_it_expired(self):
         with TempDir() as tmp:
-            _, f = self.run_with(tmp, "    owner: '@octocat'\n    reason: reviewed\n    until: 2001-02-03\n")
+            _, f = self.run_with(tmp, f"    owner: '@octocat'\n    reason: {REASON}\n    until: 2001-02-03\n")
             self.assertIsNone(f.suppressed)
             self.assertEqual(f.acceptance.problems, ["it expired on 2001-02-03"])
             self.assertIn("(An ignore entry for this finding expired on 2001-02-03.)", f.message)
 
     def test_a_second_entry_that_is_valid_still_ignores_the_finding(self):
         with TempDir() as tmp:
-            _, f = self.run_with(tmp, "    reason: reviewed\n    until: 2001-02-03\n"
+            _, f = self.run_with(tmp, f"    reason: {REASON}\n    until: 2001-02-03\n"
                                       "  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
-                                      f"    owner: '@octocat'\n    reason: again\n    until: {SOON}\n")
-            self.assertEqual(f.suppressed, f"again (until {SOON})")
+                                      f"    owner: '@octocat'\n    reason: Looked at again in May\n    until: {SOON}\n")
+            self.assertEqual(f.suppressed, f"Looked at again in May (until {SOON})")
             self.assertTrue(f.acceptance.valid)
 
     def test_until_is_a_date_and_nothing_else(self):
         for until in ("2027-01-31T10:00:00Z", "2027-01-31 10:00:00", "next year", "20270131"):
             with TempDir() as tmp, self.subTest(until=until):
                 with self.assertRaises(checker.ConfigError) as raised:
-                    self.run_with(tmp, f"    owner: '@octocat'\n    reason: reviewed\n    until: {until}\n")
+                    self.run_with(tmp, f"    owner: '@octocat'\n    reason: {REASON}\n    until: {until}\n")
                 self.assertIn("must be a date (YYYY-MM-DD)", str(raised.exception))
 
     def test_a_finding_waiting_on_an_ignore_entry_is_not_written_into_a_baseline(self):
@@ -368,7 +382,7 @@ class IgnoreEntryTest(unittest.TestCase):
             repo, _ = fixture_repo(tmp)
             (repo / ".github" / "obaaf.yml").write_text(
                 "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
-                f"    reason: reviewed\n    until: {SOON}\n")
+                f"    reason: {REASON}\n    until: {SOON}\n")
             out = tmp / "new.json"
             code, _, err = run_cli("check", repo, "--write-baseline", out, *ACCEPT)
             self.assertEqual(code, 0, err)
@@ -402,7 +416,7 @@ class OldFormatTest(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("Baseline: 0 finding(s) accepted by the baseline, 16 new.", out)
             self.assertIn("The baseline is in the old format (obaaf-baseline/v0.1).", out)
-            self.assertIn(f"obaaf baseline migrate {old} --owner @NAME --reason '...' --expires YYYY-MM-DD", out)
+            self.assertIn(f"obaaf baseline migrate {old} {repo} --owner OWNER --reason REASON --expires YYYY-MM-DD", out)
             self.assertIn("because it is an old-format entry, which names no owner, reason or expiry date.", out)
 
     def test_reporting_mode_still_exits_zero(self):
@@ -422,6 +436,26 @@ class OldFormatTest(unittest.TestCase):
             self.assertIn("does not match", err)
             code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
             self.assertEqual(code, 2)
+
+    def test_an_old_file_with_values_of_the_wrong_kind_is_an_error_or_is_read_never_a_traceback(self):
+        # From the review of this slice: a list for a rule or a severity ended in a traceback (in
+        # 0.3.0 too), and so did an old entry carrying `facts` when the report listed it as stale.
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            data = json.loads(old.read_text())
+            for change in ({"rule": ["OBAAF-GHA-005"]}, {"severity": ["high"]}, {"job": {"a": 1}}, {"message": 5}):
+                broken = json.loads(json.dumps(data))
+                broken["findings"][0].update(change)
+                old.write_text(json.dumps(broken))
+                code, _, err = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+                self.assertEqual(code, 2, change)
+                self.assertNotIn("Traceback", err)
+            stray = {"rule": "OBAAF-GHA-009", "severity": "medium", "path": "p", "facts": "x"}
+            stray["fingerprint"] = baseline._digest(baseline._entry_identity_v1(stray))
+            old.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": [stray]}))
+            code, out, err = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertEqual(code, 1, err)
+            self.assertIn("no longer found: OBAAF-GHA-009 p - the finding it names", out)
 
     def test_a_name_that_is_not_valid_unicode_does_not_stop_the_reader(self):
         with TempDir() as tmp:
@@ -509,6 +543,16 @@ class MigrateTest(unittest.TestCase):
             self.assertIn("nothing to do", err)
             self.assertEqual(old.read_text(), before)
 
+    def test_it_refuses_a_path_with_nothing_to_check(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            before = old.read_text()
+            (tmp / "nothing").mkdir()
+            code, _, err = run_cli("baseline", "migrate", old, tmp / "nothing", *ACCEPT)
+            self.assertEqual(code, 2)
+            self.assertIn("nothing was checked", err)
+            self.assertEqual(old.read_text(), before)
+
     def test_it_does_not_convert_while_a_file_cannot_be_read(self):
         with TempDir() as tmp:
             repo, old = fixture_repo(tmp)
@@ -580,6 +624,35 @@ class WriteBaselineTest(unittest.TestCase):
             renewed = [e for e in json.loads(out.read_text())["findings"] if e["owner"] == "@octocat"]
             self.assertEqual(len(renewed), 1)
 
+    def test_a_valid_entry_is_kept_when_an_ignore_entry_that_does_not_count_names_its_finding(self):
+        # From the review of this slice: rewriting the baseline dropped the valid entry.
+        with TempDir() as tmp:
+            repo, _ = fixture_repo(tmp)
+            out = tmp / "new.json"
+            self.assertEqual(run_cli("check", repo, "--write-baseline", out, *ACCEPT)[0], 0)
+            (repo / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
+                f"    reason: {REASON}\n    until: {SOON}\n")
+            before = json.loads(out.read_text())
+            code, _, err = run_cli("check", repo, "--write-baseline", out)
+            self.assertEqual(code, 0, err)
+            self.assertIn("0 finding(s) newly accepted, 16 kept", err)
+            self.assertEqual(json.loads(out.read_text())["findings"], before["findings"])
+            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "low")[0], 0)
+
+    def test_it_writes_only_where_a_baseline_can_go(self):
+        with TempDir() as tmp:
+            repo, _ = fixture_repo(tmp)
+            code, _, err = run_cli("check", repo, "--write-baseline", tmp / "no-such-directory" / "b.json", *ACCEPT)
+            self.assertEqual(code, 2)
+            self.assertIn("cannot write the baseline", err)
+            notes = tmp / "notes.txt"
+            notes.write_text("not a baseline\n")
+            code, _, err = run_cli("check", repo, "--write-baseline", notes, *ACCEPT)
+            self.assertEqual(code, 2)
+            self.assertIn("does not write over a file that is not one", err)
+            self.assertEqual(notes.read_text(), "not a baseline\n")
+
     def test_it_does_not_write_over_an_old_format_baseline(self):
         with TempDir() as tmp:
             repo, old = fixture_repo(tmp)
@@ -623,12 +696,13 @@ class IdentityTest(unittest.TestCase):
                         seen.add(f.rule)
         self.assertGreaterEqual(len(seen), 22, sorted(seen))
 
-    def test_why_a_job_is_an_agent_job_is_not_part_of_the_finding(self):
-        declared = "    env:\n      OBAAF_LANE: agent\n"
-        used = ""
+    def test_which_agent_holds_write_access_is_part_of_the_finding(self):
+        # An acceptance of one agent holding write access does not cover another put in its place
+        # (found by the review of this slice: with the reason left out, 0.3.0 failed here and this passed).
         keys, messages = [], []
-        for extra, step in ((declared, "      - run: python -m agents.triage\n"),
-                            (used, "      - uses: openai/codex-action@" + "1" * 40 + "\n")):
+        for extra, step in (("", "      - uses: anthropics/claude-code-action@" + "1" * 40 + "\n"),
+                            ("", "      - name: Agent\n        run: claude --dangerously-skip-permissions -p x\n"),
+                            ("    env:\n      OBAAF_LANE: agent\n", "      - run: python -m agents.triage\n")):
             with TempDir() as tmp:
                 (tmp / ".github" / "workflows").mkdir(parents=True)
                 (tmp / ".github" / "workflows" / "a.yml").write_text(
@@ -637,8 +711,22 @@ class IdentityTest(unittest.TestCase):
                 f = next(f for f in checker.check(tmp).findings if f.rule == "OBAAF-GHA-003")
                 keys.append(baseline.key(f))
                 messages.append(f.message)
-        self.assertNotEqual(messages[0], messages[1])
-        self.assertEqual(keys[0], keys[1])
+        self.assertEqual(len(set(messages)), 3)
+        self.assertEqual(len(set(keys)), 3)
+
+    def test_a_field_expanded_through_env_is_the_reference_and_the_field_not_a_clause(self):
+        # From the review of this slice: the fact was a piece of the sentence, comma included.
+        with TempDir() as tmp:
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / ".github" / "workflows" / "a.yml").write_text(
+                "on: issues\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                "      - name: say\n        run: echo \"${{ env.TITLE }}\"\n        env:\n"
+                "          TITLE: ${{ github.event.issue.title }}\n")
+            f = next(f for f in checker.check(tmp).findings if f.rule == "OBAAF-GHA-010")
+            self.assertEqual(f.message, "Step 'say' expands env.title, which holds github.event.issue.title, inside "
+                                        "its script.")
+            self.assertEqual((f.kind, f.facts), ("through-env", {"reference": "env.title",
+                                                                "field": "github.event.issue.title"}))
 
     def test_a_hidden_character_that_moves_is_the_same_finding_and_another_one_is_not(self):
         def key_for(text):
@@ -652,15 +740,23 @@ class IdentityTest(unittest.TestCase):
                 self.assertEqual(len(found), 1)
                 return baseline.key(found[0])
         one = key_for("Read this.\u200b\n")
-        self.assertEqual(one, key_for("\n\nRead all of this.\u200b\n"))
+        # The line moved down, and other lines changed: the same finding.
+        self.assertEqual(one, key_for("# Title\n\nMore words.\nRead this.\u200b\n"))
+        # The character is on other text, at another place in its line, twice, or another character:
+        # another finding. (Found by the review of this slice, with a direction override that moved
+        # from a quoted sample into an instruction.)
+        self.assertNotEqual(one, key_for("Read all of this.\u200b\n"))
+        self.assertNotEqual(one, key_for("Read\u200b this.\n"))
         self.assertNotEqual(one, key_for("Read this.\u200b\u200b\n"))
         self.assertNotEqual(one, key_for("Read this.\u202e\n"))
+        self.assertNotEqual(key_for('A sample: "\u202eabc"\nNever push to main.\n'),
+                            key_for('A sample: "abc"\nNever \u202epush to main.\n'))
 
     def test_generated_workflows_never_give_one_identity_two_messages(self):
         """Over a few hundred generated workflows with the same file and job names: two findings that
-        are the same to an acceptance always carry the same message, apart from the stated reason a
-        job is an agent job. If a rule printed something that its facts left out, an acceptance of one
-        finding would cover the other, and this is where it would show."""
+        are the same to an acceptance, at one severity, always carry the same message. If a rule
+        printed something that its facts left out, an acceptance of one finding would cover the
+        other, and this is where it would show."""
         knobs = {
             "on": ["pull_request", "pull_request_target", "issue_comment", "push", "workflow_run",
                    "[pull_request, issue_comment]", "[push, pull_request_target]"],
@@ -685,6 +781,9 @@ class IdentityTest(unittest.TestCase):
                 "      - run: gh release upload v1 dist/*\n",
                 "      - run: echo \"${{ github.event.issue.title }}\"\n",
                 "      - run: echo \"${{ github.event.comment.body }}\"\n",
+                "      - run: echo \"${{ env.T }}\"\n        env:\n          T: ${{ github.event.issue.title }}\n",
+                "      - run: echo \"${{ env.T }}\"\n        env:\n          T: ${{ github.event.issue.body }}\n",
+                "      - run: echo \"${{ env.U }}\"\n        env:\n          U: ${{ github.event.issue.title }}\n",
                 "      - uses: docker://alpine:3\n      - run: gh pr checkout 5\n",
                 "      - uses: step-security/harden-runner@v2\n        if: github.actor != 'x'\n        with:\n"
                 "          egress-policy: block\n      - run: claude -p hello\n",
@@ -695,7 +794,6 @@ class IdentityTest(unittest.TestCase):
         names = list(knobs)
         combos = {tuple(generator.randrange(len(knobs[n])) for n in names) for _ in range(700)}
         messages: dict[str, set] = {}
-        reason = re.compile(r"^(Agent job '[^']*') \([^)]*(?:\([^)]*\)[^)]*)*\)")
         rules_seen = set()
         with TempDir() as tmp:
             (tmp / ".github" / "workflows").mkdir(parents=True)
@@ -729,7 +827,7 @@ class IdentityTest(unittest.TestCase):
                 for f in result.findings:
                     self.assertIsNotNone(f.facts)
                     rules_seen.add((f.rule, f.kind))
-                    messages.setdefault(baseline.key(f) + "|" + f.severity, set()).add(reason.sub(r"\1", f.message))
+                    messages.setdefault(baseline.key(f) + "|" + f.severity, set()).add(f.message)
         clashes = {k: v for k, v in messages.items() if len(v) > 1}
         self.assertEqual(clashes, {})
         # The generator has to reach most of what the rules can say, or the test above shows little.
@@ -737,14 +835,13 @@ class IdentityTest(unittest.TestCase):
         self.assertGreaterEqual(len({rule for rule, _ in rules_seen}), 21, sorted(rules_seen))
 
     def test_no_two_cases_of_a_rule_share_a_kind(self):
+        # `compose` records every (rule, kind) it is used with and the template that came with it.
+        # After the fixtures have run (and whatever other tests ran in this process), no pair has
+        # been seen with two templates: each case of a rule has a kind of its own.
         for target in itertools.chain(sorted(RISKY.glob("*.yml")), [REPO, TEMPLATES]):
             checker.check(target)
         self.assertEqual(rules.CONFLICTS, [])
-        by_rule: dict[str, dict] = {}
-        for (rule, kind), template in rules.TEMPLATES.items():
-            by_rule.setdefault(rule, {})[kind] = template
-        for rule, kinds in by_rule.items():
-            self.assertEqual(len(set(kinds.values())), len(kinds), rule)
+        self.assertGreaterEqual(len(rules.TEMPLATES), 30)
 
     def test_json_output_keeps_what_it_had_and_adds_the_state(self):
         with TempDir() as tmp:

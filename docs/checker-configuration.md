@@ -128,7 +128,7 @@ The rule checks the workflow files against what you declared. It cannot see that
 <a id="lifecycle"></a>
 ## What happens to a finding
 
-Every finding is in one of four states. The text report says which under the finding, and JSON output gives it as `state`.
+Every finding is in one of four states. JSON output gives the state of each finding as `state`. The text report prints a line under a finding when there is something to say about it: who accepted it and until when, why an entry that names it does not count, or what was established about its controls. A finding with no such line is new. Findings ignored by configuration are listed at the end, one line each.
 
 | State | What it means | Does it fail the check? |
 | --- | --- | --- |
@@ -143,8 +143,8 @@ No rule reports controls yet, so today every finding is new or accepted. The sta
 
 Accepting a finding is a decision somebody makes for a while. The checker enforces three things about it, in an ignore entry and in a baseline entry alike:
 
-- **an owner**: a user (`@octocat`), a team (`@my-org/build`) or an e-mail address, the forms a CODEOWNERS file takes. The checker cannot tell whether the account exists; it can tell that somebody is named.
-- **a reason**, in words.
+- **an owner**: a user (`@octocat`), a team (`@my-org/build`) or an e-mail address, the forms a CODEOWNERS file takes. The checker checks the form only. It cannot tell whether the account exists, or that `@tbd` is nobody.
+- **a reason**, in words. The checker cannot judge a reason. It refuses one with fewer than ten letters or digits, which rules out an empty one, a dot, `n/a` and `tbd`, and nothing more.
 - **an expiry date** (`YYYY-MM-DD`) that has not passed and is at most 366 days ahead. An acceptance is looked at again at least once a year; a date of 2999 would be a permanent acceptance with a date on it.
 
 An entry that lacks one of these, has expired, or is dated too far ahead accepts nothing. Its finding counts as new and fails the check like any other, and the report says under the finding what the entry lacks:
@@ -188,12 +188,15 @@ An entry looks like this:
 What an entry accepts:
 
 - **Exactly the finding its fields describe**: the rule, the file, the job and step, which of the rule's cases it is (`kind`), and the values it is about (`facts`: which secrets, which triggers, which action). There is no fingerprint beside the text, so the lines a reviewer reads in a diff are the acceptance. A job that receives one more secret is a different finding and counts as new.
-- **Not its line number and not the wording of its message.** Moving code does not disturb a baseline, and neither does a release of OBAAF that words a message differently. Jenkins findings are the exception for now: they have no `kind` or `facts`, and are identified by their message (`"message": "..."` in the entry), so a change of wording does disturb them.
+- **Not its line number, and not the wording of a rule's message.** Moving code does not disturb a baseline, and neither does a release of OBAAF that words a rule's message differently. There are three exceptions, where text is the finding:
+  - *OBAAF-GHA-003 (an agent job can write)*: why the job is an agent job is one of its facts, as the text the checker shows (`uses anthropics/claude-code-action`, `set by OBAAF_LANE`). An acceptance of one agent holding write access does not cover another put in its place. If the job is declared an agent job where it was recognised before, or a later release words the reason differently, the finding counts as new.
+  - *OBAAF-INS-001 (hidden characters)*: each character is a fact together with a digest of the line it is on. A line that moves up or down is the same finding; the same character on other text is another finding, because where a direction override sits is what it does.
+  - *Jenkins findings* have no `kind` or `facts` yet. They are identified by their message (`"message": "..."` in the entry), line numbers in it included, so moving code or a change of wording does disturb them.
 - **At the severity it was accepted at, or lower.** If the finding is now more severe than the entry says, the entry does not cover it.
 - **One finding per entry.** Two findings that differ only in their line need two entries.
 - **A step by its name.** A finding on a step names it by the step's `name`, else its `id`, else the action it uses, else its position (`step 3`). Give a name to a step that carries an accepted finding, or a step inserted above it makes the finding a new one.
 
-Writing a baseline again never renews an acceptance by itself. Entries of the file being replaced that are still valid keep their own owner, reason and expiry date. Only findings that no valid entry accepts are written with the `--owner`, `--reason` and `--expires` you give, and if there are any and you give none, nothing is written. So a diff of the baseline shows who accepted what, why, and until when, one entry at a time. Findings already ignored by configuration are not written to the baseline, and neither are findings whose ignore entry has expired or does not count: renew, complete or remove the entry instead. An entry for a finding that has since been given an ignore entry is not stale.
+Writing a baseline again never renews an acceptance by itself. Entries of the file being replaced that are still valid keep their own owner, reason and expiry date (and are written at the finding's present severity, if that is lower than it was). Only findings that no valid entry accepts are written with the `--owner`, `--reason` and `--expires` you give, and if there are any and you give none, nothing is written. So a diff of the baseline shows who accepted what, why, and until when, one entry at a time. `--write-baseline` replaces a baseline: it does not write over a file that exists and is not one. Findings already ignored by configuration are not written to the baseline. Findings whose ignore entry has expired or does not count are not newly accepted either: renew, complete or remove the entry instead. An entry for a finding that has since been given an ignore entry is not stale.
 
 The baseline is a list of accepted risks, so review changes to it like changes to the workflows: put it under CODEOWNERS. Prefer an `ignore` entry for a finding you have decided does not apply.
 
@@ -207,7 +210,7 @@ obaaf baseline migrate .github/obaaf-baseline.json \
   --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 ```
 
-`migrate` runs the check, carries over the findings the old file covers that are still found, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
+`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
 
 <a id="ignore"></a>
 ## When a finding does not apply
@@ -225,7 +228,7 @@ ignore:
     until: 2027-01-31
 ```
 
-An ignore entry is an acceptance, so [the same three things](#lifecycle) are enforced. A configuration file whose entries have no `owner` (every file written for 0.3.0 or earlier) still loads, but those entries ignore nothing until an owner is added, and neither does an entry dated more than 366 days ahead; the report says which. An entry with no rule, path, reason or `until`, or with an `until` that is not a plain date, is a configuration error as before.
+An ignore entry is an acceptance, so [the same three things](#lifecycle) are enforced. A configuration file whose entries have no `owner` (every file written for 0.3.0 or earlier) still loads, but those entries ignore nothing until an owner is added, and neither does an entry dated more than 366 days ahead; the report says which. An entry with no rule, path, reason or `until`, or with an `until` that is not a plain date (`YYYY-MM-DD`), is a configuration error and the check does not run.
 
 This is also how to record a reviewed runner pool without suppressing findings
 for other jobs. GHA-013 distinguishes:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,13 +80,16 @@ class Finding:
 
 
 class Note(str):
-    """Text a finding's message shows that is not part of what the finding is: why the job is an
-    agent job, where in a file a character sits. Every other value given to `compose` is."""
+    """Text a finding's message shows that is not one of its facts, because the facts already hold
+    it: a count of the files or characters that are listed in full as a fact. Every other value
+    given to `compose` is a fact. A note must never say something the facts do not."""
 
 
 class Fact:
     """A value that is part of what a finding is, with the text the message shows for it when that
-    is not simply the value (`*inherit` is shown as "all secrets (secrets: inherit)")."""
+    is not simply the value: `*inherit` is shown as "all secrets (secrets: inherit)", an empty
+    cache-mode as "not set". The one thing `shown` may add to the value is a line and column, which
+    are never part of a finding (a hidden character is a fact by the text of its line)."""
 
     def __init__(self, value, shown: str) -> None:
         self.value, self.shown = value, shown
@@ -102,8 +106,10 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
     """A finding's message and its facts, from one template and its named values.
 
     The message can only show the template's own words, the job, the step and `values`; each value
-    is a fact unless it is a `Note`. So nothing the message says about a finding can be missing from
-    what identifies it, and the template's wording can change without changing which finding it is.
+    is a fact unless it is a `Note`. So what the message says about a finding is in what identifies
+    it, apart from line and column numbers, and the template's wording can change without changing
+    which finding it is. Two facts are themselves text the checker wrote, and rewording them does
+    change the finding: why a job is an agent job (OBAAF-GHA-003), until agents are named data.
     """
     if TEMPLATES.setdefault((rule, kind), template) != template and (rule, kind) not in CONFLICTS:
         CONFLICTS.append((rule, kind))
@@ -331,15 +337,22 @@ class WorkflowRules:
                 continue
             view = None
             for body in expressions(text):
+                severity = "high" if untrusted else "medium"
                 found = self._untrusted_text(body)
-                if not found:
-                    if view is None:
-                        view = self._indirect(job, step)
-                    found = self._untrusted_indirectly(body, view)
                 if found:
                     self.add("OBAAF-GHA-010", step.line,
                              "Step '{step}' expands {field} inside its script.", job, step,
-                             severity="high" if untrusted else "medium", field=found)
+                             severity=severity, field=found)
+                    break
+                if view is None:
+                    view = self._indirect(job, step)
+                through = self._untrusted_indirectly(body, view)
+                if through:
+                    how, reference, found = through
+                    held = "which holds" if how == "through-env" else "from a matrix that holds"
+                    self.add("OBAAF-GHA-010", step.line,
+                             "Step '{step}' expands {reference}, " + held + " {field}, inside its script.", job, step,
+                             severity=severity, kind=how, reference=reference, field=found)
                     break
 
     @staticmethod
@@ -448,10 +461,11 @@ class WorkflowRules:
         return {"env": env, "matrix": matrix, "env_whole": whole}
 
     @staticmethod
-    def _untrusted_indirectly(body: str, view: dict) -> str | None:
+    def _untrusted_indirectly(body: str, view: dict) -> tuple[str, str, str] | None:
         """`${{ env.TITLE }}` or `${{ matrix.title }}` in a script is expanded before the shell runs,
         like any expression. If TITLE is set from an outsider-written field, the script expands that
-        field. (`"$TITLE"`, which the shell reads, is the safe form.)"""
+        field. (`"$TITLE"`, which the shell reads, is the safe form.) Returns how the field is
+        reached (`through-env` or `through-matrix`), the reference in the script, and the field."""
         for path in expr_mod.paths(body):
             root = path[0].value.lower()
             if root == "env" and (view["env"] or view["env_whole"]):
@@ -461,9 +475,9 @@ class WorkflowRules:
                     held = next(iter(view["env"].values()), None)
                 held = held or view["env_whole"]
                 if held:
-                    return f"{expr_mod.dotted(path)}, which holds {held},"
+                    return "through-env", expr_mod.dotted(path), held
             elif root == "matrix" and view["matrix"]:
-                return f"{expr_mod.dotted(path)}, from a matrix that holds {view['matrix']},"
+                return "through-matrix", expr_mod.dotted(path), view["matrix"]
         return None
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
@@ -471,9 +485,11 @@ class WorkflowRules:
         if not job.in_lane("agent"):
             return
         perms = job.permissions
-        # Why the job is an agent job is shown and is not part of the finding: the risk is the same
-        # whether the checker recognised the agent or the job was declared one.
-        why = Note(job.reason_for('agent'))
+        # Why the job is an agent job (which action or command, or a declaration) is part of the
+        # finding, as the text the checker shows for it: an acceptance of one agent holding write
+        # access must not cover another agent put in its place. It is text the checker wrote, so
+        # rewording it changes the finding; that ends when agents are named data.
+        why = job.reason_for('agent')
         if perms is None:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, so it may inherit "
@@ -560,7 +576,7 @@ class WorkflowRules:
             self.add("OBAAF-GHA-006", cache_steps[0].line,
                      "Release job '{job}' restores caches in {steps} and its cache-mode is "
                      "{mode}." + hosted_note, job, cache_steps[0], kind="restores" + runner,
-                     steps=Fact([s.name for s in cache_steps], names), mode=mode or 'not set')
+                     steps=Fact([s.name for s in cache_steps], names), mode=Fact(mode or "", mode or 'not set'))
         elif not cache_steps and mode != "none":
             self.add("OBAAF-GHA-006", job.line,
                      "Release job '{job}' does not set cache-mode: none, so a cache step added later would "
@@ -701,7 +717,7 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-008", line,
                          what + " '{uses}' is pinned to '{ref}', not a full commit SHA.", job, step,
                          severity, kind="reusable-workflow" if step is None else "action", uses=uses,
-                         ref=ref or 'nothing')
+                         ref=Fact(ref, ref or 'nothing'))
         images = []
         container = job.raw.get("container")
         if isinstance(container, str):
@@ -876,9 +892,15 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
         if hidden:
             detail = "; ".join(h.label for h in hidden[:3])
             more = f" and {len(hidden) - 3} more" if len(hidden) > 3 else ""
-            # The finding is which characters the file hides, and how many of each. Where they sit is
-            # shown and is not part of it, so text moving around them does not make it another finding.
+            # The finding is which characters the file hides and the text of the line each is on (as a
+            # digest: the line may be long, and a baseline is not the place for it). A line that moves
+            # up or down is the same finding; a character on other text is another one, because where
+            # a direction override or an invisible instruction sits is what it does. The message
+            # shows the first three with their line and column, and the count of all of them.
+            lines = text.splitlines()
+            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) on a line with sha256 "
+                           + hashlib.sha256(lines[h.line - 1].encode("utf-8", "surrogatepass")).hexdigest()[:32]
+                           for h in hidden)
             add("OBAAF-INS-001", rel, hidden[0].line, "{count} hidden character(s): {characters}{more}.",
-                count=Note(str(len(hidden))), more=Note(more),
-                characters=Fact(sorted(f"U+{h.codepoint:04X} ({h.kind})" for h in hidden), detail))
+                count=Note(str(len(hidden))), more=Note(more), characters=Fact(marks, detail))
     return findings

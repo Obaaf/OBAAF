@@ -44,7 +44,7 @@ def repo(tmp, *names, extra_lines=0):
 
 def ignore_entry(until, owner="'@example/maintainers'"):
     return ("ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci0.yml\n"
-            + (f"    owner: {owner}\n" if owner else "") + f"    reason: reviewed\n    until: {until}\n")
+            + (f"    owner: {owner}\n" if owner else "") + f"    reason: Reviewed with the build team\n    until: {until}\n")
 
 
 def write_baseline(test, tmp):
@@ -140,7 +140,7 @@ class BaselineTest(unittest.TestCase):
         def make():
             return Finding("OBAAF-GHA-001", "low", ".github/workflows/ci.yml", 3, "same", job="test")
         one = [make()]
-        text = baseline.build(one, None, "@example/maintainers", "reviewed", SOON)
+        text = baseline.build(one, None, "@example/maintainers", "Reviewed; tracked in issue 7", SOON)
         path_entries = json.loads(text)["findings"]
         two = CheckResult(findings=[make(), make()], files=["x"], errors=[], config=Config())
         baseline.apply(two, baseline.Baseline(baseline.FORMAT, path_entries))

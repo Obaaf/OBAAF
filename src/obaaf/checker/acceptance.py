@@ -18,9 +18,19 @@ from datetime import date, timedelta
 MAX_DAYS = 366
 
 # The forms a CODEOWNERS file takes for an owner: @user, @org/team, or an e-mail address. The
-# checker cannot tell whether the account exists; it can tell that somebody is named.
-_OWNER = re.compile(r"^(?:@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,99})?"
-                    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$")
+# checker cannot tell whether the account exists or whether the name is a placeholder; it can tell
+# that the entry has the form of a name. A user or organisation name is letters and digits with
+# single hyphens inside, as GitHub requires; an e-mail address has letters or digits at both ends of
+# the part before the @ and of each label after it.
+_NAME = r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}"
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_OWNER = re.compile(rf"^(?:@{_NAME}(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]{{0,98}}[A-Za-z0-9])?)?"
+                    rf"|[A-Za-z0-9](?:[A-Za-z0-9._%+-]{{0,62}}[A-Za-z0-9])?@{_LABEL}(?:\.{_LABEL})+)$")
+# A reason has to say something. The checker cannot judge what it says; it refuses one with fewer
+# than this many letters or digits, which rules out an empty one, a dot, "n/a" and "tbd".
+MIN_REASON = 10
+# Letters, by their Unicode category, that show nothing: the Hangul fillers.
+_BLANK_LETTERS = frozenset("\u115f\u1160\u3164\uffa0")
 
 BASELINE, IGNORE = "baseline", "ignore"
 
@@ -76,6 +86,8 @@ def problems(owner, reason, expires, today: date) -> list[str]:
         found.append(problem)
     if not _text(reason):
         found.append("it gives no reason")
+    elif sum(1 for ch in _text(reason) if ch.isalnum() and ch not in _BLANK_LETTERS) < MIN_REASON:
+        found.append(f"its reason says too little (fewer than {MIN_REASON} letters or digits)")
     if expires is None or (isinstance(expires, str) and not expires.strip()):
         found.append("it has no expiry date")
     else:

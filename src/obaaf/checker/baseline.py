@@ -130,7 +130,9 @@ def _check_v1(path, entries: list) -> None:
             raise BaselineError(f"baseline {path} has an entry without a fingerprint: {entry!r}")
         # The fingerprint must describe the entry a reviewer reads; otherwise an innocent-looking line
         # could carry the fingerprint of a different, worse finding.
-        if not entry.get("rule") or not entry.get("severity") or not entry.get("path") or \
+        texts = all(isinstance(entry.get(k), str) for k in ("rule", "severity", "path")) and \
+            all(isinstance(entry[k], str) for k in ("job", "step", "scope", "message") if k in entry)
+        if not texts or not entry["rule"] or not entry["severity"] or not entry["path"] or \
                 _digest(_entry_identity_v1(entry)) != entry["fingerprint"]:
             raise BaselineError(f"baseline {path} has an entry whose fingerprint does not match its rule, "
                                 f"severity, path, job, step and message: {entry.get('rule')} {entry.get('path')}")
@@ -156,7 +158,7 @@ def _check_v2(path, entries: list) -> None:
         for name in ("rule", "path"):
             if not isinstance(entry.get(name), str) or not entry[name]:
                 raise BaselineError(f"{where}: needs a {name}")
-        if entry.get("severity") not in SEVERITIES:
+        if not isinstance(entry.get("severity"), str) or entry["severity"] not in SEVERITIES:
             raise BaselineError(f"{where}: severity must be one of {', '.join(SEVERITIES)}")
         for name in ("job", "step", "scope", "kind", "message"):
             if name in entry and (not isinstance(entry[name], str) or not entry[name]):
@@ -223,16 +225,22 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
                                        entry.get("expires"), today)
         by_key.setdefault(entry_key(entry), []).append((entry, made))
     for candidates in by_key.values():
-        candidates.sort(key=lambda pair: not pair[1].valid)       # stable: valid entries are used first
+        # Taken from the end of the list: valid entries first, and each kind in the file's order.
+        candidates.reverse()
+        candidates.sort(key=lambda pair: pair[1].valid)       # stable
     used: set[int] = set()
     for f in sorted(findings, key=lambda f: not f.suppressed):
         if f.state == FIXED:
             continue
-        candidates = [pair for pair in by_key.get(finding_key(f), ()) if id(pair[0]) not in used]
+        candidates = by_key.get(finding_key(f))
         if not candidates:
             continue
-        fitting = [pair for pair in candidates if legacy or _accepts(pair[0], f)]
-        entry, made = (fitting or candidates)[0]
+        # The next entry that accepts the finding at its severity, or failing that the next entry.
+        # Looked for from the end of the list, so that many findings with one identity cost one
+        # step each and not a pass over every entry.
+        at = next((i for i in range(len(candidates) - 1, -1, -1) if legacy or _accepts(candidates[i][0], f)), None)
+        fitting = at is not None
+        entry, made = candidates.pop(at if fitting else -1)
         used.add(id(entry))
         if f.suppressed:
             continue
@@ -266,12 +274,17 @@ def entry_for(f, owner: str, reason: str, expires: str) -> dict:
             "owner": owner, "reason": reason, "expires": expires}
 
 
+def waiting_on_ignore(f) -> bool:
+    """Whether an ignore entry names the finding without accepting it (expired, or not valid)."""
+    return expired_ignore(f) or (f.acceptance is not None and f.acceptance.source == acceptance_mod.IGNORE
+                                 and not f.acceptance.valid)
+
+
 def acceptable(result) -> list:
-    """The findings a baseline can hold: everything that is not fixed, not ignored by configuration,
-    and not waiting on an ignore entry that has expired or is not valid (decide those where they are)."""
-    return [f for f in result.findings
-            if not f.suppressed and f.state != FIXED and not expired_ignore(f)
-            and not (f.acceptance is not None and f.acceptance.source == acceptance_mod.IGNORE)]
+    """The findings a baseline can newly accept: everything that is not fixed, not ignored by
+    configuration, and not waiting on an ignore entry that has expired or is not valid (that entry
+    is where the decision about it was made, so it is renewed, completed or removed there)."""
+    return [f for f in result.findings if not f.suppressed and f.state != FIXED and not waiting_on_ignore(f)]
 
 
 def build(findings: list, kept: dict | None = None, owner: str = "", reason: str = "", expires: str = "") -> str:
@@ -292,15 +305,18 @@ def plan(result, previous: Baseline | None, today: date | None = None) -> tuple[
     current format, or None): (the findings to write, those that keep a valid entry of the old file,
     as finding id -> its owner, reason and expiry date, and those that would be newly accepted)."""
     today = today or date.today()
-    findings = acceptable(result)
+    candidates = [f for f in result.findings if not f.suppressed and f.state != FIXED]
     kept: dict = {}
     if previous is not None and not previous.legacy:
-        before = [(f.acceptance, f.baselined) for f in findings]
-        _match(findings, previous.entries, _entry_key, key, today, False)
-        for f, (old_acceptance, old_baselined) in zip(findings, before):
+        before = [(f.acceptance, f.baselined) for f in candidates]
+        _match(candidates, previous.entries, _entry_key, key, today, False)
+        for f, (old_acceptance, old_baselined) in zip(candidates, before):
             if f.baselined:
                 kept[id(f)] = {"owner": f.acceptance.owner, "reason": f.acceptance.reason,
                                "expires": f.acceptance.expires}
             f.acceptance, f.baselined = old_acceptance, old_baselined
+    # A finding waiting on an ignore entry is not newly accepted here, and a valid entry the old
+    # file already has for it is not thrown away either.
+    findings = [f for f in candidates if id(f) in kept or not waiting_on_ignore(f)]
     fresh = [f for f in findings if id(f) not in kept]
     return findings, kept, fresh

@@ -294,6 +294,7 @@ class CheckResult:
     baseline_stale: list[dict] = field(default_factory=list) # baseline entries no finding matched
     baseline_format: str = ""                                # the format of the baseline that was applied
     baseline_path: str = ""
+    checked: str = ""                                        # the path the command line asked to check
 
     @property
     def workflow_files(self) -> list[str]:

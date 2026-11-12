@@ -140,7 +140,7 @@ class ConfigurationTest(unittest.TestCase):
         with TempDir() as tmp:
             write(tmp, "Jenkinsfile", RISKY)
             write(tmp, "obaaf.yml", "ignore:\n  - rule: OBAAF-JEN-009\n    path: Jenkinsfile\n    job: Test\n"
-                                    "    owner: '@platform-team'\n    reason: reviewed\n    until: 2026-06-30\n")
+                                    "    owner: '@platform-team'\n    reason: Reviewed with the platform team\n    until: 2026-06-30\n")
             result = checker.check(tmp, today=date(2026, 1, 15))
             finding = next(f for f in result.findings if f.rule == "OBAAF-JEN-009")
             self.assertIsNotNone(finding.suppressed)

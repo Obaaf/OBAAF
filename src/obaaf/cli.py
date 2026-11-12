@@ -124,20 +124,26 @@ def cmd_check(args) -> int:
     try:
         if args.baseline:
             applied = baseline_mod.load(Path(args.baseline))
-        if args.write_baseline and Path(args.write_baseline).exists():
-            # Entries of the file being replaced that are still valid keep their own owner, reason
-            # and expiry date; writing a baseline never renews an acceptance behind its owner's back.
-            previous = baseline_mod.load(Path(args.write_baseline))
     except baseline_mod.BaselineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.write_baseline and Path(args.write_baseline).exists():
+        # Entries of the file being replaced that are still valid keep their own owner, reason
+        # and expiry date; writing a baseline never renews an acceptance behind its owner's back.
+        try:
+            previous = baseline_mod.load(Path(args.write_baseline))
+        except baseline_mod.BaselineError as exc:
+            print(f"error: {exc}. --write-baseline replaces a baseline and does not write over a file that is "
+                  "not one; name another file or remove this one.", file=sys.stderr)
+            return EXIT_USAGE
     if previous is not None and previous.legacy:
         print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with "
-              f"'obaaf baseline migrate {args.write_baseline} --owner @NAME --reason \"...\" --expires "
+              f"'obaaf baseline migrate {args.write_baseline} --owner OWNER --reason REASON --expires "
               "YYYY-MM-DD', which carries over the findings it covers and accepts nothing new; or write the "
               "new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
+    result.checked = str(args.path)
     if applied is not None:
         baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
@@ -166,19 +172,24 @@ def cmd_check(args) -> int:
             wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
             if wrong:
                 print(f"error: writing this baseline would accept {len(fresh)} finding(s) that no valid entry "
-                      "accepts today. Say who accepts them, why and until when: --owner @NAME --reason \"...\" "
+                      "accepts today. Say who accepts them, why and until when: --owner OWNER --reason REASON "
                       f"--expires YYYY-MM-DD. As given, the acceptance would not count, because "
                       f"{'; '.join(wrong)}. Nothing was written.", file=sys.stderr)
                 return EXIT_USAGE
         made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
-        Path(args.write_baseline).write_text(
-            baseline_mod.build(findings, kept, made.owner or "", made.reason or "", made.expires or ""),
-            encoding="utf-8")
+        try:
+            Path(args.write_baseline).write_text(
+                baseline_mod.build(findings, kept, made.owner or "", made.reason or "", made.expires or ""),
+                encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot write the baseline to {args.write_baseline}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
         print(f"Baseline written to {args.write_baseline}: {len(fresh)} finding(s) newly accepted"
               + (f" by {made.owner} until {made.expires}" if fresh else "")
               + f", {len(kept)} kept with the owner, reason and expiry date they had.", file=sys.stderr)
-        waiting = [f for f in result.findings if not f.suppressed and f not in findings
-                   and f.acceptance is not None and f.acceptance.source == acceptance_mod.IGNORE]
+        written = {id(f) for f in findings}
+        waiting = [f for f in result.findings
+                   if not f.suppressed and id(f) not in written and baseline_mod.waiting_on_ignore(f)]
         if waiting:
             print(f"warning: {len(waiting)} finding(s) whose ignore entry has expired or does not count were "
                   "not written to the baseline; renew, complete or remove those ignore entries.", file=sys.stderr)
@@ -218,7 +229,7 @@ def cmd_baseline_migrate(args) -> int:
         return EXIT_USAGE
     wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
     if wrong:
-        print("error: say who accepts the findings, why and until when: --owner @NAME --reason \"...\" "
+        print("error: say who accepts the findings, why and until when: --owner OWNER --reason REASON "
               f"--expires YYYY-MM-DD. As given, the acceptance would not count, because {'; '.join(wrong)}.",
               file=sys.stderr)
         return EXIT_USAGE
@@ -229,6 +240,11 @@ def cmd_baseline_migrate(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
+    if not result.files and not result.errors:
+        print(f"error: no CI definitions found under {target}: nothing was checked, so nothing of {args.file} "
+              "can be carried over. Give the path the baseline was written for after the file name.",
+              file=sys.stderr)
+        return EXIT_USAGE
     if result.errors:
         for error in result.errors:
             print(f"error: {one_line(error)}", file=sys.stderr)
@@ -246,8 +262,13 @@ def cmd_baseline_migrate(args) -> int:
         return EXIT_FAIL
     made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
     out = Path(args.output or args.file)
-    out.write_text(baseline_mod.build(covered, None, made.owner, made.reason, made.expires), encoding="utf-8")
-    others = [f for f in baseline_mod.acceptable(result) if f not in covered]
+    try:
+        out.write_text(baseline_mod.build(covered, None, made.owner, made.reason, made.expires), encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write the baseline to {out}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    carried = {id(f) for f in covered}
+    others = [f for f in baseline_mod.acceptable(result) if id(f) not in carried]
     print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
           file=sys.stderr)
     if gone:
@@ -707,12 +728,15 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true", help="omit fix text in text output")
     x.add_argument("--baseline", metavar="FILE",
-                   help="findings recorded in this baseline are reported but do not fail the check; any other "
-                        "finding does, and so does a baseline entry that no longer matches (regenerate it)")
+                   help="findings that a valid entry of this baseline accepts (owner, reason, expiry date not "
+                        "passed) are reported but do not fail the check; any other finding does, and so does an "
+                        "entry that no longer matches a finding. An obaaf-baseline/v0.1 file accepts nothing "
+                        "until 'obaaf baseline migrate' converts it")
     x.add_argument("--write-baseline", metavar="FILE",
-                   help="write every finding not ignored by configuration to FILE as the new baseline, and exit 0. "
-                        "Findings that no valid entry of FILE accepts are accepted with --owner, --reason and "
-                        "--expires; entries of FILE that are still valid keep their own")
+                   help="write the baseline to FILE. Entries of FILE that are still valid keep their owner, "
+                        "reason and expiry date; every other finding is newly accepted with --owner, --reason and "
+                        "--expires, and without them nothing is written (exit 2). Left out: findings ignored by "
+                        "configuration, and findings named by an ignore entry that has expired or does not count")
     x.add_argument("--owner", metavar="OWNER", help="with --write-baseline: who accepts the findings (@user, "
                                                     "@org/team or an e-mail address)")
     x.add_argument("--reason", metavar="TEXT", help="with --write-baseline: why they are accepted")

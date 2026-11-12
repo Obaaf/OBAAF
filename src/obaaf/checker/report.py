@@ -121,8 +121,9 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
                          "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
                          "accepts these findings, why and until when:")
-            lines.append(one_line(f"    obaaf baseline migrate {result.baseline_path or 'FILE'} --owner @NAME "
-                                  "--reason '...' --expires YYYY-MM-DD"))
+            checked = f" {result.checked}" if result.checked not in ("", ".") else ""
+            lines.append(one_line(f"    obaaf baseline migrate {result.baseline_path or 'FILE'}{checked} --owner OWNER "
+                                  "--reason REASON --expires YYYY-MM-DD"))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
@@ -160,8 +161,9 @@ def _entry_text(entry: dict) -> str:
     if entry.get("message"):
         return str(entry["message"])
     parts = [str(entry["kind"])] if entry.get("kind") else []
-    for name, value in (entry.get("facts") or {}).items():
-        parts.append(f"{name}: {', '.join(value) if isinstance(value, list) else value}")
+    facts = entry.get("facts")
+    for name, value in (facts.items() if isinstance(facts, dict) else ()):
+        parts.append(f"{name}: {', '.join(str(v) for v in value) if isinstance(value, list) else value}")
     return "; ".join(parts) or "the finding it names"
 
 
