@@ -73,7 +73,7 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(self.problems(), [])
         for owner in ("@octocat", "@example/maintainers", "@a", "@0", "@a-b", "@org/team.name", "security@example.com",
                       "first.last+ci@mail.example.co", " @octocat ", "@octocat_corp", "@octocat_corp/build",
-                      "o'brien@example.ie", "_a@c.de", "jo@münchen.de", "søren@x.dk"):
+                      "o'brien@example.ie", "_a@c.de", "jo@münchen.de", "søren@x.dk", "jose\u0301@example.com"):
             self.assertEqual(self.problems(owner=owner), [], owner)
         for day in (TODAY, TODAY + timedelta(days=acceptance.MAX_DAYS)):
             self.assertEqual(self.problems(expires=day.isoformat()), [], day)
@@ -88,7 +88,10 @@ class AcceptanceTest(unittest.TestCase):
                       "a@b@c.d", "@" + "a" * 40, "@a-", "@a--b", "@org/-team", "@org/team-", ".@-.-", "%@-.-", "-@-.-",
                       "+@0.0", "a@-.com", "a@b.-", "a@b..c", "@NAME" + "x" * 100_000, "a" * 70 + "@example.com",
                       "<@user or @org/team>", "OWNER", "0@0.0", "a@1.2", "a..b@c.de", ".a@c.de", "a b@c.de",
-                      "a\u200b@c.de", "@octocat_", "@_corp", "@a_b_c", "a@" + "b" * 64 + ".de"):
+                      "a\u200b@c.de", "@octocat_", "@_corp", "@a_b_c", "a@" + "b" * 64 + ".de",
+                      # From the third review: characters that show nothing, as a whole address or inside one.
+                      "\u3164@\u3164.\u3164", "\u1160@\u115f.\uffa0", "a\u17b5@c.de", "a\u180b@c.de",
+                      "\ufe0f\ufe0fa@b.cd", "a@b\u200d.cd", "a@b.c\ufe0fd", "a\x00@c.de", "a@c.d\u3164"):
             found = self.problems(owner=owner)
             self.assertEqual(len(found), 1, owner)
             self.assertIn("is not a user (@name), a team (@org/team) or an e-mail address", found[0])
@@ -99,7 +102,10 @@ class AcceptanceTest(unittest.TestCase):
 
     def test_a_reason_that_says_too_little(self):
         for reason in (".", "?", "...", "tbd", "n/a", "ok", "\u200b", "\u2060\ufeff\u00ad", "\u3164" * 20,
-                       "- - - - - - - - - - - -", "x" * 3, "\u0301" * 3):
+                       "- - - - - - - - - - - -", "x" * 3, "\u0301" * 3,
+                       # From the third review: marks and selectors that show nothing, alone or after a letter.
+                       "\ufe0f" * 4, "\u0301" * 4, "\u034f" * 4, "\U000e0100" * 4, "\u17b5" * 4, "\u180b" * 4,
+                       "a\ufe0f\ufe0f\ufe0f", "ab\u0301\u0301\u0301"):
             found = self.problems(reason=reason)
             self.assertEqual(len(found), 1, repr(reason))
             self.assertIn("says too little", found[0])

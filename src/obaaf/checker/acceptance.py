@@ -26,40 +26,50 @@ MAX_DAYS = 366
 _HANDLE = re.compile(r"^@[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}(?:_[A-Za-z0-9]{1,39})?"
                      r"(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?)?$")
 # A reason has to say something. The checker cannot judge what it says; it refuses one with fewer
-# than this many letters, digits or marks, which rules out an empty one, a dot, "n/a" and "tbd"
-# and lets through a ticket number or a few words in any script.
+# than this many letters or digits, which rules out an empty one, a dot, "n/a" and "tbd" and lets
+# through a ticket number or a few words in any script. Marks (accents and vowel signs written as
+# their own characters) are not counted: many of them show nothing, alone or after a letter.
 MIN_REASON = 4
 # Letters, by their Unicode category, that show nothing: the Hangul fillers.
 _BLANK_LETTERS = frozenset("\u115f\u1160\u3164\uffa0")
+# Punctuation an e-mail address may have before the @, beside letters and digits.
+_LOCAL_PUNCTUATION = frozenset("._%+-'!#$&*/=?^`{|}~")
+
+
+def _visible(ch: str) -> bool:
+    """A letter or digit that shows something."""
+    return ch.isalnum() and ch not in _BLANK_LETTERS
 
 
 def _is_email(text: str) -> bool:
-    """Whether `text` has the form of an e-mail address: one @; before it a name of visible
-    characters with a letter or digit among them and no empty part between dots; after it two or
-    more labels of letters, digits and inner hyphens, the last with a letter in it. Letters of any
-    script count (søren@x.dk, jo@münchen.de)."""
+    """Whether `text` has the form of an e-mail address: one @; before it letters, digits and the
+    usual punctuation, with a letter or digit among them and no empty part between dots; after it
+    two or more labels of letters, digits and inner hyphens, the last with a letter in it. Letters
+    of any script count (søren@x.dk, jo@münchen.de), after the text is put in composed form. A
+    character that shows nothing is not part of an address: no marks, no fillers, no format or
+    control characters. So an address that cannot be written without a combining mark is not
+    recognised; name the owner as @user or @org/team."""
+    text = unicodedata.normalize("NFC", text)
     if len(text) > 254 or text.count("@") != 1:
         return False
     local, domain = text.split("@")
     if not local or len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
         return False
-    if not all(ch.isprintable() and not ch.isspace() for ch in local) or not any(ch.isalnum() for ch in local):
+    if not all(_visible(ch) or ch in _LOCAL_PUNCTUATION for ch in local) or not any(_visible(ch) for ch in local):
         return False
     labels = domain.split(".")
     if len(labels) < 2:
         return False
     for label in labels:
-        if not label or len(label) > 63 or not (label[0].isalnum() and label[-1].isalnum()) \
-                or not all(ch.isalnum() or ch == "-" for ch in label):
+        if not label or len(label) > 63 or not (_visible(label[0]) and _visible(label[-1])) \
+                or not all(_visible(ch) or ch == "-" for ch in label):
             return False
-    return any(ch.isalpha() for ch in labels[-1])
+    return any(ch.isalpha() and _visible(ch) for ch in labels[-1])
 
 
 def _says(reason: str) -> int:
-    """How many letters, digits and marks a reason has (a mark is a vowel sign or an accent written
-    as its own character, which several scripts cannot do without)."""
-    return sum(1 for ch in reason
-               if (ch.isalnum() or unicodedata.category(ch) in ("Mn", "Mc")) and ch not in _BLANK_LETTERS)
+    """How many letters and digits that show something a reason has."""
+    return sum(1 for ch in reason if _visible(ch))
 
 BASELINE, IGNORE = "baseline", "ignore"
 

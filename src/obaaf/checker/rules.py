@@ -857,10 +857,11 @@ class WorkflowRules:
 def _line_digests(text: str, hidden: list) -> list[str]:
     """For each hidden character, a digest of the line it is on. A line here ends only at a line
     feed. The line numbers the scanner reports come from `str.splitlines`, which also ends a line at
-    a form feed, a vertical tab, a lone carriage return, U+0085, U+2028 and several more; text after
-    one of those is still beside the character for a reader and for a direction override, so it is
-    part of what is digested. A carriage return before the line feed is left out, so a file saved
-    with other line endings is the same file."""
+    a form feed, a vertical tab, U+0085, U+2028 and several more; text after one of those is still
+    beside the character for a reader and for a direction override, so it is part of what is
+    digested. An instruction file is read with every carriage return, alone or before a line feed,
+    already turned into a line feed, so in a file each of those ends a line as well. If a carriage
+    return does reach this function before a line feed, it is left out of the digest."""
     starts, at = [], 0
     for line in text.splitlines(keepends=True):
         starts.append(at)

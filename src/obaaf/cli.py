@@ -139,10 +139,11 @@ def cmd_check(args) -> int:
                   "not one; name another file or remove this one.", file=sys.stderr)
             return EXIT_USAGE
     if previous is not None and previous.legacy:
-        print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with "
-              f"'obaaf baseline migrate {args.write_baseline} --owner OWNER --reason REASON --expires "
-              "YYYY-MM-DD', which carries over the findings it covers and accepts nothing new; or write the "
-              "new baseline to another file.", file=sys.stderr)
+        import shlex
+        print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with: "
+              f"obaaf baseline migrate {shlex.quote(str(args.write_baseline))} --owner OWNER --reason REASON "
+              "--expires YYYY-MM-DD (it carries over the findings the file covers and accepts nothing new), or "
+              "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
     result.checked = str(args.path)
@@ -165,7 +166,7 @@ def cmd_check(args) -> int:
     try:
         _write(text, args.output)
     except OSError as exc:
-        print(f"error: cannot write the report to {args.output}: {exc}", file=sys.stderr)
+        print(f"error: cannot write the report to {args.output or 'standard output'}: {exc}", file=sys.stderr)
         return EXIT_USAGE
     if args.write_baseline:
         if result.errors:
