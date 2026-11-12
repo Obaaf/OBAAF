@@ -273,7 +273,7 @@ The days are counted from the day the check ran (`asOf` in JSON), and every acce
 <a id="baseline"></a>
 ## Adopting the checker without hiding regressions
 
-A project that adopts the checker with existing findings usually starts in reporting mode (`--fail-on never`). Reporting mode lets new findings in unnoticed. A baseline keeps the existing findings visible while failing on anything new:
+A project that adopts the checker with existing findings usually starts in reporting mode (`--fail-on never`). Reporting mode lets new findings in unnoticed. A baseline keeps the existing findings visible while failing on anything new. [From a report to a gate](from-report-to-gate.md) has the whole path, one step at a time; [Upgrading](upgrading.md) has what changes when you move to a newer OBAAF. The command:
 
 ```bash
 # record today's findings, once, in somebody's name
