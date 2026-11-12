@@ -3,4 +3,4 @@
 Version 0.x is a draft. Nothing in this package has been piloted yet.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

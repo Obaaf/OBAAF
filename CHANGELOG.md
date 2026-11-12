@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
+**Upgrading from 0.2.0: expect new findings.** Two changes in this release make the checker report things it missed before, so a gate that passed on 0.2.0 can fail on 0.3.0 without the workflows having changed. "Lanes" and "Expressions" below say which jobs and spellings are affected and what an adopter will see. A baseline entry still matches for a job whose lanes did not change, with the one exception that "Lanes" describes.
+
 ### Lanes
 
 A job now gets the rules of every lane it belongs to. Before, a job had exactly one lane, chosen in a fixed order (agent, effect, release, untrusted), so a job that did two things was checked for one of them. An independent reviewer found the first two cases on 2026-11-11; the rest are the same class, found while fixing it and in a second review of the fix.
