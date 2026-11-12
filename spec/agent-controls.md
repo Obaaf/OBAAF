@@ -179,7 +179,7 @@ Each agent run produces a signed in-toto attestation. Fields the agent could inf
 | Trace | Tool calls with digests of their arguments | Agent harness | No (self-reported) |
 | Approvals | Reviewer identity, time, and environment | Effect lane | Yes |
 
-*How version 0.1 differs from Paper 1, Table 3.* The Trace field holds one digest of the agent's trace file, not a digest per tool call. The approval time is when the effect lane read the approval, because GitHub's approvals API returns no review time. The model identifier and version stay empty until an inference proxy reports them (version 0.2, DECISIONS.md D-020). Models are therefore not yet pinned by digest (FR10).
+*How version 0.1 differs from Paper 1, Table 3.* The Trace field holds one digest of the agent's trace file, not a digest per tool call. The approval time is when the effect lane read the approval, because GitHub's approvals API returns no review time. The model identifier and version stay empty until an inference proxy reports them (none is built yet, DECISIONS.md D-020). Models are therefore not yet pinned by digest (FR10).
 
 ## Documented incidents
 

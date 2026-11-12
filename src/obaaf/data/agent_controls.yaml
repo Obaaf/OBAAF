@@ -264,8 +264,8 @@ requirements:
 attestation_v01_note: >-
   The Trace field holds one digest of the agent's trace file, not a digest per tool call. The approval
   time is when the effect lane read the approval, because GitHub's approvals API returns no review
-  time. The model identifier and version stay empty until an inference proxy reports them (version
-  0.2, DECISIONS.md D-020). Models are therefore not yet pinned by digest (FR10).
+  time. The model identifier and version stay empty until an inference proxy reports them (none is
+  built yet, DECISIONS.md D-020). Models are therefore not yet pinned by digest (FR10).
 attestation_fields:
   - {field: Subject, content: "Digests of the proposal bundle files", produced_by: "Attestation step", trusted: true}
   - {field: Trigger, content: "Event type and identifier, repository, triggering principal and level", produced_by: "Snapshot step", trusted: true}
