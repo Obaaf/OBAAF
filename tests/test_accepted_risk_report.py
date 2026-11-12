@@ -1,0 +1,541 @@
+"""Reports lead with accepted risk (flagship slice 2a.3).
+
+A gate that has accepted 38 findings and reports "0 new" says the least important thing first. The
+text, JSON and SARIF reports now begin with how much risk is accepted, by whom and until when, list
+the acceptances that are about to run out, and keep every field earlier versions wrote.
+"""
+
+import json
+import unittest
+from datetime import date, timedelta
+
+from helpers import TempDir, run_cli
+
+from obaaf import checker, cli
+from obaaf.checker import acceptance, baseline, report
+from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED, Control, Finding
+
+TODAY = date(2026, 11, 12)
+OWNER, REASON = "@example/maintainers", "Reviewed; tracked in issue 7"
+
+
+def day(offset):
+    return (TODAY + timedelta(days=offset)).isoformat()
+
+
+def finding(**changes):
+    values = dict(rule="OBAAF-GHA-005", severity="high", path=".github/workflows/agent.yml", line=9,
+                  message="Agent job 'triage' receives MODEL_KEY.", job="triage", kind="secrets",
+                  facts={"secrets": ["MODEL_KEY"]})
+    values.update(changes)
+    return Finding(**values)
+
+
+def accepted(owner=OWNER, expires=None, source=acceptance.BASELINE, reason=REASON, **changes):
+    """A finding with a valid acceptance, as `baseline.apply` or an ignore entry leaves it."""
+    f = finding(**changes)
+    f.acceptance = acceptance.make(source, owner, reason, expires or day(90), TODAY)
+    assert f.acceptance.valid, f.acceptance.problems
+    if source == acceptance.BASELINE:
+        f.baselined = True
+    else:
+        f.suppressed = f"{reason} (until {f.acceptance.expires})"
+    return f
+
+
+def refused(problem_expires=None, **changes):
+    """A finding named by a baseline entry that does not count (it has expired)."""
+    f = finding(**changes)
+    f.acceptance = acceptance.make(acceptance.BASELINE, OWNER, REASON, problem_expires or day(-1), TODAY)
+    assert not f.acceptance.valid
+    return f
+
+
+def result_of(*findings, errors=(), notes=(), baseline_used=True):
+    result = checker.CheckResult(findings=list(findings), files=[".github/workflows/agent.yml"],
+                                 errors=list(errors), config=checker.Config(), notes=list(notes), today=TODAY)
+    result.baseline_used = baseline_used
+    result.baseline_format = baseline.FORMAT if baseline_used else ""
+    return result
+
+
+def mixed():
+    """Three owners, both sources, every state."""
+    return result_of(
+        accepted(job="a"),
+        accepted(job="b", severity="low", rule="OBAAF-GHA-020", kind="", facts={}, expires=day(40)),
+        accepted(job="c", owner="@Octocat", expires=day(200)),
+        accepted(job="d", owner="@octocat", severity="medium", source=acceptance.IGNORE, expires=day(10)),
+        accepted(job="e", owner="sec@example.com", expires=day(365)),
+        refused(job="f"),
+        finding(job="g", severity="medium"),
+        finding(job="h", controls=[Control("the environment is limited to main", CANNOT_TELL, "not read")]),
+        finding(job="i", controls=[Control("egress is enforced", VERIFIED, "tested")]),
+    )
+
+
+class AcceptedRiskTest(unittest.TestCase):
+    """The numbers every report leads with."""
+
+    def test_it_counts_accepted_findings_by_severity_source_and_owner(self):
+        risk = report.accepted_risk(mixed())
+        self.assertEqual(risk["asOf"], "2026-11-12")
+        self.assertEqual(risk["total"], 5)
+        self.assertEqual(risk["bySeverity"], {"high": 3, "medium": 1, "low": 1, "info": 0})
+        self.assertEqual(risk["bySource"], {"baseline": 4, "ignore": 1})
+        self.assertEqual(risk["owners"], [
+            {"owner": "@example/maintainers", "total": 2, "bySeverity": {"high": 1, "medium": 0, "low": 1, "info": 0},
+             "nearestExpiry": day(40)},
+            {"owner": "@Octocat", "total": 2, "bySeverity": {"high": 1, "medium": 1, "low": 0, "info": 0},
+             "nearestExpiry": day(10)},
+            {"owner": "sec@example.com", "total": 1, "bySeverity": {"high": 1, "medium": 0, "low": 0, "info": 0},
+             "nearestExpiry": day(365)},
+        ])
+        self.assertEqual((risk["nearestExpiry"], risk["daysToNearestExpiry"]), (day(10), 10))
+
+    def test_only_the_accepted_state_counts(self):
+        # Named by an entry that does not count, cannot tell, new, and fixed: none is accepted risk.
+        risk = report.accepted_risk(result_of(
+            refused(), finding(job="n"),
+            finding(job="u", controls=[Control("x", CANNOT_TELL)]),
+            finding(job="v", controls=[Control("x", VERIFIED)])))
+        self.assertEqual(risk["total"], 0)
+        self.assertEqual(risk["owners"], [])
+        self.assertIsNone(risk["nearestExpiry"])
+        self.assertIsNone(risk["daysToNearestExpiry"])
+        self.assertEqual(risk["expiringSoon"], {"withinDays": 30, "total": 0, "findings": []})
+
+    def test_a_fixed_finding_is_not_accepted_risk_even_with_an_ignore_entry(self):
+        f = accepted(source=acceptance.IGNORE, controls=[Control("egress is enforced", VERIFIED)])
+        self.assertEqual(f.state, "fixed")
+        self.assertEqual(report.accepted_risk(result_of(f))["total"], 0)
+
+    def test_an_accepted_finding_whose_control_is_not_met_is_still_accepted_risk(self):
+        f = accepted(controls=[Control("egress is enforced", NOT_MET)])
+        self.assertEqual(report.accepted_risk(result_of(f))["total"], 1)
+
+    def test_expiring_soon_is_inclusive_of_the_last_day_and_sorted_by_date(self):
+        result = result_of(accepted(job="a", expires=day(30)), accepted(job="b", expires=day(31)),
+                           accepted(job="c", expires=day(0), source=acceptance.IGNORE),
+                           accepted(job="d", expires=day(7), owner="@octocat"))
+        soon = report.accepted_risk(result)["expiringSoon"]
+        self.assertEqual(soon["withinDays"], 30)
+        self.assertEqual([(row["job"], row["daysLeft"], row["source"]) for row in soon["findings"]],
+                         [("c", 0, "ignore"), ("d", 7, "baseline"), ("a", 30, "baseline")])
+        self.assertEqual(soon["total"], 3)
+        self.assertEqual(soon["findings"][1], {
+            "rule": "OBAAF-GHA-005", "severity": "high", "path": ".github/workflows/agent.yml", "line": 9, "job": "d",
+            "owner": "@octocat", "expires": day(7), "daysLeft": 7, "source": "baseline"})
+
+    def test_the_window_is_the_callers_and_zero_turns_the_list_off(self):
+        result = result_of(accepted(job="a", expires=day(0)), accepted(job="b", expires=day(60)))
+        self.assertEqual(report.accepted_risk(result, 60)["expiringSoon"]["total"], 2)
+        self.assertEqual(report.accepted_risk(result, 1)["expiringSoon"]["total"], 1)
+        off = report.accepted_risk(result, 0)
+        self.assertEqual(off["expiringSoon"], {"withinDays": 0, "total": 0, "findings": []})
+        self.assertEqual(off["total"], 2)       # the accepted risk itself is never turned off
+
+    def test_the_days_are_counted_from_the_day_the_check_ran(self):
+        result = result_of(accepted(expires=day(5)))
+        self.assertEqual(report.accepted_risk(result)["daysToNearestExpiry"], 5)
+        result.today = TODAY + timedelta(days=5)
+        self.assertEqual(report.accepted_risk(result)["daysToNearestExpiry"], 0)
+
+    def test_an_accepted_finding_with_no_recorded_acceptance_is_counted_and_named_as_such(self):
+        f = finding()
+        f.suppressed = "set by hand"
+        risk = report.accepted_risk(result_of(f))
+        self.assertEqual((risk["total"], risk["bySource"]["ignore"]), (1, 1))
+        self.assertEqual(risk["owners"], [{"owner": None, "total": 1, "nearestExpiry": None,
+                                           "bySeverity": {"high": 1, "medium": 0, "low": 0, "info": 0}}])
+        text = report.to_text(result_of(f))
+        self.assertIn("  (no owner recorded): 1 (1 high)", text)
+        json.loads(report.to_sarif(result_of(f)))
+
+
+class TextLeadTest(unittest.TestCase):
+    def test_the_report_begins_with_the_accepted_risk(self):
+        lines = report.to_text(mixed()).splitlines()
+        self.assertEqual(lines[:9], [
+            "Accepted risk: 5 finding(s) are accepted and do not fail the check (3 high, 1 medium, 1 low).",
+            f"  @example/maintainers: 2 (1 high, 1 low); the first expires {day(40)}",
+            f"  @Octocat: 2 (1 high, 1 medium); the first expires {day(10)}",
+            f"  sec@example.com: 1 (1 high); the first expires {day(365)}",
+            "  4 accepted by baseline entries, 1 by ignore entries in the checker configuration.",
+            f"  Nearest expiry: {day(10)} (in 10 days).",
+            f"Expiring soon: 1 acceptance(s) expire within 30 days, the first on {day(10)} (in 10 days). From the "
+            "day after its date an accepted finding counts again and can fail the check: fix it, or renew the "
+            "acceptance in a reviewed change.",
+            f"  {day(10)}  @octocat  OBAAF-GHA-005 .github/workflows/agent.yml:9 [job d]  (ignore entry)",
+            "Other findings: 2 new (1 high, 1 medium), 1 cannot tell (1 high), 1 fixed by controls the checker "
+            "verified.",
+        ])
+        self.assertEqual(lines[9], "")
+        self.assertEqual(lines[10], ".github/workflows/agent.yml")
+
+    def test_no_accepted_risk_is_said_in_so_many_words(self):
+        lines = report.to_text(result_of(finding(), baseline_used=False)).splitlines()
+        self.assertEqual(lines[0], "Accepted risk: none. No finding is accepted by a baseline entry or an ignore "
+                                   "entry.")
+        self.assertEqual(lines[1], "Other findings: 1 new (1 high), 0 cannot tell, 0 fixed by controls the checker "
+                                   "verified.")
+        clean = report.to_text(result_of(baseline_used=False)).splitlines()
+        self.assertEqual(clean[1], "Other findings: 0 new, 0 cannot tell, 0 fixed by controls the checker verified.")
+
+    def test_all_accepted_does_not_read_as_nothing_found(self):
+        # The case the slice exists for: 38 accepted, 0 new.
+        result = result_of(*(accepted(job=f"j{n}", severity="high" if n % 2 else "low") for n in range(38)))
+        text = report.to_text(result)
+        self.assertTrue(text.startswith("Accepted risk: 38 finding(s) are accepted and do not fail the check "
+                                        "(19 high, 19 low).\n  @example/maintainers: 38 (19 high, 19 low)"), text[:300])
+        # The line earlier versions printed is still there, further down, for logs that look for it.
+        self.assertIn("\nBaseline: 38 finding(s) accepted by the baseline, 0 new.\n", text)
+        self.assertLess(text.index("Accepted risk:"), text.index("Baseline: 38"))
+
+    def test_errors_are_named_in_the_lead_and_listed_straight_after_it(self):
+        lines = report.to_text(result_of(accepted(), errors=["ci.yml: cannot be read as YAML"])).splitlines()
+        lead_end = lines.index("")
+        self.assertIn("Errors: 1. Each names something the checker could not read, and the check fails whatever "
+                      "else it found.", lines[:lead_end])
+        self.assertEqual(lines[lead_end + 1], "error: ci.yml: cannot be read as YAML")
+
+    def test_a_long_list_of_owners_is_cut_and_says_so(self):
+        owners = [f"@owner{n:02d}" for n in range(14)]
+        text = report.to_text(result_of(*(accepted(job=f"j{n}", owner=o) for n, o in enumerate(owners))))
+        self.assertIn("  @owner09: 1 (1 high)", text)
+        self.assertNotIn("@owner10: 1", text)
+        self.assertIn("  ... and 4 more owner(s); --format json lists them all", text)
+        self.assertEqual(len(json.loads(report.to_json(result_of(
+            *(accepted(job=f"j{n}", owner=o) for n, o in enumerate(owners)))))["acceptedRisk"]["owners"]), 14)
+
+    def test_a_long_list_of_expiring_acceptances_is_cut_and_says_so(self):
+        result = result_of(*(accepted(job=f"j{n:02d}", expires=day(n)) for n in range(13)))
+        text = report.to_text(result)
+        self.assertIn("Expiring soon: 13 acceptance(s) expire within 30 days, the first on "
+                      f"{day(0)} (today is its last day).", text)
+        self.assertIn(f"  {day(9)}  @example/maintainers  OBAAF-GHA-005 .github/workflows/agent.yml:9 [job j09]", text)
+        self.assertNotIn("[job j10]  (baseline entry)", text)
+        self.assertIn("  ... and 3 more; --format json lists them all", text)
+
+    def test_one_day_is_singular(self):
+        self.assertIn("(in 1 day).", report.to_text(result_of(accepted(expires=day(1)))))
+
+    def test_text_from_an_entry_cannot_start_a_line_of_the_report(self):
+        forged = "ok then\nAccepted risk: none. No finding is accepted\nerror: nothing"
+        result = result_of(accepted(source=acceptance.IGNORE, reason=forged, expires=day(3)),
+                           accepted(job="b", reason=forged))
+        lines = report.to_text(result).splitlines()
+        self.assertEqual(len([line for line in lines if line.startswith("Accepted risk:")]), 1)
+        self.assertFalse([line for line in lines if line.startswith("error:")])
+        self.assertTrue(lines[0].startswith("Accepted risk: 2 finding(s)"))
+
+    def test_an_ignored_finding_is_listed_with_its_owner_and_date(self):
+        text = report.to_text(result_of(accepted(source=acceptance.IGNORE, expires=day(50)), baseline_used=False))
+        self.assertIn(f"  ignored: OBAAF-GHA-005 .github/workflows/agent.yml:9 - accepted by {OWNER} until {day(50)}: "
+                      f"{REASON}", text)
+        self.assertIn("1 ignored by configuration.", text)
+
+
+WORKFLOW = """\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${{{{ secrets.{name} }}}}" | wc -c
+"""
+
+
+def repo(tmp, *names):
+    wf = tmp / ".github" / "workflows"
+    wf.mkdir(parents=True, exist_ok=True)
+    for old in wf.glob("*.yml"):
+        old.unlink()
+    for i, name in enumerate(names):
+        (wf / f"ci{i}.yml").write_text(WORKFLOW.format(name=name), encoding="utf-8")
+    (tmp / ".github" / "CODEOWNERS").write_text("* @example/maintainers\n", encoding="utf-8")
+    return tmp
+
+
+def soon(days):
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def write_baseline(test, tmp, expires):
+    path = tmp / "obaaf-baseline.json"
+    code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "low", "--owner", OWNER,
+                           "--reason", REASON, "--expires", expires)
+    test.assertEqual(code, 0, err)
+    return path
+
+
+class CommandLineTest(unittest.TestCase):
+    """The same through `obaaf check`, with a real baseline and a real ignore entry."""
+
+    def test_a_passing_gate_says_first_what_it_accepted(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A", "TOKEN_B")
+            (tmp / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci0.yml\n    owner: '@octocat'\n"
+                f"    reason: Reviewed with the build team\n    until: {soon(200)}\n", encoding="utf-8")
+            path = write_baseline(self, tmp, soon(90))
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 0)
+            lines = out.splitlines()
+            self.assertEqual(lines[0], "Accepted risk: 2 finding(s) are accepted and do not fail the check (2 low).")
+            self.assertEqual(sorted(lines[1:3]), [
+                f"  @example/maintainers: 1 (1 low); the first expires {soon(90)}",
+                f"  @octocat: 1 (1 low); the first expires {soon(200)}"])
+            self.assertEqual(lines[3], "  1 accepted by baseline entries, 1 by ignore entries in the checker "
+                                       "configuration.")
+            self.assertEqual(lines[4], f"  Nearest expiry: {soon(90)} (in 90 days).")
+            self.assertEqual(lines[5], "Other findings: 0 new, 0 cannot tell, 0 fixed by controls the checker "
+                                       "verified.")
+            self.assertIn("Baseline: 1 finding(s) accepted by the baseline, 0 new.", lines)
+            self.assertIn(f"  ignored: OBAAF-GHA-001 .github/workflows/ci0.yml:7 - accepted by @octocat until "
+                          f"{soon(200)}: Reviewed with the build team", lines)
+
+    def test_the_warning_before_an_acceptance_expires_never_changes_the_exit_status(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            path = write_baseline(self, tmp, soon(12))
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 0)
+            self.assertIn(f"Expiring soon: 1 acceptance(s) expire within 30 days, the first on {soon(12)} "
+                          "(in 12 days).", out)
+            self.assertIn(f"  {soon(12)}  {OWNER}  OBAAF-GHA-001 .github/workflows/ci0.yml:7 [job test]  "
+                          "(baseline entry)", out)
+            for days, expected in (("0", False), ("11", False), ("12", True), ("400", True)):
+                code, out, _ = run_cli("check", tmp, "--baseline", path, "--fail-on", "low", "--expiry-warning", days)
+                self.assertEqual(code, 0)
+                self.assertEqual("Expiring soon:" in out, expected, days)
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--format", "json", "--expiry-warning", "12")
+            self.assertEqual(json.loads(out)["acceptedRisk"]["expiringSoon"]["total"], 1)
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--format", "sarif", "--expiry-warning", "0")
+            kinds = [n["descriptor"]["id"] for n in
+                     json.loads(out)["runs"][0]["invocations"][0]["toolExecutionNotifications"]]
+            self.assertNotIn("acceptance-expiring", kinds)
+
+    def test_the_window_must_be_a_number_of_days(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            code, _, err = run_cli("check", tmp, "--expiry-warning", "-1")
+            self.assertEqual(code, 2)
+            self.assertIn("--expiry-warning is a number of days, 0 or more", err)
+            code, _, err = run_cli("check", tmp, "--expiry-warning", "soon")
+            self.assertEqual(code, 2)
+        default = cli.build_parser().parse_args(["check", "."]).expiry_warning
+        self.assertEqual(default, report.EXPIRY_WARNING_DAYS)
+
+    def test_the_migrate_hint_repeats_the_options_the_check_was_given(self):
+        from test_finding_lifecycle import fixture_repo
+        with TempDir() as tmp:
+            target, old = fixture_repo(tmp)
+            config = tmp / "my config.yml"
+            config.write_text("lanes: {}\n", encoding="utf-8")
+            _, out, _ = run_cli("check", target, "--baseline", old, "--platform", "github", "--config", config)
+            hint = [line for line in out.splitlines() if "obaaf baseline migrate" in line]
+            self.assertEqual(len(hint), 1)
+            self.assertTrue(hint[0].endswith(f"--owner OWNER --reason REASON --expires YYYY-MM-DD --config "
+                                             f"'{config}' --platform github"), hint[0])
+            self.assertNotIn("if any", out)
+            _, out, _ = run_cli("check", target, "--baseline", old)
+            hint = [line for line in out.splitlines() if "obaaf baseline migrate" in line]
+            self.assertTrue(hint[0].endswith("--expires YYYY-MM-DD"), hint[0])
+
+
+# The fields of a finding and of the report that 0.3.0 wrote. Expectrail's audit script reads
+# findings[].suppressed, category, severity, job, path, line, rule and title, and files, tool and
+# errors (agents/assurance/audit.py at 16edb91).
+REPORT_FIELDS_0_3_0 = ("format", "tool", "files", "errors", "findings", "notes")
+FINDING_FIELDS_0_3_0 = ("rule", "title", "severity", "category", "remediation", "path", "line", "job", "step",
+                        "message", "requirements", "agentControls", "fix", "suppressed")
+
+
+class JsonTest(unittest.TestCase):
+    def test_the_accepted_risk_and_the_summary_come_before_the_findings(self):
+        data = json.loads(report.to_json(mixed()))
+        self.assertEqual(list(data)[:4], ["format", "tool", "acceptedRisk", "summary"])
+        self.assertEqual(data["acceptedRisk"], report.accepted_risk(mixed()))
+        self.assertEqual(data["summary"], {"new": 2, "accepted": 5, "cannotTell": 1, "fixed": 1, "notAccepted": 1})
+        self.assertEqual(data["format"], "obaaf-check/v0.1")
+
+    def test_every_field_an_earlier_version_wrote_is_still_there(self):
+        data = json.loads(report.to_json(mixed()))
+        for name in REPORT_FIELDS_0_3_0:
+            self.assertIn(name, data)
+        self.assertEqual(len(data["findings"]), 8)      # the fixed one is under "fixed"
+        for f in data["findings"]:
+            for name in FINDING_FIELDS_0_3_0:
+                self.assertIn(name, f, name)
+            self.assertIn("baselined", f)
+        ignored = [f for f in data["findings"] if f["suppressed"]]
+        self.assertEqual([f["suppressed"] for f in ignored], [f"{REASON} (until {day(10)})"])
+        self.assertEqual(data["baseline"], {"stale": [], "format": baseline.FORMAT})
+
+    def test_a_valid_acceptance_says_how_many_days_it_has_left(self):
+        data = json.loads(report.to_json(result_of(accepted(expires=day(17)), refused(job="f"))))
+        first, second = data["findings"]
+        self.assertEqual(first["acceptance"], {"source": "baseline", "owner": OWNER, "reason": REASON,
+                                               "expires": day(17), "valid": True, "problems": [], "daysLeft": 17})
+        self.assertFalse(second["acceptance"]["valid"])
+        self.assertNotIn("daysLeft", second["acceptance"])
+
+    def test_through_the_command_line(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A", "TOKEN_B")
+            path = write_baseline(self, tmp, soon(45))
+            repo(tmp, "TOKEN_A", "TOKEN_C")
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--format", "json", "--fail-on", "low")
+            self.assertEqual(code, 1)
+            data = json.loads(out)
+            risk = data["acceptedRisk"]
+            self.assertEqual((risk["total"], risk["bySource"], risk["nearestExpiry"], risk["daysToNearestExpiry"]),
+                             (1, {"baseline": 1, "ignore": 0}, soon(45), 45))
+            self.assertEqual(risk["asOf"], date.today().isoformat())
+            self.assertEqual(risk["owners"][0]["owner"], OWNER)
+            self.assertEqual(len(data["baseline"]["stale"]), 1)
+
+
+class SarifTest(unittest.TestCase):
+    def run_of(self, result, **options):
+        return json.loads(report.to_sarif(result, **options))["runs"][0]
+
+    def test_the_run_leads_with_the_accepted_risk(self):
+        run = self.run_of(mixed())
+        self.assertEqual(run["properties"]["obaaf-accepted-risk"], report.accepted_risk(mixed()))
+        self.assertEqual(run["properties"]["obaaf-summary"], report.summary(mixed()))
+        invocation, = run["invocations"]
+        self.assertIs(invocation["executionSuccessful"], True)
+        first = invocation["toolExecutionNotifications"][0]
+        self.assertEqual((first["descriptor"]["id"], first["level"]), ("accepted-risk", "note"))
+        self.assertEqual(first["message"]["text"],
+                         "Accepted risk: 5 finding(s) are accepted and do not fail the check (3 high, 1 medium, "
+                         f"1 low). By owner: @example/maintainers: 2, first expiry {day(40)}; @Octocat: 2, first "
+                         f"expiry {day(10)}; sec@example.com: 1, first expiry {day(365)}.")
+        second = invocation["toolExecutionNotifications"][1]
+        self.assertEqual((second["descriptor"]["id"], second["level"]), ("acceptance-expiring", "warning"))
+        self.assertIn(f"the first on {day(10)} (in 10 days)", second["message"]["text"])
+
+    def test_no_accepted_risk_is_a_notification_too(self):
+        run = self.run_of(result_of(finding(), baseline_used=False))
+        notes = run["invocations"][0]["toolExecutionNotifications"]
+        self.assertEqual([n["message"]["text"] for n in notes],
+                         ["Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."])
+        self.assertEqual(run["properties"]["obaaf-accepted-risk"]["total"], 0)
+
+    def test_an_accepted_finding_is_a_suppressed_result_that_says_who_accepted_it(self):
+        run = self.run_of(result_of(accepted(job="a", expires=day(40)),
+                                    accepted(job="b", source=acceptance.IGNORE, owner="@octocat", expires=day(9)),
+                                    refused(job="c"), finding(job="d")))
+        by_baseline, by_ignore, not_accepted, new = run["results"]
+        said = f"Accepted by {OWNER} until {day(40)}: {REASON}."
+        self.assertEqual(by_baseline["suppressions"], [{"kind": "external", "status": "accepted",
+                                                        "justification": said}])
+        self.assertEqual(by_baseline["message"]["text"], f"Agent job 'triage' receives MODEL_KEY. {said}")
+        self.assertEqual(by_baseline["properties"]["obaaf-acceptance"],
+                         {"source": "baseline", "owner": OWNER, "reason": REASON, "expires": day(40), "daysLeft": 40})
+        self.assertEqual(by_baseline["baselineState"], "unchanged")
+        self.assertEqual(by_ignore["suppressions"][0]["justification"],
+                         f"Accepted by @octocat until {day(9)}: {REASON}.")
+        self.assertEqual(by_ignore["properties"]["obaaf-acceptance"]["source"], "ignore")
+        self.assertNotIn("baselineState", by_ignore)
+        # An entry that does not count suppresses nothing, and the result says why in words.
+        self.assertNotIn("suppressions", not_accepted)
+        self.assertNotIn("obaaf-acceptance", not_accepted["properties"])
+        self.assertEqual(not_accepted["message"]["text"],
+                         "Agent job 'triage' receives MODEL_KEY. Not accepted: the baseline entry that names this "
+                         f"finding does not count, because it expired on {day(-1)}.")
+        self.assertEqual(not_accepted["properties"]["obaaf-state"], "new")
+        self.assertNotIn("suppressions", new)
+        self.assertEqual(new["message"]["text"], "Agent job 'triage' receives MODEL_KEY.")
+
+    def test_a_result_carries_its_controls_as_data_and_in_words(self):
+        controls = [Control("the key is in an environment", VERIFIED, "main-only", id="secrets-protected"),
+                    Control("egress is enforced", NOT_MET, id="egress-enforced")]
+        result, = self.run_of(result_of(finding(controls=controls), baseline_used=False))["results"]
+        self.assertEqual(result["properties"]["obaaf-controls"], [
+            {"id": "secrets-protected", "name": "the key is in an environment", "verdict": "verified",
+             "detail": "main-only"},
+            {"id": "egress-enforced", "name": "egress is enforced", "verdict": "not met", "detail": ""}])
+        self.assertEqual(result["message"]["text"],
+                         "Agent job 'triage' receives MODEL_KEY. Controls: the key is in an environment: verified "
+                         "(main-only); egress is enforced: not met.")
+
+    def test_errors_and_notes_are_in_the_run(self):
+        run = self.run_of(result_of(accepted(), errors=["ci.yml: cannot be read as YAML: line 3"],
+                                    notes=["Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'."]))
+        invocation, = run["invocations"]
+        self.assertIs(invocation["executionSuccessful"], False)
+        seen = [(n["descriptor"]["id"], n["level"], n["message"]["text"])
+                for n in invocation["toolExecutionNotifications"]]
+        self.assertEqual(seen[0][0], "accepted-risk")
+        self.assertIn(("not-read", "error", "ci.yml: cannot be read as YAML: line 3"), seen)
+        self.assertIn(("note", "note", "Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'."),
+                      seen)
+
+    def test_baseline_entries_that_no_longer_match_and_an_old_baseline_are_in_the_run(self):
+        result = result_of(finding())
+        result.baseline_stale = [baseline.entry_for(finding(job="gone"), OWNER, REASON, day(30))]
+        texts = [(n["descriptor"]["id"], n["level"], n["message"]["text"])
+                 for n in self.run_of(result)["invocations"][0]["toolExecutionNotifications"]]
+        stale = [text for kind, level, text in texts if (kind, level) == ("baseline", "warning")]
+        self.assertEqual(len(stale), 1)
+        self.assertTrue(stale[0].startswith("A baseline entry no longer matches a finding: OBAAF-GHA-005 "
+                                            ".github/workflows/agent.yml [job gone] - secrets; secrets: MODEL_KEY."))
+        old = result_of(finding())
+        old.baseline_format = baseline.FORMAT_V1
+        texts = [n["message"]["text"] for n in self.run_of(old)["invocations"][0]["toolExecutionNotifications"]]
+        self.assertTrue(any("old format (obaaf-baseline/v0.1)" in text for text in texts))
+
+    def test_the_run_is_well_formed(self):
+        """What SARIF 2.1.0 requires of the objects this slice added (sections 3.20, 3.58 and 3.35 of
+        the standard): an invocation says whether execution succeeded, a notification has a message
+        and one of four levels, a descriptor reference points at a descriptor of the tool, and a
+        suppression has a kind and, when it has a status, one of three."""
+        result = mixed()
+        result.errors, result.notes = ["x.yml: unreadable"], ["a note"]
+        run = self.run_of(result)
+        descriptors = run["tool"]["driver"]["notifications"]
+        self.assertEqual([d["id"] for d in descriptors], list(report.NOTIFICATIONS))
+        for descriptor in descriptors:
+            self.assertTrue(descriptor["shortDescription"]["text"])
+        invocation, = run["invocations"]
+        self.assertIsInstance(invocation["executionSuccessful"], bool)
+        for note in invocation["toolExecutionNotifications"]:
+            self.assertTrue(note["message"]["text"])
+            self.assertIn(note["level"], ("none", "note", "warning", "error"))
+            self.assertEqual(descriptors[note["descriptor"]["index"]]["id"], note["descriptor"]["id"])
+        rules = [r["id"] for r in run["tool"]["driver"]["rules"]]
+        for res in run["results"]:
+            self.assertEqual(rules[res["ruleIndex"]], res["ruleId"])
+            self.assertTrue(res["message"]["text"])
+            for suppression in res.get("suppressions", []):
+                self.assertIn(suppression["kind"], ("inSource", "external"))
+                self.assertIn(suppression["status"], ("accepted", "underReview", "rejected"))
+        # A fixed finding is not a result, as before.
+        self.assertEqual(len(run["results"]), 8)
+
+    def test_through_the_command_line(self):
+        with TempDir() as tmp:
+            repo(tmp, "TOKEN_A")
+            path = write_baseline(self, tmp, soon(100))
+            (tmp / ".github" / "workflows" / "broken.yml").write_text("on: [push\njobs: {", encoding="utf-8")
+            code, out, _ = run_cli("check", tmp, "--baseline", path, "--format", "sarif", "--fail-on", "never")
+            self.assertEqual(code, 1)       # a file that could not be read fails the check whatever --fail-on says
+            run = json.loads(out)["runs"][0]
+            self.assertIs(run["invocations"][0]["executionSuccessful"], False)
+            errors = [n for n in run["invocations"][0]["toolExecutionNotifications"] if n["level"] == "error"]
+            self.assertEqual(len(errors), 1)
+            self.assertIn(".github/workflows/broken.yml", errors[0]["message"]["text"])
+            result, = run["results"]
+            self.assertEqual(result["suppressions"][0]["status"], "accepted")
+            self.assertIn(f"Accepted by {OWNER} until {soon(100)}: {REASON}.", result["message"]["text"])
+            self.assertEqual(run["properties"]["obaaf-accepted-risk"]["total"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
