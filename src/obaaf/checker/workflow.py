@@ -402,16 +402,19 @@ class Step:
 
     @property
     def with_(self) -> dict:
-        """The step's inputs, by name in lower case. GitHub hands an action its inputs as
-        environment variables named in upper case, so `REF:` and `ref:` are the same input. Two
-        names that differ only in case are reported as a problem when the file is read; here their
-        values are joined, so a rule that searches a value sees both."""
+        """The step's inputs, by name with ASCII letters in lower case. GitHub hands an action its
+        inputs as environment variables named in upper case, so `REF:` and `ref:` are the same
+        input. Only A to Z are folded: what GitHub's upper-casing makes of any other letter is not
+        established, so a name with one is left as written and reported as a problem when the file
+        is read. So are two names that are the same input. Here the values of such a pair are
+        joined, which lets a rule that searches a value see both and can make a rule that compares
+        the whole value miss; the problem, which fails the check, is what covers that."""
         value = self.raw.get("with")
         if not isinstance(value, dict):
             return {}
         out: dict = {}
         for name, given in value.items():
-            key = str(name).lower()
+            key = input_name(name)
             out[key] = f"{out[key]} {given}" if key in out else given
         return out
 
@@ -791,15 +794,29 @@ def parse(path: str, text: str) -> Workflow:
     return workflow
 
 
-def _same_input_twice(step_raw: dict) -> str | None:
-    """Two names under `with:` that differ only in case, if the step has such a pair. They are one
-    input to GitHub, and which value it takes is not something the checker can tell."""
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def input_name(name) -> str:
+    """An input's name as the rules look it up: A to Z in lower case, every other character as
+    written (the Kelvin sign is not `k`, and `\u017f` is not `s`)."""
+    return str(name).translate(_ASCII_LOWER)
+
+
+def _input_problem(step_raw: dict) -> str | None:
+    """What is wrong with the names under a step's `with:`, if anything: two names that are one
+    input to GitHub, or a name with a letter outside ASCII, which GitHub's upper-casing may or may
+    not turn into another input's name. Either way the checker cannot tell what the action is given."""
     given = step_raw.get("with")
     seen: dict = {}
     for name in (given if isinstance(given, dict) else ()):
-        key = str(name).lower()
+        if isinstance(name, str) and not name.isascii():
+            return (f"has an input name with a letter outside ASCII ('{one_line(name, 60)}'), and the checker "
+                    "cannot tell which input GitHub takes it for")
+        key = input_name(name)
         if key in seen:
-            return f"'{one_line(seen[key], 60)}' and '{one_line(name, 60)}'"
+            return (f"gives the same input twice under two spellings ('{one_line(seen[key], 60)}' and "
+                    f"'{one_line(name, 60)}'), so the checker cannot tell which value GitHub uses")
         seen[key] = name
     return None
 
@@ -809,11 +826,9 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     groups = 0
 
     def inputs_checked(raw: dict, number: int) -> None:
-        twice = _same_input_twice(raw)
-        if twice:
-            workflow.problems.append(f"job '{job.id}', step {number} gives the same input twice under names "
-                                     f"that differ only in case ({twice}), so the checker cannot tell which "
-                                     "value GitHub uses")
+        problem = _input_problem(raw)
+        if problem:
+            workflow.problems.append(f"job '{job.id}', step {number} {problem}")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "

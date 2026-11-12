@@ -135,6 +135,13 @@ class SecretInAgentJobTest(unittest.TestCase):
         f = one(check(agent_workflow(environment="010"), config=config), "OBAAF-GHA-005")
         self.assertEqual(control(f, "secrets-protected").verdict, CANNOT_TELL)
 
+    def test_an_environment_written_as_zero_or_false_is_cannot_tell_too(self):
+        for written in ("0", "false", "{name: 0}", "1.5"):
+            f = one(check(agent_workflow(environment=written)), "OBAAF-GHA-005")
+            with self.subTest(written=written):
+                self.assertEqual((control(f, "secrets-protected").verdict, control(f, "environment-restricted").verdict),
+                                 (CANNOT_TELL, CANNOT_TELL))
+
     def test_names_that_differ_only_in_the_case_of_other_letters_are_cannot_tell(self):
         config = {"lanes": CONFIG["lanes"], "protected_secrets": {"*_API_KEY": "strasse"}}
         f = one(check(agent_workflow(environment="stra\u00dfe"), config=config), "OBAAF-GHA-005")
@@ -274,6 +281,21 @@ class OutsiderInputTest(unittest.TestCase):
         self.assertTrue({"OBAAF-GHA-002", "OBAAF-GHA-019"} <= found, found)
         self.assertNotIn("OBAAF-GHA-011", found)
 
+    def test_only_a_to_z_are_folded_in_an_input_name(self):
+        """Found by the second review: lower-casing with Unicode rules turned the Kelvin sign into
+        `k`, so `pac\u212aage-manager-cache: false`, which is not that input to GitHub, switched
+        the cache off for the checker and lowered OBAAF-GHA-006 from high to low."""
+        self.assertEqual(wf_mod.input_name("REF"), "ref")
+        self.assertEqual(wf_mod.input_name("pac\u212aage"), "pac\u212aage")
+        self.assertEqual(wf_mod.input_name("allow-un\u017fafe"), "allow-un\u017fafe")
+        text = ("on: push\npermissions: {}\njobs:\n  ship:\n    runs-on: ubuntu-24.04\n    environment: production\n"
+                f"    permissions: {{contents: write}}\n    steps:\n      - uses: actions/setup-node@{SHA}\n"
+                "        with: {\"pac\u212aage-manager-cache\": false}\n      - run: npm publish\n")
+        result = check(text, config={})
+        self.assertEqual([(f.severity, f.kind) for f in result.findings if f.rule == "OBAAF-GHA-006"],
+                         [("high", "restores")])
+        self.assertTrue(any("letter outside ASCII" in error for error in result.errors), result.errors)
+
     def test_the_same_input_twice_in_two_cases_is_an_error(self):
         steps = f"      - uses: actions/checkout@{SHA}\n        with: {{ref: main, REF: refs/pull/7/head}}"
         result = check(agent_workflow(steps=steps))
@@ -342,7 +364,27 @@ class EgressTest(unittest.TestCase):
     def test_a_monitor_that_starts_after_other_steps_is_not_met(self):
         f = self.egress(steps=self.CHECKOUT + "\n" + self.MONITOR)
         self.assertEqual((f.kind, f.state, verdicts(f)), ("late-monitor", "new", {"egress-enforced": NOT_MET}))
-        self.assertIn("as step 2, so the steps before it run without it", f.message)
+        self.assertIn("it runs after 1 other step(s).", f.message)
+
+    def test_first_means_before_anything_else_can_run(self):
+        """Found by the second review: a monitor in a `parallel` group with the agent, or started
+        in the background, was the "first step" and kept an acceptance made for a real first step."""
+        from obaaf.checker import baseline
+        accepted = baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT))
+        group = ("      - parallel:\n"
+                 f"          - uses: step-security/harden-runner@{SHA}\n            with: {{egress-policy: block}}\n"
+                 "          - run: make")
+        for what, steps, place in (("parallel", group, "in a parallel group"),
+                                   ("background", self.MONITOR + "\n        background: true\n" + self.CHECKOUT,
+                                    "in the background"),
+                                   ("after a step that is not a mapping", "      - oops\n" + self.MONITOR,
+                                    "after 0 other step(s)")):
+            result = check(agent_workflow(steps=steps))
+            f = one(result, "OBAAF-GHA-020")
+            with self.subTest(what=what):
+                self.assertEqual((f.kind, f.state, verdicts(f), f.facts["place"]),
+                                 ("late-monitor", "new", {"egress-enforced": NOT_MET}, place))
+                self.assertNotEqual(baseline.key(f), accepted)
 
     def test_an_acceptance_covers_the_monitor_as_written_and_no_other(self):
         """Accepting "cannot tell" for one monitor must not cover the same job after the monitor is
@@ -355,15 +397,23 @@ class EgressTest(unittest.TestCase):
                                                        "{egress-policy: block, allowed-endpoints: '*:*'}"),
             "sudo left on": self.MONITOR.replace("{egress-policy: block}", "{egress-policy: block, disable-sudo: false}"),
             "may fail": self.MONITOR + "\n        continue-on-error: true",
+            "its own env": self.MONITOR + "\n        env: {X: y}",
+            "the input spelt another way": self.MONITOR.replace("egress-policy", "EGRESS-POLICY"),
         }
         for what, monitor in changed.items():
             with self.subTest(what=what):
                 self.assertNotEqual(baseline.key(self.egress(steps=monitor + "\n" + self.CHECKOUT)), accepted)
         self.assertNotEqual(baseline.key(self.egress(steps=self.CHECKOUT + "\n" + self.MONITOR)), accepted)
-        same = (self.MONITOR + "\n" + self.CHECKOUT + "\n      - run: make",                  # a step after it
-                self.MONITOR.replace("egress-policy", "EGRESS-POLICY") + "\n" + self.CHECKOUT)     # the same input
-        for steps in same:
-            self.assertEqual(baseline.key(self.egress(steps=steps)), accepted)
+        # A second monitor step later in the job, in another mode, is part of what was accepted.
+        audit = f"\n      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: audit}}"
+        self.assertNotEqual(baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT + audit)), accepted)
+        # `true` is not the text 'True': GitHub hands the action different text for each.
+        sudo = [self.MONITOR.replace("{egress-policy: block}", f"{{egress-policy: block, disable-sudo: {value}}}")
+                for value in ("true", "'True'")]
+        self.assertNotEqual(*(baseline.key(self.egress(steps=steps + "\n" + self.CHECKOUT)) for steps in sudo))
+        # A step after the monitor that is not a monitor changes nothing.
+        self.assertEqual(baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT + "\n      - run: make")),
+                         accepted)
 
     def test_a_policy_computed_when_the_job_runs_is_cannot_tell_and_the_same_finding_as_before(self):
         for inputs in ("{egress-policy: '${{ inputs.policy }}'}", "'${{ fromJSON(inputs.monitor) }}'"):

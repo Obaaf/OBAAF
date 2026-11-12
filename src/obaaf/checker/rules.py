@@ -162,6 +162,23 @@ def _bypasses_failure(raw) -> bool:
     return isinstance(raw, dict) and runs_after_failure(raw.get("if", ""))
 
 
+def _canonical(value, _open: tuple = ()) -> str:
+    """A value from a workflow file as text that is the same for the same value and different for a
+    different one: mappings by sorted key, every scalar with its type (`true` is not `'True'`). A
+    value that contains itself through a YAML alias is written as `<again>` where it recurs."""
+    if isinstance(value, (dict, list)):
+        if id(value) in _open or len(_open) > 60:
+            return "<again>"
+        inside = (*_open, id(value))
+        if isinstance(value, dict):
+            return "{" + ",".join(sorted(f"{_canonical(k, inside)}:{_canonical(v, inside)}"
+                                         for k, v in value.items())) + "}"
+        return "[" + ",".join(_canonical(v, inside) for v in value) + "]"
+    if isinstance(value, tuple):
+        return "(" + ",".join(_canonical(v, _open) for v in value) + ")"
+    return f"{type(value).__name__}:{value!r}"
+
+
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
@@ -547,10 +564,11 @@ class WorkflowRules:
                         "it. Make sure the runner's network enforces the policy.",
             "conditional": "Agent job '{job}': its blocking egress monitor runs only if {condition}. Make sure the "
                            "runner's network enforces the policy.",
-            "late-monitor": "Agent job '{job}' starts its blocking egress monitor ({monitor}) as step {place}, so "
-                            "the steps before it run without it.",
+            "late-monitor": "Agent job '{job}' does not start its blocking egress monitor ({monitor}) before "
+                            "everything else: it runs {place}.",
             "unverified-monitor": "Agent job '{job}' runs a blocking egress monitor ({monitor}) as its first "
-                                  "step, with {inputs}. The checker cannot yet tell whether it limits the agent.",
+                                  "step (as written: sha256 {written}). The checker cannot yet tell whether it "
+                                  "limits the agent.",
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
 
@@ -577,18 +595,28 @@ class WorkflowRules:
             first = enforced[0]
             uses = str(first.uses)
             where = f"step '{one_line(first.name, 80)}'"
-            if first.index != 0:
-                return (Control(name, NOT_MET, f"{where} starts the blocking egress monitor as step "
-                                               f"{first.index + 1}, so the steps before it run without it", ident),
-                        "late-monitor", {"monitor": uses, "place": first.index + 1})
-            inputs = sorted(f"{key}={value}" for key, value in first.with_.items())
-            if "continue-on-error" in first.raw:
-                inputs.append(f"continue-on-error={first.raw.get('continue-on-error')}")
+            steps = job.raw.get("steps")
+            # First means the first entry of `steps:` as written, started and finished before the
+            # next one: not a member of a `parallel` group, and not a background step.
+            if not (isinstance(steps, list) and steps and steps[0] is first.raw):
+                place = f"after {first.index} other step(s)" if first.group is None else "in a parallel group"
+            elif first.background:
+                place = "in the background"
+            else:
+                place = ""
+            if place:
+                return (Control(name, NOT_MET, f"{where} starts the blocking egress monitor {place}, so other "
+                                               "steps can run without it", ident),
+                        "late-monitor", {"monitor": uses, "place": place})
+            # Every step of the job that uses a monitor, as written and where it stands: a second
+            # one in another mode, or any change to the first, makes it another finding.
+            written = hashlib.sha256(_canonical([(step.index, step.raw) for step in known]).encode(
+                "utf-8", "surrogatepass")).hexdigest()[:32]
             detail = (f"{where} uses {one_line(first.action, 80)} in block mode as the job's first step, but the "
                       "checker does not read what makes that hold: its version, and that the job cannot undo it "
                       "with sudo or a container")
             return (Control(name, CANNOT_TELL, detail, ident), "unverified-monitor",
-                    {"monitor": uses, "inputs": Fact(inputs, f"{len(inputs)} input(s) set")})
+                    {"monitor": uses, "written": written})
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
         if monitors:
             condition = str(monitors[0].raw.get("if"))
@@ -621,21 +649,25 @@ class WorkflowRules:
         declared = job.environment
         written = job.raw.get("environment")
         written = written.get("name") if isinstance(written, dict) else written
+        # `010` is the number 8 to this reader and may be the number 10, or text, to GitHub's, and
+        # `0` or `false` may be a name to GitHub and is nothing here.
+        odd = written is not None and not isinstance(written, str)
+        shown = one_line(written if odd else declared, 120)
 
         def both(verdict: str, detail: str, second: str = CANNOT_TELL) -> list[Control]:
             if second == NOT_MET:
                 about = "the job declares no environment, so its secrets come from the repository or organization"
             else:
-                about = (f"where a secret is stored and which branches may use environment "
-                         f"'{one_line(declared, 120)}' are repository settings, which obaaf check does not read; "
-                         "obaaf audit reads environments and their branch rules")
+                about = (f"where a secret is stored and which branches may use environment '{shown}' are "
+                         "repository settings, which obaaf check does not read; obaaf audit reads environments "
+                         "and their branch rules")
             return [Control(scoped, verdict, detail, "secrets-protected"),
                     Control(setting, second, about, "environment-restricted")]
 
         if job.reusable:
             return both(NOT_MET, "a job that calls a reusable workflow cannot declare an environment, so the "
                                  "secrets it passes come from the repository or organization", NOT_MET)
-        second = CANNOT_TELL if declared else NOT_MET
+        second = CANNOT_TELL if declared or odd else NOT_MET
         if "*" in names or "*inherit" in names:
             return both(NOT_MET, "the job can take every secret, so it is not limited to protected ones", second)
         upper = sorted({str(n).upper() for n in names})
@@ -647,12 +679,11 @@ class WorkflowRules:
             more = f", and {len(unlisted) - 5} more" if len(unlisted) > 5 else ""
             return both(NOT_MET, "not listed in protected_secrets: "
                                  f"{', '.join(one_line(secret, 60) for secret in unlisted[:5])}{more}", second)
+        if odd:
+            return both(CANNOT_TELL, f"the job's environment is written as a number or as true or false ({shown}), "
+                                     "and YAML readers do not agree on how those are spelt")
         if not declared:
             return both(NOT_MET, "the job declares no environment", NOT_MET)
-        if not isinstance(written, str):
-            # `010` is the number 8 to this reader and may be the number 10, or text, to GitHub's.
-            return both(CANNOT_TELL, "the job's environment is not written as text, and YAML readers do not agree "
-                                     "on how a number or a true/false value is spelt")
         if "${{" in declared:
             return both(CANNOT_TELL, f"the job's environment is an expression ({one_line(declared, 120)}), which "
                                      "the checker cannot compare with the one protected_secrets names")
@@ -669,8 +700,8 @@ class WorkflowRules:
             return both(CANNOT_TELL, f"the job declares environment '{one_line(declared, 120)}' and "
                                      f"protected_secrets names {', '.join(repr(one_line(env, 120)) for env in unsure)}"
                                      ", which differ only in the case of letters outside ASCII")
-        shown = ", ".join(upper[:5]) + (f", and {len(upper) - 5} more" if len(upper) > 5 else "")
-        return both(VERIFIED, f"{shown} in environment '{one_line(declared, 120)}'")
+        listed = ", ".join(upper[:5]) + (f", and {len(upper) - 5} more" if len(upper) > 5 else "")
+        return both(VERIFIED, f"{listed} in environment '{one_line(declared, 120)}'")
 
     # Events that only someone with write access can cause, and whose payload outsiders do not write.
     _WRITE_ACCESS_EVENTS = frozenset({"push", "workflow_dispatch", "schedule", "release"})
@@ -737,7 +768,8 @@ class WorkflowRules:
                 return Control(name, NOT_MET, f"it reads {one_line(field, 120)}, which someone without write "
                                               "access can write", ident)
         if unsure:
-            return Control(name, CANNOT_TELL, "; ".join(unsure), ident)
+            more = f"; and {len(unsure) - 5} more" if len(unsure) > 5 else ""
+            return Control(name, CANNOT_TELL, "; ".join(unsure[:5]) + more, ident)
         took = "; ".join(text for count, text in (
             (default, f"{default} checkout step(s) take the ref the event names"),
             (fixed, f"{fixed} checkout step(s) take a ref written in the workflow")) if count) or "no checkout step"

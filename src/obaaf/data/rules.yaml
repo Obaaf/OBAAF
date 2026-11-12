@@ -346,10 +346,11 @@ rules:
       monitor that always runs (`step-security/harden-runner` with `egress-policy: block` and no
       `if:`) as the job's first step is reported as "cannot tell": whether it limits the agent
       depends on its version and on the job being unable to undo it with sudo or a container, and
-      the checker reads neither yet. An acceptance of that case covers the monitor as written (the
-      action with its ref, and every input) and no other. A monitor that starts after the job's
-      first step leaves the steps before it without it and is "not met". No egress control is
-      reported as verified yet, so today the finding can be accepted and cannot be cleared.
+      the checker reads neither yet. An acceptance of that case covers the monitor as written (every
+      step of the job that uses a monitor, key for key) and no other. A monitor that starts after
+      other steps, in a `parallel` group or in the background lets other steps run without it and
+      is "not met". No egress control is reported as verified yet, so today the finding can be
+      accepted and cannot be cleared.
     fix: >-
       Limit the agent job's egress to the inference proxy, with ephemeral self-hosted runners behind a
       network policy or a blocking runtime egress monitor that always runs, and declare the policy in
