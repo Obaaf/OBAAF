@@ -174,9 +174,20 @@ def _check_v2(path, entries: list) -> None:
         # with an acceptance that does not count, and the report says so beside the finding.
 
 
+def _no_duplicates(pairs: list) -> dict:
+    """A JSON object, refused when it gives a key twice: a reader of the file would see one value and
+    the checker would use the other."""
+    out: dict = {}
+    for name, value in pairs:
+        if name in out:
+            raise ValueError(f"the key {name!r} appears twice in one object")
+        out[name] = value
+    return out
+
+
 def load(path: Path) -> Baseline:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_no_duplicates)
     except FileNotFoundError as exc:
         raise BaselineError(f"baseline not found: {path} (create it with --write-baseline)") from exc
     except (OSError, ValueError, RecursionError) as exc:

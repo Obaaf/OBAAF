@@ -97,8 +97,10 @@ class AcceptanceTest(unittest.TestCase):
             self.assertEqual(self.problems(expires=expires), ["it has no expiry date"], repr(expires))
 
     def test_an_expiry_that_is_not_a_date(self):
+        ahead = (TODAY + timedelta(days=30)).isoformat()
+        other_digits = ahead.translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩"))      # Arabic-Indic digits
         for expires in ("soon", "never", "2027-13-01", "2027-02-30", "20270101", "2027-1-1", "01/02/2027", 20270101,
-                        True, ["2027-01-01"], datetime(2027, 1, 1, 12, 0), "2027-01-01T00:00:00"):
+                        True, ["2027-01-01"], datetime(2027, 1, 1, 12, 0), "2027-01-01T00:00:00", other_digits):
             found = self.problems(expires=expires)
             self.assertEqual(len(found), 1, repr(expires))
             self.assertIn("is not a date (YYYY-MM-DD)", found[0])
@@ -275,6 +277,16 @@ class BaselineEntryTest(unittest.TestCase):
     def test_two_findings_need_two_entries(self):
         result = applied([entry()], finding(line=1), finding(line=2))
         self.assertEqual(sorted(f.baselined for f in result.findings), [False, True])
+
+    def test_an_entry_that_gives_a_key_twice_is_refused(self):
+        with TempDir() as tmp:
+            repo, _ = fixture_repo(tmp)
+            path = tmp / "b.json"
+            text = json.dumps({"format": baseline.FORMAT, "findings": [entry(expires="2001-02-03")]})
+            path.write_text(text.replace('"expires": "2001-02-03"', f'"expires": "2001-02-03", "expires": "{SOON}"'))
+            code, _, err = run_cli("check", repo, "--baseline", path, "--fail-on", "low")
+            self.assertEqual(code, 2)
+            self.assertIn("appears twice", err)
 
     def test_a_file_the_checker_cannot_read_as_a_baseline_is_refused(self):
         good = entry()

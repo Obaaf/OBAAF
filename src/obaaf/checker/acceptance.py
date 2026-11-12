@@ -51,7 +51,7 @@ def parse_date(value) -> date | None:
     """A calendar date from a `date` or from text of the form YYYY-MM-DD, and nothing else."""
     if isinstance(value, date) and not hasattr(value, "hour"):
         return value
-    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value.strip()):
         try:
             return date.fromisoformat(value.strip())
         except ValueError:
