@@ -1,0 +1,507 @@
+{
+  "format": "obaaf-api-recording/v0.1",
+  "api": "https://api.github.com",
+  "note": "Written by hand from the example responses in GitHub's REST reference (read 2026-11-12) and shaped after the settings behind the incidents in docs/flagship.md. Not recorded from a live repository.",
+  "scenario": "The same repository read with a token that has no administrative access, such as a workflow's own token.",
+  "responses": [
+    {
+      "path": "/repos/example-studio/game",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "id": 1296269,
+        "node_id": "MDEwOlJlcG9zaXRvcnkxMjk2MjY5",
+        "name": "game",
+        "full_name": "example-studio/game",
+        "owner": {
+          "login": "example-studio",
+          "id": 1,
+          "type": "Organization",
+          "site_admin": false
+        },
+        "private": false,
+        "html_url": "https://github.com/example-studio/game",
+        "fork": false,
+        "url": "https://api.github.com/repos/example-studio/game",
+        "default_branch": "main",
+        "archived": false,
+        "visibility": "public"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/rulesets?includes_parents=true&per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": [
+        {
+          "id": 42,
+          "name": "main protection",
+          "source_type": "Repository",
+          "source": "example-studio/game",
+          "enforcement": "active",
+          "node_id": "RRS_lACkVXNlcgQB",
+          "_links": {
+            "self": {
+              "href": "https://api.github.com/repos/example-studio/game/rulesets/42"
+            },
+            "html": {
+              "href": "https://github.com/example-studio/game/rules/42"
+            }
+          },
+          "created_at": "2026-11-09T08:43:03Z",
+          "updated_at": "2026-11-10T16:29:47Z"
+        },
+        {
+          "id": 73,
+          "name": "organisation baseline",
+          "source_type": "Organization",
+          "source": "example-studio",
+          "enforcement": "evaluate",
+          "node_id": "RRS_lACkVXNlcgQQ",
+          "_links": {
+            "self": {
+              "href": "https://api.github.com/orgs/example-studio/rulesets/73"
+            },
+            "html": null
+          },
+          "created_at": "2026-08-15T08:43:03Z",
+          "updated_at": "2026-09-23T16:29:47Z"
+        }
+      ]
+    },
+    {
+      "path": "/repos/example-studio/game/rules/branches/main?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": [
+        {
+          "type": "pull_request",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "example-studio/game",
+          "ruleset_id": 42,
+          "parameters": {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews_on_push": true,
+            "require_code_owner_review": false,
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": false,
+            "allowed_merge_methods": [
+              "merge",
+              "squash"
+            ]
+          }
+        },
+        {
+          "type": "required_status_checks",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "example-studio/game",
+          "ruleset_id": 42,
+          "parameters": {
+            "strict_required_status_checks_policy": false,
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              {
+                "context": "test (3.13)",
+                "integration_id": 15368
+              }
+            ]
+          }
+        },
+        {
+          "type": "deletion",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "example-studio/game",
+          "ruleset_id": 42
+        },
+        {
+          "type": "non_fast_forward",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "example-studio/game",
+          "ruleset_id": 42
+        }
+      ]
+    },
+    {
+      "path": "/repos/example-studio/game/branches/main",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "name": "main",
+        "commit": {
+          "sha": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+          "url": "https://api.github.com/repos/example-studio/game/commits/7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
+        },
+        "_links": {
+          "self": "https://api.github.com/repos/example-studio/game/branches/main",
+          "html": "https://github.com/example-studio/game/tree/main"
+        },
+        "protected": true,
+        "protection": {
+          "enabled": true,
+          "required_status_checks": {
+            "enforcement_level": "non_admins",
+            "contexts": [
+              "test (3.13)"
+            ],
+            "checks": [
+              {
+                "context": "test (3.13)",
+                "app_id": 15368
+              }
+            ]
+          }
+        },
+        "protection_url": "https://api.github.com/repos/example-studio/game/branches/main/protection"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/environments?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "total_count": 2,
+        "environments": [
+          {
+            "id": 161088068,
+            "node_id": "MDExOkVudmlyb25tZW50MTYxMDg4MDY4",
+            "name": "main-only",
+            "url": "https://api.github.com/repos/example-studio/game/environments/main-only",
+            "html_url": "https://github.com/example-studio/game/deployments/activity_log?environments_filter=main-only",
+            "created_at": "2026-11-09T22:00:40Z",
+            "updated_at": "2026-11-09T22:00:40Z",
+            "protection_rules": [],
+            "deployment_branch_policy": null
+          },
+          {
+            "id": 161088069,
+            "node_id": "MDExOkVudmlyb25tZW50MTYxMDg4MDY5",
+            "name": "release",
+            "url": "https://api.github.com/repos/example-studio/game/environments/release",
+            "html_url": "https://github.com/example-studio/game/deployments/activity_log?environments_filter=release",
+            "created_at": "2026-10-23T22:00:40Z",
+            "updated_at": "2026-10-23T22:00:40Z",
+            "protection_rules": [
+              {
+                "id": 3736,
+                "node_id": "MDQ6R2F0ZTM3MzY=",
+                "type": "wait_timer",
+                "wait_timer": 30
+              },
+              {
+                "id": 3755,
+                "node_id": "MDQ6R2F0ZTM3NTU=",
+                "prevent_self_review": false,
+                "type": "required_reviewers",
+                "reviewers": [
+                  {
+                    "type": "User",
+                    "reviewer": {
+                      "login": "octocat",
+                      "id": 1,
+                      "node_id": "MDQ6VXNlcjE=",
+                      "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+                      "url": "https://api.github.com/users/octocat",
+                      "html_url": "https://github.com/octocat",
+                      "type": "User",
+                      "site_admin": false
+                    }
+                  },
+                  {
+                    "type": "Team",
+                    "reviewer": {
+                      "id": 1,
+                      "node_id": "MDQ6VGVhbTE=",
+                      "url": "https://api.github.com/teams/1",
+                      "name": "Justice League",
+                      "slug": "justice-league",
+                      "privacy": "closed",
+                      "permission": "admin",
+                      "parent": null
+                    }
+                  }
+                ]
+              },
+              {
+                "id": 3756,
+                "node_id": "MDQ6R2F0ZTM3NTY=",
+                "type": "branch_policy"
+              }
+            ],
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/environments/release/deployment-branch-policies?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "total_count": 2,
+        "branch_policies": [
+          {
+            "id": 361471,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3kzNjE0NzE=",
+            "name": "release/*"
+          },
+          {
+            "id": 361472,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3kzNjE0NzI=",
+            "name": "main",
+            "type": "branch"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/rulesets/42?includes_parents=true",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "id": 42,
+        "name": "main protection",
+        "target": "branch",
+        "source_type": "Repository",
+        "source": "example-studio/game",
+        "enforcement": "active",
+        "conditions": {
+          "ref_name": {
+            "include": [
+              "~DEFAULT_BRANCH"
+            ],
+            "exclude": []
+          }
+        },
+        "rules": [
+          {
+            "type": "required_status_checks",
+            "parameters": {
+              "strict_required_status_checks_policy": false,
+              "do_not_enforce_on_create": false,
+              "required_status_checks": [
+                {
+                  "context": "test (3.13)",
+                  "integration_id": 15368
+                }
+              ]
+            }
+          },
+          {
+            "type": "pull_request",
+            "parameters": {
+              "required_approving_review_count": 1,
+              "dismiss_stale_reviews_on_push": true,
+              "require_code_owner_review": false,
+              "require_last_push_approval": false,
+              "required_review_thread_resolution": false,
+              "allowed_merge_methods": [
+                "merge",
+                "squash"
+              ]
+            }
+          },
+          {
+            "type": "deletion"
+          },
+          {
+            "type": "non_fast_forward"
+          }
+        ],
+        "node_id": "RRS_lACkVXNlcgQB",
+        "_links": {
+          "self": {
+            "href": "https://api.github.com/repos/example-studio/game/rulesets/42"
+          },
+          "html": {
+            "href": "https://github.com/example-studio/game/rules/42"
+          }
+        },
+        "created_at": "2026-11-09T08:43:03Z",
+        "updated_at": "2026-11-10T16:29:47Z"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/rulesets/73?includes_parents=true",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "id": 73,
+        "name": "organisation baseline",
+        "target": "branch",
+        "source_type": "Organization",
+        "source": "example-studio",
+        "enforcement": "evaluate",
+        "conditions": {
+          "ref_name": {
+            "include": [
+              "~ALL"
+            ],
+            "exclude": []
+          },
+          "repository_name": {
+            "include": [
+              "~ALL"
+            ],
+            "exclude": []
+          }
+        },
+        "rules": [
+          {
+            "type": "non_fast_forward"
+          }
+        ],
+        "node_id": "RRS_lACkVXNlcgQQ",
+        "created_at": "2026-08-15T08:43:03Z",
+        "updated_at": "2026-09-23T16:29:47Z"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/branches/main/protection",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/environments/main-only/secrets?per_page=100",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "environments=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/environments/release/secrets?per_page=100",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "environments=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/secrets?per_page=100",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "secrets=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/organization-secrets?per_page=100",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "secrets=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/permissions",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/permissions/workflow",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/permissions/fork-pr-contributor-approval",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/actions/policies?has_parents=true&per_page=100",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=write"
+      },
+      "body": {
+        "message": "Resource not accessible by integration",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "403"
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/collaborators?affiliation=all&per_page=100",
+      "status": 404,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "message": "Not Found",
+        "documentation_url": "https://docs.github.com/rest",
+        "status": "404"
+      }
+    }
+  ]
+}

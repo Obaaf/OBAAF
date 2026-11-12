@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.obaaf.com/schemas/settings-snapshot/v0.1.json",
+  "title": "OBAAF settings snapshot",
+  "description": "What `obaaf audit` read of a repository's GitHub settings, and what it could not read. Version 0.1 is a draft and may change before it is released.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "repository", "api", "api_version", "taken_at", "tool", "viewer", "branches", "settings", "requests"],
+  "properties": {
+    "format": {"const": "obaaf-settings-snapshot/v0.1"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$"},
+    "requested_as": {"type": "string"},
+    "api": {"type": "string"},
+    "api_version": {"type": "string"},
+    "taken_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "tool": {"type": "string"},
+    "viewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authenticated"],
+      "properties": {
+        "authenticated": {"type": "boolean"},
+        "repository_permissions": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "can_bypass_rulesets": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "branches": {"type": "array", "items": {"type": "string"}},
+    "settings": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/entry"}
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status"],
+        "properties": {"path": {"type": "string"}, "status": {"type": "integer"}}
+      }
+    }
+  },
+  "$defs": {
+    "problem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["what", "reason_code", "reason"],
+      "properties": {
+        "what": {"type": "string"},
+        "reason_code": {"$ref": "#/$defs/reason_code"},
+        "reason": {"type": "string"},
+        "accepted_permissions": {"type": "string"}
+      }
+    },
+    "reason_code": {
+      "enum": ["no_token", "unauthorized", "forbidden", "not_found", "rate_limited", "network", "server_error", "unexpected", "withheld", "depends"]
+    },
+    "entry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {"status": {"const": "read"}, "value": {}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value", "problems", "needs"],
+          "properties": {
+            "status": {"const": "partial"},
+            "value": {},
+            "problems": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/problem"}},
+            "needs": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason_code", "reason", "needs"],
+          "properties": {
+            "status": {"const": "unread"},
+            "reason_code": {"$ref": "#/$defs/reason_code"},
+            "reason": {"type": "string"},
+            "needs": {"type": "string"},
+            "accepted_permissions": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {"status": {"const": "not_applicable"}, "reason": {"type": "string"}}
+        }
+      ]
+    }
+  }
+}

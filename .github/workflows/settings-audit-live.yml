@@ -1,0 +1,71 @@
+# Runs the settings audit's reader (obaaf audit) against this repository on GitHub itself.
+# The unit tests drive the reader from hand-written recordings; this is where it meets the real API.
+# It is read-only: the audit sends GET requests only, and the job's token can read and nothing else.
+# It runs when the reader changes and on request. It is not a required check.
+name: Settings audit (live)
+
+on:
+  pull_request:
+    paths:
+      - "src/obaaf/audit/**"
+      - "src/obaaf/data/schemas/settings-snapshot.schema.json"
+      - "scripts/check_live_audit.py"
+      - ".github/workflows/settings-audit-live.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Read this repository's settings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+
+      # The workflow's own token reads no more of a public repository's settings than anyone can, but
+      # it has its own rate limit. What GitHub shows anyone must be read; an answer that does not have
+      # the documented shape fails the job, because that is the thing this job exists to find.
+      - name: Audit with the workflow's read-only token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p audit-live
+          obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out audit-live/with-token.json \
+            --record audit-live/with-token | tee audit-live/with-token.txt
+          python scripts/check_live_audit.py audit-live/with-token.json \
+            --read repository rulesets branch_rules branches environments
+
+      # With no token GitHub allows 60 requests an hour for each IP address, and hosted runners share
+      # addresses, so being rate limited here is expected now and then and is not a failure. Anything
+      # else that goes wrong is.
+      - name: Audit with no token
+        run: |
+          code=0
+          obaaf audit --repo "$GITHUB_REPOSITORY" --no-token --snapshot-out audit-live/no-token.json \
+            --record audit-live/no-token > audit-live/no-token.txt || code=$?
+          cat audit-live/no-token.txt
+          echo "obaaf audit exited $code"
+          python scripts/check_live_audit.py audit-live/no-token.json --rate-limit-ok \
+            --read repository rulesets branch_rules branches environments
+
+      - name: Keep the snapshots and GitHub's answers
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-audit-live
+          path: audit-live/
+          if-no-files-found: warn
+          retention-days: 30

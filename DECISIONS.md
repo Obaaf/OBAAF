@@ -46,6 +46,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-036 | Jenkins results are advisory, and unknowns are coverage, not findings | Proposed |
 | D-037 | The Jenkins release lane signs with a key service and reads approvals from the controller | Proposed |
 | D-038 | Governance adopted; the project accepts outside contributions | Accepted, 2026-11-09 |
+| D-040 | The settings audit only reads, and records what it could not read | Proposed, 2026-11-12 |
 
 ---
 
@@ -203,6 +204,13 @@ This proposal is withdrawn at the maintainer's request. The identifier is reserv
 **Decision.** [GOVERNANCE.md](GOVERNANCE.md) is adopted as written, no longer a draft: two maintainers (Osita Sean Keluo-Udeke and Ofonna Nweze), lazy consensus day to day, significant changes recorded here, and the Contributor Covenant 2.1 as the code of conduct ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)). [CONTRIBUTING.md](CONTRIBUTING.md) no longer says the project is closed: it accepts contributions under its existing rules (DCO sign-off, public sources only, data first, tests with every rule).
 
 **Reason.** The repository already worked this way (two maintainers in CODEOWNERS, a numbered decision log, DCO, SECURITY.md), but the draft marker and the "not yet open" line told a newcomer the opposite. The 0.x caveat stays: formats may change before 1.0, so large changes start as an issue.
+
+### D-040 The settings audit only reads, and records what it could not read
+
+**Decision.** `obaaf audit` reads repository settings through GitHub's REST API with GET requests only; the client has no other verb. It works with whatever access the caller's token has, and with none on a public repository. It never creates a token and never asks for more than read access: the two things GitHub shows only to a caller who could also change them (who may bypass a ruleset, and Actions policies) are read when the token happens to allow it and are otherwise reported as not read. Every setting the audit covers is in its snapshot as read, partly read, not read (with a reason code, GitHub's stated requirement and GitHub's own error) or not applicable; none is ever left out. An answer that does not have the shape GitHub documents is recorded as not read. Where GitHub's reference leaves a reading open, the audit takes the one that cannot turn "unknown" into "fine": an empty bypass list counts as "nobody" only from a repository administrator's token for the repository's own ruleset; a 404 from classic branch protection counts as "no protection" only with GitHub's message "Branch not protected"; an environment whose answer lacks the branch policy field is not taken to allow every branch. The audit covers only settings that the repository's own workflows depend on. The snapshot keeps the names of secrets and reviewers and counts of collaborators, never a token, a secret's value or a collaborator's login. Proposed in the flagship work (slice 2b.1; plan decision F-23 and the decisions recorded under that slice in [the plan](docs/flagship.md)). This first part applies no rule.
+
+**Reason.** The first adopter's incidents were all settings (an environment open to every branch, an administrator bypass on the ruleset, approvals nobody could give, one required check of eleven, an Actions policy that blocked a trigger), and `obaaf check` reads none of them. A tool that reads settings with a maintainer's token must not be able to change them, and a tool that reports on settings must not let what it could not see pass as clean: the tools compared in [the landscape](docs/landscape.md) need an owner's token for full results, and the adopter's own gate had answered "0 new" while seeing nothing of this. GitHub answers 404 for what a caller may not see, omits fields by permission, and documents neither the empty-list case nor the "Branch not protected" message, so each of those is read the cautious way until a run with an administrator's token settles it.
+
 ---
 
 ## Open questions from the specification
