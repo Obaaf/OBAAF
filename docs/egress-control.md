@@ -24,7 +24,7 @@ So nothing has failed, and nothing has been tried. Slice 2c.2 tries it. OBAAF de
 **AWF's pages disagree about how it works by default, and which is true of the version OBAAF pins is not known.**
 
 - The documentation site (security architecture, command reference) describes `sudo awf` with firewall rules, as set out below.
-- The notes for release v0.28.71 call that mode `--legacy-security` and give the default as "strict security (network-isolation + api-proxy)", a mode that "Requires no sudo/NET_ADMIN". The pages read do not say how that mode keeps the command in.
+- The notes for release v0.28.71 call that mode `--legacy-security` and give the default as "strict security (network-isolation + api-proxy)", a mode that "Requires no sudo/NET_ADMIN". The notes say only that it enforces egress "via Docker network topology (internal network + dual-homed proxy) instead of iptables". They do not say what stops the command from changing that.
 
 The two keep a command in by different means, so slice 2c.2 settles this before anything else. What follows is the mode the documentation site describes.
 
@@ -33,7 +33,7 @@ The two keep a command in by different means, so slice 2c.2 settles this before 
 - The command runs as the calling user, not root, inside a `chroot` of the host's filesystem.
 - A name on the list allows all its subdomains. With no list, nothing is allowed.
 
-**How the command is kept from undoing it, in that mode.** The rules are in two places the command should not be able to change. The container's own rules need `CAP_NET_ADMIN`, which the security architecture page says is dropped before the command starts; AWF's review of 2026-07-27 says the agent container never has it, and that `NET_RAW` and `SYS_ADMIN` are dropped too. The host's rules need root on the host, and the page says the Docker socket is hidden from the command. About `sudo` no page says anything. The escape report says `no-new-privs=1` is set inside; if so, `sudo` should gain nothing. That is an inference, and it was not run. It is the first escape test.
+**How the command is kept from undoing it, in that mode.** The rules are in two places the command should not be able to change. The container's own rules need `CAP_NET_ADMIN`, which the security architecture page says is dropped before the command starts; AWF's review of 2026-07-27 says the agent container never has it, and that `NET_RAW` and `SYS_ADMIN` are dropped too. The host's rules need root on the host, and the page says the Docker socket is hidden from the command. About `sudo` inside the sandbox no page says anything. The escape report says `no-new-privs=1` is set inside; if so, `sudo` should gain nothing. That is an inference, and it was not run. It is the first escape test.
 
 In that mode AWF itself needs `sudo` on the runner to set the rules. That is not a weakness in the confinement: the step that starts AWF is written by the workflow's author.
 
@@ -46,9 +46,10 @@ The quoted sentences are AWF's. They go into OBAAF's documentation as they are, 
 - **It is not a boundary against the runner.** The container, chroot and firewall rules are "not a security boundary against runner-host compromise". In the documented mode, a root process on the host that removes the `DOCKER-USER` rules opens it.
 - **What the command can read and write is not clear.** The security architecture page says "Filesystem access is unrestricted", that the command can read `.ssh` and `.aws` under the home directory, and that the home directory and `/tmp` are writable. The command reference describes selective mounts, with only some directories under the home directory writable (it names `.cache`, `.config` and `.local`). The review of 2026-07-27 says credentials are hidden. Not run.
 - **IPv6** is turned off in the container by a setting whose failure is only a warning (AWF's review, rated medium).
-- **Some flags remove the protection.** `--enable-dind` lets the command "bypass all firewall restrictions". `--env-all` "May expose sensitive credentials". `--ssl-bump` changes the security model. The v0.28.71 notes add `--legacy-security`, `--enable-host-access` and `--upstream-proxy`, which is taken from the host's proxy variables when it is not set.
+- **Some flags remove the protection.** `--enable-dind` lets the command "bypass all firewall restrictions". `--env-all` "May expose sensitive credentials". `--ssl-bump` changes the security model.
+- **Three more options are ones we distrust; AWF gives no warning on them.** `--legacy-security` changes the mode. `--enable-host-access` gives "access to host services via host.docker.internal". `--upstream-proxy` sends the proxy's traffic through another proxy, taken from the host's proxy variables when it is not set.
 
-One more limit is our inference, not AWF's statement: without TLS inspection the proxy reads only the server name, so a request to an allowed name on a shared address may carry a different `Host` inside. Bullfrog was bypassed this way ([landscape](landscape.md), part 2).
+One more limit is our inference, not AWF's statement: without TLS inspection the proxy reads only the server name, so a request to an allowed name on a shared address may carry a different `Host` inside. A researcher reported bypassing Bullfrog this way ([landscape](landscape.md), part 2).
 
 ## What OBAAF's action adds
 
@@ -68,7 +69,7 @@ This is the open question of the design, and it can sink it.
 
 The confinement ends when the command ends. Whatever the command could write is still there for the rest of the job, and anything a later step executes or loads from such a place runs with the full network. The workspace is one such place; it is the agent's output. By AWF's pages, so are `/tmp` and at least some directories under the home directory. On a hosted runner, as far as we know without having run it, `~/.local/bin` is on the `PATH` ahead of the system directories and `git` reads `~/.config/git/config`, and actions used earlier in the job (`actions/checkout`, for one) run a post step after the last step. A program planted as `~/.local/bin/git` would then run, unconfined, in a post step that the workflow's author never sees.
 
-So the rule for the job is: **after the confined step, nothing runs or loads anything from a place the command could write**, post steps included. Those places are the workspace, `/tmp`, the writable home directories and any directory on the `PATH`. The agent's output leaves as an artifact, and another job treats it as data. That is the effect lane OBAAF already describes.
+So the rule for the job is: **after the confined step, nothing runs or loads anything from a place the command could write, and nothing saves such a place to a cache**, post steps included. A cache saved by a post step is restored, and may be executed, by another run. Those places are the workspace, `/tmp`, the writable home directories and any directory on the `PATH`. The agent's output leaves as an artifact, and another job treats it as data. That is the effect lane OBAAF already describes.
 
 Whether a job can be written to meet that rule is not known. It depends on which places the pinned AWF really lets the command write, and on whether the action can keep those writes away from the rest of the job (a scratch home directory for the command, or restoring the writable directories afterwards). Slice 2c.2 establishes both. If it cannot be done, a command wrapper is not enough on a hosted runner and OBAAF says so.
 
@@ -76,7 +77,7 @@ Whether a job can be written to meet that rule is not known. It depends on which
 
 It confines a command. An agent that is itself an action (`uses: anthropics/claude-code-action`) is a separate step and cannot be wrapped by this; for those the answer is a control that covers the whole job, below.
 
-The adopter's 19 agent jobs all start their agent from a `run` step, 17 of them from the project's own code ([flagship plan](flagship.md), slice 1.3), so in principle they could be wrapped. That was not tried. A rough count by the reviewer of this note: 11 of the 19 have `run` steps after the step that holds the model key, which the rule above does not allow as they stand, and 10 already run their agent under bubblewrap.
+The adopter's 19 agent jobs all start their agent from a `run` step, 17 of them from the project's own code ([flagship plan](flagship.md), slice 1.3), so in principle they could be wrapped. That was not tried. A rough count by the reviewer of this note, not checked: 11 of the 19 have `run` steps after the step that holds the model key (what those steps run was read in six jobs only), which the rule above may not allow as they stand, and 10 mention bubblewrap in their steps.
 
 ## The escape tests (for slice 2c.2)
 
@@ -91,9 +92,9 @@ Must block, or the action does not ship as enforcement:
 - a direct connection to an IP address, on 443 and on another port
 - another DNS resolver over UDP and over TCP, and DNS over HTTPS to a resolver that is not on the list
 - IPv6
-- `sudo`; the firewall rules; the Docker socket and a new container (Harden-Runner's `disable-sudo` was evaded through Docker, and Bullfrog's removal of `sudo` was undone through the `docker` group)
+- `sudo`; the firewall rules; the Docker socket and a new container (Harden-Runner's `disable-sudo` was evaded through Docker, and a researcher reported that Bullfrog's removal of `sudo` was undone through the `docker` group)
 - a child process, a background process that outlives the command, and proxy variables such as `NO_PROXY=*`
-- traffic sent with `sendto` and `sendmsg` (it escaped Harden-Runner's log), and a second DNS query in one TCP segment (it escaped Bullfrog)
+- traffic sent with `sendto` and `sendmsg` (it escaped Harden-Runner's log), and a second DNS query in one TCP segment (a researcher reported that it escaped Bullfrog)
 - a TLS handshake with no server name
 - anything left behind that takes effect later: a line in `GITHUB_ENV`, `GITHUB_PATH` or `GITHUB_OUTPUT`, a workflow command on the output, a program planted in `~/.local/bin`, a git configuration file
 
@@ -105,7 +106,7 @@ If full enforcement turns out not to be achievable on hosted runners, the docume
 
 ## Where another tool is the better choice
 
-- **GitHub's native egress firewall** (`runs-on: ubuntu-24.04-firewall`, technical preview). It sits outside the runner's virtual machine, so nothing in the job can touch it, and it covers every step, which also answers the question of what a command leaves behind. Where a repository can use it, use it and not this action.
+- **GitHub's native egress firewall** (`runs-on: ubuntu-24.04-firewall`, technical preview). It sits outside the runner's virtual machine, so nothing in the job can touch it, and it covers every step. As far as we can tell, that also answers the question of what a command leaves behind; it was not tried. Where a repository can use it, use it and not this action.
 - **GitHub Agentic Workflows** for a new agent workflow (decision F-21, still the maintainer's to confirm). It runs the agent behind AWF, whose key proxy is meant to keep the model key from the agent. That proxy has not been tested here.
 - **Harden-Runner** when the whole job is to be limited, including agents that are actions. It needs version 2.16.0 or later with `sudo` and containers removed, and its free tier does not cover private repositories ([landscape](landscape.md), part 2).
 - **Cimon** (Cycode) also covers the whole job, with an eBPF sensor. Its action is Apache-2.0 and downloads a binary whose source the pages read do not show; it says it usually ignores traffic between containers and the 10.0.0.0/8 and 172.16.0.0/12 networks; whether a root process can turn it off is not stated.
@@ -116,9 +117,9 @@ If full enforcement turns out not to be achievable on hosted runners, the docume
 OBAAF-GHA-020 clears for this action only when all of these can be read from the workflow:
 
 - the action is pinned to a commit OBAAF lists as released;
-- the agent command is inside the action's `run` input, and no agent runs in another step of the job;
-- the allow-list is written out in the workflow (no expression), and has no single-label name and no name under which anyone can register a host; the report shows the list;
-- nothing after the confined step, post steps included, runs or loads anything from a place the command could write. Until slice 2c.2 shows which places those are, this cannot be read, and the result is "cannot tell".
+- the agent command is inside the action's `run` input, and no other step of the job, before or after, is given a secret, and job-level `env` holds none. The checker recognises few agents by name (2 of the adopter's 19), so it cannot see for itself that no other step is the agent; without this condition a job could wrap `true` and run its agent in an ordinary step. The condition rests on an agent needing a key. A job whose agent needs none cannot be told from a look-alike, and slice 2c.3 has to decide what to say about it;
+- the allow-list is written out in the workflow (no expression), and has no single-label name and no name on the public suffix list, its private section included (the names under which anyone can register a host). A shared name that is not on that list passes. The report shows the allow-list;
+- nothing after the confined step, post steps included, runs or loads anything from a place the command could write, and nothing saves such a place to a cache. Until slice 2c.2 shows which places those are, this cannot be read, and the result is "cannot tell".
 
 Where any of it cannot be read, the result is "cannot tell", not a pass.
 
@@ -128,7 +129,7 @@ Where any of it cannot be read, the result is "cannot tell", not a pass.
 - The source of Harden-Runner's agent and of Cimon's sensor was not read; only their pages and Cimon's `action.yml`.
 - Whether this repository can use the native firewall's runner label was not tried.
 - AWF's README says its key proxy is always on, the v0.28.71 notes put it in the default mode, and the command reference lists it as a flag that is off by default. Which is true decides part of slice 2a.2 and was not established.
-- What a hosted runner puts on the `PATH`, and what its post steps run, is from memory and not from a run.
+- What a hosted runner puts on the `PATH`, what its post steps run and save, and that the runner reads workflow commands from a step's output, are from memory and not from a run.
 
 ## Sources
 
