@@ -1,10 +1,11 @@
 """The settings audit's reader (flagship slice 2b.1): what it asks GitHub for, how it records the answers,
 and above all how it records what it could not read.
 
-The recordings under tests/fixtures/settings/ were written by hand from the example responses in GitHub's
-REST reference (read 2026-11-12). They were not recorded from a live repository. The workflow
-.github/workflows/settings-audit-live.yml runs the same reader against GitHub itself; where a test rests on
-how GitHub was seen to answer there, its comment says so.
+Three of the recordings under tests/fixtures/settings/ (public-no-token, workflow-token, admin-token) were
+written by hand from the example responses in GitHub's REST reference (read 2026-11-12). They were not
+recorded from a live repository. The two whose names begin with "live-" are GitHub's own answers to a run
+with no token, as the workflow .github/workflows/settings-audit-live.yml printed them (RecordedFromGitHubTest
+says which run). That workflow runs the same reader against GitHub itself whenever the reader changes.
 """
 
 import copy
@@ -169,6 +170,94 @@ class ReadWithoutATokenTest(unittest.TestCase):
         self.assertIn("It does not judge them yet", text)
         self.assertIn('"main-only": any branch or tag may deploy', text)
         self.assertIn("8 requests sent, all GET", text)
+
+
+class RecordedFromGitHubTest(unittest.TestCase):
+    """GitHub's own answers, not hand-written ones: what api.github.com sent a caller with no token on
+    2026-11-12 at 01:33 UTC, in https://github.com/Obaaf/OBAAF/actions/runs/43135263367, for this repository
+    and for the first adopter's. Both repositories are public and so is everything in the answers.
+
+    Only what anyone may read is covered. No answer to an administrator's token has been recorded yet."""
+
+    def take(self, name: str, repository: str):
+        entries = recording(name)
+        snap, transport = take(entries, repository=repository)
+        self.assertEqual(transport.missing, [])
+        # The reader asks today for exactly what it asked for on the day, in the same order.
+        self.assertEqual([path for path, _ in transport.seen], [e["path"] for e in entries])
+        return snap, report.to_text(snap)
+
+    def test_this_repository_as_anyone_sees_it(self):
+        snap, text = self.take("live-obaaf-no-token", "Obaaf/OBAAF")
+        s = snap["settings"]
+        self.assertEqual({k: v for k, v in statuses(snap).items() if v != "unread"}, {
+            "repository": "read", "rulesets": "read", "ruleset_bypass_actors": "not_applicable",
+            "branch_rules": "read", "branches": "read", "environments": "read"})
+        self.assertEqual({s[k]["reason_code"] for k in NEEDS_A_TOKEN}, {"no_token"})
+        self.assertEqual(s["repository"]["value"], {
+            "full_name": "Obaaf/OBAAF", "visibility": "public", "default_branch": "main", "owner": "Obaaf",
+            "owner_type": "Organization", "fork": False, "archived": False})
+        self.assertEqual(s["rulesets"]["value"], [])
+        self.assertEqual(s["branch_rules"]["value"], {"main": []})
+        # Classic branch protection's required checks are shown to anyone.
+        main = s["branches"]["value"]["main"]
+        self.assertTrue(main["protected"])
+        self.assertEqual(len(main["public_protection"]["required_status_checks"]["contexts"]), 8)
+        self.assertEqual(s["environments"]["value"], [
+            {"name": "github-pages", "deployment_branches": "selected", "wait_timer": 0, "reviewers": [],
+             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": True,
+             "branch_policies": [{"name": "main", "type": "branch"}]},
+            {"name": "pypi", "deployment_branches": "any", "wait_timer": 0,
+             "reviewers": [{"type": "User", "name": "seanudeke", "id": 55066947}],
+             "prevent_self_review": False, "other_protection_rules": [], "can_admins_bypass": True}])
+        self.assertIn('"pypi": any branch or tag may deploy; reviewers: seanudeke (self-review allowed); '
+                      "administrators may bypass these rules: yes", text)
+        # Nothing for an administrator to bypass, so nothing is said about it.
+        self.assertIn('"github-pages": may deploy: main; no required reviewers\n', text)
+
+    def test_a_repository_protected_by_a_ruleset_as_anyone_sees_it(self):
+        snap, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
+        s = snap["settings"]
+        (ruleset,) = s["rulesets"]["value"]
+        self.assertEqual((ruleset["id"], ruleset["name"], ruleset["enforcement"], ruleset["target"]),
+                         (26914817, "Protect main", "active", "branch"))
+        self.assertEqual([r["type"] for r in ruleset["rules"]],
+                         ["deletion", "non_fast_forward", "pull_request", "required_status_checks"])
+        self.assertEqual(ruleset["rules"][2]["parameters"]["required_approving_review_count"], 0)
+        # GitHub sent a caller with no token no bypass_actors field at all, not an empty list.
+        bypass = s["ruleset_bypass_actors"]
+        self.assertEqual((bypass["status"], bypass["reason_code"]), ("unread", "withheld"))
+        self.assertNotIn("can_bypass_rulesets", snap["viewer"])
+        self.assertEqual([r["ruleset_id"] for r in s["branch_rules"]["value"]["main"]], [26914817] * 4)
+        # The branch has no classic protection, and GitHub still calls it protected.
+        self.assertEqual(s["branches"]["value"]["main"], {"protected": True, "public_protection": {
+            "enabled": False, "required_status_checks": {"strict": None, "enforcement_level": "off",
+                                                         "contexts": [], "checks": []}}})
+        self.assertIn("main: GitHub calls it protected; no required checks shown in this view", text)
+        self.assertIn('"unity": any branch or tag may deploy; reviewers: seanudeke (self-review allowed); '
+                      "administrators may bypass these rules: yes", text)
+
+    def test_every_required_check_of_a_rule_is_named_in_the_report(self):
+        # The first report from this recording cut the rule off after three names and part of a fourth.
+        _, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
+        checks = ("required_status_checks (test, obaaf-audit, capture-smoke, web-capture, seeded-bugs, "
+                  "agents-gate1, agents-harness-verify, feedback-offline, agents-sandbox, agents-bench-compare, "
+                  "private-export-scan)")
+        rules = f"deletion, non_fast_forward, pull_request (0 approvals), {checks}"
+        self.assertIn(f'"Protect main" (active, branch, from Repository Expectrail/Expectrail): {rules}\n', text)
+        self.assertIn(f"      main: {rules}\n", text)
+
+    def test_more_checks_than_fit_on_a_line_are_counted_not_dropped_without_a_word(self):
+        entries = recording("live-expectrail-no-token")
+        for path in ("/repos/Expectrail/Expectrail/rulesets/26914817?includes_parents=true",
+                     "/repos/Expectrail/Expectrail/rules/branches/main?per_page=100"):
+            body = entry_for(entries, path)["body"]
+            rule = next(r for r in (body["rules"] if isinstance(body, dict) else body)
+                        if r["type"] == "required_status_checks")
+            rule["parameters"]["required_status_checks"] = [{"context": f"check-{n:02}"} for n in range(35)]
+        text = report.to_text(take(entries, repository="Expectrail/Expectrail")[0])
+        self.assertEqual(text.count("check-29 and 5 more)"), 2)
+        self.assertNotIn("check-30", text)
 
 
 class ReadWithAnAdministratorsTokenTest(unittest.TestCase):
@@ -917,6 +1006,30 @@ class TokenNeverComesBackOutTest(unittest.TestCase):
         self.assertNotIn(TOKEN, everything)
         self.assertGreaterEqual(everything.count("[token]"), 5)
 
+    def test_in_an_answer_nested_too_deeply_to_examine(self):
+        # Deep enough to be past any examination, shallow enough for the JSON parser to accept it.
+        deep = "[" * 300 + json.dumps({"echo": TOKEN}) + "]" * 300
+        for token in (TOKEN, None):
+            client = audit.Client(transport=audit.ReplayTransport([ok(R, deep)]), token=token)
+            answer = client.get(R)
+            self.assertEqual((answer.code, answer.data), ("unexpected", None))
+            if token:
+                self.assertNotIn(TOKEN, client.recording_text())
+        entries = replace(recording("admin-token"), f"{R}/actions/permissions/workflow", body=deep)
+        code, everything = self.run_cli_with(entries)
+        self.assertEqual(code, 0)
+        self.assertNotIn(TOKEN, everything)
+
+    def test_across_the_place_where_a_long_answer_that_is_not_json_is_cut(self):
+        for before in (github.RECORDED_TEXT_CHARS - 10, github.RECORDED_TEXT_CHARS - 1, 5):
+            body = "<" * before + TOKEN + ">" * 50
+            client = audit.Client(transport=audit.ReplayTransport([ok(R, body)]), token=TOKEN)
+            client.get(R)
+            kept = client.recorded[0]["body"]
+            self.assertLessEqual(len(kept), github.RECORDED_TEXT_CHARS)
+            for length in range(4, len(TOKEN) + 1):
+                self.assertNotIn(TOKEN[:length], kept, (before, length))
+
     def test_in_a_transport_error(self):
         class Breaks:
             def get(self, url, headers):
@@ -1070,6 +1183,9 @@ class TerminalTest(unittest.TestCase):
         bodies[f"{R}/rulesets/42?includes_parents=true"]["name"] = self.NASTY
         bodies[f"{R}/rulesets/42?includes_parents=true"]["bypass_actors"][0]["actor_type"] = self.NASTY
         bodies[f"{R}/rulesets/73?includes_parents=true"]["name"] = self.NASTY
+        bodies[f"{R}/rulesets/73?includes_parents=true"]["rules"].extend([
+            {"type": self.NASTY},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": self.NASTY}]}}])
         bodies[f"{R}/actions/policies/7"]["name"] = self.NASTY
         bodies[f"{R}/actions/policies/7"]["rules"][0]["parameters"]["allowed_events"] = [self.NASTY]
         bodies[f"{R}/actions/secrets?per_page=100"]["secrets"][0]["name"] = self.NASTY
@@ -1085,7 +1201,7 @@ class TerminalTest(unittest.TestCase):
         for bad in ("\x1b", "‮", "​", "؜", "\U000e0041", "\x7f", "\x9b", "\r"):
             self.assertNotIn(bad, text, repr(bad))
         self.assertNotIn("\nREAD: all is", text)
-        self.assertGreaterEqual(text.count("READ: all is"), 9)
+        self.assertGreaterEqual(text.count("READ: all is"), 11)
         self.assertEqual(len([line for line in text.splitlines() if line.startswith("READ:")]), 1)
         self.assertIn(self.SHOWN[:40], text)
         self.assertTrue(snapshot_mod.dumps(snap).isascii())

@@ -12,6 +12,7 @@ from obaaf.audit.settings import BY_KEY, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
+CHECKS_SHOWN = 30  # required checks named in one line before "and N more"; the snapshot always has them all
 
 
 def counts(snapshot: dict) -> dict[str, int]:
@@ -31,6 +32,13 @@ def _list(items, limit: int = 8) -> str:
     return ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")
 
 
+def _join(texts, limit: int = 12) -> str:
+    """Join texts this module composed itself. Each is already safe to print, and none is cut again: a rule
+    such as the required checks names several things, and cutting it would hide some of them."""
+    texts = list(texts)
+    return ", ".join(texts[:limit]) + (f" and {len(texts) - limit} more" if len(texts) > limit else "")
+
+
 def _count(n, noun: str, plural: str | None = None) -> str:
     return f"{plain(n, 20)} {noun if n == 1 else (plural or noun + 's')}"
 
@@ -46,7 +54,7 @@ def _rule_text(rule: dict) -> str:
         return f"pull_request ({_count(parameters['required_approving_review_count'], 'approval')})"
     if kind == "required_status_checks" and isinstance(parameters.get("required_status_checks"), list):
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
-        return f"required_status_checks ({_list(names) if names else 'none named'})"
+        return f"required_status_checks ({_list(names, CHECKS_SHOWN) if names else 'none named'})"
     return plain(kind, 60)
 
 
@@ -70,7 +78,7 @@ def _source(item: dict) -> str:
 
 def _check_names(checks: dict) -> str:
     names = sorted(set(checks["contexts"]) | {c["context"] for c in checks["checks"] or []})
-    return f"required checks: {_list(names, 12)}" if names else "required checks: none named"
+    return f"required checks: {_list(names, CHECKS_SHOWN)}" if names else "required checks: none named"
 
 
 def _ruleset_names(settings: dict) -> dict:
@@ -113,7 +121,13 @@ def _environment_text(env: dict) -> str:
             env["prevent_self_review"], "")
     wait = f"; wait {plain(env['wait_timer'], 10)} min" if env["wait_timer"] else ""
     other = f"; other rules: {_list(env['other_protection_rules'])}" if env["other_protection_rules"] else ""
-    return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}"
+    # GitHub's setting "Allow administrators to bypass configured protection rules", as it gives it. It is
+    # said only where there is a reviewer, a wait or another rule for an administrator to bypass.
+    bypass = ""
+    if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"]:
+        bypass = "; administrators may bypass these rules: " + {True: "yes", False: "no"}.get(
+            env.get("can_admins_bypass"), "not given")
+    return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}{bypass}"
 
 
 def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one branch per setting, kept flat
@@ -126,7 +140,7 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
         if not value:
             return ["no ruleset applies to this repository"]
         return [f"{quoted(r['name'])} ({plain(r['enforcement'], 20)}, {plain(r['target'] or 'target not given', 20)}, "
-                f"from {_source(r)}): " + (_list([_rule_text(x) for x in r["rules"]], 12) if r["rules"] else "no rules")
+                f"from {_source(r)}): " + (_join(_rule_text(x) for x in r["rules"]) if r["rules"] else "no rules")
                 for r in value]
     if key == "ruleset_bypass_actors":
         names = _ruleset_names(settings)
@@ -138,15 +152,18 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
             lines.append(f"ruleset {plain(entry['ruleset_id'], 20)}{name}: {who}")
         return lines or ["no ruleset's bypass list was read"]
     if key == "branch_rules":
-        return [f"{plain(branch, 80)}: " + (_list([_rule_text(r) for r in rules], 12) if rules else "no active rule")
+        return [f"{plain(branch, 80)}: " + (_join(_rule_text(r) for r in rules) if rules else "no active rule")
                 for branch, rules in value.items()]
     if key == "branches":
         lines = []
         for branch, entry in value.items():
             shown = entry["public_protection"]
             checks = shown["required_status_checks"] if shown else None
+            named = bool(checks) and bool(checks["contexts"] or checks["checks"])
+            # This view shows the checks of a classic protection rule only. Checks a ruleset requires are
+            # under the rules in force, so an empty list here is "none shown", not "none required".
             lines.append(f"{plain(branch, 80)}: GitHub calls it {'protected' if entry['protected'] else 'not protected'}; "
-                         + (_check_names(checks) if checks else "no required checks shown"))
+                         + (_check_names(checks) if named else "no required checks shown in this view"))
         return lines
     if key == "branch_protection":
         return [f"{plain(branch, 80)}: {_classic_text(rule)}" for branch, rule in value.items()]

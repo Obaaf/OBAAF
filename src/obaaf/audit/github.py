@@ -33,6 +33,8 @@ API_VERSION = "2026-03-10"
 TIMEOUT_SECONDS = 20          # for each read from the socket
 REQUEST_SECONDS = 60          # for one whole answer, however slowly it arrives
 MAX_BODY_BYTES = 5 * 1024 * 1024
+MAX_JSON_DEPTH = 100          # GitHub's answers are a handful of levels deep
+RECORDED_TEXT_CHARS = 2000    # how much of an answer that is not JSON a recording keeps
 MAX_REDIRECTS = 3
 MAX_PAGES = 10
 PER_PAGE = 100
@@ -251,9 +253,12 @@ class Client:
         return text.replace(self._token, REDACTED) if self._token and self._token in text else text
 
     def _scrub(self, value, depth: int = 0):
-        """A copy of parsed JSON with the token cut out of every string, keys included."""
-        if not self._token or depth > 200:
-            return value
+        """A copy of parsed JSON with the token cut out of every string, keys included.
+
+        An answer nested more deeply than :data:`MAX_JSON_DEPTH` is refused, with or without a token: no
+        part of an answer is ever passed on unexamined."""
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError("the answer is nested too deeply")
         if isinstance(value, str):
             return self._scrub_text(value)
         if isinstance(value, list):
@@ -295,7 +300,9 @@ class Client:
 
     def _record(self, path: str, raw: Raw, body: object, parsed: bool) -> None:
         if not parsed and raw.body:
-            body = self._scrub_text(raw.body[:2000].decode("utf-8", "replace"))
+            # The token is cut out of the whole text before the text is shortened, so that a token lying
+            # across the cut cannot leave its first characters behind.
+            body = self._scrub_text(raw.body.decode("utf-8", "replace"))[:RECORDED_TEXT_CHARS]
         entry = {"path": path, "status": raw.status,
                  "headers": {k: v for k, v in sorted(raw.headers.items()) if k in RECORDED_HEADERS}, "body": body}
         if raw.error:

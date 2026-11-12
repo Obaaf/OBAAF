@@ -1,0 +1,685 @@
+{
+  "format": "obaaf-api-recording/v0.1",
+  "api": "https://api.github.com",
+  "responses": [
+    {
+      "path": "/repos/Expectrail/Expectrail",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "53",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "id": 1435158179,
+        "node_id": "R_kgDOVYrGow",
+        "name": "Expectrail",
+        "full_name": "Expectrail/Expectrail",
+        "private": false,
+        "owner": {
+          "login": "Expectrail",
+          "id": 354629299,
+          "node_id": "O_kgDOFSM2sw",
+          "avatar_url": "https://avatars.githubusercontent.com/u/354629299?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/Expectrail",
+          "html_url": "https://github.com/Expectrail",
+          "followers_url": "https://api.github.com/users/Expectrail/followers",
+          "following_url": "https://api.github.com/users/Expectrail/following{/other_user}",
+          "gists_url": "https://api.github.com/users/Expectrail/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/Expectrail/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/Expectrail/subscriptions",
+          "organizations_url": "https://api.github.com/users/Expectrail/orgs",
+          "repos_url": "https://api.github.com/users/Expectrail/repos",
+          "events_url": "https://api.github.com/users/Expectrail/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/Expectrail/received_events",
+          "type": "Organization",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "html_url": "https://github.com/Expectrail/Expectrail",
+        "description": "An AI coding agent says it fixed the bug. Expectrail runs the changed software and watches to find out.",
+        "fork": false,
+        "url": "https://api.github.com/repos/Expectrail/Expectrail",
+        "forks_url": "https://api.github.com/repos/Expectrail/Expectrail/forks",
+        "keys_url": "https://api.github.com/repos/Expectrail/Expectrail/keys{/key_id}",
+        "collaborators_url": "https://api.github.com/repos/Expectrail/Expectrail/collaborators{/collaborator}",
+        "teams_url": "https://api.github.com/repos/Expectrail/Expectrail/teams",
+        "hooks_url": "https://api.github.com/repos/Expectrail/Expectrail/hooks",
+        "issue_events_url": "https://api.github.com/repos/Expectrail/Expectrail/issues/events{/number}",
+        "events_url": "https://api.github.com/repos/Expectrail/Expectrail/events",
+        "assignees_url": "https://api.github.com/repos/Expectrail/Expectrail/assignees{/user}",
+        "branches_url": "https://api.github.com/repos/Expectrail/Expectrail/branches{/branch}",
+        "tags_url": "https://api.github.com/repos/Expectrail/Expectrail/tags",
+        "blobs_url": "https://api.github.com/repos/Expectrail/Expectrail/git/blobs{/sha}",
+        "git_tags_url": "https://api.github.com/repos/Expectrail/Expectrail/git/tags{/sha}",
+        "git_refs_url": "https://api.github.com/repos/Expectrail/Expectrail/git/refs{/sha}",
+        "trees_url": "https://api.github.com/repos/Expectrail/Expectrail/git/trees{/sha}",
+        "statuses_url": "https://api.github.com/repos/Expectrail/Expectrail/statuses/{sha}",
+        "languages_url": "https://api.github.com/repos/Expectrail/Expectrail/languages",
+        "stargazers_url": "https://api.github.com/repos/Expectrail/Expectrail/stargazers",
+        "contributors_url": "https://api.github.com/repos/Expectrail/Expectrail/contributors",
+        "subscribers_url": "https://api.github.com/repos/Expectrail/Expectrail/subscribers",
+        "subscription_url": "https://api.github.com/repos/Expectrail/Expectrail/subscription",
+        "commits_url": "https://api.github.com/repos/Expectrail/Expectrail/commits{/sha}",
+        "git_commits_url": "https://api.github.com/repos/Expectrail/Expectrail/git/commits{/sha}",
+        "comments_url": "https://api.github.com/repos/Expectrail/Expectrail/comments{/number}",
+        "issue_comment_url": "https://api.github.com/repos/Expectrail/Expectrail/issues/comments{/number}",
+        "contents_url": "https://api.github.com/repos/Expectrail/Expectrail/contents/{+path}",
+        "compare_url": "https://api.github.com/repos/Expectrail/Expectrail/compare/{base}...{head}",
+        "merges_url": "https://api.github.com/repos/Expectrail/Expectrail/merges",
+        "archive_url": "https://api.github.com/repos/Expectrail/Expectrail/{archive_format}{/ref}",
+        "downloads_url": "https://api.github.com/repos/Expectrail/Expectrail/downloads",
+        "issues_url": "https://api.github.com/repos/Expectrail/Expectrail/issues{/number}",
+        "pulls_url": "https://api.github.com/repos/Expectrail/Expectrail/pulls{/number}",
+        "milestones_url": "https://api.github.com/repos/Expectrail/Expectrail/milestones{/number}",
+        "notifications_url": "https://api.github.com/repos/Expectrail/Expectrail/notifications{?since,all,participating}",
+        "labels_url": "https://api.github.com/repos/Expectrail/Expectrail/labels{/name}",
+        "releases_url": "https://api.github.com/repos/Expectrail/Expectrail/releases{/id}",
+        "deployments_url": "https://api.github.com/repos/Expectrail/Expectrail/deployments",
+        "created_at": "2026-10-27T02:31:33Z",
+        "updated_at": "2026-11-12T00:57:25Z",
+        "pushed_at": "2026-11-12T01:18:07Z",
+        "git_url": "git://github.com/Expectrail/Expectrail.git",
+        "ssh_url": "git@github.com:Expectrail/Expectrail.git",
+        "clone_url": "https://github.com/Expectrail/Expectrail.git",
+        "svn_url": "https://github.com/Expectrail/Expectrail",
+        "homepage": "https://expectrail.tech",
+        "size": 74446,
+        "stargazers_count": 1,
+        "watchers_count": 1,
+        "language": "Python",
+        "has_issues": true,
+        "has_projects": true,
+        "has_wiki": true,
+        "has_pages": true,
+        "has_discussions": false,
+        "forks_count": 0,
+        "mirror_url": null,
+        "archived": false,
+        "disabled": false,
+        "open_issues_count": 40,
+        "license": {
+          "key": "apache-2.0",
+          "name": "Apache License 2.0",
+          "spdx_id": "Apache-2.0",
+          "url": "https://api.github.com/licenses/apache-2.0",
+          "node_id": "MDc6TGljZW5zZTI="
+        },
+        "allow_forking": true,
+        "is_template": false,
+        "web_commit_signoff_required": false,
+        "has_pull_requests": true,
+        "pull_request_creation_policy": "all",
+        "topics": [
+          "ai-agents",
+          "continuous-delivery",
+          "continuous-deployment",
+          "continuous-integration",
+          "metaai",
+          "metamuse",
+          "verification"
+        ],
+        "visibility": "public",
+        "forks": 0,
+        "open_issues": 40,
+        "watchers": 1,
+        "default_branch": "main",
+        "temp_clone_token": null,
+        "custom_properties": {},
+        "organization": {
+          "login": "Expectrail",
+          "id": 354629299,
+          "node_id": "O_kgDOFSM2sw",
+          "avatar_url": "https://avatars.githubusercontent.com/u/354629299?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/Expectrail",
+          "html_url": "https://github.com/Expectrail",
+          "followers_url": "https://api.github.com/users/Expectrail/followers",
+          "following_url": "https://api.github.com/users/Expectrail/following{/other_user}",
+          "gists_url": "https://api.github.com/users/Expectrail/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/Expectrail/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/Expectrail/subscriptions",
+          "organizations_url": "https://api.github.com/users/Expectrail/orgs",
+          "repos_url": "https://api.github.com/users/Expectrail/repos",
+          "events_url": "https://api.github.com/users/Expectrail/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/Expectrail/received_events",
+          "type": "Organization",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "network_count": 0,
+        "subscribers_count": 0
+      }
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rulesets?includes_parents=true&per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "52",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": [
+        {
+          "id": 26914817,
+          "name": "Protect main",
+          "target": "branch",
+          "source_type": "Repository",
+          "source": "Expectrail/Expectrail",
+          "enforcement": "active",
+          "node_id": "RRS_lACqUmVwb3NpdG9yec5VisajzgGasAE",
+          "_links": {
+            "self": {
+              "href": "https://api.github.com/repos/Expectrail/Expectrail/rulesets/26914817"
+            },
+            "html": {
+              "href": "https://github.com/Expectrail/Expectrail/rules/26914817"
+            }
+          },
+          "created_at": "2026-11-10T03:53:47.097Z",
+          "updated_at": "2026-11-11T17:59:43.690Z"
+        }
+      ]
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rulesets/26914817?includes_parents=true",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "51",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "id": 26914817,
+        "name": "Protect main",
+        "target": "branch",
+        "source_type": "Repository",
+        "source": "Expectrail/Expectrail",
+        "enforcement": "active",
+        "conditions": {
+          "ref_name": {
+            "exclude": [],
+            "include": [
+              "~DEFAULT_BRANCH"
+            ]
+          }
+        },
+        "rules": [
+          {
+            "type": "deletion"
+          },
+          {
+            "type": "non_fast_forward"
+          },
+          {
+            "type": "pull_request",
+            "parameters": {
+              "required_approving_review_count": 0,
+              "dismiss_stale_reviews_on_push": true,
+              "required_reviewers": [],
+              "require_code_owner_review": false,
+              "dismissal_restriction": {
+                "enabled": false,
+                "allowed_actors": []
+              },
+              "require_last_push_approval": false,
+              "required_review_thread_resolution": false,
+              "require_extra_approval_for_unattributed_changes": true,
+              "allowed_merge_methods": [
+                "merge",
+                "squash",
+                "rebase"
+              ]
+            }
+          },
+          {
+            "type": "required_status_checks",
+            "parameters": {
+              "strict_required_status_checks_policy": false,
+              "do_not_enforce_on_create": false,
+              "required_status_checks": [
+                {
+                  "context": "test",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "obaaf-audit",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "capture-smoke",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "web-capture",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "seeded-bugs",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-gate1",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-harness-verify",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "feedback-offline",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-sandbox",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-bench-compare",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "private-export-scan",
+                  "integration_id": 15368
+                }
+              ]
+            }
+          }
+        ],
+        "node_id": "RRS_lACqUmVwb3NpdG9yec5VisajzgGasAE",
+        "created_at": "2026-11-10T03:53:47.097Z",
+        "updated_at": "2026-11-11T17:59:43.690Z",
+        "_links": {
+          "self": {
+            "href": "https://api.github.com/repos/Expectrail/Expectrail/rulesets/26914817"
+          },
+          "html": {
+            "href": "https://github.com/Expectrail/Expectrail/rules/26914817"
+          }
+        }
+      }
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rules/branches/main?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "50",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": [
+        {
+          "type": "deletion",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "Expectrail/Expectrail",
+          "ruleset_id": 26914817
+        },
+        {
+          "type": "non_fast_forward",
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "Expectrail/Expectrail",
+          "ruleset_id": 26914817
+        },
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews_on_push": true,
+            "required_reviewers": [],
+            "require_code_owner_review": false,
+            "dismissal_restriction": {
+              "enabled": false,
+              "allowed_actors": []
+            },
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": false,
+            "require_extra_approval_for_unattributed_changes": true,
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          },
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "Expectrail/Expectrail",
+          "ruleset_id": 26914817
+        },
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "strict_required_status_checks_policy": false,
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              {
+                "context": "test",
+                "integration_id": 15368
+              },
+              {
+                "context": "obaaf-audit",
+                "integration_id": 15368
+              },
+              {
+                "context": "capture-smoke",
+                "integration_id": 15368
+              },
+              {
+                "context": "web-capture",
+                "integration_id": 15368
+              },
+              {
+                "context": "seeded-bugs",
+                "integration_id": 15368
+              },
+              {
+                "context": "agents-gate1",
+                "integration_id": 15368
+              },
+              {
+                "context": "agents-harness-verify",
+                "integration_id": 15368
+              },
+              {
+                "context": "feedback-offline",
+                "integration_id": 15368
+              },
+              {
+                "context": "agents-sandbox",
+                "integration_id": 15368
+              },
+              {
+                "context": "agents-bench-compare",
+                "integration_id": 15368
+              },
+              {
+                "context": "private-export-scan",
+                "integration_id": 15368
+              }
+            ]
+          },
+          "ruleset_source_type": "Repository",
+          "ruleset_source": "Expectrail/Expectrail",
+          "ruleset_id": 26914817
+        }
+      ]
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/branches/main",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "49",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "name": "main",
+        "commit": {
+          "sha": "bdccc2d17b697fc7d46d7085f75fe2f359626685",
+          "node_id": "C_kwDOVYrGo9oAKGJkY2NjMmQxN2I2OTdmYzdkNDZkNzA4NWY3NWZlMmYzNTk2MjY2ODU",
+          "commit": {
+            "author": {
+              "name": "Sean Keluo-Udeke",
+              "email": "55066947+seanudeke@users.noreply.github.com",
+              "date": "2026-11-12T00:49:32Z"
+            },
+            "committer": {
+              "name": "GitHub",
+              "email": "noreply@github.com",
+              "date": "2026-11-12T00:49:32Z"
+            },
+            "message": "Merge pull request #314 from Expectrail/arch/307-lost-worker-processes\n\nA killed worker's processes are stopped, found by the job's id and never by a group number",
+            "tree": {
+              "sha": "1e4366644cfd355c0a67a9088d4ab56089b1d092",
+              "url": "https://api.github.com/repos/Expectrail/Expectrail/git/trees/1e4366644cfd355c0a67a9088d4ab56089b1d092"
+            },
+            "url": "https://api.github.com/repos/Expectrail/Expectrail/git/commits/bdccc2d17b697fc7d46d7085f75fe2f359626685",
+            "comment_count": 0,
+            "verification": {
+              "verified": true,
+              "reason": "valid",
+              "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJq9Q0cCRC1aQ7uu5UhlAAAqd4QAAR/7Li7YfWhqw3d+pSY66qh\nd9YVZDJW0nOnPtAm6asfyVgK8VjmS0SBW7f8iZDqpMRzjB5h8YWnqJn4oIC+Nlb0\nf3vTM797MfNez8OXYneLnUBoHqGpaIYb/IXO0F2VqcOZimAwWvnb8ERn5AgBpF+M\n0oXNTOgNZdFxZG5kdml4hQd/6Nc6nCX7WAW/bRhupcfdMZdjnZToFLeL4BYOxMzx\nnWftjK9uoPqLEcrfX80lCpplpXD/UNSkbvcCrxJndi4gCQ4ifCdMsrAiUOE2N89I\nGyk0sftgjanJRRDms7qOs6aRg3oR5DaeuvS6xnKbhWsHNvKEixJCNnOHTd6epHE1\n/tMJLlExveB9ifiOF+uVSnQ2MLJzyI9uOPdTQ98yrn+nLcLb43eiwEQKfqwpPBtd\nI0kxrlZZGE2LyG6vw0k+FrEvmR/qkSroA/gUu+WICtvHfEgScU5l8451/9iAcR0F\nYJxw7CMGQ8lOTrIQnIUJBuqvcoR9KDobnzJt3TZWGCr7X6BX9InpWBgHKj48TEY3\nbw9v6C3dzE244Y/rMJiuUzcvT0CILqsGqTmT3jcCxk+Xx88fFD5mHf4hIKi2zXVp\nS1VHSfE489UsueVFr4C9PjgB3eZB+sgwTAVu/eg+Ob1oUu64+iM62GqAEeENX6sR\nb+yY51maqwDfSKA6CHyy\n=IIOu\n-----END PGP SIGNATURE-----\n",
+              "payload": "tree 1e4366644cfd355c0a67a9088d4ab56089b1d092\nparent fdd88c3552e137baa85c220f00cb02d40c835636\nparent 8cd6ff2b7514e8a67018ced87a886bf1cfe52ae1\nauthor Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com> 1794444572 -0500\ncommitter GitHub <noreply@github.com> 1794444572 -0500\n\nMerge pull request #314 from Expectrail/arch/307-lost-worker-processes\n\nA killed worker's processes are stopped, found by the job's id and never by a group number",
+              "verified_at": "2026-11-12T00:49:33Z"
+            }
+          },
+          "url": "https://api.github.com/repos/Expectrail/Expectrail/commits/bdccc2d17b697fc7d46d7085f75fe2f359626685",
+          "html_url": "https://github.com/Expectrail/Expectrail/commit/bdccc2d17b697fc7d46d7085f75fe2f359626685",
+          "comments_url": "https://api.github.com/repos/Expectrail/Expectrail/commits/bdccc2d17b697fc7d46d7085f75fe2f359626685/comments",
+          "author": {
+            "login": "seanudeke",
+            "id": 55066947,
+            "node_id": "MDQ6VXNlcjU1MDY2OTQ3",
+            "avatar_url": "https://avatars.githubusercontent.com/u/55066947?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/seanudeke",
+            "html_url": "https://github.com/seanudeke",
+            "followers_url": "https://api.github.com/users/seanudeke/followers",
+            "following_url": "https://api.github.com/users/seanudeke/following{/other_user}",
+            "gists_url": "https://api.github.com/users/seanudeke/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/seanudeke/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/seanudeke/subscriptions",
+            "organizations_url": "https://api.github.com/users/seanudeke/orgs",
+            "repos_url": "https://api.github.com/users/seanudeke/repos",
+            "events_url": "https://api.github.com/users/seanudeke/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/seanudeke/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+          },
+          "committer": {
+            "login": "web-flow",
+            "id": 19864447,
+            "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+            "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/web-flow",
+            "html_url": "https://github.com/web-flow",
+            "followers_url": "https://api.github.com/users/web-flow/followers",
+            "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+            "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+            "organizations_url": "https://api.github.com/users/web-flow/orgs",
+            "repos_url": "https://api.github.com/users/web-flow/repos",
+            "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/web-flow/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+          },
+          "parents": [
+            {
+              "sha": "fdd88c3552e137baa85c220f00cb02d40c835636",
+              "url": "https://api.github.com/repos/Expectrail/Expectrail/commits/fdd88c3552e137baa85c220f00cb02d40c835636",
+              "html_url": "https://github.com/Expectrail/Expectrail/commit/fdd88c3552e137baa85c220f00cb02d40c835636"
+            },
+            {
+              "sha": "8cd6ff2b7514e8a67018ced87a886bf1cfe52ae1",
+              "url": "https://api.github.com/repos/Expectrail/Expectrail/commits/8cd6ff2b7514e8a67018ced87a886bf1cfe52ae1",
+              "html_url": "https://github.com/Expectrail/Expectrail/commit/8cd6ff2b7514e8a67018ced87a886bf1cfe52ae1"
+            }
+          ]
+        },
+        "_links": {
+          "self": "https://api.github.com/repos/Expectrail/Expectrail/branches/main",
+          "html": "https://github.com/Expectrail/Expectrail/tree/main"
+        },
+        "protected": true,
+        "protection": {
+          "enabled": false,
+          "required_status_checks": {
+            "enforcement_level": "off",
+            "contexts": [],
+            "checks": []
+          }
+        },
+        "protection_url": "https://api.github.com/repos/Expectrail/Expectrail/branches/main/protection"
+      }
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "48",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 3,
+        "environments": [
+          {
+            "id": 25894631060,
+            "node_id": "EN_kwDOVYrGo88AAAAGB3C2lA",
+            "name": "github-pages",
+            "url": "https://api.github.com/repos/Expectrail/Expectrail/environments/github-pages",
+            "html_url": "https://github.com/Expectrail/Expectrail/deployments/activity_log?environments_filter=github-pages",
+            "created_at": "2026-10-31T18:51:47Z",
+            "updated_at": "2026-10-31T18:51:47Z",
+            "can_admins_bypass": true,
+            "protection_rules": [
+              {
+                "id": 70815635,
+                "node_id": "GA_kwDOVYrGo84EOI-T",
+                "type": "branch_policy"
+              }
+            ],
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          },
+          {
+            "id": 26858049335,
+            "node_id": "EN_kwDOVYrGo88AAAAGQN1PNw",
+            "name": "main-only",
+            "url": "https://api.github.com/repos/Expectrail/Expectrail/environments/main-only",
+            "html_url": "https://github.com/Expectrail/Expectrail/deployments/activity_log?environments_filter=main-only",
+            "created_at": "2026-11-10T17:10:02Z",
+            "updated_at": "2026-11-10T17:10:02Z",
+            "can_admins_bypass": true,
+            "protection_rules": [
+              {
+                "id": 71998869,
+                "node_id": "GA_kwDOVYrGo84ESp2V",
+                "type": "branch_policy"
+              }
+            ],
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          },
+          {
+            "id": 26745039996,
+            "node_id": "EN_kwDOVYrGo88AAAAGOiDsfA",
+            "name": "unity",
+            "url": "https://api.github.com/repos/Expectrail/Expectrail/environments/unity",
+            "html_url": "https://github.com/Expectrail/Expectrail/deployments/activity_log?environments_filter=unity",
+            "created_at": "2026-11-09T18:55:10Z",
+            "updated_at": "2026-11-09T18:55:10Z",
+            "can_admins_bypass": true,
+            "protection_rules": [
+              {
+                "id": 71872493,
+                "node_id": "GA_kwDOVYrGo84ESK_t",
+                "type": "required_reviewers",
+                "prevent_self_review": false,
+                "reviewers": [
+                  {
+                    "type": "User",
+                    "reviewer": {
+                      "login": "seanudeke",
+                      "id": 55066947,
+                      "node_id": "MDQ6VXNlcjU1MDY2OTQ3",
+                      "avatar_url": "https://avatars.githubusercontent.com/u/55066947?v=4",
+                      "gravatar_id": "",
+                      "url": "https://api.github.com/users/seanudeke",
+                      "html_url": "https://github.com/seanudeke",
+                      "followers_url": "https://api.github.com/users/seanudeke/followers",
+                      "following_url": "https://api.github.com/users/seanudeke/following{/other_user}",
+                      "gists_url": "https://api.github.com/users/seanudeke/gists{/gist_id}",
+                      "starred_url": "https://api.github.com/users/seanudeke/starred{/owner}{/repo}",
+                      "subscriptions_url": "https://api.github.com/users/seanudeke/subscriptions",
+                      "organizations_url": "https://api.github.com/users/seanudeke/orgs",
+                      "repos_url": "https://api.github.com/users/seanudeke/repos",
+                      "events_url": "https://api.github.com/users/seanudeke/events{/privacy}",
+                      "received_events_url": "https://api.github.com/users/seanudeke/received_events",
+                      "type": "User",
+                      "user_view_type": "public",
+                      "site_admin": false
+                    }
+                  }
+                ]
+              }
+            ],
+            "deployment_branch_policy": null
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments/github-pages/deployment-branch-policies?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "47",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 1,
+        "branch_policies": [
+          {
+            "id": 65053457,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3k2NTA1MzQ1Nw==",
+            "name": "main",
+            "type": "branch"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments/main-only/deployment-branch-policies?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "46",
+        "x-ratelimit-reset": "1794450796",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 1,
+        "branch_policies": [
+          {
+            "id": 66235781,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3k2NjIzNTc4MQ==",
+            "name": "main",
+            "type": "branch"
+          }
+        ]
+      }
+    }
+  ]
+}
