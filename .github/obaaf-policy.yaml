@@ -26,11 +26,13 @@ release:
 
 agents:
   check: true
-  # Agent commits are checked from this commit to the released one (D-025). It is the commit
-  # of release 0.3.0 (tag v0.3.0), the first release that passed the full `obaaf verify release`
+  # Commits from OBAAF's agent lane (a record trailer, a record file, or the effect lane's
+  # identity) are checked from this commit to the released one (D-025). It is the commit of
+  # release 0.3.0 (tag v0.3.0), the first release that passed the full `obaaf verify release`
   # gate, with the whole reachable history scanned (run 43163897279, 2026-11-12).
   # Move it forward only in a reviewed change, and only to a commit whose release passed.
-  # Never set it to v0.2.0 or earlier: those tags only ran signature-type checks.
+  # The commits of v0.1.0 and v0.2.0 do not qualify: 0.1.0 was uploaded with no check, and
+  # 0.2.0 with a provenance signature check only.
   since: "5162a177955b4f18ba190d048862e66246b4af05"
   records_dir: .obaaf/records
   propose_workflow: Obaaf/OBAAF/.github/workflows/obaaf-agent-propose.yml

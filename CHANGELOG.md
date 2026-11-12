@@ -65,7 +65,7 @@ GitHub hands an action its inputs as environment variables named in upper case, 
 
 ### Release policy
 
-- This repository's own release policy now sets `agents.since` to the commit of release 0.3.0, the first release that passed the full `obaaf verify release` gate. From the next release on, agent commits are checked from that commit to the released one, and no longer over the whole history (D-025). Nothing changes for adopters.
+- This repository's own release policy now sets `agents.since` to the commit of release 0.3.0, the first release that passed the full `obaaf verify release` gate. Once this is on `main`, a release checks commits from OBAAF's agent lane (a record trailer, a record file, or the effect lane's identity) from that commit to the released one, and no longer over the whole history (D-025). There were none in the history up to 0.3.0. Commits written with an AI assistant and merged through ordinary review are not what this check counts. Nothing changes for adopters.
 
 ### Fixed
 

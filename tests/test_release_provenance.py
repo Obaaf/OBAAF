@@ -143,7 +143,7 @@ class ObafReleasePolicyTest(unittest.TestCase):
         # The commit of release 0.3.0, the first release that passed the full gate (D-025). A later
         # value must be the commit of a later release that passed, set in a reviewed change.
         self.assertEqual(policy.agents_since, "5162a177955b4f18ba190d048862e66246b4af05")
-        self.assertNotIn("0123456789abcdef", text)   # the placeholder from before the first release
+        self.assertNotIn("0123456789abcdef", text)   # the placeholder from before release 0.3.0
         self.assertNotIn("OWNER/REPO", text)
         self.assertNotIn("obaaf-release.yml", text)
 
