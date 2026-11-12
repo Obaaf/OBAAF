@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 
 from obaaf import __version__
@@ -15,6 +16,14 @@ from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
 SECURITY_SEVERITY = {"high": "8.0", "medium": "5.0", "low": "2.0", "info": "0.0"}
+
+
+def semantic_version(version: str = __version__) -> str:
+    """``version`` as Semantic Versioning writes it, for SARIF's ``semanticVersion``.
+
+    A development version is a pre-release there: 0.4.0.dev0 is 0.4.0-dev.0. It is not 0.4.0, a release
+    that does not exist yet and that a report from the code before it must not claim to come from."""
+    return re.sub(r"\.dev(\d+)\Z", r"-dev.\1", version)
 
 
 def _requirements(rule: dict) -> str:
@@ -325,7 +334,7 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None) -> str:
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
-            "tool": {"driver": {"name": "obaaf", "version": __version__, "semanticVersion": __version__.split(".dev")[0],
+            "tool": {"driver": {"name": "obaaf", "version": __version__, "semanticVersion": semantic_version(),
                                 "rules": rules}},
             "results": results,
         }],
