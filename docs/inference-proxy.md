@@ -32,7 +32,7 @@ Agent jobs must reach only the proxy and the package sources the task needs (R7)
 - run the agent job on ephemeral self-hosted runners behind a network policy that allows only the proxy, or
 - use a runtime egress monitor that blocks other destinations (the template's optional step, enabled with the repository variable `OBAAF_EGRESS_MONITOR`).
 
-Declare the policy in the job's `OBAAF_EGRESS` variable; the agent-run record copies it. A declaration alone enforces nothing, so `obaaf check` reports agent jobs whose egress is only declared, or limited by a monitor that runs only under a condition, as well as agent jobs with no policy at all (`OBAAF-GHA-020`, low).
+Declare the policy in the job's `OBAAF_EGRESS` variable; the agent-run record copies it. A declaration alone enforces nothing, so `obaaf check` reports agent jobs whose egress is only declared, or limited by a monitor that runs only under a condition, as well as agent jobs with no policy at all (`OBAAF-GHA-020`, low). A monitor that always runs is reported as "cannot tell" until the checker can verify it; see [the controls the checker reads](checker-configuration.md#controls).
 
 ## Open design points
 

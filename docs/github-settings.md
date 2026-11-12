@@ -1,6 +1,6 @@
 # GitHub settings for the OBAAF templates
 
-The templates enforce what a workflow file can enforce. The rest lives in repository settings, which `obaaf check` cannot read. Set these before using the templates, and recheck them when the self-assessment asks for evidence. Menu names follow GitHub's documentation as of October 2026.
+The templates enforce what a workflow file can enforce. The rest lives in repository settings, which `obaaf check` cannot read. `obaaf audit` reads most of the settings on this page and records what it could not read; it does not judge them yet ([the settings audit](settings-audit.md)). Set these before using the templates, and recheck them when the self-assessment asks for evidence. Menu names follow GitHub's documentation as of October 2026.
 
 ## Actions permissions
 

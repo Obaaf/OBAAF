@@ -159,6 +159,7 @@ ignore:
   - rule: OBAAF-JEN-007
     path: Jenkinsfile
     job: Review                           # the stage label
+    owner: "@my-org/platform"
     reason: "Agent pods run in the ai-agents namespace, whose NetworkPolicy allows only the inference proxy"
     until: 2027-03-31
 ```

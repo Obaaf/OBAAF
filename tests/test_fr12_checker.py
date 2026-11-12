@@ -236,7 +236,11 @@ class CheckerBypassesTest(unittest.TestCase):
             enforced = wf.replace("    steps:\n", "    steps:\n"
                                   f"      - uses: step-security/harden-runner@{SHA}\n"
                                   "        with: {egress-policy: block, allowed-endpoints: 'proxy.example:443'}\n")
-            self.assertNotIn("OBAAF-GHA-020", rules_of(findings_for(tmp, enforced)))
+            # A blocking monitor that always runs is no longer a pass: the checker does not read what
+            # makes it hold (its version, its place before the agent, whether the job can undo it),
+            # so the finding stays and says "cannot tell".
+            found = [f for f in findings_for(tmp, enforced) if f.rule == "OBAAF-GHA-020"]
+            self.assertEqual([(f.kind, f.state) for f in found], [("unverified-monitor", "cannot-tell")])
 
     def test_an_effect_job_gated_by_a_needed_job_counts_only_without_always(self):
         wf = ("on:\n  workflow_run: {workflows: [Agent], types: [completed]}\npermissions: {}\njobs:\n"
@@ -321,6 +325,7 @@ class ConfigurationTest(unittest.TestCase):
             (tmp / ".github" / "CODEOWNERS").write_text("/.github/ @studio/build\n")
             config = tmp / ".github" / "obaaf.yml"
             config.write_text("ignore:\n  - rule: OBAAF-GHA-013\n    path: .github/workflows/ci.yml\n"
+                              "    owner: '@studio/build'\n"
                               "    reason: Ephemeral runners, see issue 9\n    until: 2027-01-31\n")
             before = checker.check(tmp, today=date(2026, 12, 1))
             suppressed = [f for f in before.findings if f.rule == "OBAAF-GHA-013"]

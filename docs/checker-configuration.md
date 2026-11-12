@@ -125,25 +125,138 @@ The checker refuses a configuration with a setting it does not know, so a misspe
 
 The rule checks the workflow files against what you declared. It cannot see that the secret has actually been removed from the repository and organization, or that the environment's deployment branches are limited, so check those in the settings.
 
+<a id="lifecycle"></a>
+## What happens to a finding
+
+Every finding is in one of four states. JSON output gives the state of each finding as `state`. The text report prints a line under a finding when there is something to say about it: who accepted it and until when, why an entry that names it does not count, or what was established about its controls. A finding with no such line is new. Findings ignored by configuration are listed at the end, one line each.
+
+| State | What it means | Does it fail the check? |
+| --- | --- | --- |
+| **new** | Nobody has decided anything about it, or the decision does not count (see below). | Yes, at or above `--fail-on` |
+| **accepted** | A valid acceptance names it: an [ignore entry](#ignore) or a [baseline entry](#baseline) with an owner, a reason and an expiry date. | No, until the date passes |
+| **fixed** | Every control that clears the finding was read and verified by the checker. It is listed at the end of the report with the controls. | No |
+| **cannot tell** (`cannot-tell` in JSON) | No control that would clear it is known to be missing, but the checker could not read what decides at least one of them. | Yes. The checker never assumes a control it cannot read. |
+
+Two rules report controls: a secret in an agent job (OBAAF-GHA-005) and an agent job with no egress restriction (OBAAF-GHA-020). Every other finding is new or accepted.
+
+<a id="controls"></a>
+### Controls that clear a finding
+
+Under a finding that has controls the report lists each one with a verdict:
+
+- **verified**: the checker read what decides it, and it holds.
+- **not met**: the checker read it, and it does not hold.
+- **cannot tell**: the checker could not read what decides it. This is never treated as a pass.
+
+A finding is fixed when every control is verified. If none is known to be missing and at least one could not be read, the finding is "cannot tell". If any is not met, it is new. Controls do not change which finding an acceptance names, so a finding can be accepted whatever its controls say.
+
+```text
+.github/workflows/agent.yml
+     5  HIGH   OBAAF-GHA-005  Secret available to an agent job  [job agent]
+        Agent job 'agent' receives MODEL_API_KEY.
+        Controls (it is cleared when all 4 are verified):
+          verified     each of the job's secrets is listed in protected_secrets, and the job declares the environment named there (MODEL_API_KEY in environment 'main-only')
+          cannot tell  the secrets are stored only in that environment, and only protected branches may use it (where a secret is stored and which branches may use environment 'main-only' are repository settings, which obaaf check does not read; obaaf audit reads environments and their branch rules)
+          verified     no pull request, issue or comment starts the job, and its checkout steps and the event fields it reads take nothing from one (started only by workflow_dispatch; 1 checkout step(s) take the ref the event names)
+          not met      a control the checker recognises limits the job's network access to an allow-list (no blocking egress control in the job)
+```
+
+**Neither finding can be cleared today.** For OBAAF-GHA-005 the second control is a repository setting, which `obaaf check` does not read, and for both findings no egress control is reported as verified yet. Until that changes, the controls say what is in place and what is missing, and the finding is accepted with an owner, a reason and an expiry date, or it fails the check. JSON output gives the controls of each finding as `controls`, each with an `id` that stays the same when the wording changes.
+
+What each control is, and what the checker reads to decide it:
+
+| Control (`id`) | Verified when | Not met when | Cannot tell when |
+| --- | --- | --- | --- |
+| `secrets-protected` | Every secret the job references matches an entry in [`protected_secrets`](#protected-secrets), and the job declares the environment the entry names (any environment, for an entry that names none). This is what OBAAF-GHA-024 checks for the secrets that are listed. | A secret is not listed; the job can take every secret (`toJSON(secrets)`, `secrets[...]`, `secrets: inherit`); the job declares no environment, or another one; the job calls a reusable workflow, which cannot declare an environment. | The job's environment is an expression, is not written as text (a number, true or false, a list or a mapping: YAML readers do not agree on how numbers are spelt), or differs from the one named only in the case of letters outside ASCII. |
+| `environment-restricted` | Never, today. | The job declares no environment, or calls a reusable workflow: its secrets then come from the repository or organization. | In every other case. Where a secret is stored, and which branches may use an environment, are repository settings. [`obaaf audit`](settings-audit.md) reads environments and their branch rules; `obaaf check` does not use what it reads yet. |
+| `no-outsider-input` | Only `push`, `workflow_dispatch`, `schedule` or `release` can start the job; every `actions/checkout` step takes the ref the event names or one written out in the workflow; and no `${{ }}` in the job, and no `if:` of the job or its steps, reads a field someone without write access can write (the fields OBAAF-GHA-010 lists). | A pull request, an issue, a comment or another outsider's event can start the job, a run that follows any other run included; a checkout step names a pull request's ref; a script uses a command the checker knows to fetch a pull request's code (`gh pr checkout`, `gh pr diff`, `git fetch` or `git pull` of `pull/N/head`, a `.patch` address); an expression or condition reads such a field (a commit message, for example). | Another event can start the job (`workflow_call`, `repository_dispatch`, `merge_group`, a run that the job's `if:` limits to runs started by `push`, `release`, `workflow_dispatch` or `schedule`), or no event was found; a checkout names another repository or a ref computed when the job runs, or takes its inputs from an expression; the job calls a reusable workflow. |
+| `egress-enforced` | Never, today. | The job has no blocking egress control, has one behind an `if:`, starts one anywhere but as its first step on its own (after other steps, in a `parallel` group or in the background, other steps can run without it), or only declares a policy in `OBAAF_EGRESS`. | The job's first step uses `step-security/harden-runner` with `egress-policy: block` and no `if:`. Whether that limits the agent depends on its version and on the job being unable to undo it with sudo or a container, which the checker does not read yet. Also when a monitor's `egress-policy` is computed when the job runs. |
+
+What the third control does not read, so that "verified" is not taken for more than it is. Its name says what it covers: the events, the checkout steps and the event fields. It does not cover what a script, an action other than `actions/checkout` or the agent itself fetches while the job runs (issue text fetched with `gh`, a web page, a pull request fetched by a command the checker does not know); a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; a value another job hands over through `needs.*.outputs`; or the content of a local action. A proxy that holds the model key is not counted as a control: none has been tested.
+
+A baseline entry that accepts OBAAF-GHA-020 for a monitor the checker cannot verify is for the workflow file as it stood, byte for byte; the finding shows the first 32 characters of the file's SHA-256. Any later change to that file makes the finding a new one, to be looked at again. That is blunt on purpose: the checker cannot verify the monitor, so it does not judge which changes to it matter. An [ignore entry](#ignore) names the rule, the file and the job and holds until its date; use one if the finding should stay accepted while the file changes.
+
+Which events can start a job is read from the tokens of the job's `if:`. Only a comparison of `github.event_name` with a text (`==` or `!=`, either way round), on its own or joined to other conditions by `&&` and `||`, rules an event out. A negation, a comparison of a comparison, a function, and words inside a string rule nothing out. An `if:` that has `${{ }}` and anything outside it, even a space or the line break of a `|` block, is a text to GitHub and is always true, so it rules nothing out either. In a workflow that other workflows call, `github.event_name` is the caller's event, so no test rules `workflow_call` out. A job that needs another job is limited to the events that job runs on, unless its `if:` has `always(`, `failure(` or `cancelled(` anywhere in it, or `success()` anywhere but as one of the conditions joined by `&&`.
+
+Input names under `with:` are read with A to Z in either case, as GitHub reads them: `REF:` is the `ref` input. A step that gives the same input twice in two spellings is reported as an error, because the checker cannot tell which value GitHub uses. So is an input name with a letter outside ASCII, because it is not established what GitHub's upper-casing makes of one.
+
+### An acceptance needs an owner, a reason and an expiry date
+
+Accepting a finding is a decision somebody makes for a while. The checker enforces three things about it, in an ignore entry and in a baseline entry alike:
+
+- **an owner**: a user (`@octocat`), a team (`@my-org/build`) or an e-mail address, the forms a CODEOWNERS file takes. The checker checks the form only. It cannot tell whether the account exists, or that `@tbd` is nobody.
+- **a reason**, in words. The checker cannot judge a reason. It refuses one with fewer than four letters or digits, which rules out an empty one, a dot, `n/a` and `tbd`, and nothing more: `aaaa` is a reason to the checker, and so are four letters of a script whose letters look like punctuation.
+- **an expiry date** (`YYYY-MM-DD`) that has not passed and is at most 366 days ahead. An acceptance is looked at again at least once a year; a date of 2999 would be a permanent acceptance with a date on it.
+
+An entry that lacks one of these, has expired, or is dated too far ahead accepts nothing. Its finding counts as new and fails the check like any other, and the report says under the finding what the entry lacks:
+
+```text
+    12  HIGH   OBAAF-GHA-005  Secret available to an agent job  [job triage]
+        Agent job 'triage' receives MODEL_API_KEY.
+        Not accepted: the baseline entry that names this finding does not count, because it expired on 2026-10-01.
+```
+
 <a id="baseline"></a>
 ## Adopting the checker without hiding regressions
 
 A project that adopts the checker with existing findings usually starts in reporting mode (`--fail-on never`). Reporting mode lets new findings in unnoticed. A baseline keeps the existing findings visible while failing on anything new:
 
 ```bash
-obaaf check . --write-baseline .github/obaaf-baseline.json   # record today's findings, once
+# record today's findings, once, in somebody's name
+obaaf check . --write-baseline .github/obaaf-baseline.json \
+  --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 obaaf check . --baseline .github/obaaf-baseline.json --fail-on low
 ```
 
-With `--baseline`, a finding recorded in the baseline is still reported, marked `(baseline)` in text, `"baselined": true` in JSON and `baselineState: unchanged` in SARIF, but does not fail the check. Every other finding at or above `--fail-on` fails it. So does a baseline entry at or above `--fail-on` that no longer matches any finding: regenerate the baseline with `--write-baseline` and commit it, so the improvement is locked in and the finding cannot come back unnoticed.
+With `--baseline`, a finding that a valid baseline entry accepts is still reported, with who accepted it and until when. It is marked `(baseline)` in text, `"baselined": true` and `"state": "accepted"` in JSON and `baselineState: unchanged` in SARIF, and it does not fail the check. Every other finding at or above `--fail-on` fails it. So does a baseline entry at or above `--fail-on` that no longer matches any finding: run `--write-baseline` again and commit the result, so the improvement is locked in and the finding cannot come back unnoticed.
 
-Findings are matched on rule, severity, file, job, step and message, but not line number, so moving code does not churn the baseline. A finding that becomes more severe, or a job that receives an additional secret, no longer matches and counts as new. Findings already ignored by configuration are not written to the baseline, and neither are findings whose ignore entry has expired: renew or remove the entry instead. An entry for a finding that has since been given an ignore entry is not stale. Every entry's fingerprint is recomputed from its rule, severity, file, job, step and message when the baseline is read, and a baseline whose entry does not match is refused, so the text a reviewer reads is the finding that is accepted.
+An entry looks like this:
 
-The baseline is a list of accepted risks, so review changes to it like changes to the workflows: put it under CODEOWNERS. A change that adds a line to the baseline is accepting a new finding, and the diff shows exactly which one. Prefer an `ignore` entry, with its reason and expiry, for a finding you have decided does not apply.
+```json
+{
+  "rule": "OBAAF-GHA-005",
+  "severity": "high",
+  "path": ".github/workflows/agent.yml",
+  "job": "triage",
+  "kind": "secrets",
+  "facts": { "secrets": ["MODEL_API_KEY"] },
+  "owner": "@my-org/build",
+  "reason": "Inherited on adoption; tracked in issue 12",
+  "expires": "2027-03-31"
+}
+```
 
+What an entry accepts:
+
+- **Exactly the finding its fields describe**: the rule, the file, the job and step, which of the rule's cases it is (`kind`), and the values it is about (`facts`: which secrets, which triggers, which action). There is no fingerprint beside the text, so the lines a reviewer reads in a diff are the acceptance. A job that receives one more secret is a different finding and counts as new.
+- **Not its line number, and not the wording of a rule's message.** Moving code does not disturb a baseline, and neither does a release of OBAAF that words a rule's message differently. There are three exceptions, where text is the finding:
+  - *OBAAF-GHA-003 (an agent job can write)*: why the job is an agent job is one of its facts, as the text the checker shows (`uses anthropics/claude-code-action`, `runs an agent CLI in 'Agent'`, `set by OBAAF_LANE`). When that text changes, the finding counts as new: another recognised action, a command in another step, a declaration added where the agent was recognised before, or a later release that words the reason differently. The text is not a description of the agent. Another command in a step of the same name, a second agent added after the first, and any change of agent in a job that is declared an agent job all leave it as it was, and the acceptance still covers the job. 0.3.0 behaved the same way.
+  - *OBAAF-INS-001 (hidden characters)*: each character is a fact together with a digest of the line it is on. A line ends at a line feed or a carriage return and nowhere else: a form feed, a vertical tab or U+2028 does not end it. A line that moves up or down is the same finding. The same character with any other text on its line is another finding, because what a direction override does depends on the text beside it. Text on the lines before and after is not part of it.
+  - *Jenkins findings* have no `kind` or `facts` yet. They are identified by their message (`"message": "..."` in the entry), line numbers in it included, so moving code or a change of wording does disturb them.
+- **At the severity it was accepted at, or lower.** If the finding is now more severe than the entry says, the entry does not cover it.
+- **One finding per entry.** Two findings that differ only in their line need two entries.
+- **A step by its name.** A finding on a step names it by the step's `name`, else its `id`, else the action it uses, else its position (`step 3`). Give a name to a step that carries an accepted finding, or a step inserted above it makes the finding a new one.
+
+Writing a baseline again never renews an acceptance by itself. Entries of the file being replaced that are still valid keep their own owner, reason and expiry date (and are written at the finding's present severity, if that is lower than it was). Only findings that no valid entry accepts are written with the `--owner`, `--reason` and `--expires` you give, and if there are any and you give none, nothing is written. So a diff of the baseline shows who accepted what, why, and until when, one entry at a time. `--write-baseline` replaces a baseline: it does not write over a file that exists and is not one. Findings already ignored by configuration are not written to the baseline. Findings whose ignore entry has expired or does not count are not newly accepted either: renew, complete or remove the entry instead. An entry for a finding that has since been given an ignore entry is not stale.
+
+The baseline is a list of accepted risks, so review changes to it like changes to the workflows: put it under CODEOWNERS. Prefer an `ignore` entry for a finding you have decided does not apply.
+
+<a id="baseline-migrate"></a>
+### A baseline written by 0.2.0 or 0.3.0
+
+Those versions wrote `obaaf-baseline/v0.1` files, whose entries name no owner, reason or expiry date. The file is still read, and each entry still finds its finding, but none of them accepts one: with `--fail-on low` the check fails until the file is converted. The report says so once, with the command:
+
+```bash
+obaaf baseline migrate .github/obaaf-baseline.json \
+  --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
+```
+
+`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
+
+<a id="ignore"></a>
 ## When a finding does not apply
 
-Suppress a finding you have reviewed with an expiring `ignore` entry. Every entry needs a rule, a path, a reason, and an `until` date, and the path may not match everything:
+Suppress a finding you have reviewed with an expiring `ignore` entry. Every entry needs a rule, a path, an owner, a reason and an `until` date, and the path may not match everything:
 
 ```yaml
 # .github/obaaf.yml
@@ -151,9 +264,12 @@ ignore:
   - rule: OBAAF-GHA-013
     path: .github/workflows/ci.yml
     job: build
+    owner: "@my-org/build"
     reason: Reviewed fork selector and ephemeral runner lifecycle, see issue 42
     until: 2027-01-31
 ```
+
+An ignore entry is an acceptance, so [the same three things](#lifecycle) are enforced. A configuration file whose entries have no `owner` (every file written for 0.3.0 or earlier) still loads, but those entries ignore nothing until an owner is added, and neither does an entry dated more than 366 days ahead; the report says which. An entry with no rule, path, reason or `until`, or with an `until` that is not a plain date (`YYYY-MM-DD`), is a configuration error and the check does not run.
 
 This is also how to record a reviewed runner pool without suppressing findings
 for other jobs. GHA-013 distinguishes:
@@ -173,7 +289,8 @@ Do not use an ignore entry merely to obtain a green check.
 
 A release on PyPI does not contain changes merged after it; the changelog's
 "Unreleased" section lists them. Everything described on this page is in version
-0.3.0. Use a separate environment and install a reviewed, full Git commit SHA
+0.3.0, except the states of a finding, the owner, reason and expiry date that an
+acceptance needs, and `obaaf baseline migrate`, which are not released yet. Use a separate environment and install a reviewed, full Git commit SHA
 when piloting unreleased code:
 
 ```bash
@@ -199,7 +316,7 @@ steps that run an agent, and lane overrides and ignore entries name a stage as `
 
 ## Egress
 
-`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020` and the agent lane templates for how egress is enforced.
+`OBAAF_EGRESS` records the egress policy an agent job is meant to run under. It documents intent, it is not enforcement. See `OBAAF-GHA-020`, [the controls the checker reads](#controls) and the agent lane templates for how egress is enforced.
 
 ## Reference
 
