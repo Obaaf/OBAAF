@@ -82,7 +82,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["type", "parameters"],
-        "properties": {"type": {"type": "string"}, "parameters": {"type": "object"}}
+        "properties": {"type": {"type": "string"}, "parameters": {"type": ["object", "null"]}}
       }
     },
     "repository": {
@@ -128,9 +128,9 @@
       "additionalProperties": false,
       "required": ["type", "ruleset_id", "ruleset_source_type", "ruleset_source", "parameters"],
       "properties": {
-        "type": {"type": "string"}, "ruleset_id": {"type": ["integer", "null"]},
+        "type": {"type": "string"}, "ruleset_id": {"$ref": "#/$defs/id"},
         "ruleset_source_type": {"$ref": "#/$defs/text_or_null"}, "ruleset_source": {"$ref": "#/$defs/text_or_null"},
-        "parameters": {"type": "object"}
+        "parameters": {"type": ["object", "null"]}
       }
     },
     "status_checks": {
@@ -238,7 +238,7 @@
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "deployment_branches", "wait_timer", "reviewers", "prevent_self_review", "other_protection_rules"],
+      "required": ["name", "deployment_branches", "wait_timer", "reviewers", "prevent_self_review", "other_protection_rules", "can_admins_bypass"],
       "properties": {
         "name": {"type": "string"},
         "deployment_branches": {"enum": ["any", "protected", "selected"]},
@@ -263,7 +263,7 @@
         },
         "prevent_self_review": {"$ref": "#/$defs/flag_or_null"},
         "other_protection_rules": {"$ref": "#/$defs/names"},
-        "can_admins_bypass": {"type": "boolean"}
+        "can_admins_bypass": {"$ref": "#/$defs/flag_or_null"}
       },
       "if": {"properties": {"deployment_branches": {"const": "selected"}}},
       "then": {"required": ["branch_policies"]},

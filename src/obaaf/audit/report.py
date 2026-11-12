@@ -32,7 +32,7 @@ def _list(items, limit: int = 8) -> str:
     return ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")
 
 
-def _join(texts, limit: int = 12) -> str:
+def _join(texts, limit: int = 30) -> str:
     """Join texts this module composed itself. Each is already safe to print, and none is cut again: a rule
     such as the required checks names several things, and cutting it would hide some of them."""
     texts = list(texts)
@@ -50,8 +50,9 @@ def _yes(value) -> str:
 def _rule_text(rule: dict) -> str:
     parameters = rule.get("parameters") or {}
     kind = rule.get("type")
-    if kind == "pull_request" and isinstance(parameters.get("required_approving_review_count"), int):
-        return f"pull_request ({_count(parameters['required_approving_review_count'], 'approval')})"
+    approvals = parameters.get("required_approving_review_count")
+    if kind == "pull_request" and isinstance(approvals, int) and not isinstance(approvals, bool):
+        return f"pull_request ({_count(approvals, 'approval')})"
     if kind == "required_status_checks" and isinstance(parameters.get("required_status_checks"), list):
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
         return f"required_status_checks ({_list(names, CHECKS_SHOWN) if names else 'none named'})"
@@ -68,7 +69,9 @@ def _policy_rule_text(rule: dict) -> str:
 
 
 def _workflow_paths(conditions) -> str:
-    paths = ((conditions or {}).get("workflow_path") or {}).get("include") if isinstance(conditions, dict) else None
+    """The workflow files a policy names, if its conditions have the usual shape; otherwise nothing is said."""
+    scope = conditions.get("workflow_path") if isinstance(conditions, dict) else None
+    paths = scope.get("include") if isinstance(scope, dict) else None
     return f" for {_list(paths)}" if isinstance(paths, list) and paths else ""
 
 
@@ -95,19 +98,30 @@ def _classic_text(rule: dict) -> str:
     reviews, checks = rule["required_pull_request_reviews"], rule["required_status_checks"]
     if not reviews["required"]:
         approvals = "no review required"
-    elif reviews["required_approving_review_count"] is None:
-        approvals = "review required (the number of approvals was not given)"
     else:
-        approvals = _count(reviews["required_approving_review_count"], "approval") + " required"
+        count, allowed = reviews["required_approving_review_count"], reviews["bypass_allowances"]
+        approvals = ("review required, number of approvals not given" if count is None
+                     else _count(count, "approval") + " required")
+        if allowed is None:
+            approvals += ", who may bypass it not given"
+        else:
+            # A group GitHub did not list is null, which is "not known", not "nobody".
+            unknown = [group for group in ("users", "teams", "apps") if allowed[group] is None]
+            named = sum(len(allowed[group] or []) for group in ("users", "teams", "apps"))
+            approvals += f", {_count(named, 'name')} may bypass it" if named else ", nobody listed may bypass it"
+            approvals += f" ({', '.join(unknown)} not given)" if unknown else ""
     admins = "administrators are held to it" if rule["enforce_admins"] else "administrators are not held to it"
-    return f"{approvals}; {_check_names(checks) if checks['required'] else 'no required checks'}; {admins}"
+    force = {True: "; force pushes allowed", None: "; force pushes: not given"}.get(rule["allow_force_pushes"], "")
+    return f"{approvals}; {_check_names(checks) if checks['required'] else 'no required checks'}; {admins}{force}"
 
 
 def _environment_text(env: dict) -> str:
     if env["deployment_branches"] == "any":
         branches = "any branch or tag may deploy"
     elif env["deployment_branches"] == "protected":
-        branches = "only protected branches may deploy"
+        # GitHub's setting, in its words. What it lets through depends on which branches have a protection
+        # rule, which this line does not judge.
+        branches = "only branches GitHub counts as protected may deploy"
     elif env["branch_policies"] is None:
         branches = "only selected branches or tags may deploy (the patterns were not read)"
     else:
@@ -127,12 +141,13 @@ def _environment_text(env: dict) -> str:
     # said only where there is a reviewer, a wait or another rule for an administrator to bypass.
     bypass = ""
     if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"]:
-        bypass = "; administrators may bypass these rules: " + {True: "yes", False: "no"}.get(
-            env.get("can_admins_bypass"), "not given")
+        bypass = "; administrators may bypass these rules: " + _yes(env["can_admins_bypass"])
     return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}{bypass}"
 
 
-def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one branch per setting, kept flat
+def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:  # noqa: C901 - kept flat
+    """What was read of one setting. ``whole`` is false for a setting that was only partly read: an empty
+    value then means that nothing of it was read, and must not be worded as "there is none"."""
     if key == "repository":
         owner_kind = {"Organization": "the organisation", "User": "the user"}.get(value["owner_type"], "")
         extra = (", a fork" if value["fork"] else "") + (", archived" if value["archived"] else "")
@@ -140,7 +155,7 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
                 f"owned by {owner_kind} {plain(value['owner'], 40)}{extra}".replace("  ", " ")]
     if key == "rulesets":
         if not value:
-            return ["no ruleset applies to this repository"]
+            return ["no ruleset applies to this repository" if whole else "no ruleset was read"]
         return [f"{quoted(r['name'])} ({plain(r['enforcement'], 20)}, {plain(r['target'] or 'target not given', 20)}, "
                 f"from {_source(r)}): " + (_join(_rule_text(x) for x in r["rules"]) if r["rules"] else "no rules")
                 for r in value]
@@ -154,7 +169,7 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
             lines.append(f"ruleset {plain(entry['ruleset_id'], 20)}{name}: {who}")
         return lines or ["no ruleset's bypass list was read"]
     if key == "branch_rules":
-        return [f"{plain(branch, 80)}: " + (_join(_rule_text(r) for r in rules) if rules else "no active rule")
+        return [f"{quoted(branch, 80)}: " + (_join(_rule_text(r) for r in rules) if rules else "no active rule")
                 for branch, rules in value.items()]
     if key == "branches":
         lines = []
@@ -163,14 +178,17 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
             checks = shown["required_status_checks"] if shown else None
             named = bool(checks) and bool(checks["contexts"] or checks["checks"])
             # This view shows the checks of a classic protection rule only. Checks a ruleset requires are
-            # under the rules in force, so an empty list here is "none shown", not "none required".
-            lines.append(f"{plain(branch, 80)}: GitHub calls it {'protected' if entry['protected'] else 'not protected'}; "
-                         + (_check_names(checks) if named else "no required checks shown in this view"))
+            # under the rules in force, so an empty list here is "none shown", not "none required". A list
+            # can also be shown for a rule that is switched off, so the enforcement level is said with it.
+            level = f" (enforcement: {plain(checks['enforcement_level'] or 'not given', 20)})" if named else ""
+            lines.append(f"{quoted(branch, 80)}: GitHub calls it {'protected' if entry['protected'] else 'not protected'}; "
+                         + (_check_names(checks) + level if named else "no required checks shown in this view"))
         return lines
     if key == "branch_protection":
-        return [f"{plain(branch, 80)}: {_classic_text(rule)}" for branch, rule in value.items()]
+        return [f"{quoted(branch, 80)}: {_classic_text(rule)}" for branch, rule in value.items()]
     if key == "environments":
-        return [_environment_text(env) for env in value] or ["the repository has no environments"]
+        return [_environment_text(env) for env in value] or [
+            "the repository has no environments" if whole else "no environment was read"]
     if key == "environment_secrets":
         return [f"{quoted(name)}: " + (_list(secrets, 12) if secrets else "no secrets")
                 for name, secrets in value.items()]
@@ -201,7 +219,7 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
         return [line]
     if key == "actions_policies":
         if not value:
-            return ["no Actions policy was listed for this repository"]
+            return ["no Actions policy was listed for this repository" if whole else "no Actions policy was read"]
         return [f"{quoted(p['name'])} ({plain(p['enforcement'], 20)}, from {_source(p)})"
                 f"{_workflow_paths(p['conditions'])}: "
                 + ("; ".join(_policy_rule_text(r) for r in p["rules"]) or "no rules")
@@ -257,20 +275,25 @@ def to_text(snapshot: dict, origin: str = "") -> str:
                 lines.append(f"      {plain(entry['reason'], 300)}")
                 continue
             try:
-                described = _describe(setting.key, entry["value"], settings)
+                described = _describe(setting.key, entry["value"], settings, whole=status == "read")
             except (KeyError, TypeError, AttributeError, IndexError, ValueError):
                 # A loaded snapshot has been checked against the schema, so this should not happen; if it
                 # does, the value is shown as not describable rather than guessed at.
                 described = ["recorded, but not in a form this version can describe"]
-            lines += [f"      {line}" for line in described]
+            # An empty value with nothing to say about it (a file can hold one) is said to be empty.
+            lines += [f"      {line}" for line in described or ["nothing is recorded"]]
             for problem in entry.get("problems", []):
                 lines.append(f"      NOT READ: {plain(problem['what'], 160)}: {plain(problem['reason'], 400)}")
             if status == "partial" and setting.note:
                 lines.append(f"      {setting.note}")
     lines.append("")
     requests = snapshot["requests"]
+    # For a run that has just been made, the client can only send GET. For a file, the list of requests is
+    # what the file says and nothing more.
+    sent = f"The snapshot lists {_count(len(requests), 'request')}." if origin else (
+        f"{_count(len(requests), 'request')} sent, all GET.")
     lines.append(f"{total} settings: {tally['read']} read, {tally['partial']} partly read, {tally['unread']} not read, "
-                 f"{tally['not_applicable']} that do not apply. {_count(len(requests), 'request')} sent, all GET.")
+                 f"{tally['not_applicable']} that do not apply. {sent}")
     return "\n".join(lines) + "\n"
 
 

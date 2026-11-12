@@ -166,15 +166,26 @@ def _answer_problem(key: str, what: str, answer: Answer) -> dict:
     return _problem(key, what, answer.code, answer.why, answer.accepted)
 
 
+def _in_order(problems: list[dict]) -> list[dict]:
+    """Problems by key, numbers before names, so that the order GitHub listed things in changes nothing."""
+    return sorted(problems, key=lambda p: (0, int(p["key"]), "") if p["key"].isdecimal() and p["key"].isascii()
+                  else (1, 0, p["key"]))
+
+
+def _partial(setting: Setting, value, problems: list[dict]) -> dict:
+    return {"status": "partial", "value": value, "problems": _in_order(problems), "needs": setting.needs}
+
+
 def _outcome(setting: Setting, value, problems: list[dict], total: int) -> dict:
     """read when every part was read, unread when none was, partial otherwise."""
     if not problems:
         return _read(value)
+    problems = _in_order(problems)
     if len({p["key"] for p in problems}) >= total:
         first = problems[0]
         reason = first["reason"] if total <= 1 else f"none of {total} could be read; the first: {first['reason']}"
         return _unread(setting, first["reason_code"], reason, first.get("accepted_permissions", ""))
-    return {"status": "partial", "value": value, "problems": problems, "needs": setting.needs}
+    return _partial(setting, value, problems)
 
 
 def _not_applicable(reason: str) -> dict:
@@ -257,10 +268,11 @@ def _rules(obj: dict, what: str) -> list[dict]:
     for rule in _array(obj, "rules", what):
         rule = _obj(rule, f"a rule of {what}")
         parameters = rule.get("parameters")
-        # A rule such as "deletion" has no parameters, and GitHub then sends none.
+        # A rule such as "deletion" has no parameters, and GitHub then sends none. That is recorded as
+        # null, not as an empty object: for a rule that should have parameters, "none came" is not "none set".
         rules.append({"type": _text(rule, "type", f"a rule of {what}"),
                       "parameters": _json_safe(_obj(parameters, "a rule's parameters"), what)
-                      if parameters is not None else {}})
+                      if parameters is not None else None})
     return sorted(rules, key=lambda r: (r["type"], json.dumps(r["parameters"], sort_keys=True)))
 
 
@@ -422,8 +434,7 @@ class _Reader:
         rules, listed = self.settings.get("branch_rules", {}), self.listed_rulesets
         if listed is None or rules.get("status") not in ("read", "partial"):
             return
-        unlisted = sorted({r["ruleset_id"] for found in rules["value"].values() for r in found
-                           if r["ruleset_id"] is not None} - listed)
+        unlisted = sorted({r["ruleset_id"] for found in rules["value"].values() for r in found} - listed)
         if not unlisted:
             return
         reason = ("a rule in force on an audited branch comes from this ruleset, which the list of rulesets "
@@ -432,8 +443,7 @@ class _Reader:
             entry = self.settings[key]
             added = [_problem(str(i), f"ruleset {i}", "unexpected", reason) for i in unlisted]
             if entry["status"] in ("read", "partial"):
-                self.settings[key] = {"status": "partial", "value": entry["value"], "needs": BY_KEY[key].needs,
-                                      "problems": entry.get("problems", []) + added}
+                self.settings[key] = _partial(BY_KEY[key], entry["value"], entry.get("problems", []) + added)
             elif entry["status"] == "not_applicable":
                 self.settings[key] = _unread(BY_KEY[key], "unexpected", f"ruleset {unlisted[0]}: {reason}")
 
@@ -449,13 +459,18 @@ class _Reader:
             for rule in answer.data:
                 rule = _obj(rule, "a branch rule")
                 parameters = rule.get("parameters")
+                # Every rule in force says which ruleset it comes from. Without that the check that the
+                # list of rulesets was whole could not be made, so a rule that does not say is not accepted.
+                ruleset_id = _number(rule, "ruleset_id", "a branch rule")
+                if ruleset_id <= 0:
+                    raise Shape("a branch rule's ruleset id was not a positive number")
                 rules.append({"type": _text(rule, "type", "a branch rule"),
-                              "ruleset_id": _number(rule, "ruleset_id", "a branch rule", optional=True),
+                              "ruleset_id": ruleset_id,
                               "ruleset_source_type": _text(rule, "ruleset_source_type", "a branch rule", optional=True),
                               "ruleset_source": _text(rule, "ruleset_source", "a branch rule", optional=True),
                               "parameters": _json_safe(_obj(parameters, "a rule's parameters"), "a branch rule")
-                              if parameters is not None else {}})
-            value[branch] = sorted(rules, key=lambda r: (r["type"], r["ruleset_id"] or 0,
+                              if parameters is not None else None})
+            value[branch] = sorted(rules, key=lambda r: (r["type"], r["ruleset_id"],
                                                           json.dumps(r["parameters"], sort_keys=True)))
         self.settings["branch_rules"] = _outcome(BY_KEY["branch_rules"], value, problems, len(self.branches))
 
@@ -522,11 +537,7 @@ class _Reader:
                         env["name"], f"the branch and tag patterns of environment {quoted(env['name'])}", answer))
             value.append(env)
         value.sort(key=lambda e: e["name"])
-        if problems:
-            self.settings["environments"] = {"status": "partial", "value": value, "problems": problems,
-                                             "needs": setting.needs}
-        else:
-            self.settings["environments"] = _read(value)
+        self.settings["environments"] = _partial(setting, value, problems) if problems else _read(value)
 
     def read_environment_secrets(self) -> None:
         setting = BY_KEY["environment_secrets"]
@@ -578,9 +589,8 @@ class _Reader:
             selected = self.client.get(f"{self.base}/actions/permissions/selected-actions")
             if not selected.ok:
                 value["selected_actions"] = None
-                self.settings["actions_permissions"] = {
-                    "status": "partial", "value": value, "needs": setting.needs,
-                    "problems": [_answer_problem("selected_actions", "the list of selected actions", selected)]}
+                self.settings["actions_permissions"] = _partial(setting, value, [
+                    _answer_problem("selected_actions", "the list of selected actions", selected)])
                 return
             chosen = _obj(selected.data, "the selected actions")
             patterns = _array(chosen, "patterns_allowed", "the selected actions")
@@ -619,11 +629,8 @@ class _Reader:
             private = self.client.get(f"{self.base}/actions/permissions/fork-pr-workflows-private-repos")
             if not private.ok:
                 value["private_repository"] = None
-                self.settings["fork_pull_requests"] = {
-                    "status": "partial", "value": value, "needs": setting.needs,
-                    "problems": [_answer_problem(
-                        "private_repository", "the settings for fork pull requests on a private repository",
-                        private)]}
+                self.settings["fork_pull_requests"] = _partial(setting, value, [_answer_problem(
+                    "private_repository", "the settings for fork pull requests on a private repository", private)])
                 return
             body = _obj(private.data, "the private fork settings")
             value["private_repository"] = {
@@ -678,13 +685,22 @@ class _Reader:
             self.settings["collaborators"] = _failed(BY_KEY["collaborators"], answer)
             return
         counts = {name: 0 for name in ROLE_NAMES.values()}
+        seen = set()
         for item in answer.data:
-            permissions = _obj(_obj(item, "a collaborator").get("permissions"), "a collaborator's permissions")
-            role = next((r for r in ROLE_ORDER if permissions.get(r) is True), None)
+            item = _obj(item, "a collaborator")
+            login = _text(item, "login", "a collaborator").lower()
+            if login in seen:
+                raise Shape("a collaborator was listed twice")
+            seen.add(login)
+            permissions = _obj(item.get("permissions"), "a collaborator's permissions")
+            # All five must be there as true or false. A missing "admin" is not "not an administrator":
+            # read that way, an administrator would be counted in whichever lower role came next.
+            held = {r: _flag(permissions, r, "a collaborator's permissions") for r in ROLE_ORDER}
+            role = next((r for r in ROLE_ORDER if held[r]), None)
             if role is None:
                 raise Shape("a collaborator had no permission set to true")
             counts[ROLE_NAMES[role]] += 1
-        self.settings["collaborators"] = _read({"total": len(answer.data), "by_role": counts})
+        self.settings["collaborators"] = _read({"total": len(seen), "by_role": counts})
 
     # -- everything
     def run(self) -> None:
@@ -802,8 +818,11 @@ def _environment(item: dict) -> dict:
         if protected == custom:
             raise Shape(f"the branch policy of {what} was neither protected branches nor selected ones")
         branches = "protected" if protected else "selected"
+    # Whether administrators may bypass the rules: null when GitHub did not say, never left out, because
+    # leaving a part out means it does not apply.
     env = {"name": name, "deployment_branches": branches, "wait_timer": 0, "reviewers": [],
-           "prevent_self_review": None, "other_protection_rules": []}
+           "prevent_self_review": None, "other_protection_rules": [],
+           "can_admins_bypass": _flag(item, "can_admins_bypass", what, optional=True)}
     for rule in _array(item, "protection_rules", what):
         rule = _obj(rule, f"a protection rule of {what}")
         kind = _text(rule, "type", f"a protection rule of {what}")
@@ -823,8 +842,6 @@ def _environment(item: dict) -> dict:
         elif kind != "branch_policy":  # branch_policy only says that deployment_branch_policy is set
             env["other_protection_rules"].append(kind)
     env["other_protection_rules"].sort()
-    if isinstance(item.get("can_admins_bypass"), bool):
-        env["can_admins_bypass"] = item["can_admins_bypass"]
     return env
 
 
@@ -857,4 +874,6 @@ def take(client: Client, repository: str, branches: tuple[str, ...] = (), now: d
     }
     if full_name.lower() != repository.lower():
         snapshot["requested_as"] = repository
-    return snapshot
+    from obaaf.audit.snapshot import settle  # imported here: that module imports this one
+
+    return settle(snapshot)

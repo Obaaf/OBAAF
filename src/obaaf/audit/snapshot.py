@@ -12,15 +12,22 @@ import json
 from pathlib import Path
 
 from obaaf.audit.github import plain
-from obaaf.audit.settings import FORMAT, SETTINGS
+from obaaf.audit.settings import BY_KEY, FORMAT, SETTINGS
 from obaaf.catalog import data_text
 
 MAX_SNAPSHOT_BYTES = 20 * 1024 * 1024
 MAX_DEPTH = 40
+# The only settings that can fail to exist for a repository. Any other marked "not applicable" is a file
+# saying that something was looked at when it was not.
+MAY_NOT_APPLY = ("ruleset_bypass_actors", "environment_secrets", "organization_secrets")
 
 
 class SnapshotError(ValueError):
     """A snapshot file cannot be used."""
+
+
+class ReaderFault(RuntimeError):
+    """The reader built something that is not a snapshot. A fault in obaaf, not in a file or an answer."""
 
 
 def dumps(snapshot: dict) -> str:
@@ -79,18 +86,50 @@ def problems(snapshot: object) -> list[str]:
         if missing or extra:
             return (["no entry for: " + ", ".join(missing)] if missing else []) + (
                 ["entries this version does not know: " + ", ".join(extra[:10])] if extra else [])
-    import jsonschema  # imported lazily, like the record commands do
-
-    schema = json.loads(data_text("schemas/settings-snapshot.schema.json"))
-    validator = jsonschema.Draft202012Validator(schema)
+        wrong = [key for key in known if isinstance(settings[key], dict)
+                 and settings[key].get("status") == "not_applicable" and key not in MAY_NOT_APPLY]
+        if wrong:
+            return ["marked as not applicable, which these settings cannot be: " + ", ".join(wrong)]
     found = []
-    for err in sorted(validator.iter_errors(snapshot), key=lambda e: [str(p) for p in e.absolute_path]):
+    for err in sorted(_validator().iter_errors(snapshot), key=lambda e: [str(p) for p in e.absolute_path]):
         where = "/".join(plain(p, 40) for p in err.absolute_path) or "(root)"
         # The validator's own message quotes the offending value; say where and which rule instead.
         found.append(f"{where}: does not match the snapshot format ({plain(err.validator, 30)})")
         if len(found) == 20:
             break
     return found
+
+
+def _validator():
+    import jsonschema  # imported lazily, like the record commands do
+
+    return jsonschema.Draft202012Validator(json.loads(data_text("schemas/settings-snapshot.schema.json")))
+
+
+def settle(snapshot: dict) -> dict:
+    """Make a snapshot the reader has just built fit the format, or raise.
+
+    The reader checks the shape of GitHub's answers and the schema checks the shape of a snapshot; the two
+    were written separately and once disagreed (a wait of two million minutes was read, written and then
+    refused when the file was read back). So every snapshot is checked before anyone gets it. A setting
+    whose value the schema refuses is recorded as not read: the answer behind it was outside what this
+    version understands, and that must not be written down as known. Anything else the schema refuses is
+    a fault in the reader and is raised."""
+    refused: dict[str, str] = {}
+    for err in _validator().iter_errors(snapshot):
+        path = list(err.absolute_path)
+        if len(path) < 3 or path[0] != "settings" or path[1] not in BY_KEY or path[2] != "value":
+            raise ReaderFault("the reader built a snapshot that is not in the snapshot format")
+        where = "/".join(plain(part, 40) for part in path[3:]) or "the value"
+        refused.setdefault(path[1], f"{where} ({plain(err.validator, 30)})")
+    for key, where in sorted(refused.items()):
+        snapshot["settings"][key] = {
+            "status": "unread", "reason_code": "unexpected", "needs": BY_KEY[key].needs,
+            "reason": f"the answer held a value outside what the snapshot format allows: {where}"}
+    found = problems(snapshot)
+    if found:
+        raise ReaderFault("the reader built a snapshot that is not in the snapshot format: " + "; ".join(found[:3]))
+    return snapshot
 
 
 def load(path: str | Path) -> dict:

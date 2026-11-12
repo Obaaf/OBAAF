@@ -35,6 +35,7 @@ REQUEST_SECONDS = 60          # for one whole answer, however slowly it arrives
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_JSON_DEPTH = 100          # GitHub's answers are a handful of levels deep
 RECORDED_TEXT_CHARS = 2000    # how much of an answer that is not JSON a recording keeps
+RECORDED_ERROR_CHARS = 300    # and how much of a transport error
 MAX_REDIRECTS = 3
 MAX_PAGES = 10
 PER_PAGE = 100
@@ -118,7 +119,7 @@ class UrllibTransport:
                     return self._raw(exc.code, exc.headers, exc)
         except (urllib.error.URLError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
-            return Raw(0, error=f"{type(reason).__name__}: {reason}"[:300])
+            return Raw(0, error=f"{type(reason).__name__}: {reason}")
         except (ValueError, http.client.HTTPException) as exc:
             # The text of these errors can quote a header, and one header is the token: name the error only.
             return Raw(0, error=f"the request failed ({type(exc).__name__})")
@@ -198,24 +199,48 @@ class Answer:
 
 def plain(text: object, limit: int = 200) -> str:
     """Text from outside made safe to print on one line: nothing that moves the cursor, changes direction,
-    hides, or cannot be encoded, and a bounded length. Every such character becomes a question mark."""
-    cleaned = "".join("?" if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") else ch
-                      for ch in str(text))
+    hides, or cannot be encoded, and a bounded length. Every such character becomes a question mark, and
+    every kind of space, or run of spaces, becomes one space."""
+    cleaned = "".join("?" if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+                      else " " if unicodedata.category(ch) == "Zs" else ch for ch in str(text))
+    # Runs of spaces become one: a long run could push the rest of a value to the start of the next
+    # line of a terminal, where it would read as a line of the report.
+    cleaned = re.sub(r" {2,}", " ", cleaned)
     return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
 
 
+# Characters that are not the ASCII double quote and read as one: primes, low and reversed quotes, the
+# full-width quote. Curly quotes are caught by their Unicode category below.
+QUOTE_LOOKALIKES = "″‶„‚〝〞〟＂ʺ˝״"
+
+
 def quoted(name: object, limit: int = 60) -> str:
-    """A name from outside, in double quotes, which it cannot close early to imitate the rest of its line."""
-    return '"' + plain(name, limit).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A name from outside, in double quotes, which it cannot close early to imitate the rest of its line.
+    A character that looks like a quotation mark without being one becomes a question mark."""
+    cleaned = "".join("?" if unicodedata.category(ch) in ("Pi", "Pf") or ch in QUOTE_LOOKALIKES else ch
+                      for ch in plain(name, limit))
+    return '"' + cleaned.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _no_constants(name: str):
     raise ValueError(f"{name} is not JSON")
 
 
+def _finite(text: str) -> float:
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError("a number too large to be one is not JSON this client reads")
+    return value
+
+
 def parse_json(data: bytes):
-    """Strict JSON: NaN and Infinity, which Python would accept, are refused."""
-    return json.loads(data.decode("utf-8"), parse_constant=_no_constants)
+    """Strict JSON: NaN and Infinity, which Python would accept, are refused, and so is a number such as
+    1e999, which Python would read as infinity and then write back as the word."""
+    return json.loads(data.decode("utf-8"), parse_constant=_no_constants, parse_float=_finite)
+
+
+class _TooDeep(ValueError):
+    """An answer is nested more deeply than this client examines."""
 
 
 class Client:
@@ -258,7 +283,7 @@ class Client:
         An answer nested more deeply than :data:`MAX_JSON_DEPTH` is refused, with or without a token: no
         part of an answer is ever passed on unexamined."""
         if depth > MAX_JSON_DEPTH:
-            raise ValueError("the answer is nested too deeply")
+            raise _TooDeep()
         if isinstance(value, str):
             return self._scrub_text(value)
         if isinstance(value, list):
@@ -274,14 +299,15 @@ class Client:
         url = self.api + path
         for _ in range(MAX_REDIRECTS + 1):
             raw = self.transport.get(url, self._headers())
-            raw.error = self._scrub_text(raw.error)
+            # Cut out the token first, shorten afterwards: shortening first could leave part of a token.
+            raw.error = self._scrub_text(raw.error)[:RECORDED_ERROR_CHARS]
             raw.headers = {k: self._scrub_text(v) for k, v in raw.headers.items()}
-            body, parsed = self._parse(raw)
+            body, parsed, refused = self._parse(raw)
             shown = url[len(self.api):] if url.startswith(self.api) else url
             self.requests.append({"path": shown, "status": raw.status})
             self._record(shown, raw, body, parsed)
             if raw.status not in (301, 302, 307, 308):
-                return self._classify(raw, body, parsed)
+                return self._classify(raw, body, parsed, refused)
             target = urllib.parse.urljoin(url, raw.headers.get("location", ""))
             if not self._same_host(target) or not target.startswith(self.api + "/"):
                 return Answer(raw.status, code="unexpected",
@@ -289,14 +315,16 @@ class Client:
             url = target
         return Answer(0, code="unexpected", why=f"more than {MAX_REDIRECTS} redirects")
 
-    def _parse(self, raw: Raw) -> tuple[object, bool]:
-        """The body as JSON with the token cut out, and whether it was JSON at all."""
+    def _parse(self, raw: Raw) -> tuple[object, bool, str]:
+        """The body as JSON with the token cut out, whether it could be used as JSON, and if not, why."""
         if not raw.body or len(raw.body) > MAX_BODY_BYTES:
-            return None, False
+            return None, False, "the answer was not JSON"
         try:
-            return self._scrub(parse_json(raw.body)), True
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            return None, False
+            return self._scrub(parse_json(raw.body)), True, ""
+        except (_TooDeep, RecursionError):
+            return None, False, f"the answer was nested more than {MAX_JSON_DEPTH} levels deep and was not examined"
+        except (ValueError, UnicodeDecodeError):
+            return None, False, "the answer was not JSON"
 
     def _record(self, path: str, raw: Raw, body: object, parsed: bool) -> None:
         if not parsed and raw.body:
@@ -309,7 +337,7 @@ class Client:
             entry["error"] = raw.error
         self.recorded.append(entry)
 
-    def _classify(self, raw: Raw, data: object, parsed: bool) -> Answer:
+    def _classify(self, raw: Raw, data: object, parsed: bool, refused: str = "") -> Answer:
         host = urllib.parse.urlsplit(self.api).hostname
         if raw.status == 0:
             return Answer(0, code="network", why=f"no answer from {host} ({plain(raw.error)})")
@@ -329,7 +357,7 @@ class Client:
             return Answer(raw.status, code="rate_limited", why=self.rate_limited, message=message)
         if 200 <= raw.status < 300:
             if not parsed:
-                return Answer(raw.status, code="unexpected", why="the answer was not JSON")
+                return Answer(raw.status, code="unexpected", why=refused or "the answer was not JSON")
             return Answer(raw.status, data=data, more=_names_next_page(raw.headers.get("link", "")))
         if raw.status == 401:
             return Answer(401, code="unauthorized", why="GitHub did not accept the token (HTTP 401)" + said,
@@ -387,7 +415,7 @@ class Client:
                               why="an empty page named a next page; the list was not read to its end")
         else:
             return Answer(200, code="unexpected",
-                          why=f"more than {MAX_PAGES * PER_PAGE} entries; the list was not read to its end")
+                          why=f"{MAX_PAGES * PER_PAGE} entries or more; the list was not read to its end")
         if total is not None and total != len(items):
             return Answer(200, code="unexpected",
                           why=f"GitHub said there were {total} entries and returned {len(items)}")

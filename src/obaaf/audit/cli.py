@@ -79,12 +79,19 @@ def _token(args, api: str, default_api: str) -> tuple[str | None, str]:
             # The characters GitHub's tokens are made of. Anything else is not a token, and could not be
             # cut out of an answer reliably if a server ever echoed it.
             if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{8,4096}", value):
-                raise UsageError(f"the environment variable {_plain(name)} does not hold a token (it is too "
-                                 "short, or has characters a token cannot have)")
+                raise UsageError(f"the environment variable {_named(args, name)} does not hold a token (it is "
+                                 "too short, or has characters a token cannot have)")
             return value, name
     if args.token_env:
-        raise UsageError(f"--token-env {_plain(args.token_env)}: that environment variable is not set or is empty")
+        raise UsageError("--token-env: the environment variable it names is not set or is empty. It takes the "
+                         "name of a variable, never a token")
     return None, ""
+
+
+def _named(args, name: str) -> str:
+    """How to refer to a token's variable in a message. What was given to --token-env is not repeated when
+    it led nowhere: someone may have put the token itself there."""
+    return "named by --token-env" if args.token_env else _plain(name)
 
 
 def _plain(text: object, limit: int = 140) -> str:
@@ -104,6 +111,13 @@ def _emit(text: str, output: str | None) -> None:
 
 def cmd_audit(args) -> int:
     """Run the audit. Whatever goes wrong, the result is a message and a non-zero exit, never a pass."""
+    for stream in (sys.stdout, sys.stderr):
+        # A terminal that cannot show a character (a name in another script on a cp1252 console) gets it
+        # written as an escape. Failing to print is not a reason to fail the audit.
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
     try:
         return _run(args)
     except UsageError as exc:
@@ -126,7 +140,7 @@ def _run(args) -> int:
     from obaaf.audit.settings import check_branches
 
     try:
-        if args.from_snapshot:
+        if args.from_snapshot is not None:
             for flag, value in (("--no-token", args.no_token), ("--token-env", args.token_env),
                                 ("--api-url", args.api_url), ("--record", args.record), ("--branch", args.branch),
                                 ("--snapshot-out", args.snapshot_out)):
@@ -166,7 +180,7 @@ def _run(args) -> int:
     except (audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
         raise UsageError(str(exc)) from None
     _emit(snapshot_mod.dumps(snap) if args.format == "json" else report.to_text(snap, origin=origin), args.output)
-    if args.snapshot_out and not args.from_snapshot:
+    if args.snapshot_out and args.from_snapshot is None:
         print(f"Snapshot written to {_plain(args.snapshot_out)}.", file=sys.stderr)
     if snap["settings"]["repository"]["status"] != "read":
         # Reading nothing must not look like a pass.
