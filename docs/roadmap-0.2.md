@@ -23,7 +23,7 @@ Version 0.1 is the first release, now in active adoption. The first external pil
 ## Found while releasing OBAAF with its own controls
 
 - **Empty / no-vendored-binaries manifest. Shipped.** `vendored_binaries: none` produces a valid empty manifest; OBAAF's repository commits that declaration; the PyPI release signs a build record.
-- **Full `obaaf verify release` on OBAAF itself. Shipped (dogfood).** `.github/obaaf-policy.yaml` and the publish job run `obaaf verify release` after the `pypi` environment approval, with tools and policy from the default branch. Residual: no `workflow_run` lane split and no pre-approval summary job; after the first green release, set `agents.since` to that commit (D-025).
+- **Full `obaaf verify release` on OBAAF itself. Shipped (dogfood).** `.github/obaaf-policy.yaml` and the publish job run `obaaf verify release` after the `pypi` environment approval, with tools and policy from the default branch. Residual: no `workflow_run` lane split and no pre-approval summary job; after the first green release, set `agents.since` to that commit (D-025). That release was 0.3.0, and the policy now names its commit.
 
 ## Data wanted
 
