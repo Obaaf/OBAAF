@@ -262,7 +262,17 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
 def apply(result, baseline: Baseline, today: date | None = None) -> None:
     """Mark the findings the baseline accepts, attach to each matched finding the acceptance it got
     (valid or not), and record the entries that no longer match any finding."""
-    today = today or date.today()
+    # One day for the whole report. A result that `check` made is judged on the day it was checked:
+    # its ignore entries already were, and the report counts the days an acceptance has left from
+    # that day, so a check that crosses midnight cannot judge two entries on two days. `today` is
+    # for a result built by hand, which has no day yet; another day for a result that has one is a
+    # mistake, and is refused, not quietly dropped.
+    checked = getattr(result, "today", None)
+    if checked is not None and today is not None and today != checked:
+        raise ValueError(f"the result was checked on {checked.isoformat()}, and its baseline cannot be judged "
+                         f"on {today.isoformat()}: give that day to check()")
+    today = checked or today or date.today()
+    result.today = today
     if baseline.legacy:
         stale = _match(result.findings, baseline.entries, lambda e: e["fingerprint"], fingerprint, today, True)
     else:

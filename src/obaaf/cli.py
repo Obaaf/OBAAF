@@ -94,6 +94,9 @@ def cmd_check(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.expiry_warning < 0:
+        print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
+        return EXIT_USAGE
     if args.lanes:
         from obaaf.checker.workflow import one_line
         notes: list[str] = []
@@ -147,6 +150,10 @@ def cmd_check(args) -> int:
         return EXIT_USAGE
     result = checker.check(target, config=config, platform=args.platform)
     result.checked = str(args.path)
+    # What a command the report suggests has to repeat to check the same thing.
+    # One word each, so a value that begins with a hyphen is still read as a value.
+    result.options = ([f"--config={args.config}"] if args.config else []) \
+        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
     if applied is not None:
         baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
@@ -158,11 +165,11 @@ def cmd_check(args) -> int:
               file=sys.stderr)
         return EXIT_USAGE
     if args.format == "json":
-        text = report.to_json(result)
+        text = report.to_json(result, expiring_within=args.expiry_warning)
     elif args.format == "sarif":
-        text = report.to_sarif(result)
+        text = report.to_sarif(result, expiring_within=args.expiry_warning)
     else:
-        text = report.to_text(result, show_fixes=not args.no_fixes)
+        text = report.to_text(result, show_fixes=not args.no_fixes, expiring_within=args.expiry_warning)
     try:
         _write(text, args.output)
     except OSError as exc:
@@ -745,6 +752,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "--expires, and without them nothing is written (exit 2). Findings ignored by "
                         "configuration are left out, and a finding named by an ignore entry that has expired or "
                         "does not count is not newly accepted")
+    x.add_argument("--expiry-warning", metavar="DAYS", type=int, default=30,
+                   help="list the acceptances that expire within DAYS days as expiring soon (default: 30; 0 turns "
+                        "the list off). It never changes the exit status")
     x.add_argument("--owner", metavar="OWNER", help="with --write-baseline: who accepts the findings (@user, "
                                                     "@org/team or an e-mail address)")
     x.add_argument("--reason", metavar="TEXT", help="with --write-baseline: why they are accepted")
@@ -949,7 +959,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _printable_streams() -> None:
+    """Make standard output and standard error write a character they cannot encode as an escape.
+    A report names owners, jobs and paths in any script. Where the output is ASCII, Python would
+    otherwise end the command in a traceback at the first letter outside it, and a report must not
+    be lost over one character."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):       # a stream that is closed or cannot be changed
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _printable_streams()
     return int(args.func(args) or 0)
