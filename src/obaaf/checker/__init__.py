@@ -399,7 +399,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     rels: list[str] = []
     agent_lane_present = False
     suspect_jobs: list[tuple[str, str]] = []
-    declared = _LaneDeclarations(config, is_repo, on_its_own, workflows_sought=platform != "jenkins",
+    declared = _LaneDeclarations(config, root, is_repo, on_its_own, workflows_sought=platform != "jenkins",
                                  jenkins_sought=jenkins_sought)
     for path in files:
         try:
@@ -508,9 +508,9 @@ class _LaneDeclarations:
     only add rules, so one that silently does nothing leaves a job with fewer rules than its author
     meant it to have."""
 
-    def __init__(self, config: "Config", is_repo: bool, on_its_own: bool, workflows_sought: bool,
+    def __init__(self, config: "Config", root: Path, is_repo: bool, on_its_own: bool, workflows_sought: bool,
                  jenkins_sought: bool) -> None:
-        self.config, self.is_repo, self.on_its_own = config, is_repo, on_its_own
+        self.config, self.root, self.is_repo, self.on_its_own = config, root, is_repo, on_its_own
         self.workflows_sought, self.jenkins_sought = workflows_sought, jenkins_sought
         self.problems: list[str] = []
         self.known: dict[str, tuple[str, set]] = {}    # path -> ("job" or "stage", the names it has)
@@ -542,9 +542,19 @@ class _LaneDeclarations:
         self.problems.extend(result.lane_problems)
         self.known[rel] = ("stage", set(result.stage_keys))
 
-    def _looked_for(self, path: str) -> bool:
-        """Whether this run looked for files of the kind `path` names at all."""
-        return self.workflows_sought if path.endswith((".yml", ".yaml")) else self.jenkins_sought
+    def _out_of_scope(self, path: str) -> bool:
+        """Whether `path` is a file that exists and is of a kind this run did not look for at all
+        (a Jenkinsfile when only workflows were checked, or the other way round). An entry for a
+        file that does not exist is never out of scope: it is a mistake whatever was checked."""
+        sought = self.workflows_sought if path.endswith((".yml", ".yaml")) else self.jenkins_sought
+        if sought:
+            return False
+        try:
+            root = self.root.resolve()
+            target = (root / path).resolve()
+            return target.is_relative_to(root) and target.is_file()
+        except (OSError, ValueError):
+            return False
 
     def notes(self) -> list[str]:
         found = list(self.problems)
@@ -554,7 +564,7 @@ class _LaneDeclarations:
             if path in self.unread:
                 continue
             read = path in self.known
-            if not read and not (self.is_repo and self._looked_for(path)):
+            if not read and (not self.is_repo or self._out_of_scope(path)):
                 continue    # the configuration covers more than the files this run was given
             if wf_mod.declared_lane(value) is None:
                 found.append(wf_mod.not_a_lane(f"the checker configuration sets lanes: '{shown}'", value))
@@ -575,7 +585,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
     jenkins_sought = is_repo and platform != "github" and target.resolve() == root
-    declared = _LaneDeclarations(config, is_repo, not is_repo, workflows_sought=platform != "jenkins",
+    declared = _LaneDeclarations(config, root, is_repo, not is_repo, workflows_sought=platform != "jenkins",
                                  jenkins_sought=jenkins_sought)
     if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),

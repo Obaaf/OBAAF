@@ -705,6 +705,7 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
     extra_agents = extra_agents or {}
     workflow.lane_problems = []
     paths = tuple(dict.fromkeys((workflow.path, *aliases)))
+    read = {id(workflow.raw.get("env"))} | {id(job.raw.get("env")) for job in workflow.jobs.values()}
 
     def problem(text: str) -> None:
         if text not in workflow.lane_problems:
@@ -741,47 +742,48 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
             job.lane_notes.append("declared trusted, which cannot override what the job does")
         job.lanes.update(declared)
         job.settle_lane(trusted_why or "default")
-        for where in _stray_declarations(job.raw, skip=("env",)):
+        for where in _stray_declarations(job.raw, read):
             problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE in {where}, "
                     "where it is not read (it is read in the job's env and in the workflow's env); "
                     "the declaration changes nothing")
-    for where in _stray_declarations(workflow.raw, skip=("env", "jobs")):
-        problem(f"{one_line(workflow.path, 120)} sets OBAAF_LANE in {where}, where it is not read (it is read "
-                "in a job's env and in the workflow's env); the declaration changes nothing")
 
 
-def _stray_declarations(raw, skip: tuple = ()) -> list[str]:
-    """Where `raw` (a job or a workflow) sets OBAAF_LANE in a place the checker does not read it: a
-    step's env, a container's, a service's. `skip` names the top-level keys that are read elsewhere."""
+def _stray_declarations(raw, read: set) -> list[str]:
+    """Where a job sets OBAAF_LANE in an `env` the checker does not read it from: a step's, a
+    container's, a service's. `read` holds the identities of the env mappings that are read, so an
+    env shared with a job through a YAML anchor is not reported."""
     found: list[str] = []
-    seen: set = set()
+    budget = [20_000]      # nodes; anchors can make a small file a very large tree
 
-    def walk(node, trail: tuple, depth: int) -> None:
-        if depth > 12 or not isinstance(node, (dict, list)) or id(node) in seen:
+    def walk(node, trail: tuple, above: frozenset) -> None:
+        budget[0] -= 1
+        if budget[0] < 0 or len(trail) > 12 or not isinstance(node, (dict, list)) or id(node) in above:
             return
-        seen.add(id(node))
+        above = above | {id(node)}
         if isinstance(node, list):
             for index, item in enumerate(node):
-                walk(item, trail + (index + 1,), depth + 1)
+                walk(item, trail + (index + 1,), above)
             return
+        if trail[-1:] == ("env",) and "OBAAF_LANE" in node and id(node) not in read:
+            where = f"step {trail[1]}" if trail[:1] == ("steps",) and len(trail) > 1 else \
+                one_line(".".join(str(part) for part in trail), 80)
+            if where not in found:
+                found.append(where)
         for key, value in node.items():
-            if key == "OBAAF_LANE":
-                if trail[:1] == ("steps",) and len(trail) > 1:
-                    where = f"step {trail[1]}"
-                else:
-                    where = one_line(".".join(str(part) for part in trail) or "the top level", 80)
-                if where not in found:
-                    found.append(where)
-            elif not (depth == 0 and key in skip):
-                walk(value, trail + (str(key),), depth + 1)
+            walk(value, trail + (str(key),), above)
 
-    walk(raw, (), 0)
+    walk(raw, (), frozenset())
     return found
 
 
-# An environment whose name says where releases go. `prod` and `itch` must start a word: `switch`
-# and `reproduce` are not release environments.
-RELEASE_ENVIRONMENT_RE = re.compile(r"release|publish|store|steam|deploy|(?<![a-z])prod|(?<![a-z])itch")
+# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod,
+# app-store). A name that says it is not production, or comes before it, is taken at its word.
+RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
+NOT_PRODUCTION_RE = re.compile(r"(non|pre)[-_. ]?prod")
+
+
+def release_environment(name) -> bool:
+    return bool(RELEASE_ENVIRONMENT_RE.search(NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())))
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
@@ -794,10 +796,9 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
     writes = bool(job.permissions and job.permissions.write_scopes())
     if triggers & {"workflow_run", TRUSTED_WORKFLOW_RUN} and writes and _downloads_from_trigger_run(job):
         lanes["effect"] = "applies the output of another workflow's run"
-    env_name = (job.environment or "").lower()
     if job.upload_steps(detection):
         lanes["release"] = "uploads or publishes artifacts"
-    elif RELEASE_ENVIRONMENT_RE.search(env_name):
+    elif release_environment(job.environment):
         # Whatever starts the job: a job that a pull request or a comment can start and that uses
         # the production environment is the case OBAAF-GHA-015 exists for.
         lanes["release"] = f"uses the '{job.environment}' environment"

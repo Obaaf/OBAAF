@@ -411,17 +411,33 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         self.assertEqual(len(notes), 1, notes)
         self.assertIn("job 'work' sets OBAAF_LANE in step 1, where it is not read", notes[0])
 
-    def test_obaaf_lane_anywhere_else_it_is_not_read(self):
+    def test_obaaf_lane_in_an_env_that_is_not_read(self):
         # The step is named by its place in the file, the number an error about it would use.
-        wf = ("on: push\nservices-note: {env: {OBAAF_LANE: agent}}\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
+        wf = ("on: push\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
               "    container: {image: 'node:22', env: {OBAAF_LANE: agent}}\n"
-              "    steps:\n      - not-a-step\n      - run: make\n        env: {OBAAF_LANE: agent}\n")
+              "    steps:\n      - not-a-step\n      - run: make\n        env: &shared {OBAAF_LANE: agent}\n"
+              "      - run: make test\n        env: *shared\n")
         with TempDir() as tmp:
             notes = ignored(check(tmp, wf))
         self.assertEqual(len(notes), 3, notes)
-        self.assertTrue(any("job 'work' sets OBAAF_LANE in container.env" in note for note in notes), notes)
-        self.assertTrue(any("job 'work' sets OBAAF_LANE in step 2" in note for note in notes), notes)
-        self.assertTrue(any("wf.yml sets OBAAF_LANE in services-note.env" in note for note in notes), notes)
+        for where in ("container.env", "step 2", "step 3"):
+            with self.subTest(where=where):
+                self.assertTrue(any(f"job 'work' sets OBAAF_LANE in {where}," in note for note in notes), notes)
+
+    def test_no_note_for_obaaf_lane_that_is_read_or_is_not_a_declaration(self):
+        # An env shared through an anchor is the job's env; an input of that name is not an env.
+        wf = ("on:\n  workflow_call:\n    inputs:\n      OBAAF_LANE: {type: string}\n"
+              "jobs:\n  first:\n    runs-on: ubuntu-latest\n    env: &lane {OBAAF_LANE: agent}\n"
+              "    steps:\n      - run: ./a.sh\n"
+              "  second:\n    runs-on: ubuntu-latest\n    env: *lane\n    steps:\n"
+              f"      - uses: some/action@{SHA}\n        with: {{OBAAF_LANE: agent}}\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf)
+            shown = {row[1]: row[2] for row in checker.lanes(path)}
+            notes = ignored(checker.check(path))
+        self.assertEqual(shown, {"first": "agent", "second": "agent"})
+        self.assertEqual(notes, [])
 
     def test_one_workflow_checked_with_the_repository_configuration(self):
         # The configuration names files from the repository root; a file checked on its own must
@@ -487,12 +503,16 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
                     self.assertEqual(ignored(checker.check(tmp, platform=platform)), [])
 
     def test_no_note_about_a_jenkinsfile_when_only_the_workflows_directory_is_checked(self):
-        config = "lanes:\n  Jenkinsfile#Build: agent\n"
+        # But an entry for a file that does not exist is a mistake whatever was checked.
+        config = "lanes:\n  Jenkinsfile#Build: agent\n  wf#work: agent\n"
         with TempDir() as tmp:
             repo(tmp, self.PLAIN, config, jenkinsfile=JENKINSFILE)
             result = checker.check(tmp / ".github" / "workflows")
+            github_only = ignored(checker.check(tmp, platform="github"))
         self.assertEqual(result.jenkins_files, [])
-        self.assertEqual(ignored(result), [])
+        for notes in (ignored(result), github_only):
+            self.assertEqual(len(notes), 1, notes)
+            self.assertIn("'wf#work'", notes[0])
 
     def test_no_second_report_for_a_job_already_reported_as_an_error(self):
         wf = "on: push\njobs:\n  build: hello\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n"
@@ -591,6 +611,52 @@ class AJenkinsStageDeclarationOnlyAddsRulesTest(unittest.TestCase):
                 self.assertEqual(found, declared)
                 self.assertIn("Deploy", result.stage_keys)
 
+    def test_the_step_nothing_checks_is_reported_at_its_own_severity(self):
+        # The third review's case. OBAAF-JEN-012 is reported once for a file. A stage declared
+        # `release` behind a provenance check came first and took the finding at medium, and the
+        # `npm publish` that nothing checks lost it.
+        text = """pipeline {
+  agent any
+  stages {
+    stage('Verify') {
+      when { branch 'main' }
+      steps { sh 'gh attestation verify app.tgz --owner acme' }
+    }
+    stage('Pack') {
+      when { branch 'main' }
+      environment { OBAAF_LANE = 'release' }
+      steps { sh 'tar czf app.tgz build' }
+    }
+    stage('Ship') { steps { sh 'npm publish' } }
+  }
+}
+"""
+        from obaaf.catalog import load
+        from obaaf.checker import jenkins
+        for lanes in ({}, {"Jenkinsfile#Pack": "agent"}, {"Jenkinsfile#Pack": "trusted"}, {"Jenkinsfile": "release"}):
+            with self.subTest(lanes=lanes):
+                result = jenkins.analyze("Jenkinsfile", text.encode(), load(), None, lane_overrides=lanes)
+                found = [(f.severity, f.job) for f in result.findings if f.rule == "OBAAF-JEN-012"]
+                self.assertEqual([severity for severity, _ in found], ["high"], found)
+
+    def test_a_declared_stage_whose_steps_are_not_shell_steps(self):
+        # The step's code is not in the file; the declaration says what it is.
+        for lane, step, expected in (("agent", "reviewWithAssistant(prompt: 'review this')", "agent"),
+                                     ("release", "uploadToStore(file: 'app.tgz')", "release")):
+            with self.subTest(lane=lane):
+                text = JENKINSFILE.replace("sh './build.sh'", step)
+                _, plain = jenkins_rules(text)
+                _, declared = jenkins_rules(text, {"Jenkinsfile#Build": lane})
+                self.assertNotEqual([row[1] for row in plain.lanes], [expected])
+                self.assertEqual([row[1] for row in declared.lanes], [expected])
+
+    def test_a_value_computed_when_the_build_runs_is_reported_as_that(self):
+        with TempDir() as tmp:
+            repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = \"${params.LANE}\" }"))
+            notes = ignored(checker.check(tmp))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("Jenkinsfile, line 6, sets OBAAF_LANE to a value computed when the build runs", notes[0])
+
     def test_a_value_in_the_file_that_is_not_a_lane_is_reported(self):
         with TempDir() as tmp:
             repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = 'relaese' }"))
@@ -599,7 +665,7 @@ class AJenkinsStageDeclarationOnlyAddsRulesTest(unittest.TestCase):
             (tmp / "Jenkinsfile").write_text(NESTED)
             nested = ignored(checker.check(tmp))
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("Jenkinsfile sets OBAAF_LANE to 'relaese', which is not a lane", notes[0])
+        self.assertIn("Jenkinsfile, line 6, sets OBAAF_LANE to 'relaese', which is not a lane", notes[0])
         self.assertEqual(nested, [])
 
 
@@ -612,13 +678,20 @@ class AnEnvironmentNamedForReleasesTest(unittest.TestCase):
             return checker.lanes(path)[0][2]
 
     def test_names_that_say_release(self):
-        for name in ("prod", "production", "aws-prod", "Prod_EU", "release", "itch", "itch.io", "appstore",
-                     "steam", "deploy-preview", "publish"):
+        # Anywhere in the name, in any case, as before this change.
+        for name in ("prod", "production", "aws-prod", "Prod_EU", "AppProd", "awsprod", "K8sProd", "GameItch",
+                     "release", "itch", "itch.io", "appstore", "steam", "deploy-preview", "publish",
+                     "preprod-release", "{name: WebProd}"):
             with self.subTest(name=name):
                 self.assertEqual(self.lane(name), "release")
 
-    def test_names_that_only_contain_the_letters(self):
-        for name in ("switch-tests", "reproduce", "nonprod", "kitchen", "staging", "ci"):
+    def test_a_name_that_says_it_is_not_production(self):
+        for name in ("nonprod", "non-prod", "NonProd", "preprod", "pre-production", "PreProduction", "pre_prod"):
+            with self.subTest(name=name):
+                self.assertEqual(self.lane(name), "trusted")
+
+    def test_names_that_say_nothing(self):
+        for name in ("staging", "ci", "review"):
             with self.subTest(name=name):
                 self.assertEqual(self.lane(name), "trusted")
 

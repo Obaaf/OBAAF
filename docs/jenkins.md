@@ -168,7 +168,12 @@ In a Jenkinsfile, set a stage's lane in its `environment` (`OBAAF_LANE = 'agent'
 pipeline's, each enclosing stage's, the stage's own, and a `lanes:` entry in the configuration for
 the file (`Jenkinsfile`), the stage (`Jenkinsfile#Ship`) or a stage it is nested in. None of them
 hides another, so a stage declared `release` in the file and `agent` in the configuration gets the
-rules of both. A value that is not a lane is listed in the report's notes.
+rules of both. A value that is not a lane, or one computed when the build runs, is listed in the
+report's notes.
+
+On a stage, `agent` and `release` are the lanes that change what is checked. `agent` says the
+stage's shell steps, and its steps whose code is not in the file (shared-library steps), run an
+agent; `release` says they publish. The other lanes are accepted and change nothing.
 
 ## Running the audit in Jenkins
 

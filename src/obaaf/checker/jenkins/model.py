@@ -69,7 +69,8 @@ class Ctx:
     agent: Agent | None = None
     lane: str | None = None
     lane_line: int = 0
-    lanes: tuple = ()             # every OBAAF_LANE value declared on the way to the step, outermost first
+    lanes: tuple = ()             # (value, line) of every OBAAF_LANE on the way to the step, outermost
+                                  # first; the value is None when it is computed at run time
     in_function: str | None = None
     swallowed: str | None = None  # catchError, warnError or a catch block: its failure does not stop the build
     branch: tuple = ()            # ((parallel line, branch name), ...): steps in sibling branches run concurrently
@@ -1237,7 +1238,7 @@ class Builder:
                         var, sep, val = s.text().partition("=")
                         if var.strip() == "OBAAF_LANE" and sep:
                             inner = replace(inner, lane=val.strip().lower() or inner.lane, lane_line=s.line,
-                                            lanes=inner.lanes + (val.strip(),))
+                                            lanes=inner.lanes + ((val.strip(), s.line),))
             self.block(call.closure, inner)
 
     def inline(self, name: str, call: Call, ctx: Ctx) -> None:
@@ -1387,7 +1388,7 @@ class Builder:
                 lane = (text or "").strip().lower() or lane
                 lane_line = stmt.line
                 # Kept even when it names no lane, so that it can be reported and not dropped.
-                lanes += ("(a computed value)" if text is None else text.strip(),)
+                lanes += ((None if text is None else text.strip(), stmt.line),)
             if isinstance(value, Str):
                 self.p.env_values[var] = value
             self.track_value(var, value)

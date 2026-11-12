@@ -117,10 +117,17 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
             lane, reason = "unknown", "its condition cannot be evaluated" if crs else "runs no build code"
         result.lanes.append((stage_label(stage), lane, reason))
         result.stage_keys.update(key.partition("#")[2] for key in engine.lane_keys(stage)[1:])
-        for value in dict.fromkeys(value for info in infos for value in info.ctx.lanes):
-            # One note for each value, not one for each stage it reaches.
-            problem = not_a_lane(f"{one_line(rel, 120)} sets OBAAF_LANE", value)
-            if declared_lane(value) is None and problem not in result.lane_problems:
+        for value, line in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
+            # One note for each declaration, not one for each stage it reaches.
+            where = f"{one_line(rel, 120)}, line {line}, sets OBAAF_LANE"
+            if value is None:
+                problem = (f"{where} to a value computed when the build runs, which the checker cannot read as "
+                           "a lane; the declaration changes nothing")
+            elif declared_lane(value) is None:
+                problem = not_a_lane(where, value)
+            else:
+                continue
+            if problem not in result.lane_problems:
                 result.lane_problems.append(problem)
         if ai:
             result.agent_present = True
