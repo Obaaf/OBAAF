@@ -57,7 +57,7 @@ def _detect_repository(path: str) -> tuple[str, str]:
         done = subprocess.run(["git", "-C", path, "config", "--get", "remote.origin.url"], capture_output=True,
                               text=True, timeout=10, check=False)
         match = REMOTE.match(done.stdout.strip()) if done.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         match = None
     if match:
         return match.group(1), f"from the origin remote of {path}"
@@ -65,7 +65,7 @@ def _detect_repository(path: str) -> tuple[str, str]:
     if env:
         return env, "from $GITHUB_REPOSITORY"
     raise UsageError("could not tell which repository to audit: pass --repo OWNER/REPO (no github.com origin "
-                     f"remote was found in {path}, and $GITHUB_REPOSITORY is not set)")
+                     f"remote was found in {_plain(path)}, and $GITHUB_REPOSITORY is not set)")
 
 
 def _token(args, api: str, default_api: str) -> tuple[str | None, str]:
@@ -76,13 +76,21 @@ def _token(args, api: str, default_api: str) -> tuple[str | None, str]:
     for name in names:
         value = os.environ.get(name, "").strip()
         if value:
-            if not re.fullmatch(r"[\x21-\x7e]{1,4096}", value):
-                raise UsageError(f"${name} does not hold a token (it contains spaces or other characters a "
-                                 "token cannot have)")
+            # The characters GitHub's tokens are made of. Anything else is not a token, and could not be
+            # cut out of an answer reliably if a server ever echoed it.
+            if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{8,4096}", value):
+                raise UsageError(f"the environment variable {_plain(name)} does not hold a token (it is too "
+                                 "short, or has characters a token cannot have)")
             return value, name
     if args.token_env:
-        raise UsageError(f"--token-env {args.token_env}: that environment variable is not set or is empty")
+        raise UsageError(f"--token-env {_plain(args.token_env)}: that environment variable is not set or is empty")
     return None, ""
+
+
+def _plain(text: object, limit: int = 140) -> str:
+    from obaaf.audit.github import plain
+
+    return plain(text, limit)
 
 
 def _emit(text: str, output: str | None) -> None:
@@ -91,12 +99,31 @@ def _emit(text: str, output: str | None) -> None:
         Path(output).write_text(text, encoding="utf-8")
     else:
         sys.stdout.write(text)
+        sys.stdout.flush()
 
 
-def cmd_audit(args, transport=None) -> int:
+def cmd_audit(args) -> int:
+    """Run the audit. Whatever goes wrong, the result is a message and a non-zero exit, never a pass."""
+    try:
+        return _run(args)
+    except UsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except OSError as exc:
+        # A file that could not be written, or output that could not be printed.
+        print(f"error: {_plain(exc.strerror or type(exc).__name__)}"
+              + (f": {_plain(exc.filename)}" if exc.filename else ""), file=sys.stderr)
+        return EXIT_FAIL
+    except Exception as exc:  # noqa: BLE001 - a crash must not look like anything but a failure
+        print(f"error: obaaf audit failed unexpectedly ({type(exc).__name__}). This is a bug in obaaf; nothing "
+              "was established about the settings.", file=sys.stderr)
+        return EXIT_FAIL
+
+
+def _run(args) -> int:
     from obaaf import audit
     from obaaf.audit import report, snapshot as snapshot_mod
-    from obaaf.audit.github import plain
+    from obaaf.audit.settings import check_branches
 
     try:
         if args.from_snapshot:
@@ -108,38 +135,39 @@ def cmd_audit(args, transport=None) -> int:
             snap = snapshot_mod.load(args.from_snapshot)
             if args.repo and args.repo.lower() not in (snap["repository"].lower(),
                                                        str(snap.get("requested_as", "")).lower()):
-                raise UsageError(f"{args.from_snapshot} is a snapshot of {plain(snap['repository'], 140)}, "
-                                 f"not of {plain(args.repo, 140)}")
+                raise UsageError(f"{_plain(args.from_snapshot)} is a snapshot of {_plain(snap['repository'])}, "
+                                 f"not of {_plain(args.repo)}")
             how = "with a token" if snap["viewer"]["authenticated"] else "without a token"
-            origin = (f"From the snapshot {args.from_snapshot}, taken {report.when(snap)} {how}. Nothing was "
-                      "asked of GitHub now.")
+            origin = (f"From the snapshot {_plain(args.from_snapshot)}, taken {report.when(snap)} {how}. Nothing "
+                      "was asked of GitHub now.")
         else:
             api = audit.github.check_api_url(args.api_url) if args.api_url else audit.DEFAULT_API
             repository, found = (args.repo, "") if args.repo else _detect_repository(args.path)
             if not audit.OWNER_REPO.match(repository or ""):
-                raise UsageError(f"expected OWNER/REPO, got {plain(repository, 140)!r}")
+                raise UsageError(f"expected OWNER/REPO, got {_plain(repository)!r}")
+            try:
+                check_branches(args.branch)
+            except ValueError as exc:
+                raise UsageError(str(exc)) from None
             token, token_from = _token(args, api, audit.DEFAULT_API)
-            client = audit.Client(transport=transport, api=api, token=token)
+            client = audit.Client(api=api, token=token)
             snap = audit.take(client, repository, tuple(args.branch))
             origin = ""
             if found:
-                print(f"Auditing {repository} ({found}).", file=sys.stderr)
+                print(f"Auditing {repository} ({_plain(found)}).", file=sys.stderr)
             if token_from:
-                print(f"Using the token in ${token_from}. Only GET requests are sent.", file=sys.stderr)
+                print(f"Using the token in the environment variable {_plain(token_from)}. Only GET requests are "
+                      "sent.", file=sys.stderr)
             if args.record:
                 Path(args.record).mkdir(parents=True, exist_ok=True)
                 (Path(args.record) / "responses.json").write_text(client.recording_text(), encoding="utf-8")
             if args.snapshot_out:
                 snapshot_mod.write(snap, args.snapshot_out)
-    except (UsageError, audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
-    except (OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_USAGE if isinstance(exc, ValueError) else EXIT_FAIL
+    except (audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
+        raise UsageError(str(exc)) from None
     _emit(snapshot_mod.dumps(snap) if args.format == "json" else report.to_text(snap, origin=origin), args.output)
     if args.snapshot_out and not args.from_snapshot:
-        print(f"Snapshot written to {args.snapshot_out}.", file=sys.stderr)
+        print(f"Snapshot written to {_plain(args.snapshot_out)}.", file=sys.stderr)
     if snap["settings"]["repository"]["status"] != "read":
         # Reading nothing must not look like a pass.
         print(f"error: {report.why_unread(snap)}. Nothing was audited.", file=sys.stderr)

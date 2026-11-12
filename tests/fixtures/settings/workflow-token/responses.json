@@ -1,7 +1,7 @@
 {
   "format": "obaaf-api-recording/v0.1",
   "api": "https://api.github.com",
-  "note": "Written by hand from the example responses in GitHub's REST reference (read 2026-11-12) and shaped after the settings behind the incidents in docs/flagship.md. Not recorded from a live repository.",
+  "note": "Written by hand from the example responses in GitHub's REST reference (read 2026-11-12) and shaped after the settings behind the incidents in docs/flagship.md. Not recorded from a live repository. How GitHub really answers was seen once, for this repository's own workflow token and for no token, in https://github.com/Obaaf/OBAAF/actions/runs/43129074849: the refusals in the workflow-token recording (HTTP 403, the message, the X-Accepted-GitHub-Permissions values) and the collaborator list being readable are written to match that run. Nothing here that needs administrative access has been seen live.",
   "scenario": "The same repository read with a token that has no administrative access, such as a workflow's own token.",
   "responses": [
     {
@@ -493,15 +493,66 @@
     },
     {
       "path": "/repos/example-studio/game/collaborators?affiliation=all&per_page=100",
-      "status": 404,
+      "status": 200,
       "headers": {
         "content-type": "application/json; charset=utf-8"
       },
-      "body": {
-        "message": "Not Found",
-        "documentation_url": "https://docs.github.com/rest",
-        "status": "404"
-      }
+      "body": [
+        {
+          "login": "maintainer-one",
+          "id": 11,
+          "node_id": "MDQ6VXNlcjE=",
+          "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+          "url": "https://api.github.com/users/maintainer-one",
+          "html_url": "https://github.com/maintainer-one",
+          "type": "User",
+          "site_admin": false,
+          "permissions": {
+            "pull": true,
+            "triage": true,
+            "push": true,
+            "maintain": true,
+            "admin": true
+          },
+          "role_name": "admin"
+        },
+        {
+          "login": "maintainer-two",
+          "id": 12,
+          "node_id": "MDQ6VXNlcjE=",
+          "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+          "url": "https://api.github.com/users/maintainer-two",
+          "html_url": "https://github.com/maintainer-two",
+          "type": "User",
+          "site_admin": false,
+          "permissions": {
+            "pull": true,
+            "triage": true,
+            "push": true,
+            "maintain": true,
+            "admin": true
+          },
+          "role_name": "admin"
+        },
+        {
+          "login": "maintainer-three",
+          "id": 13,
+          "node_id": "MDQ6VXNlcjE=",
+          "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+          "url": "https://api.github.com/users/maintainer-three",
+          "html_url": "https://github.com/maintainer-three",
+          "type": "User",
+          "site_admin": false,
+          "permissions": {
+            "pull": true,
+            "triage": true,
+            "push": true,
+            "maintain": true,
+            "admin": true
+          },
+          "role_name": "admin"
+        }
+      ]
     }
   ]
 }

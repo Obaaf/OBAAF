@@ -1,7 +1,7 @@
 {
   "format": "obaaf-api-recording/v0.1",
   "api": "https://api.github.com",
-  "note": "Written by hand from the example responses in GitHub's REST reference (read 2026-11-12) and shaped after the settings behind the incidents in docs/flagship.md. Not recorded from a live repository.",
+  "note": "Written by hand from the example responses in GitHub's REST reference (read 2026-11-12) and shaped after the settings behind the incidents in docs/flagship.md. Not recorded from a live repository. How GitHub really answers was seen once, for this repository's own workflow token and for no token, in https://github.com/Obaaf/OBAAF/actions/runs/43129074849: the refusals in the workflow-token recording (HTTP 403, the message, the X-Accepted-GitHub-Permissions values) and the collaborator list being readable are written to match that run. Nothing here that needs administrative access has been seen live.",
   "scenario": "A public repository in an organisation, read with no token. One environment holds secrets and lets any branch deploy.",
   "responses": [
     {

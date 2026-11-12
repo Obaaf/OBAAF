@@ -1,12 +1,13 @@
 """The settings audit's report for people. The JSON output is the snapshot itself.
 
 The report leads with what was not read, because that is where a reader is most likely to assume more than
-the audit knows.
+the audit knows. Everything that comes from GitHub or from a snapshot file passes through ``plain`` or
+``quoted`` on its way to the terminal, numbers included: a snapshot file can hold anything.
 """
 
 from __future__ import annotations
 
-from obaaf.audit.github import plain
+from obaaf.audit.github import plain, quoted
 from obaaf.audit.settings import BY_KEY, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
@@ -30,8 +31,12 @@ def _list(items, limit: int = 8) -> str:
     return ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")
 
 
-def _count(n: int, noun: str, plural: str | None = None) -> str:
-    return f"{n} {noun if n == 1 else (plural or noun + 's')}"
+def _count(n, noun: str, plural: str | None = None) -> str:
+    return f"{plain(n, 20)} {noun if n == 1 else (plural or noun + 's')}"
+
+
+def _yes(value) -> str:
+    return {True: "yes", False: "no"}.get(value, "not given")
 
 
 def _rule_text(rule: dict) -> str:
@@ -43,13 +48,6 @@ def _rule_text(rule: dict) -> str:
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
         return f"required_status_checks ({_list(names) if names else 'none named'})"
     return plain(kind, 60)
-
-
-def _checks_text(checks: dict | None) -> str:
-    if not checks:
-        return "no required checks shown"
-    names = sorted(set(checks.get("contexts", [])) | {c["context"] for c in checks.get("checks", [])})
-    return f"required checks: {_list(names)}" if names else "required checks: none named"
 
 
 def _policy_rule_text(rule: dict) -> str:
@@ -66,34 +64,78 @@ def _workflow_paths(conditions) -> str:
     return f" for {_list(paths)}" if isinstance(paths, list) and paths else ""
 
 
-def _ruleset_names(settings: dict) -> dict[str, str]:
+def _source(item: dict) -> str:
+    return f"{plain(item['source_type'] or 'a source not given', 20)} {plain(item['source'] or '', 60)}".strip()
+
+
+def _check_names(checks: dict) -> str:
+    names = sorted(set(checks["contexts"]) | {c["context"] for c in checks["checks"] or []})
+    return f"required checks: {_list(names, 12)}" if names else "required checks: none named"
+
+
+def _ruleset_names(settings: dict) -> dict:
     value = settings.get("rulesets", {}).get("value")
     try:
-        return {str(r["id"]): str(r["name"]) for r in value or []}
+        return {r["id"]: r["name"] for r in value or []}
     except (KeyError, TypeError):
         return {}
 
 
+def _classic_text(rule: dict) -> str:
+    if not rule["exists"]:
+        return "no classic protection rule"
+    reviews, checks = rule["required_pull_request_reviews"], rule["required_status_checks"]
+    if not reviews["required"]:
+        approvals = "no review required"
+    elif reviews["required_approving_review_count"] is None:
+        approvals = "review required (the number of approvals was not given)"
+    else:
+        approvals = _count(reviews["required_approving_review_count"], "approval") + " required"
+    admins = "administrators are held to it" if rule["enforce_admins"] else "administrators are not held to it"
+    return f"{approvals}; {_check_names(checks) if checks['required'] else 'no required checks'}; {admins}"
+
+
+def _environment_text(env: dict) -> str:
+    if env["deployment_branches"] == "any":
+        branches = "any branch or tag may deploy"
+    elif env["deployment_branches"] == "protected":
+        branches = "only protected branches may deploy"
+    elif env["branch_policies"] is None:
+        branches = "only selected branches or tags may deploy (the patterns were not read)"
+    else:
+        branches = "may deploy: " + (_list([p["name"] for p in env["branch_policies"]])
+                                     if env["branch_policies"] else "nothing (no pattern is set)")
+    if not env["reviewers"]:
+        review = "no required reviewers"
+    else:
+        review = "reviewers: " + _list([r["name"] for r in env["reviewers"]])
+        review += {True: " (self-review prevented)", False: " (self-review allowed)"}.get(
+            env["prevent_self_review"], "")
+    wait = f"; wait {plain(env['wait_timer'], 10)} min" if env["wait_timer"] else ""
+    other = f"; other rules: {_list(env['other_protection_rules'])}" if env["other_protection_rules"] else ""
+    return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}"
+
+
 def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one branch per setting, kept flat
     if key == "repository":
-        owner_kind = "the organisation" if value["owner_type"] == "Organization" else "the user"
+        owner_kind = {"Organization": "the organisation", "User": "the user"}.get(value["owner_type"], "")
         extra = (", a fork" if value["fork"] else "") + (", archived" if value["archived"] else "")
         return [f"{plain(value['visibility'], 20)} repository, default branch {plain(value['default_branch'], 80)}, "
-                f"owned by {owner_kind} {plain(value['owner'], 40)}{extra}"]
+                f"owned by {owner_kind} {plain(value['owner'], 40)}{extra}".replace("  ", " ")]
     if key == "rulesets":
         if not value:
             return ["no ruleset applies to this repository"]
-        return [f'"{plain(r["name"], 60)}" ({plain(r["enforcement"], 20)}, {plain(r["target"] or "?", 20)}, from '
-                f'{plain(r["source_type"] or "?", 20)} {plain(r["source"] or "?", 60)}): '
-                + (_list([_rule_text(x) for x in r["rules"]], 12) if r["rules"] else "no rules")
+        return [f"{quoted(r['name'])} ({plain(r['enforcement'], 20)}, {plain(r['target'] or 'target not given', 20)}, "
+                f"from {_source(r)}): " + (_list([_rule_text(x) for x in r["rules"]], 12) if r["rules"] else "no rules")
                 for r in value]
     if key == "ruleset_bypass_actors":
-        lines, names = [], _ruleset_names(settings)
-        for ruleset_id, actors in value.items():
-            who = _list([f'{a["actor_type"]}{"" if a["actor_id"] is None else " " + str(a["actor_id"])} '
-                         f'({a["bypass_mode"] or "mode not given"})' for a in actors]) if actors else "nobody"
-            name = f' "{plain(names[ruleset_id], 60)}"' if ruleset_id in names else ""
-            lines.append(f"ruleset {plain(ruleset_id, 20)}{name}: {who}")
+        names = _ruleset_names(settings)
+        lines = []
+        for entry in value:
+            who = _list([f"{a['actor_type']}{'' if a['actor_id'] is None else ' ' + str(a['actor_id'])} "
+                         f"({a['bypass_mode'] or 'mode not given'})" for a in entry["actors"]])
+            name = f" {quoted(names[entry['ruleset_id']])}" if entry["ruleset_id"] in names else ""
+            lines.append(f"ruleset {plain(entry['ruleset_id'], 20)}{name}: {who}")
         return lines or ["no ruleset's bypass list was read"]
     if key == "branch_rules":
         return [f"{plain(branch, 80)}: " + (_list([_rule_text(r) for r in rules], 12) if rules else "no active rule")
@@ -101,51 +143,17 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
     if key == "branches":
         lines = []
         for branch, entry in value.items():
-            shown = entry.get("public_protection") or {}
+            shown = entry["public_protection"]
+            checks = shown["required_status_checks"] if shown else None
             lines.append(f"{plain(branch, 80)}: GitHub calls it {'protected' if entry['protected'] else 'not protected'}; "
-                         + _checks_text(shown.get("required_status_checks")))
+                         + (_check_names(checks) if checks else "no required checks shown"))
         return lines
     if key == "branch_protection":
-        lines = []
-        for branch, rule in value.items():
-            if rule is None:
-                lines.append(f"{plain(branch, 80)}: no classic protection rule")
-                continue
-            reviews = rule["required_pull_request_reviews"]
-            approvals = "no review required" if reviews is None else _count(
-                reviews["required_approving_review_count"] or 0, "approval") + " required"
-            admins = {True: "administrators are held to it", False: "administrators are not held to it",
-                      None: "whether administrators are held to it was not given"}[rule["enforce_admins"]]
-            lines.append(f"{plain(branch, 80)}: {approvals}; {_checks_text(rule['required_status_checks'])}; {admins}")
-        return lines
+        return [f"{plain(branch, 80)}: {_classic_text(rule)}" for branch, rule in value.items()]
     if key == "environments":
-        if not value:
-            return ["the repository has no environments"]
-        lines = []
-        for env in value:
-            policy = env["deployment_branch_policy"]
-            if policy is None:
-                branches = "any branch or tag may deploy"
-            elif policy["protected_branches"]:
-                branches = "only protected branches may deploy"
-            elif env["branch_policies"] is None:
-                branches = "only selected branches or tags may deploy (the patterns were not read)"
-            else:
-                branches = "may deploy: " + (_list([p["name"] for p in env["branch_policies"]])
-                                             if env["branch_policies"] else "nothing (no pattern is set)")
-            reviewers = env["required_reviewers"]
-            if reviewers is None:
-                review = "no required reviewers"
-            else:
-                review = "reviewers: " + (_list([r["name"] for r in reviewers["reviewers"]]) or "none listed")
-                review += {True: " (self-review prevented)", False: " (self-review allowed)",
-                           None: ""}[reviewers["prevent_self_review"]]
-            wait = f"; wait {env['wait_timer']} min" if env["wait_timer"] else ""
-            other = f"; other rules: {_list(env['other_protection_rules'])}" if env["other_protection_rules"] else ""
-            lines.append(f'"{plain(env["name"], 60)}": {branches}; {review}{wait}{other}')
-        return lines
+        return [_environment_text(env) for env in value] or ["the repository has no environments"]
     if key == "environment_secrets":
-        return [f'"{plain(name, 60)}": ' + (_list(secrets, 12) if secrets else "no secrets")
+        return [f"{quoted(name)}: " + (_list(secrets, 12) if secrets else "no secrets")
                 for name, secrets in value.items()]
     if key in ("repository_secrets", "organization_secrets"):
         return [_list(value, 12) if value else "none"]
@@ -153,38 +161,37 @@ def _describe(key: str, value, settings: dict) -> list[str]:  # noqa: C901 - one
         if not value["enabled"]:
             return ["GitHub Actions is turned off for this repository"]
         allowed = plain(value["allowed_actions"] or "not given", 20)
-        selected = value["selected_actions"]
-        if selected:
-            allowed += (f" (GitHub's own: {_yes(selected['github_owned_allowed'])}, verified creators: "
-                        f"{_yes(selected['verified_allowed'])}, {_count(len(selected['patterns_allowed']), 'pattern')})")
+        if value["allowed_actions"] == "selected":
+            selected = value["selected_actions"]
+            allowed += " (the list was not read)" if selected is None else (
+                f" (GitHub's own: {_yes(selected['github_owned_allowed'])}, verified creators: "
+                f"{_yes(selected['verified_allowed'])}, {_count(len(selected['patterns_allowed']), 'pattern')})")
         return [f"allowed actions: {allowed}; pinning to a commit required: {_yes(value['sha_pinning_required'])}"]
     if key == "workflow_permissions":
         return [f"the workflow token defaults to {plain(value['default_workflow_permissions'], 20)}; workflows "
                 f"{'may' if value['can_approve_pull_request_reviews'] else 'may not'} approve pull requests"]
     if key == "fork_pull_requests":
         line = f"approval is required for: {plain(value['approval_policy'], 60)}"
-        private = value["private_repository"]
-        if private:
-            line += "; on this private repository, fork pull requests " + (
-                "do not run workflows" if not private["run_workflows_from_fork_pull_requests"] else
-                f"run workflows (write tokens: {_yes(private['send_write_tokens_to_workflows'])}, secrets: "
-                f"{_yes(private['send_secrets_and_variables'])})")
+        if "private_repository" in value:
+            private = value["private_repository"]
+            line += "; on this private repository, " + (
+                "the settings for fork pull requests were not read" if private is None else
+                "fork pull requests do not run workflows" if not private["run_workflows_from_fork_pull_requests"] else
+                f"fork pull requests run workflows (write tokens: {_yes(private['send_write_tokens_to_workflows'])}, "
+                f"secrets: {_yes(private['send_secrets_and_variables'])})")
         return [line]
     if key == "actions_policies":
         if not value:
             return ["no Actions policy was listed for this repository"]
-        return [f'"{plain(p["name"], 60)}" ({plain(p["enforcement"], 20)}, from {plain(p["source_type"] or "?", 20)} '
-                f'{plain(p["source"] or "?", 60)}){_workflow_paths(p["conditions"])}: '
+        return [f"{quoted(p['name'])} ({plain(p['enforcement'], 20)}, from {_source(p)})"
+                f"{_workflow_paths(p['conditions'])}: "
                 + ("; ".join(_policy_rule_text(r) for r in p["rules"]) or "no rules")
                 for p in value]
     if key == "collaborators":
-        roles = ", ".join(f"{n} {role}" for role, n in value["by_role"].items() if n)
+        roles = ", ".join(f"{plain(n, 20)} {role}" for role, n in value["by_role"].items()
+                          if n and role in ("admin", "maintain", "write", "triage", "read"))
         return [f"{_count(value['total'], 'account')}" + (f": {roles}" if roles else "")]
     return [plain(value, 300)]
-
-
-def _yes(value) -> str:
-    return {True: "yes", False: "no"}.get(value, "not given")
 
 
 def to_text(snapshot: dict, origin: str = "") -> str:
@@ -233,8 +240,8 @@ def to_text(snapshot: dict, origin: str = "") -> str:
             try:
                 described = _describe(setting.key, entry["value"], settings)
             except (KeyError, TypeError, AttributeError, IndexError, ValueError):
-                # A snapshot file is checked for its outline, not for every value inside; a value this
-                # version cannot describe is shown as that, not guessed at.
+                # A loaded snapshot has been checked against the schema, so this should not happen; if it
+                # does, the value is shown as not describable rather than guessed at.
                 described = ["recorded, but not in a form this version can describe"]
             lines += [f"      {line}" for line in described]
             for problem in entry.get("problems", []):
@@ -250,7 +257,7 @@ def to_text(snapshot: dict, origin: str = "") -> str:
 
 def when(snapshot: dict) -> str:
     stamp = str(snapshot.get("taken_at", ""))
-    return f"{stamp[:10]} {stamp[11:16]} UTC" if len(stamp) == 20 else plain(stamp, 40)
+    return plain(f"{stamp[:10]} {stamp[11:16]} UTC" if len(stamp) == 20 else stamp, 40)
 
 
 def why_unread(snapshot: dict) -> str:
