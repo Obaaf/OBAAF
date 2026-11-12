@@ -171,8 +171,9 @@ the file (`Jenkinsfile`), the stage (`Jenkinsfile#Ship`) or a stage it is nested
 hides another, so a stage declared `release` in the file and `agent` in the configuration gets the
 rules of both. A value that is not a lane, or one computed when the build runs, declares nothing.
 Where it reaches at least one step it is reported as the finding `OBAAF-CFG-001`, on its line in
-the Jenkinsfile, with the names of the stages it reaches (a method is `name()`, a `post` block
-`post always`, as `--lanes` labels them). So is a `lanes:` entry that names a stage the file does
+the Jenkinsfile, with the labels of the stages it reaches as `--lanes` prints them (a method
+that nothing in the file calls is `name()`, a `post` block `post always`), except that steps
+outside any stage have the empty label and not `pipeline`. So is a `lanes:` entry that names a stage the file does
 not have, in the configuration file; a stage written without a block (`stage 'Build'`) holds no
 step and counts as one the file does not have. Unlike the OBAAF-JEN rules it is not advisory about the
 controller: it says the checker did not get a declaration its author wrote. Two things are not
