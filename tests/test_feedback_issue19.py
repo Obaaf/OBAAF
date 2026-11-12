@@ -63,7 +63,7 @@ class LaneNotesTest(unittest.TestCase):
         with TempDir() as tmp:
             _write_repo(tmp, wf, instruction=None)
             notes = checker.check(tmp).notes
-            self.assertTrue(any("suggests agent work but stayed in the trusted lane" in n for n in notes), notes)
+            self.assertTrue(any("suggests agent work but are not in the agent lane" in n for n in notes), notes)
 
 
 class CategoryTest(unittest.TestCase):
