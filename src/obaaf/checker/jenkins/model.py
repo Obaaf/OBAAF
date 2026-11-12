@@ -69,6 +69,8 @@ class Ctx:
     agent: Agent | None = None
     lane: str | None = None
     lane_line: int = 0
+    lanes: tuple = ()             # (value, line) of every OBAAF_LANE on the way to the step, outermost
+                                  # first; the value is None when it is computed at run time
     in_function: str | None = None
     swallowed: str | None = None  # catchError, warnError or a catch block: its failure does not stop the build
     branch: tuple = ()            # ((parallel line, branch name), ...): steps in sibling branches run concurrently
@@ -1233,9 +1235,10 @@ class Builder:
             if name == "withEnv":
                 for arg in call.args:
                     for s in all_strings(arg):
-                        var, _, val = s.text().partition("=")
-                        if var.strip() == "OBAAF_LANE" and val.strip():
-                            inner = replace(inner, lane=val.strip().lower(), lane_line=s.line)
+                        var, sep, val = s.text().partition("=")
+                        if var.strip() == "OBAAF_LANE" and sep:
+                            inner = replace(inner, lane=val.strip().lower() or inner.lane, lane_line=s.line,
+                                            lanes=inner.lanes + ((val.strip(), s.line),))
             self.block(call.closure, inner)
 
     def inline(self, name: str, call: Call, ctx: Ctx) -> None:
@@ -1369,7 +1372,7 @@ class Builder:
         if env.closure is None:
             return ctx
         new: list[Binding] = []
-        lane, lane_line = ctx.lane, ctx.lane_line
+        lane, lane_line, lanes = ctx.lane, ctx.lane_line, ctx.lanes
         for stmt in env.closure.stmts:
             if not isinstance(stmt, Assign):
                 continue
@@ -1381,12 +1384,15 @@ class Builder:
                                    stmt.line, origin))
                 continue
             if var == "OBAAF_LANE":
-                lane = (literal(value) or "").strip().lower() or lane
+                text = literal(value)
+                lane = (text or "").strip().lower() or lane
                 lane_line = stmt.line
+                # Kept even when it names no lane, so that it can be reported and not dropped.
+                lanes += ((None if text is None else text.strip(), stmt.line),)
             if isinstance(value, Str):
                 self.p.env_values[var] = value
             self.track_value(var, value)
-        return replace(ctx, creds=ctx.creds + tuple(new), lane=lane, lane_line=lane_line)
+        return replace(ctx, creds=ctx.creds + tuple(new), lane=lane, lane_line=lane_line, lanes=lanes)
 
     def stage_list(self, block: Block | None, ctx: Ctx, parallel: int | None = None) -> None:
         """Stages in order; with `parallel` (the line of a parallel block), each stage is a branch that

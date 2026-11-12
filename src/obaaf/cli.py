@@ -95,8 +95,13 @@ def cmd_check(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
     if args.lanes:
-        for wf, job, lane, reason in checker.lanes(target, config, platform=args.platform):
-            print(f"{wf}#{job}: {lane} ({reason})")
+        from obaaf.checker.workflow import one_line
+        notes: list[str] = []
+        for wf, job, lane, reason in checker.lanes(target, config, platform=args.platform, notes=notes):
+            # One line per job, whatever a job or step is called.
+            print(f"{one_line(wf)}#{one_line(job)}: {lane} ({one_line(reason)})")
+        for note in notes:
+            print(f"note: {note}", file=sys.stderr)
         return EXIT_OK
     if not target.exists():
         print(f"error: {target} not found", file=sys.stderr)
