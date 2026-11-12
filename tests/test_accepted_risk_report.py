@@ -370,7 +370,8 @@ class TextLeadTest(unittest.TestCase):
                    "\u00fcbersicht/ci.yml", 'say "hi"/ci.yml', ""]
         result = result_of(*(finding(path=path) for path in hostile), finding(path="plain/ci.yml"),
                            finding(path=".github/workflows/a-b_c.1+2@x~y.yml"),
-                           finding(path="one\ntwo/Accepted risk: none/ci.yml"), baseline_used=False)
+                           finding(path="one\ntwo/Accepted risk: none/ci.yml"),
+                           finding(path="line\nbreak\u00a0and\ttab.yml"), baseline_used=False)
         lines = report.to_text(result).splitlines()
         self.assertEqual([line for line in lines if line.startswith("Accepted")],
                          ["Accepted risk: none. No finding is accepted by a baseline entry or an ignore entry."])
@@ -380,6 +381,9 @@ class TextLeadTest(unittest.TestCase):
         self.assertIn("plain/ci.yml", lines)
         self.assertIn(".github/workflows/a-b_c.1+2@x~y.yml", lines)
         self.assertIn('"one\\ntwo/Accepted risk: none/ci.yml"', lines)
+        # A character that does not print is an escape before the path is judged, and an escape is
+        # visible ASCII: such a path is one line with no space in it, and is not quoted.
+        self.assertIn("line\\nbreak\\xa0and\\ttab.yml", lines)
         # Every line in the first column that is not a quoted path, a bare ASCII path, or a blank has
         # an ASCII space or is the checker's own; no path is among them.
         headers = [line for line in lines if line and not line.startswith((" ", '"'))]

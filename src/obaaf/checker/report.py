@@ -121,11 +121,12 @@ def _owner_key(name: str) -> str:
 def _path_header(path) -> str:
     """A file's path as the line that heads its findings. That line starts in the first column, where
     every line the checker writes in its own words also starts, and each of those has a space in it.
-    A path is printed as it is only when every character in it is a visible ASCII character, which
-    leaves nothing that can stand for a space: not a space, and not one of the characters outside
-    ASCII that print as a blank (U+2800, U+3164 and others; there is no complete list to rely on).
-    Any other path is put in quotes, so its line begins with a quotation mark and no line of the
-    checker's does."""
+    A character that does not print is written as an escape first, as everywhere in the report.
+    The path is then printed without quotes only when every character of what is left is a visible
+    ASCII character, which leaves nothing that can stand for a space: not a space, and not one of
+    the characters outside ASCII that print as a blank (U+2800, U+3164 and others; there is no
+    complete list to rely on). Any other path is put in quotes, so its line begins with a
+    quotation mark and no line of the checker's does."""
     shown = one_line(path)
     return shown if shown and all("!" <= ch <= "~" for ch in shown) else f'"{shown}"'
 
