@@ -7,6 +7,7 @@ releases, and which caches can it read.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -700,7 +701,7 @@ class Workflow:
     jobs: dict[str, Job] = field(default_factory=dict)
     error: str | None = None
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
-    lane_problems: list[str] = field(default_factory=list)  # lane declarations that name no lane
+    lane_problems: list = field(default_factory=list)  # IdleDeclaration: declarations in the file that do nothing
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
 
     @property
@@ -894,10 +895,73 @@ def shown_value(value) -> str:
     return f"'{one_line(text, 60)}'"
 
 
-def not_a_lane(where: str, value) -> str:
-    """The note for a declaration whose value names no lane."""
-    return (f"{where} to {shown_value(value)}, which is not a lane ({', '.join(LANES)}); "
-            "the declaration changes nothing")
+VALUE_LIMIT = 200
+
+
+def value_identity(value) -> str:
+    """A declared value as what identifies a finding about it. Text, a number and true or false are
+    all text to the CI system that reads the variable, so each is its text in quotes; a list, a
+    mapping and an empty value are named without quotes, so none can be mistaken for text that
+    spells the same words. Text longer than VALUE_LIMIT characters is its length and digest, which
+    keeps an acceptance small and still tells two long values apart."""
+    if value is None or value == "":
+        return "an empty value"
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return "a list"
+    if isinstance(value, dict):
+        return "a mapping"
+    text = str(value).lower() if isinstance(value, bool) else str(value)
+    return bounded(text, quoted=True)
+
+
+def bounded(text: str, quoted: bool = False) -> str:
+    """`text` as part of what identifies a finding: itself (in quotes when `quoted`), or its length
+    and digest when it is longer than VALUE_LIMIT characters."""
+    if len(text) > VALUE_LIMIT:
+        digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+        return f"sha256:{digest} ({len(text)} characters)"
+    return f"'{text}'" if quoted else text
+
+
+@dataclass(frozen=True)
+class IdleDeclaration:
+    """A lane declaration that does nothing: its value is not a lane, it is written where the
+    checker does not read it, or it names a job, a stage or a file that is not there. The job it was
+    meant for gets none of the rules the declaration was meant to add, so it is reported as a
+    finding (OBAAF-CFG-001) and never dropped without a word.
+
+    This is one written in a workflow or a Jenkinsfile; a `lanes:` entry is judged by the caller,
+    which knows every file the configuration covers. `kind` says which case it is. `value` is the
+    declared value as `value_identity` gives it and `shown` as a report prints it; `lane` is the
+    lane it names when it names one."""
+    kind: str
+    path: str = ""                # the file it is written in
+    line: int = 0
+    job: str | None = None
+    step: str | None = None
+    value: str = ""
+    shown: str = ""
+    lane: str | None = None
+    service: str = ""             # the service whose env holds it
+    # Whether the job is already in the lane the declaration names, so nothing is missing because of it.
+    redundant: bool = False
+
+    @classmethod
+    def of(cls, kind: str, value, **where) -> "IdleDeclaration":
+        return cls(kind=kind, value=value_identity(value), shown=shown_value(value),
+                   lane=declared_lane(value), **where)
+
+
+def key_line(mapping, key, owner_line: int = 0) -> int:
+    """The line a key of a parsed mapping is written on, for a mapping that belongs to something
+    that starts on `owner_line` (a job, a step, the file). A mapping reached through a YAML alias
+    was written above its owner, at the anchor; then the owner's own line is given, which is where
+    a reader looks for it."""
+    line_of = getattr(mapping, "line_of", None)
+    try:
+        return max(int(line_of(key)) if line_of else 0, owner_line)
+    except (TypeError, ValueError):
+        return owner_line
 
 
 _UNSET = object()
@@ -910,9 +974,10 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
     Inference comes first, and each lane is decided on its own: a job that runs an agent and
     publishes is in the agent lane and in the release lane, and gets the rules of both. A lane
     declared with OBAAF_LANE or in the checker configuration is added to those. A declaration never
-    takes a job out of a lane, so it can add rules and cannot remove any. A declaration that does
-    nothing (a value that is not a lane, OBAAF_LANE on a step) is recorded in
-    `workflow.lane_problems`, never dropped without a word.
+    takes a job out of a lane, so it can add rules and cannot remove any. An OBAAF_LANE that does
+    nothing (a value that is not a lane, or one set where it is not read) is recorded in
+    `workflow.lane_problems`, never dropped without a word. A `lanes:` entry that does nothing is
+    for the caller to report: it knows every file the configuration covers.
 
     `aliases` are other paths the configuration may know this file by: a workflow checked on its
     own is `ci.yml` to the checker and `.github/workflows/ci.yml` in the repository's configuration.
@@ -923,21 +988,20 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
     workflow.lane_problems = []
     paths = tuple(dict.fromkeys((workflow.path, *aliases)))
 
-    def problem(text: str) -> None:
-        if text not in workflow.lane_problems:
-            workflow.lane_problems.append(text)
+    def problem(found: IdleDeclaration) -> None:
+        if found not in workflow.lane_problems:
+            workflow.lane_problems.append(found)
 
     for job in workflow.jobs.values():
         job.lanes = _inferred_lanes(job, detection, extra_agents)
         job.lane_notes = []
         configured = [f"{path}#{job.id}" for path in paths] + list(paths)
-        declarations = [(overrides.get(key, _UNSET), "set in the checker configuration",
-                         f"the checker configuration sets lanes: '{one_line(key, 120)}'") for key in configured]
+        declarations = [(overrides.get(key, _UNSET), "set in the checker configuration", None) for key in configured]
         declarations += [
             (job.env.get("OBAAF_LANE", _UNSET), "set by OBAAF_LANE",
-             f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE"),
+             {"kind": "job-not-a-lane", "job": job.id, "line": key_line(job.env, "OBAAF_LANE", job.line)}),
             (workflow.env.get("OBAAF_LANE", _UNSET), "set by OBAAF_LANE",
-             f"{one_line(workflow.path, 120)} sets OBAAF_LANE"),
+             {"kind": "workflow-not-a-lane", "line": key_line(workflow.env, "OBAAF_LANE", 1)}),
         ]
         declared: dict = {}
         trusted_why = None
@@ -946,7 +1010,9 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
                 continue
             lane = declared_lane(value)
             if lane is None:
-                problem(not_a_lane(where, value))
+                if where is not None:
+                    problem(IdleDeclaration.of(where["kind"], value, path=workflow.path, line=where["line"],
+                                               job=where.get("job")))
             elif lane == "trusted":
                 trusted_why = trusted_why or why
             else:
@@ -958,13 +1024,11 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
             job.lane_notes.append("declared trusted, which cannot override what the job does")
         job.lanes.update(declared)
         job.settle_lane(trusted_why or "default")
-        for where in _stray_declarations(job, {id(workflow.raw.get("env")), id(job.raw.get("env"))}):
-            problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE in {where}, "
-                    "where it is not read (it is read in the job's env and in the workflow's env); "
-                    "the declaration changes nothing")
+        for found in _stray_declarations(workflow, job, {id(workflow.raw.get("env")), id(job.raw.get("env"))}):
+            problem(found)
 
 
-def _stray_declarations(job: Job, read: set) -> list[str]:
+def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     """Where a job sets OBAAF_LANE in an `env` the checker does not read it from: a step's, the
     container's, a service's. `read` holds the identities of the two env mappings that are read for
     this job (its own and the workflow's), so an env shared with one of them through a YAML anchor
@@ -972,15 +1036,20 @@ def _stray_declarations(job: Job, read: set) -> list[str]:
     def stray(env) -> bool:
         return isinstance(env, dict) and "OBAAF_LANE" in env and id(env) not in read
 
-    found = [f"the env of the step at line {step.line}" for step in job.steps if stray(step.raw.get("env"))]
+    def found(kind: str, env, line: int, **where) -> IdleDeclaration:
+        return IdleDeclaration.of(kind, env["OBAAF_LANE"], path=workflow.path, job=job.id,
+                                  line=key_line(env, "OBAAF_LANE", line), **where)
+
+    out = [found("step-env", step.raw["env"], step.line, step=step.name)
+           for step in job.steps if stray(step.raw.get("env"))]
     container = job.raw.get("container")
     if isinstance(container, dict) and stray(container.get("env")):
-        found.append("container.env")
+        out.append(found("container-env", container["env"], job.line))
     services = job.raw.get("services")
     for name, service in (services.items() if isinstance(services, dict) else ()):
         if isinstance(service, dict) and stray(service.get("env")):
-            found.append(f"services.{one_line(name, 60)}.env")
-    return list(dict.fromkeys(found))
+            out.append(found("service-env", service["env"], job.line, service=bounded(str(name))))
+    return list(dict.fromkeys(out))
 
 
 # An environment whose name says where releases go, anywhere in the name (AppProd, awsprod,

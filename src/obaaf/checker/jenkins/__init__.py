@@ -22,7 +22,7 @@ from obaaf.checker.jenkins import parser as parser_mod
 from obaaf.checker.jenkins import rules as rules_mod
 from obaaf.checker.jenkins.model import CR_NO, CR_POSSIBLE, CR_YES
 from obaaf.checker.jenkins.rules import ALL, RULES, Unknown, stage_label
-from obaaf.checker.workflow import declared_lane, not_a_lane, one_line
+from obaaf.checker.workflow import IdleDeclaration, declared_lane
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "Library", "Intermediate", "Saved",
              "DerivedDataCache", ".godot", "Binaries", "build", "dist", "target", ".gradle", ".idea", "vendor"}
@@ -74,7 +74,7 @@ class FileResult:
     suspect_stages: list = field(default_factory=list)
     lanes: list = field(default_factory=list)       # (stage, lane, reason)
     stage_keys: set = field(default_factory=set)    # the names a `lanes:` entry may give a stage
-    lane_problems: list = field(default_factory=list)   # OBAAF_LANE values in the file that name no lane
+    lane_problems: list = field(default_factory=list)   # IdleDeclaration: OBAAF_LANE values that name no lane
 
 
 def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_agents: dict | None = None,
@@ -116,15 +116,14 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         else:
             lane, reason = "unknown", "its condition cannot be evaluated" if crs else "runs no build code"
         result.lanes.append((stage_label(stage), lane, reason))
-        result.stage_keys.update(key.partition("#")[2] for key in engine.lane_keys(stage)[1:])
+        # Each key is the file, a `#` and a name for the stage. The file's own name may hold a `#`.
+        result.stage_keys.update(key[len(rel) + 1:] for key in engine.lane_keys(stage)[1:])
         for value, line in dict.fromkeys(pair for info in infos for pair in info.ctx.lanes):
-            # One note for each declaration, not one for each stage it reaches.
-            where = f"{one_line(rel, 120)}, line {line}, sets OBAAF_LANE"
+            # One finding for each declaration, not one for each stage it reaches.
             if value is None:
-                problem = (f"{where} to a value computed when the build runs, which the checker cannot read as "
-                           "a lane; the declaration changes nothing")
+                problem = IdleDeclaration(kind="jenkins-computed", path=rel, line=line)
             elif declared_lane(value) is None:
-                problem = not_a_lane(where, value)
+                problem = IdleDeclaration.of("jenkins-not-a-lane", value, path=rel, line=line)
             else:
                 continue
             if problem not in result.lane_problems:

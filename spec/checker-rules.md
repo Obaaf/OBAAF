@@ -36,6 +36,7 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
 | [OBAAF-GHA-024](#obaaf-gha-024) | high | authority | Protected secret used outside its environment | G3.4, G9.1 |
+| [OBAAF-CFG-001](#obaaf-cfg-001) | high | authority | Lane declaration that does nothing | - |
 | [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
 | [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
 | [OBAAF-JEN-003](#obaaf-jen-003) | high | authority | AI agent stage can push, start jobs or publish | G8.1, R2, R4 |
@@ -257,6 +258,14 @@ The checker configuration lists the secret under protected_secrets, but a job re
 
 **Fix.** Keep the secret only in the environment named in protected_secrets, limit that environment's deployment branches to the default branch, delete any repository or organization copy, and add `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+## OBAAF-CFG-001
+
+**Lane declaration that does nothing** (high). Requirements: -. Supports: FR12.
+
+A lane declaration puts a job in a lane (untrusted, agent, effect, release) so that the lane's rules apply to it. This one changes nothing, so the job, stage or file it was written for gets none of the rules it was meant to add, and every other finding on that job can be missing without the report showing it. The cases: OBAAF_LANE, in a job's env, the workflow's env or a Jenkinsfile, set to a value that is not a lane (a misspelling such as `agnet`, an expression, an empty value, or in a Jenkinsfile a value computed when the build runs); OBAAF_LANE set in a step's env, a container's or a service's, where the checker does not read it; and an entry under `lanes:` in the checker configuration whose value is not a lane, or that names a job or Jenkins stage its file does not have, or a file that is not there. The finding is reported where the declaration is written: in the workflow or Jenkinsfile, or in the checker configuration. It is high because the checker cannot know which findings are missing: the agent lane alone has high-severity rules. It is low when nothing can be missing: the declaration names `trusted`, which adds no rule even where it is read, or it sits in a step's, container's or service's env and names a lane the job is in anyway. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at.
+
+**Fix.** Correct the declaration or delete it. The value is one of untrusted, agent, effect, release or trusted. OBAAF_LANE belongs in the job's env or the workflow's env. A `lanes:` entry names the file and job as `obaaf check . --lanes` prints them. Run that command afterwards and confirm the job is in the lane you meant (see docs/checker-configuration.md#lane-overrides).
+
 ## OBAAF-JEN-001
 
 **Credentials available to change-request code or an AI agent** (high). Requirements: G3.4, G8.1, G9.1, R2, R3. Supports: FR3, FR7.
@@ -409,6 +418,7 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 
 | Test file | Models | Expected rules |
 | --- | --- | --- |
+| `tests/fixtures/workflows/risky/agent-lane-misspelled.yml` | Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed. | OBAAF-CFG-001 |
 | `tests/fixtures/workflows/risky/claude-action-toctou.yml` | Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk. | OBAAF-GHA-012, OBAAF-GHA-011, OBAAF-GHA-020 |
 | `tests/fixtures/workflows/risky/clinejection-release.yml` | Clinejection, part 2: the release workflow restores the shared cache and publishes with a long-lived token, unchecked. | OBAAF-GHA-006, OBAAF-GHA-014, OBAAF-GHA-016, OBAAF-GHA-017, OBAAF-GHA-008 |
 | `tests/fixtures/workflows/risky/clinejection-triage.yml` | Clinejection, part 1: an issue-triage agent that any user can start runs shell tools with a write-capable cache. | OBAAF-GHA-007, OBAAF-GHA-003, OBAAF-GHA-008 |

@@ -60,7 +60,7 @@ jobs:
 
 A declaration adds a lane. It never takes a job out of a lane the checker inferred, so it can add rules and cannot remove any: declaring `release` on a job that runs an agent leaves it an agent job and makes it a release job as well. Declaring `trusted` adds no lane and removes none. When `trusted` is the only lane declared for a job and the checker puts the job in a lane anyway, the reason shown for that lane ends with `declared trusted, which cannot override what the job does`. Case and surrounding space do not matter (`Agent` is `agent`).
 
-`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else. A declaration that does nothing is listed in the notes at the end of the report as ignored: a value that is not a lane (a misspelling, an expression, an empty value), and `OBAAF_LANE` set in a step's `env`, a container's or a service's. `obaaf check . --lanes` prints the same notes.
+`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else. A declaration that does nothing is a finding, `OBAAF-CFG-001`: a value that is not a lane (a misspelling, an expression, an empty value), and `OBAAF_LANE` set in a step's `env`, a container's or a service's. See [A declaration that does nothing](#a-declaration-that-does-nothing).
 
 When a job is in a lane both because of what it does and because it was declared, the declaration is the reason shown (`set by OBAAF_LANE`, `set in the checker configuration`).
 
@@ -76,7 +76,37 @@ A lane override only adds rules, like `OBAAF_LANE`: the job is put in the lane y
 
 For a Jenkinsfile the key names a stage (`Jenkinsfile#Ship`) and also covers the stages nested in it; `Jenkinsfile` alone covers every stage. See [jenkins.md](jenkins.md).
 
-For a file this run reads, an entry is listed in the notes as ignored when its value is not a lane or when it names a job or Jenkins stage the file does not have. When a repository is checked, so is an entry for a file that is not there. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
+For a file this run reads, an entry is a finding (`OBAAF-CFG-001`, reported in the configuration file, on the entry's line) when its value is not a lane or when it names a job or Jenkins stage the file does not have. When a repository is checked, so is an entry for a file that is not there. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
+
+### A declaration that does nothing
+
+A lane declaration exists to add rules to a job. One that changes nothing leaves the job without those rules, and nothing else in the report would show it: a job declared `OBAAF_LANE: agnet` is not an agent job to the checker, so none of the agent findings appear and the check passes. Until 0.3.0 such a declaration was listed in the notes at the end of the report, which do not affect the result. It is now a finding, `OBAAF-CFG-001`, so it fails the check like any other until it is corrected or accepted.
+
+```text
+.github/workflows/triage.yml
+     9  HIGH   OBAAF-CFG-001  Lane declaration that does nothing  [job triage]
+        Job 'triage' sets OBAAF_LANE to 'agnet', which is not a lane (untrusted, agent, effect, release, trusted), so the declaration changes nothing.
+```
+
+What is reported, and where:
+
+| The declaration | Reported in |
+| --- | --- |
+| `OBAAF_LANE` in a job's `env` or the workflow's `env`, set to a value that is not a lane | the workflow, on that line |
+| `OBAAF_LANE` in a step's `env`, a container's or a service's, whatever its value | the workflow, on that line |
+| `OBAAF_LANE` in a Jenkinsfile, set to a value that is not a lane or computed when the build runs | the Jenkinsfile, on that line |
+| a `lanes:` entry whose value is not a lane | the configuration file, on the entry's line |
+| a `lanes:` entry that names a job or Jenkins stage its file does not have, or a file that is not there | the configuration file, on the entry's line |
+
+One entry can be two findings: `'ci.yml#wrok': agnet` has a value that is not a lane and names a job that is not there.
+
+**Severity.** The finding is high. The checker cannot know which findings are missing because of the declaration, and the agent lane alone has high-severity rules, so anything lower would let a gate set to `--fail-on high` pass a job whose agent rules never ran. It is low in the two cases where nothing can be missing: the declaration names `trusted`, which adds no rule even where it is read, or it sits in a step's, container's or service's `env` and names a lane the job is in anyway. If the job later leaves that lane the finding becomes high, and an acceptance made at low no longer covers it.
+
+**Fixing it.** Correct the value, move `OBAAF_LANE` to the job's `env`, give the `lanes:` entry the path and job that `obaaf check . --lanes` prints, or delete the declaration. `--lanes` prints these declarations too, as notes, because it lists lanes and reports no findings.
+
+**Accepting it.** Like any finding, with an owner, a reason and an expiry date, in an `ignore` entry (for a `lanes:` entry, `path:` is the configuration file) or a baseline entry. What identifies the finding is the file the declaration is written in, the job and step for one in a workflow, the `lanes:` key for one in the configuration, and the value it was set to. Change the value and it is another finding. A value or key longer than 200 characters is identified by its length and SHA-256 digest, so that a baseline stays readable.
+
+**The configuration file's path.** A finding about a `lanes:` entry names the configuration file from the directory every other path in the report is given from: `.github/obaaf.yml` when a repository is checked, and `../obaaf.yml` when one workflow is checked on its own with `--config .github/obaaf.yml`, because that workflow is `ci.yml` in the same report.
 
 `obaaf check . --lanes` shows the first lane a job is in, in the order agent, effect, release, untrusted, and names the others after it: `ci.yml#ship: agent (uses openai/codex-action; also release: uploads or publishes artifacts)`.
 

@@ -1,22 +1,28 @@
 # Optional configuration for `obaaf check`. Copy to .github/obaaf.yml.
 #
+# `obaaf templates install` writes this file as .github/obaaf.yml, so the two
+# examples below are comments: an entry here is read, and one that names a job
+# or a file you do not have declares something that is not true.
+#
 # lanes: state a job's lane when the checker cannot infer it
-#        (untrusted, agent, effect, release or trusted).
+#        (untrusted, agent, effect, release or trusted). An entry whose value is
+#        not a lane, or that names a job or a file that is not there, changes
+#        nothing and is reported as OBAAF-CFG-001.
 # agents: extra actions or commands that run an AI agent in your workflows.
 # ignore: accept a finding for a stated reason until a date. Every entry needs
 #         rule, path, owner, reason and until. It stops applying after `until`,
 #         and it does not apply at all without an owner or when `until` is more
 #         than 366 days ahead.
-lanes:
-  .github/workflows/nightly.yml#package: release
+lanes: {}
+#   .github/workflows/nightly.yml#package: release
 
 agents:
   actions: []
   commands: []
 
-ignore:
-  - rule: OBAAF-GHA-008
-    path: .github/workflows/legacy-tools.yml
-    owner: "@your-org/build-team"
-    reason: "The vendor publishes no commit SHAs yet; tracked in issue 12"
-    until: 2027-03-31
+ignore: []
+#   - rule: OBAAF-GHA-008
+#     path: .github/workflows/legacy-tools.yml
+#     owner: "@your-org/build-team"
+#     reason: "The vendor publishes no commit SHAs yet; tracked in issue 12"
+#     until: 2027-03-31
