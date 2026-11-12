@@ -94,6 +94,9 @@ def cmd_check(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.expiry_warning < 0:
+        print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
+        return EXIT_USAGE
     if args.lanes:
         from obaaf.checker.workflow import one_line
         notes: list[str] = []
@@ -113,9 +116,6 @@ def cmd_check(args) -> int:
         return EXIT_USAGE
     if args.baseline and args.write_baseline:
         print("error: use --baseline or --write-baseline, not both", file=sys.stderr)
-        return EXIT_USAGE
-    if args.expiry_warning < 0:
-        print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
         return EXIT_USAGE
     from obaaf.checker import baseline as baseline_mod
     accepting = [name for name in ("owner", "reason", "expires") if getattr(args, name) is not None]
@@ -151,8 +151,9 @@ def cmd_check(args) -> int:
     result = checker.check(target, config=config, platform=args.platform)
     result.checked = str(args.path)
     # What a command the report suggests has to repeat to check the same thing.
-    result.options = (["--config", args.config] if args.config else []) \
-        + (["--platform", args.platform] if args.platform != "auto" else [])
+    # One word each, so a value that begins with a hyphen is still read as a value.
+    result.options = ([f"--config={args.config}"] if args.config else []) \
+        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
     if applied is not None:
         baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
@@ -958,7 +959,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _printable_streams() -> None:
+    """Make standard output and standard error write a character they cannot encode as an escape.
+    A report names owners, jobs and paths in any script, and a name can hold half of a surrogate
+    pair. Where the output is ASCII, or for that half pair anywhere, Python would otherwise end the
+    command in a traceback, and a report must not be lost over one character."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):       # a stream that is closed or cannot be changed
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _printable_streams()
     return int(args.func(args) or 0)
