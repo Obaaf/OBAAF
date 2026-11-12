@@ -60,7 +60,7 @@ jobs:
 
 A declaration adds a lane. It never takes a job out of a lane the checker inferred, so it can add rules and cannot remove any: declaring `release` on a job that runs an agent leaves it an agent job and makes it a release job as well. Declaring `trusted` adds no lane and removes none. When `trusted` is the only lane declared for a job and the checker puts the job in a lane anyway, the reason shown for that lane ends with `declared trusted, which cannot override what the job does`. Case and surrounding space do not matter (`Agent` is `agent`).
 
-`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else. A declaration that does nothing is listed in the notes at the end of the report as ignored: a value that is not a lane (a misspelling, an expression, an empty value), and `OBAAF_LANE` set somewhere it is not read, such as a step's `env` or a container's. `obaaf check . --lanes` prints the same notes.
+`OBAAF_LANE` is read in a job's `env` and in the workflow's `env`, and nowhere else. A declaration that does nothing is listed in the notes at the end of the report as ignored: a value that is not a lane (a misspelling, an expression, an empty value), and `OBAAF_LANE` set in a step's `env`, a container's or a service's. `obaaf check . --lanes` prints the same notes.
 
 When a job is in a lane both because of what it does and because it was declared, the declaration is the reason shown (`set by OBAAF_LANE`, `set in the checker configuration`).
 
@@ -76,7 +76,7 @@ A lane override only adds rules, like `OBAAF_LANE`: the job is put in the lane y
 
 For a Jenkinsfile the key names a stage (`Jenkinsfile#Ship`) and also covers the stages nested in it; `Jenkinsfile` alone covers every stage. See [jenkins.md](jenkins.md).
 
-An entry that does nothing is listed in the notes as ignored: one whose value is not a lane, one that names a job or Jenkins stage the file does not have, and, when a repository is checked, one that names a file the checker did not read. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
+For a file this run reads, an entry is listed in the notes as ignored when its value is not a lane or when it names a job or Jenkins stage the file does not have. When a repository is checked, so is an entry for a file that is not there. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. `lanes:` must be a mapping; any other value that is not empty is a configuration error and the check does not run.
 
 `obaaf check . --lanes` shows the first lane a job is in, in the order agent, effect, release, untrusted, and names the others after it: `ci.yml#ship: agent (uses openai/codex-action; also release: uploads or publishes artifacts)`.
 

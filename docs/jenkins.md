@@ -154,7 +154,7 @@ agents:
   steps: [reviewWithClaude]               # shared-library steps that run an agent
   commands: ['run-agent\.sh']             # regular expressions matched against shell scripts
 lanes:
-  "Jenkinsfile#Publish": release          # file#stage, as --lanes prints it
+  "Jenkinsfile#Publish": release          # file#stage; --lanes prints it as "Jenkinsfile#stage Publish"
 ignore:
   - rule: OBAAF-JEN-007
     path: Jenkinsfile
@@ -173,7 +173,7 @@ report's notes.
 
 On a stage, `agent` and `release` are the lanes that change what is checked. `agent` says the
 stage's shell steps, and its steps whose code is not in the file (shared-library steps, outside
-`post` blocks), run an agent; `release` says they publish, and that the stage's `sshPublisher` and
+`post`, `catch` and `finally` blocks), run an agent; `release` says they publish, and that the stage's `sshPublisher` and
 `ftpPublisher` steps do. Other steps the checker knows (`archiveArtifacts`, `httpRequest`, `build`)
 are not changed by a declaration. The other lanes are accepted and change nothing.
 
