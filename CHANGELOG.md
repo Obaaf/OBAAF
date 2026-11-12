@@ -63,6 +63,10 @@ GitHub hands an action its inputs as environment variables named in upper case, 
 - `obaaf audit --from-snapshot FILE` reports from a saved snapshot with no network, after checking the file against a schema that covers every value. `--fail-on-unread` exits 1 when a setting that applies was not read in full. Reading nothing at all (repository not found, rate limited at the first request) exits 1, and so does any failure the command did not foresee.
 - Tested from recordings written by hand from the examples in GitHub's REST reference, and from two recordings of what GitHub itself answered a caller with no token, for this repository and for the first adopter's. Run against GitHub by a workflow in this repository, with the workflow's own token and with no token: the settings GitHub shows anyone were read, and the administrative ones were refused and reported as not read. It has not been run with a token that can read the administrative settings. See [docs/settings-audit.md](docs/settings-audit.md).
 
+### Release policy
+
+- This repository's own release policy now sets `agents.since` to the commit of release 0.3.0, the first release that passed the full `obaaf verify release` gate. Once this is on `main`, a release checks commits from OBAAF's agent lane (a record trailer, a record file, or the effect lane's identity) from that commit to the released one, and no longer over the whole history (D-025). There were none in the history up to 0.3.0. Commits written with an AI assistant and merged through ordinary review are not what this check counts. Nothing changes for adopters.
+
 ### Fixed
 
 - `obaaf check --write-baseline` ended in a Python traceback when a job id contained a lone surrogate character (a name YAML can spell and Unicode cannot encode). The baseline is now written, as valid UTF-8, and read back.
