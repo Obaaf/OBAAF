@@ -701,6 +701,7 @@ class Workflow:
     error: str | None = None
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list[str] = field(default_factory=list)  # lane declarations that name no lane
+    digest: str = ""            # sha256 of the file's bytes, when it was read from a file
 
     @property
     def triggers(self) -> dict[str, Any]:

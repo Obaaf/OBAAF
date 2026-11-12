@@ -346,8 +346,8 @@ rules:
       monitor that always runs (`step-security/harden-runner` with `egress-policy: block` and no
       `if:`) as the job's first step is reported as "cannot tell": whether it limits the agent
       depends on its version and on the job being unable to undo it with sudo or a container, and
-      the checker reads neither yet. An acceptance of that case covers the monitor as written (every
-      step of the job that uses a monitor, key for key) and no other. A monitor that starts after
+      the checker reads neither yet. A baseline entry that accepts that case is for the workflow
+      file as it stood, byte for byte, and stops counting when the file changes. A monitor that starts after
       other steps, in a `parallel` group or in the background lets other steps run without it and
       is "not met". No egress control is reported as verified yet, so today the finding can be
       accepted and cannot be cleared.

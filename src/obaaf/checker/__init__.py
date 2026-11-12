@@ -9,6 +9,7 @@ sends nothing over the network (NFR5).
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -438,6 +439,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
+        # The bytes, not the text: a byte that is not UTF-8 is replaced in the text, and two files
+        # that differ only there must not be one file to an acceptance.
+        workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)

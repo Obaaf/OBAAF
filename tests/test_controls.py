@@ -378,7 +378,7 @@ class EgressTest(unittest.TestCase):
                                    ("background", self.MONITOR + "\n        background: true\n" + self.CHECKOUT,
                                     "in the background"),
                                    ("after a step that is not a mapping", "      - oops\n" + self.MONITOR,
-                                    "after an entry of steps the checker could not read")):
+                                    "after another entry of steps")):
             result = check(agent_workflow(steps=steps))
             f = one(result, "OBAAF-GHA-020")
             with self.subTest(what=what):
@@ -386,47 +386,63 @@ class EgressTest(unittest.TestCase):
                                  ("late-monitor", "new", {"egress-enforced": NOT_MET}, place))
                 self.assertNotEqual(baseline.key(f), accepted)
 
-    def test_an_acceptance_covers_the_monitor_as_written_and_no_other(self):
+    def test_an_acceptance_covers_the_file_that_was_looked_at_and_no_other(self):
         """Accepting "cannot tell" for one monitor must not cover the same job after the monitor is
-        moved, repinned, given other inputs or allowed to fail."""
+        moved, repinned, given other inputs or allowed to fail. Three reviews in a row found two
+        monitors that an identity built from the parsed step could not tell apart (types, a second
+        monitor beside the agent, `010` and `8`, `0o10` and '0o10'), so the identity is the file."""
         from obaaf.checker import baseline
-        accepted = baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT))
-        changed = {
-            "another ref": self.MONITOR.replace(SHA, "v1"),
-            "another allow-list": self.MONITOR.replace("{egress-policy: block}",
-                                                       "{egress-policy: block, allowed-endpoints: '*:*'}"),
-            "sudo left on": self.MONITOR.replace("{egress-policy: block}", "{egress-policy: block, disable-sudo: false}"),
-            "may fail": self.MONITOR + "\n        continue-on-error: true",
-            "its own env": self.MONITOR + "\n        env: {X: y}",
-            "the input spelt another way": self.MONITOR.replace("egress-policy", "EGRESS-POLICY"),
-        }
-        for what, monitor in changed.items():
-            with self.subTest(what=what):
-                self.assertNotEqual(baseline.key(self.egress(steps=monitor + "\n" + self.CHECKOUT)), accepted)
-        self.assertNotEqual(baseline.key(self.egress(steps=self.CHECKOUT + "\n" + self.MONITOR)), accepted)
-        # A second monitor step later in the job, in another mode, is part of what was accepted.
+        plain = self.MONITOR + "\n" + self.CHECKOUT
+        accepted = baseline.key(self.egress(steps=plain))
+        self.assertEqual(baseline.key(self.egress(steps=plain)), accepted)       # the same file again
         audit = f"\n      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: audit}}"
-        self.assertNotEqual(baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT + audit)), accepted)
-        # `true` is not the text 'True': GitHub hands the action different text for each.
-        sudo = [self.MONITOR.replace("{egress-policy: block}", f"{{egress-policy: block, disable-sudo: {value}}}")
-                for value in ("true", "'True'")]
-        self.assertNotEqual(*(baseline.key(self.egress(steps=steps + "\n" + self.CHECKOUT)) for steps in sudo))
-        # Found by the third review. A second monitor beside the agent is not one after it.
-        after = self.MONITOR + "\n      - run: make" + audit
-        beside = (self.MONITOR + "\n      - parallel:\n          - run: make\n"
-                  f"          - uses: step-security/harden-runner@{SHA}\n            with: {{egress-policy: audit}}")
-        self.assertNotEqual(baseline.key(self.egress(steps=after)), baseline.key(self.egress(steps=beside)))
-        # And a number keeps no spelling (`010` is 8 to this reader, and need not be to GitHub's),
-        # so with one among the inputs any change to the file is a change.
-        for one_way, another in (("8", "010"), ("2400", "40:00"), ("1000.0", "1e3"), ("2001-01-01", "2001-1-1")):
-            keys = [baseline.key(self.egress(steps=self.MONITOR.replace(
-                "{egress-policy: block}", f"{{egress-policy: block, x: {value}}}") + "\n" + self.CHECKOUT))
-                for value in (one_way, another)]
-            with self.subTest(one_way=one_way, another=another):
-                self.assertNotEqual(*keys)
-        # A step after the monitor that is not a monitor changes nothing.
-        self.assertEqual(baseline.key(self.egress(steps=self.MONITOR + "\n" + self.CHECKOUT + "\n      - run: make")),
-                         accepted)
+        changed = {
+            "another ref": self.MONITOR.replace(SHA, "v1") + "\n" + self.CHECKOUT,
+            "another allow-list": self.MONITOR.replace("{egress-policy: block}",
+                                                       "{egress-policy: block, allowed-endpoints: '*:*'}")
+                                  + "\n" + self.CHECKOUT,
+            "may fail": self.MONITOR + "\n        continue-on-error: true\n" + self.CHECKOUT,
+            "its own env": self.MONITOR + "\n        env: {X: y}\n" + self.CHECKOUT,
+            "the input spelt another way": self.MONITOR.replace("egress-policy", "EGRESS-POLICY") + "\n" + self.CHECKOUT,
+            "a second monitor after the agent": plain + audit,
+            "a comment": plain + "  # reviewed",
+        }
+        keys = {what: baseline.key(self.egress(steps=steps)) for what, steps in changed.items()}
+        for what, key in keys.items():
+            with self.subTest(what=what):
+                self.assertNotEqual(key, accepted)
+        self.assertEqual(len(set(keys.values())), len(keys))
+        pairs = [(f"x: {a}", f"x: {b}") for a, b in (("true", "'True'"), ("8", "010"), ("0o10", "'0o10'"),
+                                                      ("1e3", "'1e3'"), ("2400", "40:00"))]
+        pairs.append((plain + "\n      - run: make" + audit,
+                      self.MONITOR + "\n      - parallel:\n          - run: make\n"
+                      f"          - uses: step-security/harden-runner@{SHA}\n            with: {{egress-policy: audit}}"))
+        for one_way, another in pairs:
+            steps = [text if text.startswith("      ") else
+                     self.MONITOR.replace("{egress-policy: block}", f"{{egress-policy: block, {text}}}") + "\n" + self.CHECKOUT
+                     for text in (one_way, another)]
+            with self.subTest(one_way=one_way[:40], another=another[:40]):
+                self.assertNotEqual(*(baseline.key(self.egress(steps=text)) for text in steps))
+
+    def test_a_number_too_long_to_print_among_a_monitors_inputs_is_no_traceback(self):
+        """Found by the fourth review, when the identity was built from the parsed values."""
+        steps = self.MONITOR.replace("{egress-policy: block}", "{egress-policy: block, x: 0x" + "f" * 6000 + "}")
+        f = self.egress(steps=steps + "\n" + self.CHECKOUT)
+        self.assertEqual(f.kind, "unverified-monitor")
+        json.loads(report.to_json(check(agent_workflow(steps=steps + "\n" + self.CHECKOUT))))
+
+    def test_bytes_that_are_not_utf8_are_part_of_the_file(self):
+        from obaaf.checker import baseline
+        keys = []
+        for byte in (b"\xff", b"\xfe"):
+            with TempDir() as tmp:
+                target = tmp / ".github" / "workflows"
+                target.mkdir(parents=True)
+                text = agent_workflow(steps=self.MONITOR + "\n" + self.CHECKOUT)
+                (target / "agent.yml").write_bytes(text.encode("utf-8") + b"# " + byte + b"\n")
+                result = checker.check(tmp, config=checker.Config.from_data(CONFIG, "obaaf.yml"))
+                keys.append(baseline.key(one(result, "OBAAF-GHA-020")))
+        self.assertNotEqual(*keys)
 
     def test_aliases_nested_in_a_monitors_inputs_cost_their_size(self):
         """Found by the third review: eleven levels of ten aliases each took longer than anyone

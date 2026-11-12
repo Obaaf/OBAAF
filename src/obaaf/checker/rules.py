@@ -163,34 +163,6 @@ def _bypasses_failure(raw) -> bool:
     return isinstance(raw, dict) and runs_after_failure(raw.get("if", ""))
 
 
-def _digest(*parts: str) -> str:
-    joined = "\x00".join(parts)
-    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
-
-
-def _as_written(value, memo: dict, spelt: list) -> str:
-    """A digest of a value from a workflow file that is the same for the same value and different
-    for a different one: mappings by sorted key, every scalar with its type (`true` is not
-    `'True'`). Each mapping and list is digested once, however many YAML aliases lead to it, so a
-    file of nested aliases costs its size and not its expansion. `spelt` collects the scalars whose
-    spelling the value does not keep: a number or a date (`010`, `8` and `0o10` are one value to the
-    reader this checker uses, and need not be one to GitHub's)."""
-    if isinstance(value, (dict, list)):
-        key = id(value)
-        if key not in memo:
-            memo[key] = "<again>"       # a value that contains itself; the YAML reader refuses those
-            if isinstance(value, dict):
-                inside = sorted(_digest(_as_written(k, memo, spelt), _as_written(v, memo, spelt))
-                                for k, v in value.items())
-                memo[key] = _digest("mapping", *inside)
-            else:
-                memo[key] = _digest("list", *(_as_written(v, memo, spelt) for v in value))
-        return memo[key]
-    if not isinstance(value, (str, bool, type(None))):
-        spelt.append(value)
-    return _digest(type(value).__name__, repr(value))
-
-
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
@@ -579,8 +551,8 @@ class WorkflowRules:
             "late-monitor": "Agent job '{job}' does not start its blocking egress monitor ({monitor}) before "
                             "everything else: it runs {place}.",
             "unverified-monitor": "Agent job '{job}' runs a blocking egress monitor ({monitor}) as its first "
-                                  "step (as written: sha256 {written}). The checker cannot yet tell whether it "
-                                  "limits the agent.",
+                                  "step (workflow file sha256 {written}). The checker cannot yet tell whether "
+                                  "it limits the agent.",
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
 
@@ -592,10 +564,10 @@ class WorkflowRules:
         Nothing is `verified` yet. A step that uses a known monitor in block mode, with no
         condition, as the job's first step is "cannot tell": whether it holds depends on its version
         and on the job being unable to undo it with sudo or a container, which are not read. The
-        finding for it is identified by the monitor as written (the action with its ref, and every
-        input), so an acceptance covers that monitor and no other. A monitor that is not the first
-        step leaves the steps before it without it, and a monitor behind a condition or a
-        declaration alone enforces nothing: each is "not met"."""
+        finding for it is identified by the workflow file as it stands, so an acceptance covers the
+        file that was looked at and no later one. A monitor that is not the first step, on its own,
+        lets other steps run without it, and a monitor behind a condition or a declaration alone
+        enforces nothing: each is "not met"."""
         name = "a control the checker recognises limits the job's network access to an allow-list"
         ident = "egress-enforced"
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
@@ -613,7 +585,7 @@ class WorkflowRules:
             if not (isinstance(steps, list) and steps and steps[0] is first.raw):
                 place = ("in a parallel group" if first.group is not None else
                          f"after {first.index} other step(s)" if first.index else
-                         "after an entry of steps the checker could not read")
+                         "after another entry of steps")
             elif first.background:
                 place = "in the background"
             else:
@@ -622,7 +594,10 @@ class WorkflowRules:
                 return (Control(name, NOT_MET, f"{where} starts the blocking egress monitor {place}, so other "
                                                "steps can run without it", ident),
                         "late-monitor", {"monitor": uses, "place": place})
-            written = self._monitors_as_written(known)
+            # An acceptance of "cannot tell" is for the workflow file that was looked at, byte for
+            # byte. Anything narrower has to say which differences GitHub cannot see, and the reader
+            # this checker uses does not read YAML as GitHub's does (numbers, groups, aliases).
+            written = (self.wf.digest or hashlib.sha256(self.wf.text.encode("utf-8", "surrogatepass")).hexdigest())[:32]
             detail = (f"{where} uses {one_line(first.action, 80)} in block mode as the job's first step, but the "
                       "checker does not read what makes that hold: its version, and that the job cannot undo it "
                       "with sudo or a container")
@@ -646,22 +621,6 @@ class WorkflowRules:
             return (Control(name, NOT_MET, "OBAAF_EGRESS is a declaration, and nothing in the job enforces it",
                             ident), kind, values)
         return Control(name, NOT_MET, "no blocking egress control in the job", ident), kind, values
-
-    def _monitors_as_written(self, known: list) -> str:
-        """What identifies the monitors of a job for an acceptance: every step that uses one, with
-        where it stands (its place, its `parallel` group, whether it runs in the background) and
-        every key and value as written. A second monitor in another mode, or any change to the
-        first, makes it another finding. Where a value's spelling is not kept (a number or a date),
-        or the steps cannot be read through, the whole file is part of it, so any change to the
-        file is a change."""
-        spelt: list = []
-        try:
-            memo: dict = {}
-            parts = [_digest(str(step.index), str(step.group), str(step.background),
-                             _as_written(step.raw, memo, spelt)) for step in known]
-        except RecursionError:
-            parts, spelt = [], [None]
-        return _digest(*parts, self.wf.text if spelt else "")[:32]
 
     def _secret_controls(self, job: Job, names: set) -> list[Control]:
         """Two controls about where an agent job's secrets come from. The first is read from the
