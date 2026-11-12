@@ -22,6 +22,7 @@ from obaaf.checker.jenkins.model import (
 )
 from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Prop, Str, path_of
 from obaaf.checker.rules import Finding
+from obaaf.checker.workflow import declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -112,6 +113,11 @@ class Info:
     @property
     def runs_code(self) -> bool:
         return self.shell or bool(self.ai) or self.use.name.startswith("docker.build")
+
+
+# Steps that copy files to another host. They are not counted as publishing on their own, because
+# they mostly copy reports and logs; in a stage declared a release lane they are the upload.
+TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
 
 
 def stage_label(stage: tuple) -> str:
@@ -285,10 +291,14 @@ class JenkinsRules:
             self.infos.append(info)
         # A stage declared as an agent lane (OBAAF_LANE or configuration) runs agents in every code step.
         for info in self.infos:
-            lane = self.lane_of(info.ctx)
-            if lane == "agent" and info.shell and not info.ai:
+            lanes = self.lanes_of(info.ctx)
+            # A shell step, or a step whose code is not in this file (most likely a shared-library
+            # step): in a stage declared an agent or release lane, that is where the agent runs or
+            # the upload happens. Not in a post block, where such a step is most often a notice.
+            code = info.shell or (info.unresolved and info.ctx.post is None)
+            if "agent" in lanes and code and not info.ai:
                 info.ai = "the stage is declared an agent lane"
-            if lane == "release" and info.shell and not info.publish:
+            if "release" in lanes and (code or info.use.name in TRANSFER_STEPS) and not info.publish:
                 info.publish = "the stage is declared a release lane"
         # Indexes, so no rule compares every step with every agent or stage.
         for info in self.infos:
@@ -298,11 +308,21 @@ class JenkinsRules:
             if info.publish:
                 self.publishing_stages.add(info.ctx.stage)
 
-    def lane_of(self, ctx) -> str | None:
-        label = stage_label(ctx.stage)
-        override = self.lane_overrides.get(f"{self.path}#{label}") or (
-            self.lane_overrides.get(f"{self.path}#{ctx.stage[-1]}") if ctx.stage else None)
-        return override or ctx.lane
+    def lane_keys(self, stage: tuple) -> list[str]:
+        """The `lanes:` keys that apply to a step in `stage`: the file, the stage by its full label or
+        its own name, and every stage it is nested in."""
+        keys = [self.path, f"{self.path}#{stage_label(stage)}"]
+        for depth in range(1, len(stage) + 1):
+            keys += [f"{self.path}#{stage_label(stage[:depth])}", f"{self.path}#{stage[depth - 1]}"]
+        return list(dict.fromkeys(keys))
+
+    def lanes_of(self, ctx) -> set:
+        """Every lane declared for a step: in the configuration, and with OBAAF_LANE anywhere on the
+        way to the step. A declaration adds a lane and none hides another, as in a workflow; a value
+        that is not a lane adds nothing."""
+        values = [self.lane_overrides.get(key) for key in self.lane_keys(ctx.stage)]
+        values += [value for value, _ in ctx.lanes]
+        return {lane for lane in map(declared_lane, values) if lane}
 
     def _ai(self, info: Info) -> str | None:
         if info.use.name in self.detection.get("jenkins_agent_steps", []):
@@ -934,14 +954,17 @@ class JenkinsRules:
             return
         self.applicable.add("OBAAF-JEN-012")
         checks = [i for i in self.infos if i.verify in ("full", "provenance")]
-        first, kinds = None, set()
+        unchecked = []
         for publish in publishes:
             found = {c.verify for c in checks if self.gates(c, publish)}
             if "full" not in found:
-                first, kinds = publish, found
-                break
-        if first is None:
+                unchecked.append((publish, found))
+        if not unchecked:
             return
+        # One finding for the file, on the worst step: a step that publishes with no check at all
+        # before one that has a provenance check only. Taking the first in the file let an earlier,
+        # better checked step stand in for a later one that nothing checks, at a lower severity.
+        first, kinds = next((pair for pair in unchecked if "provenance" not in pair[1]), unchecked[0])
         if "provenance" in kinds:
             self.add("OBAAF-JEN-012", first.line,
                      f"The step at line {first.line} publishes after a provenance check only; approvals and agent "
