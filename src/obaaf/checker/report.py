@@ -8,6 +8,7 @@ important thing first.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import unicodedata
 from datetime import date
@@ -30,6 +31,14 @@ EXPIRY_WARNING_DAYS = 30
 # "and N more". The JSON and SARIF forms carry all of them.
 SHOWN = 10
 NO_OWNER = "(no owner recorded)"
+
+
+def semantic_version(version: str = __version__) -> str:
+    """``version`` as Semantic Versioning writes it, for SARIF's ``semanticVersion``.
+
+    A development version is a pre-release there: 0.4.0.dev0 is 0.4.0-dev.0. It is not 0.4.0, a release
+    that does not exist yet and that a report from the code before it must not claim to come from."""
+    return re.sub(r"\.dev(\d+)\Z", r"-dev.\1", version)
 
 
 def _requirements(rule: dict) -> str:
@@ -632,7 +641,7 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None,
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
-            "tool": {"driver": {"name": "obaaf", "version": __version__, "semanticVersion": __version__.split(".dev")[0],
+            "tool": {"driver": {"name": "obaaf", "version": __version__, "semanticVersion": semantic_version(),
                                 "rules": rules,
                                 "notifications": [{"id": kind, "shortDescription": {"text": text}}
                                                   for kind, text in NOTIFICATIONS.items()]}},
