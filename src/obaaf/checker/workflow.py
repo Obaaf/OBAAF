@@ -705,7 +705,6 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
     extra_agents = extra_agents or {}
     workflow.lane_problems = []
     paths = tuple(dict.fromkeys((workflow.path, *aliases)))
-    read = {id(workflow.raw.get("env"))} | {id(job.raw.get("env")) for job in workflow.jobs.values()}
 
     def problem(text: str) -> None:
         if text not in workflow.lane_problems:
@@ -742,44 +741,35 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
             job.lane_notes.append("declared trusted, which cannot override what the job does")
         job.lanes.update(declared)
         job.settle_lane(trusted_why or "default")
-        for where in _stray_declarations(job.raw, read):
+        for where in _stray_declarations(job, {id(workflow.raw.get("env")), id(job.raw.get("env"))}):
             problem(f"{one_line(workflow.path, 120)}: job '{one_line(job.id, 80)}' sets OBAAF_LANE in {where}, "
                     "where it is not read (it is read in the job's env and in the workflow's env); "
                     "the declaration changes nothing")
 
 
-def _stray_declarations(raw, read: set) -> list[str]:
-    """Where a job sets OBAAF_LANE in an `env` the checker does not read it from: a step's, a
-    container's, a service's. `read` holds the identities of the env mappings that are read, so an
-    env shared with a job through a YAML anchor is not reported."""
-    found: list[str] = []
-    budget = [20_000]      # nodes; anchors can make a small file a very large tree
+def _stray_declarations(job: Job, read: set) -> list[str]:
+    """Where a job sets OBAAF_LANE in an `env` the checker does not read it from: a step's, the
+    container's, a service's. `read` holds the identities of the two env mappings that are read for
+    this job (its own and the workflow's), so an env shared with one of them through a YAML anchor
+    is not reported."""
+    def stray(env) -> bool:
+        return isinstance(env, dict) and "OBAAF_LANE" in env and id(env) not in read
 
-    def walk(node, trail: tuple, above: frozenset) -> None:
-        budget[0] -= 1
-        if budget[0] < 0 or len(trail) > 12 or not isinstance(node, (dict, list)) or id(node) in above:
-            return
-        above = above | {id(node)}
-        if isinstance(node, list):
-            for index, item in enumerate(node):
-                walk(item, trail + (index + 1,), above)
-            return
-        if trail[-1:] == ("env",) and "OBAAF_LANE" in node and id(node) not in read:
-            where = f"step {trail[1]}" if trail[:1] == ("steps",) and len(trail) > 1 else \
-                one_line(".".join(str(part) for part in trail), 80)
-            if where not in found:
-                found.append(where)
-        for key, value in node.items():
-            walk(value, trail + (str(key),), above)
-
-    walk(raw, (), frozenset())
-    return found
+    found = [f"the env of the step at line {step.line}" for step in job.steps if stray(step.raw.get("env"))]
+    container = job.raw.get("container")
+    if isinstance(container, dict) and stray(container.get("env")):
+        found.append("container.env")
+    services = job.raw.get("services")
+    for name, service in (services.items() if isinstance(services, dict) else ()):
+        if isinstance(service, dict) and stray(service.get("env")):
+            found.append(f"services.{one_line(name, 60)}.env")
+    return list(dict.fromkeys(found))
 
 
 # An environment whose name says where releases go, anywhere in the name (AppProd, awsprod,
 # app-store). A name that says it is not production, or comes before it, is taken at its word.
 RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
-NOT_PRODUCTION_RE = re.compile(r"(non|pre)[-_. ]?prod")
+NOT_PRODUCTION_RE = re.compile(r"(?<![a-z])(non|pre)[-_. ]?prod")     # not the end of `canon-prod`
 
 
 def release_environment(name) -> bool:

@@ -115,6 +115,11 @@ class Info:
         return self.shell or bool(self.ai) or self.use.name.startswith("docker.build")
 
 
+# Steps that copy files to another host. They are not counted as publishing on their own, because
+# they mostly copy reports and logs; in a stage declared a release lane they are the upload.
+TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
+
+
 def stage_label(stage: tuple) -> str:
     return " > ".join(stage) if stage else "pipeline"
 
@@ -289,11 +294,11 @@ class JenkinsRules:
             lanes = self.lanes_of(info.ctx)
             # A shell step, or a step whose code is not in this file (most likely a shared-library
             # step): in a stage declared an agent or release lane, that is where the agent runs or
-            # the upload happens.
-            code = info.shell or info.unresolved
+            # the upload happens. Not in a post block, where such a step is most often a notice.
+            code = info.shell or (info.unresolved and info.ctx.post is None)
             if "agent" in lanes and code and not info.ai:
                 info.ai = "the stage is declared an agent lane"
-            if "release" in lanes and code and not info.publish:
+            if "release" in lanes and (code or info.use.name in TRANSFER_STEPS) and not info.publish:
                 info.publish = "the stage is declared a release lane"
         # Indexes, so no rule compares every step with every agent or stage.
         for info in self.infos:

@@ -409,7 +409,7 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         self.assertNotIn("OBAAF-GHA-003", rules(result))
         notes = ignored(result)
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("job 'work' sets OBAAF_LANE in step 1, where it is not read", notes[0])
+        self.assertIn("job 'work' sets OBAAF_LANE in the env of the step at line 8, where it is not read", notes[0])
 
     def test_obaaf_lane_in_an_env_that_is_not_read(self):
         # The step is named by its place in the file, the number an error about it would use.
@@ -420,9 +420,26 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         with TempDir() as tmp:
             notes = ignored(check(tmp, wf))
         self.assertEqual(len(notes), 3, notes)
-        for where in ("container.env", "step 2", "step 3"):
+        for where in ("container.env", "the env of the step at line 8", "the env of the step at line 10"):
             with self.subTest(where=where):
                 self.assertTrue(any(f"job 'work' sets OBAAF_LANE in {where}," in note for note in notes), notes)
+
+    def test_an_env_shared_with_another_job_is_not_this_jobs_env(self):
+        # `second` has no lane from `first`'s env, so its step's copy of it is a declaration that does nothing.
+        wf = ("on: push\njobs:\n  first:\n    runs-on: ubuntu-latest\n    env: &lane {OBAAF_LANE: agent}\n"
+              "    steps:\n      - run: ./a.sh\n"
+              "  second:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n"
+              f"        n: [{', '.join(str(n) for n in range(25000))}]\n"
+              "    steps:\n      - run: ./b.sh\n        env: *lane\n"
+              f"      - uses: some/action@{SHA}\n        with: {{env: {{OBAAF_LANE: agent}}}}\n")
+        with TempDir() as tmp:
+            path = tmp / "wf.yml"
+            path.write_text(wf)
+            shown = {row[1]: row[2] for row in checker.lanes(path)}
+            notes = ignored(checker.check(path))
+        self.assertEqual(shown, {"first": "agent", "second": "trusted"})
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("job 'second' sets OBAAF_LANE in the env of the step at line", notes[0])
 
     def test_no_note_for_obaaf_lane_that_is_read_or_is_not_a_declaration(self):
         # An env shared through an anchor is the job's env; an input of that name is not an env.
@@ -650,6 +667,23 @@ class AJenkinsStageDeclarationOnlyAddsRulesTest(unittest.TestCase):
                 self.assertNotEqual([row[1] for row in plain.lanes], [expected])
                 self.assertEqual([row[1] for row in declared.lanes], [expected])
 
+    def test_a_notice_in_a_post_block_is_not_the_upload(self):
+        text = JENKINSFILE.replace("sh './build.sh'", "sh './ship.sh'").replace(
+            "    }\n  }\n}", "    }\n  }\n  post { failure { notifyTeam(channel: 'releases') } }\n}")
+        self.assertIn("post { failure", text)
+        found, result = jenkins_rules(text, {"Jenkinsfile": "release"})
+        self.assertEqual([row[1] for row in result.lanes if row[0] == "Build"], ["release"])
+        self.assertNotIn("OBAAF-JEN-011", found)
+
+    def test_a_file_transfer_step_in_a_stage_declared_release_is_the_upload(self):
+        # docs/jenkins.md tells adopters to declare exactly this.
+        text = JENKINSFILE.replace("sh './build.sh'", "sshPublisher(publishers: [])")
+        _, plain = jenkins_rules(text)
+        found, declared = jenkins_rules(text, {"Jenkinsfile#Build": "release"})
+        self.assertNotEqual([row[1] for row in plain.lanes], ["release"])
+        self.assertEqual([row[1] for row in declared.lanes], ["release"])
+        self.assertIn("OBAAF-JEN-012", found)
+
     def test_a_value_computed_when_the_build_runs_is_reported_as_that(self):
         with TempDir() as tmp:
             repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = \"${params.LANE}\" }"))
@@ -686,9 +720,17 @@ class AnEnvironmentNamedForReleasesTest(unittest.TestCase):
                 self.assertEqual(self.lane(name), "release")
 
     def test_a_name_that_says_it_is_not_production(self):
-        for name in ("nonprod", "non-prod", "NonProd", "preprod", "pre-production", "PreProduction", "pre_prod"):
+        for name in ("nonprod", "non-prod", "NonProd", "preprod", "pre-production", "PreProduction", "pre_prod",
+                     "Pre Prod", "aws-nonprod"):
             with self.subTest(name=name):
                 self.assertEqual(self.lane(name), "trusted")
+
+    def test_a_production_name_that_only_ends_in_those_letters(self):
+        # The fourth review's case: `canon-prod` is production. When in doubt the job is a release job.
+        for name in ("canon-prod", "xenon_prod", "lebanonprod", "Canon Production", "sempre-prod",
+                     "{name: xenon-prod}", "AppNonProd"):
+            with self.subTest(name=name):
+                self.assertEqual(self.lane(name), "release")
 
     def test_names_that_say_nothing(self):
         for name in ("staging", "ci", "review"):
@@ -752,6 +794,16 @@ class AConfigurationThatCannotBeReadIsAnErrorTest(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn("lanes must be a mapping", err)
                 self.assertNotIn("Traceback", out + err)
+
+    def test_a_configuration_that_is_not_yaml(self):
+        with TempDir() as tmp:
+            repo(tmp, job("      - run: make\n"), "lanes: {a: [\n")
+            with self.assertRaises(checker.ConfigError):
+                checker.Config.load(tmp)
+            code, out, err = run_cli("check", tmp)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be read as YAML", err)
+        self.assertNotIn("Traceback", out + err)
 
     def test_lanes_left_empty_is_no_declaration(self):
         # As before this change: an empty value of any kind declares nothing.

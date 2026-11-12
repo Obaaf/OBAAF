@@ -228,7 +228,11 @@ class Config:
         candidates = [Path(explicit)] if explicit else [root / rel for rel in CONFIG_LOCATIONS]
         for path in candidates:
             if path.is_file():
-                return cls.from_data(yamlutil.load_file(path) or {}, path)
+                try:
+                    data = yamlutil.load_file(path)
+                except Exception as exc:    # YAML errors, duplicate keys, text that is not UTF-8
+                    raise ConfigError(f"{path}: cannot be read as YAML: {exc}") from exc
+                return cls.from_data(data or {}, path)
         if explicit:
             raise ConfigError(f"config file not found: {explicit}")
         return cls()

@@ -172,8 +172,10 @@ rules of both. A value that is not a lane, or one computed when the build runs, 
 report's notes.
 
 On a stage, `agent` and `release` are the lanes that change what is checked. `agent` says the
-stage's shell steps, and its steps whose code is not in the file (shared-library steps), run an
-agent; `release` says they publish. The other lanes are accepted and change nothing.
+stage's shell steps, and its steps whose code is not in the file (shared-library steps, outside
+`post` blocks), run an agent; `release` says they publish, and that the stage's `sshPublisher` and
+`ftpPublisher` steps do. Other steps the checker knows (`archiveArtifacts`, `httpRequest`, `build`)
+are not changed by a declaration. The other lanes are accepted and change nothing.
 
 ## Running the audit in Jenkins
 
