@@ -242,8 +242,8 @@ def uncommented(script: str) -> str:
     """A shell script without its comments: from a `#` at the start of a word, outside quotes, to the
     end of the line, following `'`, `"` and backslashes. Approximate: shell has more quoting than
     this (`$'...'`, here-documents), so it can take text for a comment that is not one, or the other
-    way round. It is used only for AWF, where hiding a match gives the stricter answer ("not met"
-    rather than "cannot tell")."""
+    way round. It is used only to find an AWF command line, which is never better than "cannot tell";
+    `--enable-dind` is searched in the whole script."""
     out: list[str] = []
     quote = ""
     i, text = 0, script or ""
@@ -271,47 +271,30 @@ def uncommented(script: str) -> str:
     return "".join(out)
 
 
-# A process a step leaves running after it ends, in the forms the checker recognises. The whole
-# script is searched, comments and quoted text included, so a form written in a comment or a string
-# only adds a "cannot tell". Every pattern is linear in the length of the script.
+# A process a step may leave running after it ends. Shell can start one in endless spellings (line
+# continuations, full paths, `--detach=true`, backticks, `sudo at`), so the checker does not try to
+# tell a detached container from one that ends with its step: any mention of a container engine, a
+# terminal multiplexer or a detaching command counts, and so does `&` as an operator. The whole
+# script is searched, comments and quoted text included, so a word in a comment or a string adds a
+# "cannot tell" and never hides one. Both patterns are linear in the length of the script.
 _AMPERSAND_RE = re.compile(r"(?<![&|>])&(?![&>])")
-_DETACHING_WORD_RE = re.compile(r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|coproc)\b")
-_AT_RE = re.compile(r"(?:^|[;&|(`])[ \t]*at[ \t]", re.M)
-_SHORT_D_RE = re.compile(r"-[A-Za-z]*d[A-Za-z]*")
+_DETACHING_RE = re.compile(
+    r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|coproc|docker|docker-compose|podman"
+    r"|podman-compose|nerdctl|screen|tmux|batch)\b"
+    r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])")
 
 
 def leaves_process(script: str) -> str | None:
-    """How a script may leave a process running after its step ends, or None: `&` as an operator
-    (not `&&`, `2>&1`, `&>` or `|&`); `nohup`, `setsid`, `disown`, `daemonize`, `start-stop-daemon`,
-    `systemd-run`, `coproc` or `at`; a container started detached (`docker` or `podman` with `run`
-    and `-d` among its short options or `--detach`, any `start`, or `compose up -d`, `up --wait`,
-    `compose start`); `screen -d...`; `tmux new -d`."""
+    """What in a script may leave a process running after its step ends, or None: `&` as an operator
+    (not `&&`, `2>&1`, `&>` or `|&`), or a mention anywhere of `nohup`, `setsid`, `disown`,
+    `daemonize`, `start-stop-daemon`, `systemd-run`, `coproc`, `batch`, `at` with a time or an
+    option, a container engine (`docker`, `docker-compose`, `podman`, `podman-compose`, `nerdctl`)
+    or a terminal multiplexer (`screen`, `tmux`)."""
     text = script or ""
     if _AMPERSAND_RE.search(text):
         return "&"
-    word = _DETACHING_WORD_RE.search(text)
-    if word:
-        return word.group(0)
-    if _AT_RE.search(text):
-        return "at"
-    for line in text.splitlines():
-        tokens = line.replace(";", " ").replace("|", " ").replace("(", " ").replace(")", " ").split()
-        if not tokens:
-            continue
-        names = set(tokens)
-        short_d = any(_SHORT_D_RE.fullmatch(t) for t in tokens)
-        engines = names & {"docker", "podman"}
-        composes = names & {"docker-compose", "podman-compose"} or (engines and "compose" in names)
-        if composes and (("up" in names and (short_d or "--detach" in names or "--wait" in names))
-                         or "start" in names):
-            return "compose"
-        if engines and (("run" in names and (short_d or "--detach" in names)) or "start" in names):
-            return "a detached container"
-        if "screen" in names and short_d:
-            return "screen"
-        if "tmux" in names and names & {"new", "new-session"} and short_d:
-            return "tmux"
-    return None
+    found = _DETACHING_RE.search(text)
+    return found.group(0).split()[0] if found else None
 
 
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).

@@ -1101,7 +1101,7 @@ class WorkflowRules:
             return None
         step = found[0]
         where = one_line(step.name, 80)
-        if any(egress_mod.AWF_UNSAFE_RE.search(egress_mod.uncommented(s.run)) for s in found):
+        if any(egress_mod.AWF_UNSAFE_RE.search(s.run) for s in found):
             return egress_mod.Reading(NOT_MET, f"step '{where}' runs AWF with --enable-dind, which hands the "
                                                "command the Docker socket and, in AWF's documentation, allows "
                                                "a bypass", "awf", {"where": where, "written": self._written()})

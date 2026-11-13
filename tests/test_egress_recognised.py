@@ -420,7 +420,13 @@ class EgressActionTest(unittest.TestCase):
                     "printf '%s\\n' $'it\\'s #1' ; ./scripts/watch.sh &",
                     "cat > notes.txt <<'EOF'\nit's done\nEOF\necho ' #a' ; ./scripts/watch.sh &",
                     "docker create --name h -v /:/host alpine sleep 1d\ndocker start h",
-                    "docker compose up --wait", "coproc ./scripts/watch.sh"):
+                    "docker compose up --wait", "coproc ./scripts/watch.sh",
+                    # Found by the fourth review: spellings a list of forms missed, so any mention counts.
+                    "docker run \\\n  --detach \\\n  -v /:/host \\\n  alpine sleep 1d",
+                    "tmux new-session \\\n  -d -s w ./scripts/watch.sh", "docker run --detach=true alpine sleep 1d",
+                    "true&&docker run -d alpine sleep 1d", "id=`docker run -d alpine sleep 1d`",
+                    "/usr/bin/docker run -d alpine sleep 1d", "echo ./scripts/watch.sh | sudo at now",
+                    "if true; then at now -f ./scripts/watch.sh; fi"):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
@@ -430,7 +436,8 @@ class EgressActionTest(unittest.TestCase):
         """Found by the third review: a regular expression with chained `[^\\n]*` took 43 seconds on a
         14 KB workflow."""
         import time
-        for line in ("tmux new " * 3000, "docker-compose up " * 2000, "docker run " * 4000, "screen x " * 4000):
+        for line in ("tmux new " * 3000, "docker-compose up " * 2000, "docker run " * 4000, "screen x " * 4000,
+                     "-" + "d" * 60000 + "1"):
             started = time.monotonic()
             self.check(f"      - run: {json.dumps('echo ' + line)}\n" + action())
             with self.subTest(line=line[:20]):
@@ -562,6 +569,10 @@ class AgentWorkflowFirewallTest(unittest.TestCase):
 
     def test_enable_dind_is_not_met(self):
         f = self.awf("sudo -E awf --enable-dind --allow-domains api.example.com -- claude -p x")
+        self.assertEqual((f.kind, verdict(f)), ("awf", NOT_MET))
+        # Found by the fourth review: quoting the comment remover misreads must not hide it.
+        f = self.awf("printf '%s\\n' $'it\\'s #1' ; sudo awf --enable-dind --allow-domains a.example.com -- claude -p x\n"
+                     "sudo awf --allow-domains a.example.com -- claude -p y")
         self.assertEqual((f.kind, verdict(f)), ("awf", NOT_MET))
 
     def test_the_word_in_a_string_or_a_comment_is_not_awf(self):
