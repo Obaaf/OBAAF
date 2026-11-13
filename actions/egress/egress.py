@@ -161,7 +161,7 @@ DNS_BRIDGE = "docker0"
 # What a label may hold for the resolver to pass the name on. A label of any
 # other byte (a dot inside a label, for one) would let a name that looks
 # covered be a different name under another domain, so it is refused.
-_DNS_LABEL_RE = re.compile(rb"^[A-Za-z0-9_-]{1,63}$")
+_DNS_LABEL_RE = re.compile(rb"[A-Za-z0-9_-]{1,63}")
 NOBODY_UID = 65534
 NOBODY_GID = 65534
 
@@ -265,13 +265,28 @@ def parse_model_keys(text: str, environ: dict[str, str]) -> dict[str, str]:
 
 
 def resolver_names(allow: list[str], model_keys: dict[str, str]) -> list[str]:
-    """The names the action's resolver answers: the allow-list and the host of each model key."""
+    """The names the action's resolver answers, as written to its names file.
+
+    The allow-list, each name with its subdomains, as AWF's proxy allows them;
+    then the API host of each model key the list does not cover, marked "="
+    because the resolver answers that host exactly and not its subdomains (the
+    API proxy needs the one host, and its subdomains would be a way for the
+    command to put data in a name the list does not cover).
+    """
     names = list(allow)
     for key in model_keys:
         host = MODEL_KEYS[key]
-        if host not in names:
-            names.append(host)
+        if not covered(host, allow) and "=" + host not in names:
+            names.append("=" + host)
     return names
+
+
+def read_resolver_names(text: str) -> tuple[list[str], list[str]]:
+    """The names file read back: (names with their subdomains, exact names), each checked as an allow-list."""
+    entries = [item for item in re.split(r"[\s,]+", text or "") if item]
+    exact = [item[1:] for item in entries if item.startswith("=")]
+    wide = [item for item in entries if not item.startswith("=")]
+    return parse_allow_list(" ".join(wide)), (parse_allow_list(" ".join(exact)) if exact else [])
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +336,7 @@ def dns_question(message: bytes) -> tuple[str | None, int, int] | None:
     if qclass != 1:
         return None
     end = offset + 4
-    if not labels or not all(_DNS_LABEL_RE.match(label) for label in labels):
+    if not labels or not all(_DNS_LABEL_RE.fullmatch(label) for label in labels):
         return (None, qtype, end)
     return (b".".join(labels).decode("ascii").lower(), qtype, end)
 
@@ -364,8 +379,10 @@ class DnsFilter:
     """Answers a query by forwarding it to the runner's resolver when the name
     is covered, and with REFUSED otherwise. Shared by the UDP and TCP servers."""
 
-    def __init__(self, names: list[str], upstream: str, log, upstream_port: int = DNS_PORT) -> None:
+    def __init__(self, names: list[str], upstream: str, log, upstream_port: int = DNS_PORT,
+                 exact: list[str] | None = None) -> None:
         self.names = names
+        self.exact = list(exact or [])
         self.upstream = upstream
         self.upstream_port = upstream_port
         self.log = log
@@ -383,18 +400,25 @@ class DnsFilter:
                 self.log.flush()
             self.logged += 1
 
-    def decide(self, query: bytes) -> tuple[bool, bytes | None]:
-        """(forward?, reply if not forwarded)."""
+    def decide(self, query: bytes) -> tuple[bytes | None, bytes | None]:
+        """(query to forward, or None; reply to give when nothing is forwarded).
+
+        The query forwarded is rebuilt from its ID, its recursion flag and its
+        one question, which dns_question has read and checked: nothing else
+        the asker put in the message (other sections, EDNS options, trailing
+        bytes) reaches the runner's resolver.
+        """
         question = dns_question(query)
         if question is None:
             self.note(f"refused unreadable {dns_printable(query)}")
-            return False, dns_refusal(query, 0, DNS_RCODE_FORMERR)
+            return None, dns_refusal(query, 0, DNS_RCODE_FORMERR)
         name, qtype, end = question
-        if name is not None and covered(name, self.names):
+        if name is not None and (name in self.exact or covered(name, self.names)):
             self.note(f"allowed {qtype} {name}")
-            return True, None
+            flags = int.from_bytes(query[2:4], "big") & 0x0100
+            return query[:2] + flags.to_bytes(2, "big") + b"\x00\x01" + bytes(6) + query[12:end], None
         self.note(f"refused {qtype} {name if name is not None else dns_printable(query)}")
-        return False, dns_refusal(query, end)
+        return None, dns_refusal(query, end)
 
     def forward_udp(self, query: bytes) -> bytes | None:
         import socket
@@ -448,22 +472,23 @@ def dns_filter(argv: list[str]) -> int:
         print("usage: egress.py dns-filter LISTEN UPSTREAM NAMES-FILE LOG-FILE UID:GID", file=sys.stderr)
         return 2
     listen, upstream, names_file, log_file, owner = argv
-    names = parse_allow_list(Path(names_file).read_text())
+    names, exact = read_resolver_names(Path(names_file).read_text())
     uid, gid = (int(part) for part in owner.split(":", 1))
 
     fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.fchown(fd, uid, gid)
     log = os.fdopen(fd, "a", encoding="utf-8")
-    log.write(f"listening on {listen}:{DNS_PORT}, forwarding to {upstream}: {', '.join(names)}\n")
+    log.write(f"listening on {listen}:{DNS_PORT}, forwarding to {upstream}: {', '.join(names)}"
+              f"{' (with subdomains); ' + ', '.join(exact) + ' (exactly)' if exact else ''}\n")
     log.flush()
-    deciding = DnsFilter(names, upstream, log)
+    deciding = DnsFilter(names, upstream, log, exact=exact)
 
     class Udp(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             data, sock = self.request
-            forward, reply = deciding.decide(data)
-            if forward:
-                reply = deciding.forward_udp(data)
+            outgoing, reply = deciding.decide(data)
+            if outgoing:
+                reply = deciding.forward_udp(outgoing)
             if reply:
                 sock.sendto(reply, self.client_address)
 
@@ -479,9 +504,9 @@ def dns_filter(argv: list[str]) -> int:
                     return
                 if not data:
                     return
-                forward, reply = deciding.decide(data)
-                if forward:
-                    reply = deciding.forward_tcp(data)
+                outgoing, reply = deciding.decide(data)
+                if outgoing:
+                    reply = deciding.forward_tcp(outgoing)
                 if not reply:
                     return
                 try:
@@ -933,7 +958,8 @@ def run(environ: dict[str, str]) -> int:
     if model_keys:
         print(f"obaaf-egress: model keys given to AWF's API proxy, not to the command: {', '.join(model_keys)}"
               f" (it reaches {', '.join(MODEL_KEYS[k] for k in model_keys)} whatever allow says)")
-    print(f"obaaf-egress: the proxy's resolver is the action's own, at {dns_server}; it answers only: {', '.join(dns_names)}")
+    print(f"obaaf-egress: the proxy's resolver is the action's own, at {dns_server}; it answers only: "
+          f"{', '.join(n[1:] + ' (exactly)' if n.startswith('=') else n for n in dns_names)}")
     print(f"obaaf-egress: the command can write only under {scratch}")
     sys.stdout.flush()
     print(f"::stop-commands::{token}", flush=True)

@@ -5,9 +5,10 @@ description: >-
   Firewall (github/gh-aw-firewall) at a version OBAAF's CI has tried to escape;
   everything else is refused and logged. The command can write only to a
   scratch copy of the workspace, and cannot change the runner's files. The
-  proxy's resolver answers only the listed names, so a refused name does not
-  leave the runner in a DNS query either. Read docs/egress-control.md for what
-  this blocks and what it does not.
+  proxy's resolver answers only the listed names (and, with model keys, the
+  provider's API host), so a name the proxy refuses does not leave the runner
+  in a DNS query either. Read docs/egress-control.md for what this blocks and
+  what it does not.
 author: Osita Sean Keluo-Udeke
 branding:
   icon: shield
@@ -56,8 +57,8 @@ outputs:
   dns-refused:
     description: >-
       Names the proxy's resolver refused, separated by commas. The action's
-      resolver answers only names the allow-list covers; these went no further
-      than the runner.
+      resolver answers only names the allow-list covers and the API host of
+      each model key; these went no further than the runner.
     value: ${{ steps.run.outputs.dns-refused }}
   dns-log:
     description: The log of the proxy's resolver, outside the scratch directory.

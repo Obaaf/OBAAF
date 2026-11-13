@@ -63,9 +63,12 @@ ATTEMPTS: dict[str, dict] = {
     # success. Inside, it flushes the rules and connects to 9.9.9.10.
     "sudo-iptables": {"ips": ["9.9.9.10"], "control_by_result": True},
     "docker-socket": {"ips": ["208.67.222.222"]},
-    # Slice 2c.4: a name asked of the proxy (over HTTPS and HTTP) and a name the
-    # command looks up itself must not leave the runner in a DNS query. Outside,
-    # the same names are looked up by the runner's resolver and leave.
+    # Slice 2c.4: a name asked of the proxy (over HTTPS and HTTP, the proxy
+    # named explicitly) and a name the command looks up itself must not leave
+    # the runner in a DNS query. Outside, the same names are looked up by the
+    # runner's resolver and leave. The command's own lookups never reached the
+    # action's resolver (AWF gives the command's container Docker's resolver):
+    # they are regression tests, not tests of the resolver.
     "dns-via-proxy": {"labels": ["viaproxy"]},
     "dns-via-proxy-http": {"labels": ["plainproxy"]},
     "dns-default-getent": {"labels": ["getent"]},
@@ -282,6 +285,13 @@ def judge(args: argparse.Namespace) -> int:
     if queried:
         failures.append("unlisted names left the runner in DNS queries while the attempts ran inside: "
                         + ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried))
+    # The names asked of the proxy must have reached the action's resolver and
+    # been refused there; otherwise the two attempts did not test it.
+    refused_names = set((args.dns_refused or "").split(","))
+    for label in ("viaproxy", "plainproxy"):
+        if f"{args.inside_prefix}-{label}.example.com" not in refused_names:
+            failures.append(f"the name {args.inside_prefix}-{label}.example.com is not among the names the action's "
+                            "resolver refused, so the proxy did not ask it and the attempt did not test the resolver")
 
     # Recorded, not asserted.
     recorded = {

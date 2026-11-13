@@ -28,8 +28,10 @@ done
 note "MARK_IN_ENV $(env | grep -v '^KEY_MARK=' | grep -c -- "$KEY_MARK")"
 # Places the command can read. The proc and sys trees are left out (the
 # command's own environment holds KEY_MARK); the results file holds no key.
-hits=$(timeout 120 grep -rIl --exclude-dir=proc --exclude-dir=sys -e "$KEY_MARK" \
-  "$HOME" "${TMPDIR:-/tmp}" "$PWD" /tmp /home /run /etc /var 2>/dev/null | grep -v -- "$out" | head -5 | tr '\n' ' ')
+places=("$HOME" "${TMPDIR:-/tmp}" "$PWD" /tmp /home /run /etc /var)
+searched=$(timeout 120 find "${places[@]}" -path /proc -prune -o -path /sys -prune -o -type f -readable -print 2>/dev/null | wc -l)
+hits=$(timeout 120 grep -rIl --exclude-dir=proc --exclude-dir=sys -e "$KEY_MARK" "${places[@]}" 2>/dev/null | grep -v -- "$out" | head -5 | tr '\n' ' ')
+note "FILES_SEARCHED $searched"
 note "MARK_IN_FILES ${hits:-none}"
 
 body() { head -c 400 "$1" 2>/dev/null | tr '\n\r' '  '; }

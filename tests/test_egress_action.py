@@ -130,8 +130,13 @@ class ModelKeys(unittest.TestCase):
     def test_the_resolver_answers_the_provider_host_only_when_its_key_is_given(self):
         self.assertEqual(egress.resolver_names(["api.github.com"], {}), ["api.github.com"])
         self.assertEqual(egress.resolver_names(["api.github.com"], {"ANTHROPIC_API_KEY": "k"}),
-                         ["api.github.com", "api.anthropic.com"])
+                         ["api.github.com", "=api.anthropic.com"])
         self.assertEqual(egress.resolver_names(["api.openai.com"], {"OPENAI_API_KEY": "k"}), ["api.openai.com"])
+        self.assertEqual(egress.resolver_names(["openai.com"], {"OPENAI_API_KEY": "k"}), ["openai.com"])
+        self.assertEqual(egress.read_resolver_names("api.github.com\n=api.anthropic.com\n"),
+                         (["api.github.com"], ["api.anthropic.com"]))
+        with self.assertRaises(egress.UsageError):
+            egress.read_resolver_names("api.github.com\n=*.anthropic.com\n")
 
     def test_hosted_web_tools_are_refused_in_awf_config(self):
         config = egress.awf_config("/tmp/obaaf-egress.abc")
@@ -176,6 +181,26 @@ class Resolver(unittest.TestCase):
                 message = b"\x00\x01\x01\x00\x00\x01" + bytes(6) + bytes([len(label)]) + label + b"\x03com\x00\x00\x01\x00\x01"
                 self.assertEqual(_question(message)[0], None)
 
+    def test_a_label_ending_in_a_newline_is_not_a_plain_label(self):
+        message = b"\x00\x01\x01\x00\x00\x01" + bytes(6) + b"\x02x\n\x03api\x06github\x03com\x00\x00\x01\x00\x01"
+        self.assertIsNone(_question(message)[0])
+        import io
+        outgoing, reply = egress.DnsFilter(["api.github.com"], "127.0.0.1", io.StringIO()).decide(message)
+        self.assertIsNone(outgoing)
+        self.assertEqual(reply[3] & 0xF, egress.DNS_RCODE_REFUSED)
+
+    def test_only_the_id_recursion_flag_and_question_are_forwarded(self):
+        import io
+        query = bytearray(egress.dns_query("api.github.com", 0x0102))
+        query[2:4] = (0x0100 | 0x0010 | 0x0020).to_bytes(2, "big")  # RD, CD and the reserved Z bit
+        query[10:12] = (1).to_bytes(2, "big")                            # one additional record
+        opt = b"\x00\x00\x29\x10\x00\x00\x00\x00\x00\x00\x0b\x00\x08\x00\x07\x00\x01\x18\x00leak"
+        message = bytes(query) + opt + b"trailing-data"
+        outgoing, reply = egress.DnsFilter(["api.github.com"], "127.0.0.1", io.StringIO()).decide(message)
+        self.assertIsNone(reply)
+        self.assertEqual(outgoing, egress.dns_query("api.github.com", 0x0102))
+        self.assertNotIn(b"leak", outgoing)
+
     def test_refusal_keeps_id_question_and_recursion_flag(self):
         query = egress.dns_query("leak.example.com", 0xBEEF)
         name, qtype, end = _question(query)
@@ -192,17 +217,18 @@ class Resolver(unittest.TestCase):
     def test_decide_forwards_only_covered_names(self):
         import io
         log = io.StringIO()
-        deciding = egress.DnsFilter(["api.github.com"], "127.0.0.1", log)
-        for name in ("api.github.com", "x.api.github.com"):
-            forward, reply = deciding.decide(egress.dns_query(name, 7))
-            self.assertTrue(forward, name)
+        deciding = egress.DnsFilter(["api.github.com"], "127.0.0.1", log, exact=["api.anthropic.com"])
+        for name in ("api.github.com", "x.api.github.com", "api.anthropic.com"):
+            outgoing, reply = deciding.decide(egress.dns_query(name, 7))
+            self.assertIsNotNone(outgoing, name)
             self.assertIsNone(reply)
-        for name in ("github.com", "evilapi.github.com", "api.github.com.evil.net", "leak-1234.example.com"):
-            forward, reply = deciding.decide(egress.dns_query(name, 7))
-            self.assertFalse(forward, name)
+        for name in ("github.com", "evilapi.github.com", "api.github.com.evil.net", "leak-1234.example.com",
+                     "leak.api.anthropic.com", "anthropic.com"):
+            outgoing, reply = deciding.decide(egress.dns_query(name, 7))
+            self.assertIsNone(outgoing, name)
             self.assertEqual(reply[3] & 0xF, egress.DNS_RCODE_REFUSED)
-        forward, reply = deciding.decide(b"\x00\x09" + bytes(10))
-        self.assertFalse(forward)
+        outgoing, reply = deciding.decide(b"\x00\x09" + bytes(10))
+        self.assertIsNone(outgoing)
         self.assertEqual(reply[3] & 0xF, egress.DNS_RCODE_FORMERR)
         self.assertIn("refused 1 leak-1234.example.com", log.getvalue())
         self.assertIn("allowed 1 api.github.com", log.getvalue())
