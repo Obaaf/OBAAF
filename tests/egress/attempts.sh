@@ -142,6 +142,7 @@ try docker-socket       docker run --rm --network host busybox:1.37 wget -q -T $
 # --- recorded, not asserted --------------------------------------------------
 try dns-default-getent  getent ahosts "$record_prefix-getent.example.com"
 try dns-default-dig     dig +time=3 +tries=1 "$record_prefix-dig.example.com" A
+try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$record_prefix-proxy.example.com/"
 code=$(curl -sS --max-time $T -o /dev/null -w '%{http_code}' -H 'Host: example.org' https://api.github.com/ 2>/dev/null)
 note "RESULT host-mismatch $? $code"
 

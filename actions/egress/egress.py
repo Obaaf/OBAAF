@@ -246,6 +246,9 @@ if [ "$failed" -ne 0 ]; then
   exit {EXIT_NOT_CONFINED}
 fi
 printf '%s\\n' '{nonce}' > '{marker}'
+# AWF sets HOME to the runner user's home, which is read-only in here; give
+# the command the scratch home, whose tool directories AWF mounts writable.
+export HOME='{scratch}/home'
 export TMPDIR='{scratch}/tmp'
 cd '{workdir}' || exit {EXIT_NOT_CONFINED}
 exec /bin/bash -e '{command_file}'
@@ -428,6 +431,12 @@ def run(environ: dict[str, str]) -> int:
         env_file.unlink()
     except OSError:
         pass
+    # AWF's own directories for this run, some of which it mounts writable
+    # for the command (its log and session directories). Nothing later
+    # should find them; the proxy's log is kept apart.
+    shutil.rmtree(awf_work, ignore_errors=True)
+    if awf_work.exists():
+        print(f"::warning::obaaf-egress: could not remove AWF's working directory {awf_work}; do not run or load anything from it")
 
     after = _runner_file_hashes(environ)
     changed = [name for name in before if before[name] != after.get(name)]

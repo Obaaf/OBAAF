@@ -94,6 +94,11 @@ jobs:
           PFX_IN: ${{ steps.prep.outputs.pfx_in }}
           PFX_REC: ${{ steps.prep.outputs.pfx_rec }}
           REAL_WORKSPACE: ${{ github.workspace }}
+          # On purpose: with this set, the runner obeys ::set-env and ::add-path from a
+          # step's output. The command prints both; the action must keep them from
+          # taking effect, and the judge checks that they did not. It is not passed
+          # to the command.
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: "true"
         with:
           allow: api.github.com
           env: PFX_IN PFX_REC REAL_WORKSPACE
@@ -161,6 +166,7 @@ jobs:
           env: PASSED
           run: |
             test "$PASSED" = passed-value
+            touch "$HOME/written-in-home" "$TMPDIR/written-in-tmp"
             test -z "${NOT_PASSED:-}"
             test -z "${GITHUB_TOKEN:-}"
             test -z "${ACTIONS_RUNTIME_TOKEN:-}"
@@ -214,4 +220,5 @@ jobs:
           check "a wildcard is refused" '[ "$WILDCARD_OUTCOME" = failure ]'
           check "an address is refused" '[ "$ADDRESS_OUTCOME" = failure ]'
           check "a withheld variable is refused" '[ "$RESERVED_OUTCOME" = failure ]'
+          check "AWF's working directory is gone after the run" '! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work" >/dev/null'
           exit "$fail"

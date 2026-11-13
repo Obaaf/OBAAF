@@ -230,11 +230,16 @@ def judge(args: argparse.Namespace) -> int:
         failures.append("a PATH entry added from inside the sandbox reached a later step")
 
     # Recorded, not asserted.
+    queried = sorted({m.group(1) for m in re.finditer(r"\? ([A-Za-z0-9.-]+)\. ", in_headers)
+                      if any(m.group(1) == h or m.group(1).endswith("." + h)
+                             for h in ("example.org", "example.net", "example.com", "cloudflare-dns.com"))})
     recorded = {
-        "default resolver: a name looked up inside left the runner in a DNS query":
-            args.record_prefix in in_ascii,
-        "a DNS query for an unlisted name left the runner while the attempts ran inside":
-            any(re.search(rf"\? {re.escape(h)}\.", in_headers) for h in ("example.org", "example.net", "example.com", "cloudflare-dns.com")),
+        "the command's own resolver: a name it looked up left the runner in a DNS query":
+            f"{args.record_prefix}-getent" in in_ascii or f"{args.record_prefix}-dig" in in_ascii,
+        "the proxy: a name the command asked it for, and was refused, left the runner in a DNS query":
+            f"{args.record_prefix}-proxy" in in_ascii,
+        "unlisted names seen in DNS queries leaving the runner while the attempts ran inside":
+            ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried) or "none",
         "Host header that differs from the allowed name (curl status, HTTP code)":
             " ".join(in_results.get("host-mismatch", ["not run"])),
         "files the confined command reported writing outside the scratch directory (the judge checks the runner's copies above)":
