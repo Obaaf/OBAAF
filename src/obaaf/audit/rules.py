@@ -298,9 +298,9 @@ ACTIONS_OR_ANY = frozenset((None, ACTIONS_APP))
 
 def _held_by_actions(apps: set) -> bool:
     """Whether a check of this name from GitHub Actions is one the requirements wait for: required from
-    GitHub Actions, or from any app and no other. Where another app is named, how GitHub weighs a check
-    of the same name from Actions is not established, so this is False and the rules say "cannot tell"
-    or leave it to OBAAF-SET-006."""
+    GitHub Actions (whatever else), or from any app and no other. Where another app is named and GitHub
+    Actions is not, how GitHub weighs a check of the same name from Actions is not established, so this is
+    False and the rules say "cannot tell" or leave it to OBAAF-SET-006."""
     return ACTIONS_APP in apps or apps == {None}
 
 
@@ -1035,6 +1035,7 @@ def _check_rules(run: _Run, kind: str) -> None:
     reporting = [(f, j) for f, j in run.jobs() if _stands_alone(f)]
     broken = run.broken()
     compared = 0
+    foreign_only = 0  # required checks OBAAF-SET-007 leaves to OBAAF-SET-006: another app is named
     for branch in branches:
         need = _branch_requirements(run, branch)
         subject = f"branch {_q(branch)}"
@@ -1085,6 +1086,7 @@ def _check_rules(run: _Run, kind: str) -> None:
         elif kind == "filtered":
             for context in sorted(required):
                 if not _held_by_actions(need["apps"][context]):
+                    foreign_only += 1
                     continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
@@ -1131,7 +1133,7 @@ def _check_rules(run: _Run, kind: str) -> None:
         else:
             if not need["checks_whole"]:
                 continue
-            unrequired, unsure = [], 0
+            unrequired, unsure, foreign = [], 0, []
             for file, job in reporting:
                 if job["advisory"]:
                     continue
@@ -1155,7 +1157,7 @@ def _check_rules(run: _Run, kind: str) -> None:
                     else:
                         # A name required from another app: whether a failing Actions check of that name
                         # holds the merge up is not established.
-                        unsure += 1
+                        foreign.append((file, job, [n for n in names if not _held_by_actions(need["apps"][n])]))
                     continue
                 verdicts = [_reports(job, context) for context in need["apps"]]
                 if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
@@ -1187,6 +1189,13 @@ def _check_rules(run: _Run, kind: str) -> None:
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
                             f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
                             f"request can merge while the job is failing.{source}")
+            for file, job, names in foreign:
+                run.cannot_tell(f"{subject}: job {_job_label(file, job)}",
+                                f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and reports "
+                                f"{_names(_q(n) for n in names)}, which {'is' if len(names) == 1 else 'are'} "
+                                "required there from another app (and not from GitHub Actions). How GitHub weighs a "
+                                "check of that name from GitHub Actions against such a requirement is not "
+                                "established, so whether a failing run holds the merge up is not known.")
             if unsure:
                 run.cannot_tell(f"{subject}: jobs whose check names could not be written out",
                                 f"{_n(unsure, 'job')} that may run on pull requests into {_q(branch)}: "
@@ -1201,7 +1210,9 @@ def _check_rules(run: _Run, kind: str) -> None:
                         }.get(kind, f"{_n(compared, 'job')} running on every pull request, and the required checks")
     elif not run.results:
         run.idle = {"missing": "no audited branch requires a check",
-                    "filtered": "no required check is known to be reported by a workflow job",
+                    "filtered": ("the required checks a workflow job reports are required from another app, which "
+                                 "OBAAF-SET-006 cannot tell about" if foreign_only else
+                                 "no required check is known to be reported by a workflow job"),
                     }.get(kind, "no job runs on every pull request into an audited branch")
 
 
@@ -1419,10 +1430,12 @@ def rule_013(run: _Run) -> None:
             continue
         if count == 1 and not need["approvals_whole"]:
             run.unread(subject, f"{lead[:-1]}, and {_q(branch)} requires at least 1 approval"
-                                + (" and a code owner's review" if need["code_owner"] else "")
-                                + "; a rule about its reviews was not read in full, so whether it requires more "
-                                  "approvals or a code owner's review is not known, and that decides whether the "
-                                  "workflow's approval can count",
+                                + (" and a code owner's review. A rule about its reviews was not read in full, so "
+                                   "whether it requires more approvals is not known; two or more would let the "
+                                   "workflow's approval count" if need["code_owner"] else
+                                   ". A rule about its reviews was not read in full, so whether it also requires a "
+                                   "code owner's review is not known; that would decide whether the workflow's "
+                                   "approval can be the one that counts"),
                        *sorted(set(need["gaps"])))
             continue
         if need["code_owner"] and count == 1:

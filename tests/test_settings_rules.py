@@ -1473,7 +1473,10 @@ class SecondReviewTest(unittest.TestCase):
         # is not established (its pages say a status from a different app prevents merging, and that the
         # most restrictive version of a rule applies), so neither "no finding" nor a finding is claimed.
         files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
-        self.assertEqual(status(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008"), "cannot-tell")
+        result, = of(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertEqual(result["subject"], 'branch "main": job .github/workflows/ci.yml#test')
+        self.assertIn("required there from another app", result["message"])
         self.assertEqual(status(assess_files(self.require(("test", 15368)), files), "OBAAF-SET-008"), "no-finding")
         self.assertEqual(status(assess_files(self.require(("test", None)), files), "OBAAF-SET-008"), "no-finding")
         matrix = {"ci.yml": workflow("  pull_request:\n", job("t", "    strategy:\n      matrix:\n        v: [a, b]\n"))}
@@ -1515,6 +1518,8 @@ class SecondReviewTest(unittest.TestCase):
         filtered = {"ci.yml": workflow("  pull_request:\n    paths: ['src/**']\n", job("test"))}
         found = assess_files(entries, filtered)
         self.assertEqual(of(found, "OBAAF-SET-007"), [])
+        note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-007")
+        self.assertIn("required from another app", note)
         self.assertEqual(of(assess_files(self.require(("test", 99)), filtered), "OBAAF-SET-007"), [])
 
     def test_one_approval_and_a_code_owner_with_classic_protection_unread(self):
@@ -1526,7 +1531,7 @@ class SecondReviewTest(unittest.TestCase):
         result, = of(assess_files(entries, {}), "OBAAF-SET-013")
         self.assertEqual(result["state"], "cannot-tell")
         self.assertIn("branch_protection", result["unread"])
-        self.assertIn("whether it requires more approvals or a code owner's review is not known", result["message"])
+        self.assertIn("whether it requires more approvals is not known", result["message"])
 
     def test_a_runner_group_alone_does_not_show_a_self_hosted_runner(self):
         files = {"ci.yml": workflow("  push:\n", "  build:\n    runs-on:\n      group: big-runners\n"
