@@ -345,12 +345,12 @@ rules:
       it hold. Two controls can be verified: GitHub's native egress firewall (the job runs on
       `ubuntu-24.04-firewall` and `.github/egress-firewall.yaml` sets `mode: enforce`), which covers
       the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit
-      OBAAF lists as released, with a plain allow-list that names no public suffix, the agent as its
-      command (no other step and no `env` of the job is given a credential) and no later step using
-      what the command wrote except to upload it. OBAAF lists no released commit of the action yet.
-      Harden-Runner is "cannot tell" at best, because the repository's tier is not in the workflow,
-      and "not met" before v2.16.0 or with `sudo` and containers left to the job; its version is read
-      only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell".
+      OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
+      agent as its command (no other step and no `env` of the job is given a credential, and the job
+      cannot request OIDC tokens) and no step but `actions/upload-artifact` after it. OBAAF lists no
+      released commit of the action yet. Harden-Runner is "cannot tell" at best, because the
+      repository's tier is not in the workflow, and "not met" at a listed release before v2.16.0 or
+      with `sudo` and containers left to the job; its version is read only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell".
       A policy declared in `OBAAF_EGRESS`, or a control behind a condition, is reported too, so it is
       not mistaken for enforcement. A baseline entry that accepts "cannot tell" is for the workflow
       file as it stood, byte for byte. A cleared finding still says what the control does not stop.

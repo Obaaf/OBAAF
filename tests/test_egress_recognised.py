@@ -163,6 +163,29 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertEqual(verdict(f), VERIFIED)
         self.assertIn("github.com and nothing else", detail(f))
 
+    def test_a_name_with_a_public_suffix_under_it_is_cannot_tell(self):
+        self.assertEqual(verdict(self.firewall(policy="mode: enforce\nallow: [amazonaws.com]\n")), CANNOT_TELL)
+
+    def test_a_policy_file_larger_than_the_checker_reads_is_cannot_tell(self):
+        """Found by the first review: the first megabyte was read, and a later `mode: log` was not."""
+        policy = FIREWALL + "# padding\n" * 120_000 + "mode: log\n"
+        f = self.firewall(policy=policy)
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("larger than", detail(f))
+
+    def test_a_disputed_line_break_in_the_policy_is_cannot_tell(self):
+        """Found by the first review: a reader that does not break at U+2028 sees mode inside a comment."""
+        for char in ("\u2028", "\u2029", "\u0085"):
+            with self.subTest(char=repr(char)):
+                f = self.firewall(policy=f"allow: [api.example.com] #{char}mode: enforce\n")
+                self.assertEqual(verdict(f), CANNOT_TELL)
+
+    def test_a_workflow_others_call_is_cannot_tell(self):
+        for on in ("workflow_call", "[workflow_call, workflow_dispatch]"):
+            f = self.firewall(on=on)
+            with self.subTest(on=on):
+                self.assertEqual(verdict(f), CANNOT_TELL)
+
     def test_a_link_in_place_of_the_policy_file_is_cannot_tell(self):
         with TempDir() as tmp:
             (tmp / ".github" / "workflows").mkdir(parents=True)
@@ -243,13 +266,11 @@ class EgressActionTest(unittest.TestCase):
         for ref in (SHA, "v1", "main", RELEASED.upper()):
             with self.subTest(ref=ref):
                 self.assertEqual(verdict(self.check(action(ref=ref))), CANNOT_TELL)
-        local = action().replace(f"Obaaf/OBAAF/actions/egress@{RELEASED}", "./actions/egress")
-        self.assertEqual(verdict(self.check(local)), CANNOT_TELL)
 
     def test_look_alike_actions_are_not_the_control(self):
         for uses in (f"Obaaf/OBAAF/actions/egress-lite@{RELEASED}", f"someone/OBAAF/actions/egress@{RELEASED}",
                      f"Obaaf/OBAAF/actions/egress/inner@{RELEASED}", "./actions/egress-copy",
-                     f"Obaaf/OBAAF-actions/egress@{RELEASED}"):
+                     f"Obaaf/OBAAF-actions/egress@{RELEASED}", "./actions/egress"):
             steps = action().replace(f"Obaaf/OBAAF/actions/egress@{RELEASED}", uses)
             f = self.check(steps + "\n      - run: claude -p x")
             with self.subTest(uses=uses):
@@ -264,6 +285,13 @@ class EgressActionTest(unittest.TestCase):
         self.assertIn("public suffix", detail(self.check(action(allow="github.io"))))
         # A name under a public suffix is one registrant's: it is not a public suffix itself.
         self.assertEqual(verdict(self.check(action(allow="example.github.io"))), VERIFIED)
+
+    def test_a_name_with_a_public_suffix_under_it_is_not_met(self):
+        """Found by the first review: amazonaws.com is not a public suffix, s3.amazonaws.com is."""
+        f = self.check(action(allow="amazonaws.com"))
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertIn("under it", detail(f))
+        self.assertEqual(verdict(self.check(action(allow="bucket.s3.amazonaws.com"))), VERIFIED)
 
     def test_an_allow_list_computed_when_the_job_runs_is_cannot_tell(self):
         self.assertEqual(verdict(self.check(action(allow="${{ vars.ALLOW }}"))), CANNOT_TELL)
@@ -337,11 +365,12 @@ class EgressActionTest(unittest.TestCase):
         upload = (f"      - uses: actions/upload-artifact@{SHA}\n"
                   "        with: {name: out, path: '${{ steps.agent.outputs.workspace }}'}")
         self.assertEqual(verdict(self.check(action() + "\n" + upload)), VERIFIED)
-        denied = "      - run: echo '${{ steps.agent.outputs.denied }}'"
-        self.assertEqual(verdict(self.check(action() + "\n" + denied)), VERIFIED)
         named = upload.replace("      - uses:", "      - name: Upload what obaaf-egress left\n        uses:")
         self.assertEqual(verdict(self.check(action() + "\n" + named)), VERIFIED)
         unsure = {
+            "any script after it": "      - run: echo done",
+            "another output": "      - run: echo '${{ steps.agent.outputs.denied }}'",
+            "a script of the repository": "      - run: ./scripts/apply-fix.sh",
             "a script in it": "      - run: cd '${{ steps.agent.outputs.workspace }}' && make",
             "git in it": "      - run: git -C '${{ steps.agent.outputs.workspace }}' diff",
             "through env": "      - run: bash \"$WS/x.sh\"\n        env: {WS: '${{ steps.agent.outputs.scratch }}'}",
@@ -353,8 +382,6 @@ class EgressActionTest(unittest.TestCase):
             "a wildcard": "      - run: echo '${{ steps.*.outputs.workspace }}'",
             "the step's outputs as JSON": "      - run: echo '${{ toJSON(steps.agent.outputs) }}'",
             "another action's input": f"      - uses: example/run@{SHA}\n        with: {{dir: '${{{{ steps.agent.outputs.workspace }}}}'}}",
-            "upload with the output as its name": (f"      - uses: actions/upload-artifact@{SHA}\n"
-                                                   "        with: {name: '${{ steps.agent.outputs.workspace }}', path: x}"),
         }
         for what, later in unsure.items():
             f = self.check(action() + "\n" + later)
@@ -364,10 +391,46 @@ class EgressActionTest(unittest.TestCase):
         f = self.check(action() + "\n" + cache)
         self.assertEqual(verdict(f), NOT_MET)
         self.assertIn("cache", detail(f))
+        indexed = cache.replace("steps.agent.outputs.workspace", "steps.agent.outputs.*[0]")
+        self.assertEqual(verdict(self.check(action() + "\n" + indexed)), NOT_MET)
+
+    def test_a_cache_before_it_saves_after_it(self):
+        """Found by the first review: actions/cache's post step saves its path after the job."""
+        cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: /tmp/obaaf-egress.*/workspace/node_modules}}"
+        self.assertEqual(verdict(self.check(cache + "\n" + action())), NOT_MET)
+
+    def test_a_step_before_it_that_leaves_a_process_running_is_cannot_tell(self):
+        """Found by the first review: a loop left running by an earlier step ran what the command wrote."""
+        for run in ("nohup sh -c 'while sleep 5; do sh ./x.sh; done' &", "./watch.sh &", "setsid ./watch.sh",
+                    "docker run -d --name w example/watcher"):
+            f = self.check(f"      - run: {json.dumps(run)}\n" + action())
+            with self.subTest(run=run):
+                self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertEqual(verdict(self.check("      - run: make deps && make lint 2>&1\n" + action())), VERIFIED)
+
+    def test_credentials_no_expression_hands_over_are_read(self):
+        """Found by the first review: OIDC gives any step a cloud credential without a `secrets.`."""
+        f = self.check(action(), permissions="{contents: read, id-token: write}")
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertIn("OIDC", detail(f))
+        f = self.check(action(), permissions="{contents: read, models: read}")
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertEqual(verdict(self.check(action(), permissions="read-all")), NOT_MET)
+        text = workflow(action(), permissions=None).replace("permissions: {}\n", "", 1)
+        f = egress(run_check(text))
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("permissions", detail(f))
+
+    def test_service_containers_with_volumes_are_cannot_tell(self):
+        services = ("    services:\n      w:\n        image: example/w@sha256:" + "d" * 64 + "\n"
+                    "        volumes: ['/tmp:/host-tmp']")
+        self.assertEqual(verdict(self.check(action(), job_extra=services)), CANNOT_TELL)
 
     def test_a_step_before_it_is_not_after_it_but_one_beside_it_is(self):
-        before = "      - run: rm -rf /tmp/obaaf-egress.old"
+        before = "      - run: make deps"
         self.assertEqual(verdict(self.check(before + "\n" + action())), VERIFIED)
+        names_tmp = "      - run: rm -rf /tmp/obaaf-egress.old"
+        self.assertEqual(verdict(self.check(names_tmp + "\n" + action())), CANNOT_TELL)
         group = ("      - parallel:\n" + action().replace("      - ", "          - ", 1).replace("\n        ", "\n            ")
                  + "\n          - run: bash /tmp/obaaf-egress.*/copy/x.sh")
         self.assertEqual(verdict(self.check(group)), CANNOT_TELL)
@@ -445,6 +508,14 @@ class HardenRunnerTest(unittest.TestCase):
                 self.assertEqual(verdict(f), CANNOT_TELL)
                 self.assertIn("policy store", detail(f))
 
+    def test_a_container_job_on_a_hosted_runner_is_not_met(self):
+        """It sets up nothing in a container on a GitHub-hosted runner (src/setup.ts at v2.16.0)."""
+        steps = (f"      - uses: step-security/harden-runner@{HR_2_22_0}\n"
+                 "        with: {egress-policy: block, disable-sudo-and-containers: true}\n      - run: claude -p x")
+        f = egress(run_check(workflow(steps, job_extra="    container: node:20")))
+        self.assertEqual((f.kind, verdict(f)), ("weak-monitor", NOT_MET))
+        self.assertIn("container", detail(f))
+
     def test_a_self_hosted_runner_is_named(self):
         self.assertIn("self-hosted", detail(self.monitor(runs_on="[self-hosted, linux]")))
 
@@ -465,8 +536,11 @@ class AgentWorkflowFirewallTest(unittest.TestCase):
         f = self.awf("sudo -E awf --enable-dind --allow-domains api.example.com -- claude -p x")
         self.assertEqual((f.kind, verdict(f)), ("awf", NOT_MET))
 
-    def test_the_word_in_a_string_is_not_awf(self):
-        self.assertEqual(self.awf("echo \"awful\"; claude -p x").kind, "none")
+    def test_the_word_in_a_string_or_a_comment_is_not_awf(self):
+        for run in ("echo \"awful\"; claude -p x", "# TODO: wrap this in awf --allow-domains x --\nclaude -p x",
+                    "echo awf --allow-domains x; claude -p x"):
+            with self.subTest(run=run):
+                self.assertEqual(self.awf(run).kind, "none")
 
 
 class BestControlTest(unittest.TestCase):

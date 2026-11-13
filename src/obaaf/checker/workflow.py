@@ -449,10 +449,10 @@ class Step:
 
     @property
     def confines(self) -> bool:
-        """Whether the step uses OBAAF's egress action, which runs its `run` input as a command with
-        the network limited: from OBAAF's repository, or the copy at `./actions/egress` in it."""
-        uses = (self.uses or "").strip()
-        return (self.action or "").lower() == EGRESS_ACTION or uses.rstrip("/") == "./actions/egress"
+        """Whether the step uses OBAAF's egress action from OBAAF's repository, which runs its `run`
+        input as a command with the network limited. A local copy (`./actions/egress`) is any
+        repository's own action and is not taken for it."""
+        return (self.action or "").lower() == EGRESS_ACTION
 
     def agent_text(self) -> str:
         """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,

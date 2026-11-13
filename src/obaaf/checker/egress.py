@@ -34,6 +34,7 @@ HOST_RE = re.compile(rf"^(?:{_LABEL}\.)+[a-z](?:[a-z0-9-]{{0,61}}[a-z0-9])?$")
 
 FIREWALL_LABEL = "ubuntu-24.04-firewall"
 FIREWALL_POLICY = ".github/egress-firewall.yaml"
+LIMIT = 1_000_000       # bytes of the policy file the checker reads; a larger file is "cannot tell"
 
 
 def split_list(text: str) -> list[str]:
@@ -43,9 +44,11 @@ def split_list(text: str) -> list[str]:
 
 # ------------------------------------------------------------------ the public suffix list
 @lru_cache(maxsize=1)
-def _suffix_rules() -> tuple[frozenset, frozenset, frozenset]:
-    """(rules, wildcard parents, exceptions) from the public suffix list OBAAF ships, ICANN and private
-    sections both, with every name in its ASCII (punycode) form."""
+def _suffix_rules() -> tuple[frozenset, frozenset, frozenset, frozenset]:
+    """(rules, wildcard parents, exceptions, ancestors) from the public suffix list OBAAF ships, ICANN
+    and private sections both, with every name in its ASCII (punycode) form as well as as written.
+    `ancestors` holds every name that has a public suffix under it (`amazonaws.com`, for
+    `s3.amazonaws.com`)."""
     text = resources.files("obaaf.data").joinpath("public_suffix_list.dat").read_text(encoding="utf-8")
     rules: set = set()
     wild: set = set()
@@ -67,7 +70,14 @@ def _suffix_rules() -> tuple[frozenset, frozenset, frozenset]:
             ascii_rule = rule
         target.add(ascii_rule)
         target.add(rule)
-    return frozenset(rules), frozenset(wild), frozenset(exceptions)
+    ancestors: set = set()
+    for name in (*rules, *wild):
+        labels = name.split(".")
+        start = 1 if name in rules and name not in wild else 0
+        for n in range(start, len(labels)):
+            ancestors.add(".".join(labels[n:]))
+    ancestors -= {""}
+    return frozenset(rules), frozenset(wild), frozenset(exceptions), frozenset(ancestors)
 
 
 def is_public_suffix(name: str) -> bool:
@@ -76,13 +86,28 @@ def is_public_suffix(name: str) -> bool:
     name = name.lower().rstrip(".")
     if "." not in name:
         return True
-    rules, wild, exceptions = _suffix_rules()
+    rules, wild, exceptions, _ = _suffix_rules()
     if name in exceptions:
         return False
     if name in rules:
         return True
     parent = name.split(".", 1)[1]
     return parent in wild
+
+
+def public_suffix_at_or_under(name: str) -> str | None:
+    """A public suffix that a listed name covers, or None. A listed name covers itself and every name
+    under it, so `github.io` and `amazonaws.com` (which has `s3.amazonaws.com` under it) both let in
+    hosts anyone can register; `example.github.io` does not."""
+    name = name.lower().rstrip(".")
+    if is_public_suffix(name):
+        return name
+    rules, wild, _, ancestors = _suffix_rules()
+    if name in ancestors:
+        under = sorted((r for r in (*rules, *(f"*.{w}" for w in wild)) if r.endswith("." + name)),
+                       key=lambda r: (r.startswith("*"), len(r), r))
+        return under[0] if under else name
+    return None
 
 
 # ------------------------------------------------------------------ the native firewall's policy
@@ -119,12 +144,22 @@ def read_firewall_policy(root) -> FirewallPolicy:
                                                    "firewall reads from such an entry has not been established")
     try:
         with open(path, "rb") as handle:
-            data = handle.read(1_000_000)
+            data = handle.read(LIMIT + 1)
     except OSError as exc:
         return FirewallPolicy("unreadable", detail=f"it cannot be read ({exc.strerror or exc})")
+    if len(data) > LIMIT:
+        return FirewallPolicy("unreadable", detail=f"it is larger than {LIMIT} bytes, more than the checker reads")
     digest = hashlib.sha256(data).hexdigest()[:32]
     try:
-        raw = yamlutil.load(data.decode("utf-8"))
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return FirewallPolicy("unreadable", digest=digest, detail="it is not UTF-8")
+    for char, shown in (("\u0085", "U+0085"), ("\u2028", "U+2028"), ("\u2029", "U+2029")):
+        if char in text:
+            return FirewallPolicy("unreadable", digest=digest,
+                                  detail=f"it contains {shown}, which YAML readers do not agree is a line break")
+    try:
+        raw = yamlutil.load(text)
     except Exception as exc:     # YAML errors, duplicate keys, bytes that are not UTF-8
         return FirewallPolicy("unreadable", digest=digest, detail=f"it is not YAML the checker can read ({_short(exc)})")
     if not isinstance(raw, dict):
@@ -170,8 +205,21 @@ def joined(items: list, limit: int = 5) -> str:
     return "; ".join(items[:limit]) + more
 
 
-# Whether an AWF command line is in a script: `awf`, `sudo awf`, `sudo -E awf` or a path ending in `/awf`,
-# as a command, followed by an option or `--`.
-AWF_RE = re.compile(r"(?:^|[\s;&|(`])(?:sudo\s+(?:-[A-Za-z]+\s+)*)?(?:[^\s;&|()`]*/)?awf\s+(?:-|\S)", re.M)
+# An AWF command line in a script: `awf`, `sudo awf`, `sudo -E awf` or a path ending in `/awf`, where a
+# command starts (the start of a line, or after `;`, `&`, `|`, `(` or a backtick), followed by an
+# argument. Comments are taken out first (`uncommented`), so a note that mentions awf is not one.
+AWF_RE = re.compile(r"(?:^|[;&|(`])[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:[^\s;&|()`]*/)?awf[ \t]+\S", re.M)
+
+
+def uncommented(script: str) -> str:
+    """A shell script without its comments: from a `#` at the start of a word to the end of the line.
+    Approximate (a `#` inside quotes after a space is taken for one), which can only hide a match."""
+    return re.sub(r"(?:^|(?<=\s))#[^\n]*", "", script or "")
+
+
+# A process a step leaves running after it ends: `&` at the end of a command (not `&&`), `nohup`,
+# `setsid`, `disown`, or a detached container.
+BACKGROUND_RE = re.compile(r"(?<![&|>])&(?![&>])[ \t]*(?:$|[;)\n#])|\b(?:nohup|setsid|disown)\b|docker[ \t]+run\b[^\n]*[ \t](?:-d|--detach)\b",
+                           re.M)
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).
 AWF_UNSAFE_RE = re.compile(r"--enable-dind\b")
