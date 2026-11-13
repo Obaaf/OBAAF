@@ -49,7 +49,7 @@ Linux x64 runners with Docker only. It downloads AWF's binary from GitHub's rele
 
 ## What it blocks, and what it does not
 
-Each "blocked" line is an attempt in the escape tests that got out when made outside the sandbox and was not seen leaving the runner when made inside it, judged from a packet capture on the runner's external interface (the interface of its IPv4 default route, through which Docker's traffic also leaves; the job logs the runner's routes, and IPv6 had no route at all). The confined command's own exit statuses are recorded and decide nothing. The runs: [43425789742](https://github.com/Obaaf/OBAAF/actions/runs/43425789742) (the head this page was written from) and [43425073087](https://github.com/Obaaf/OBAAF/actions/runs/43425073087) (the commit before, same verdicts); a later head's run is linked from the pull request that merged this.
+Each "blocked" line is an attempt in the escape tests that got out when made outside the sandbox and was not seen leaving the runner when made inside it, judged from a packet capture on the runner's external interface (the interface of its IPv4 default route, through which Docker's traffic also leaves; the job logs the runner's routes, and IPv6 had no route at all). The confined command's own exit statuses are recorded and decide nothing. The runs: [43432030855](https://github.com/Obaaf/OBAAF/actions/runs/43432030855) (commit `4a25d1b`) and [43431555704](https://github.com/Obaaf/OBAAF/actions/runs/43431555704) (`06ea5bb`), both with every check described here, including the cleanup and the `confined` output; [43425789742](https://github.com/Obaaf/OBAAF/actions/runs/43425789742) (`2b02f3d`) and [43425073087](https://github.com/Obaaf/OBAAF/actions/runs/43425073087) (`9bb65cb`) gave the same verdicts on the attempts before those were added. The pull request that adds this page names the run on its last commit.
 
 **Blocked (tested):**
 
@@ -65,7 +65,7 @@ Each "blocked" line is an attempt in the escape tests that got out when made out
 | Raw socket calls | UDP `sendto` and `sendmsg` to 1.1.1.2 and 1.0.0.2 |
 | A TLS handshake with no server name | `openssl s_client -noservername -connect 149.112.112.11:443` |
 | A child process | Python started from bash, connecting to 9.9.9.11 |
-| A process that outlives the command | started with `setsid nohup`, firing 20 seconds later; the capture ran 35 seconds after the step |
+| A process that outlives the command | started with `setsid nohup`, firing 20 seconds later; the capture ran 35 seconds after the step. Nothing left: AWF removes the container when the command ends, which ends the process with it, so this shows the process does not survive, not that the proxy refused it |
 | `sudo`, then a connection; `sudo` to flush the firewall rules, then a connection | `sudo` refuses: the "no new privileges" flag is set |
 | The Docker socket | AWF binds `/dev/null` over `/var/run/docker.sock` and `/run/docker.sock`; `docker run --network host` fails |
 | Changing what later steps see | writing `~/.local/bin/git`, `~/.config/git/config`, `~/.gitconfig`, `/tmp`, `RUNNER_TEMP`, the real workspace and its `.git/hooks`, and the runner's file-command files all failed (the places are absent or read-only inside); `::set-env` and `::add-path` printed by the command did not take effect, with `ACTIONS_ALLOW_UNSECURE_COMMANDS` set so that they would have without the action |

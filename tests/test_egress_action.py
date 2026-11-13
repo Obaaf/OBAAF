@@ -111,7 +111,9 @@ class InnerScript(unittest.TestCase):
         probe = script.index("attempt \"direct IPv4")
         marker = script.index("> '/tmp/obaaf-egress.abc/.m'")
         command = script.index("exec /bin/bash -e '/tmp/obaaf-egress.abc/command.sh'")
-        self.assertLess(probe, marker)
+        cd = script.index("cd '/tmp/obaaf-egress.abc/workspace'")
+        self.assertLess(probe, cd)
+        self.assertLess(cd, marker)
         self.assertLess(marker, command)
         self.assertIn(f"exit {egress.EXIT_NOT_CONFINED}", script[:marker])
         for what in ("direct IPv6", "unlisted host example.com", "sudo", "Docker socket"):

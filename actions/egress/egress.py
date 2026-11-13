@@ -264,12 +264,13 @@ if [ "$failed" -ne 0 ]; then
   echo "obaaf-egress: the sandbox did not hold; the command was not run"
   exit {EXIT_NOT_CONFINED}
 fi
-printf '%s\\n' '{nonce}' > '{marker}'
 # AWF sets HOME to the runner user's home, which is read-only in here; give
 # the command the scratch home, whose tool directories AWF mounts writable.
 export HOME='{scratch}/home'
 export TMPDIR='{scratch}/tmp'
 cd '{workdir}' || exit {EXIT_NOT_CONFINED}
+# Written last, so that the marker means the command is about to start.
+printf '%s\\n' '{nonce}' > '{marker}'
 exec /bin/bash -e '{command_file}'
 """
 
