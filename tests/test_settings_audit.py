@@ -5,7 +5,8 @@ Three of the recordings under tests/fixtures/settings/ (public-no-token, workflo
 written by hand from the example responses in GitHub's REST reference (read 2026-11-12). They were not
 recorded from a live repository. The three whose names begin with "live-" are GitHub's own answers to a run
 with no token, as the workflow .github/workflows/settings-audit-live.yml printed them (RecordedFromGitHubTest
-says which run for the two of 2026-11-12; test_settings_adopter.py is about the one of 2026-11-13). That workflow runs the same reader against GitHub itself whenever the reader changes.
+says which run for the two of 2026-11-12; test_settings_adopter.py is about the one of
+2026-11-13). That workflow runs the same reader against GitHub itself whenever the reader changes.
 """
 
 import contextlib
@@ -1958,7 +1959,14 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         self.assertIn("GIT_TERMINAL_PROMPT=0", clone)
         self.assertIn("https://github.com/Expectrail/Expectrail.git", step)
         self.assertNotIn("token", step.split("obaaf audit")[0].lower().replace("--no-token", ""))
+        self.assertNotIn("${{", step)   # nothing GitHub fills in: no secret, no token, no event text
         self.assertNotIn("env:", step)
+        job = text.split("jobs:")[1].split("steps:")[0]
+        self.assertNotIn("env:", job)   # nor anything every step of the job is given
+        self.assertEqual(text.count("persist-credentials: false"), 1)
+        self.assertNotIn("persist-credentials: true", text)
+        self.assertEqual(step.count("git -c credential.helper= "), 2)   # the clone, and the sparse checkout
+        self.assertEqual(step.count("GIT_TERMINAL_PROMPT=0 git"), 2)
         self.assertIn('files=(--path "$clone" --workflows-read)', step)
         self.assertIn('${clone:+"$clone"}', step.split("obaaf audit --repo Expectrail/Expectrail")[1]
                       .split("check_live_audit.py")[0])

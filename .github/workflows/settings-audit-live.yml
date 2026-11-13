@@ -81,18 +81,22 @@ jobs:
       # too; and if it no longer has a ruleset, a notice says that this step met none.
       # Its workflow files are cloned first, with no credentials (a public repository needs none, and
       # nothing in this job holds one for it), so that the twelve rules that compare settings with
-      # workflow files run on its own files, all of which must then be read. The commit is printed: the
-      # report is of the settings as they were at this run and of the files at that commit (plan slice
-      # 2b.4; docs/expectrail-settings-audit.md). If the clone fails (the repository was renamed or made
-      # private), the settings are audited without the files, those twelve rules answer "cannot tell",
-      # and the report must say so.
+      # workflow files run on its own files. Only .github is checked out, and only its blobs are fetched.
+      # The commit is printed: the report is of the settings as they were at this run and of the files at
+      # that commit (plan slice 2b.4; docs/expectrail-settings-audit.md). Every one of those files must
+      # then be read, so a workflow file there that OBAAF cannot read turns this job red with no change
+      # here; that is a real file OBAAF fails on, which is what this job exists to find, and the job is
+      # not a required check. If the clone fails (the repository was made private or deleted), the
+      # settings are audited without the files, those twelve rules answer "cannot tell", and the report
+      # must say so.
       - name: A public repository that has rulesets, with no token
         run: |
           code=0
           clone="$RUNNER_TEMP/expectrail"
           files=()
           if GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone --quiet --depth 1 --no-tags \
-              https://github.com/Expectrail/Expectrail.git "$clone"; then
+              --filter=blob:none --sparse https://github.com/Expectrail/Expectrail.git "$clone" \
+              && GIT_TERMINAL_PROMPT=0 git -c credential.helper= -C "$clone" sparse-checkout set .github; then
             echo "Workflow files: Expectrail/Expectrail at commit $(git -C "$clone" rev-parse HEAD)"
             files=(--path "$clone" --workflows-read)
           else

@@ -103,10 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         problems.append(f"{summary['rules_failed']} rule(s) failed while running")
     if args.workflows_read and repository_read and not (usage["read"] and usage["files"]
                                                         and not any(f["error"] for f in usage["files"])):
-        # The step was meant to run the rules on this checkout's workflow files. If none was read, every
-        # rule answered "cannot tell" and the step tested nothing of them.
-        problems.append("the workflow files of the checkout were not read, or not all of them, so the rules "
-                        "did not run on them")
+        # The step was meant to run the rules on the workflow files of the directory it compared (the one
+        # given with --path, else this checkout). If none was read, every rule answered "cannot tell" and the
+        # step tested nothing of them.
+        problems.append("the workflow files of the directory compared (--path, or this checkout) were not read, "
+                        "or not all of them, so the rules did not run on them")
     unclear = [r for r in assessment["results"] if "not in a form this rule understands" in r["message"]]
     for result in unclear:
         print(f"::notice::{result['rule']} met a real answer it does not understand: {result['subject']}")

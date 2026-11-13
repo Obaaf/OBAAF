@@ -90,7 +90,14 @@ class WhatThePageSaysTest(unittest.TestCase):
         settings = self.snap["settings"]
         self.assertEqual(settings["ruleset_bypass_actors"]["reason_code"], "withheld")
         self.assertEqual({settings[k]["reason_code"] for k in unread if k != "ruleset_bypass_actors"}, {"no_token"})
-        self.assertIn("Not read (10 of 15)", self.page)
+        # The page lists them in the report's own words, one to a line, and those are exactly the ten.
+        listed = self.page.split("Not read, 10 of 15, in the report's words:\n\n")[1].split("\n\n")[0]
+        titles = {s.key: s.title for s in audit.SETTINGS}
+        self.assertEqual(sorted(line[2:] for line in listed.splitlines()), sorted(titles[k] for k in unread))
+        for title in (titles[k] for k in unread):
+            usage = workflows.not_read("not part of this test")
+            self.assertIn(title, report.to_text(self.snap, assessment=rules.evaluate(self.snap, usage), usage=usage)
+                          .split("NOT READ: 10 of 15.")[1].split("READ: 5 of 15")[0])
         self.assertIn("**10 of the 15 settings were not read**", self.page)
 
     def test_the_rules_that_read_settings_only_answer_as_the_page_says(self):
@@ -130,6 +137,20 @@ class WhatThePageSaysTest(unittest.TestCase):
         before = required(audit.take(client, ADOPTER, (), now=TAKEN))
         self.assertEqual(sorted(set(now) - set(before)), ["package"])
         self.assertEqual(sorted(set(before) - set(now)), [])
+
+    def test_the_approval_parameter_no_rule_reads_is_in_both_readings(self):
+        def pull_request_rule(snap):
+            return next(rule["parameters"] for rule in snap["settings"]["branch_rules"]["value"]["main"]
+                        if rule["type"] == "pull_request")
+
+        client = audit.Client(transport=audit.ReplayTransport.load(SETTINGS_DIR / "live-expectrail-no-token"),
+                              token=None)
+        for snap in (self.snap, audit.take(client, ADOPTER, (), now=TAKEN)):
+            parameters = pull_request_rule(snap)
+            self.assertIs(parameters["require_extra_approval_for_unattributed_changes"], True)
+            self.assertEqual(parameters["required_approving_review_count"], 0)
+        self.assertIn("`require_extra_approval_for_unattributed_changes: true`, in this reading and in the first",
+                      self.page)
 
     def test_the_commit_and_the_run_are_named(self):
         self.assertIn("36a7a8aeb9b041ae70d481310bafe1d7a89d9fb5", self.page)
