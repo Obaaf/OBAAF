@@ -55,6 +55,14 @@ def _no_constants(name: str):
     raise ValueError(f"{name} is not JSON")
 
 
+def _finite(text: str) -> float:
+    # 1e999 is valid JSON and Python reads it as infinity, which no setting holds and json.dumps refuses.
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError("a number is too large")
+    return value
+
+
 def _too_deep(value, depth: int = 0) -> bool:
     if depth > MAX_DEPTH:
         return True
@@ -142,7 +150,8 @@ def load(path: str | Path) -> dict:
     if len(raw) > MAX_SNAPSHOT_BYTES:
         raise SnapshotError("the file is larger than 20 MB; that is not a settings snapshot")
     try:
-        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates, parse_constant=_no_constants,
+                          parse_float=_finite)
     except (ValueError, RecursionError) as exc:
         detail = plain(exc, 120) if isinstance(exc, ValueError) and not isinstance(exc, UnicodeError) else (
             "it is not UTF-8 text" if isinstance(exc, UnicodeError) else "it is nested too deeply")

@@ -1,0 +1,69 @@
+# Compares this repository's GitHub settings with the snapshot committed at .github/obaaf-settings.json,
+# the way templates/github-actions/optional/obaaf-settings-drift.yml does for an adopter, with OBAAF
+# installed from this checkout instead of a pinned release. Any difference fails the run.
+# It is read-only: the audit sends GET requests only, and the job's token can read and nothing else.
+# It is not a required check. When a setting is changed on purpose, commit a new snapshot: the run's
+# artifact settings-drift holds the one it read. It also runs on a pull request that changes the audit,
+# so a change to what the reader records shows here; such a run fails whenever the live settings differ
+# from the snapshot, whatever the pull request changed.
+name: Settings drift
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/obaaf-settings.json"
+      - ".github/workflows/settings-drift.yml"
+      - "src/obaaf/audit/**"
+      - "src/obaaf/data/schemas/settings-snapshot.schema.json"
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Compare this repository's settings with the committed snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+
+      # With no snapshot committed, the job keeps what it read and fails, as the template does. The
+      # snapshot is also printed on one line, so that it can be read from the log.
+      - name: Compare the settings with the committed snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p settings-drift
+          if [ ! -f .github/obaaf-settings.json ]; then
+            obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out settings-drift/obaaf-settings.json
+            python -c 'import json, sys; print("SNAPSHOT " + json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' \
+              settings-drift/obaaf-settings.json
+            echo "::error::No snapshot is committed at .github/obaaf-settings.json; the one this run read is in the artifact settings-drift."
+            exit 1
+          fi
+          obaaf audit --repo "$GITHUB_REPOSITORY" --expected .github/obaaf-settings.json \
+            --snapshot-out settings-drift/obaaf-settings.json
+
+      - name: Keep what was read
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-drift
+          path: settings-drift/
+          if-no-files-found: warn
+          retention-days: 7
