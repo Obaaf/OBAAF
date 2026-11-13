@@ -345,7 +345,7 @@ class EgressActionTest(unittest.TestCase):
         inside = action(extra="        env: {REVIEW_KEY: '${{ secrets.REVIEW_KEY }}'}\n")
         f = self.check(inside)
         self.assertEqual(verdict(f), CANNOT_TELL)
-        self.assertIn("2c.4", detail(f))
+        self.assertIn("2c.5", detail(f))
         f = self.check(action(run="claude -p '${{ secrets.REVIEW_KEY }}'"))
         self.assertEqual(verdict(f), CANNOT_TELL)
 

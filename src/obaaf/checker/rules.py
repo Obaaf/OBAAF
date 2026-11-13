@@ -574,9 +574,8 @@ class WorkflowRules:
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
     # After a cleared GHA-020: what the control does not stop, so the report never reads as more.
-    _LEAKS = ("Not blocked: anything the confined command sends to a listed host, and data in a host name "
-              "asked of the proxy, which leaves the runner in a DNS query even when the proxy refuses it "
-              "(until slice 2c.4)")
+    _LEAKS = ("Not blocked: anything the confined command sends to a listed host, and data in a name under "
+              "a listed name, which leaves the runner in a DNS query to that name's DNS servers")
 
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
@@ -824,8 +823,9 @@ class WorkflowRules:
           given a credential, and no other step runs an agent the checker recognises. A job whose
           steps get no credential at all is "cannot tell" unless the checker recognises the agent in
           the confined command itself, because an agent that needs no key could run in any step;
-        - no credential reaches the confined command either: the action refuses model-key names, and
-          a key under another name could leave through a listed host or the proxy's DNS (slice 2c.4);
+        - no credential is given to the confined step either: one passed to the command could leave
+          through a listed host, and one passed in `model-keys` goes to AWF's API proxy, which reaches
+          the provider whatever the allow-list says; the two are not told apart yet (slice 2c.5);
         - no step that can run after or beside it reads its `workspace` or `scratch` output or the
           scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
           any other use is "cannot tell", because the checker cannot tell reading from running."""
@@ -923,9 +923,10 @@ class WorkflowRules:
             problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
                             "(the checker tells where an agent runs by where its key goes)")
         elif inside:
-            unsure.append(f"the confined command can be given {', '.join(sorted(set(inside))[:3])}; the action "
-                          "refuses model-key names, and a key under another name could leave through a listed "
-                          "host or the proxy's DNS (slice 2c.4)")
+            unsure.append(f"the confined step is given {', '.join(sorted(set(inside))[:3])}; a key passed to the "
+                          "command could leave through a listed host, and one passed in model-keys goes to AWF's "
+                          "API proxy, which reaches the provider whatever the allow-list says; the checker does "
+                          "not tell the two apart yet (slice 2c.5)")
         elif not agents_outside:
             recognised = [step for step in confined if self._agent_step(step, step.agent_text())
                           or step.index in job.agent_script_steps]

