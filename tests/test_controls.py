@@ -88,7 +88,8 @@ class SecretInAgentJobTest(unittest.TestCase):
                 self.assertNotEqual(control(f, "egress-enforced").verdict, VERIFIED)
 
     def test_with_a_monitor_and_everything_else_in_place_it_is_cannot_tell(self):
-        steps = (f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block}}\n"
+        steps = (f"      - uses: step-security/harden-runner@{SHA}\n"
+                 "        with: {egress-policy: block, disable-sudo-and-containers: true}\n"
                  f"      - uses: actions/checkout@{SHA}")
         result = check(agent_workflow(steps=steps))
         f = one(result, "OBAAF-GHA-005")
@@ -352,7 +353,8 @@ class EgressTest(unittest.TestCase):
         f = self.egress(steps=steps)
         self.assertEqual((f.kind, f.state, verdicts(f)), ("conditional", "new", {"egress-enforced": NOT_MET}))
 
-    MONITOR = f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block}}"
+    MONITOR = (f"      - uses: step-security/harden-runner@{SHA}\n"
+               "        with: {egress-policy: block, disable-sudo-and-containers: true}")
     CHECKOUT = f"      - uses: actions/checkout@{SHA}"
 
     def test_a_monitor_that_always_runs_as_the_first_step_is_cannot_tell(self):
@@ -398,8 +400,8 @@ class EgressTest(unittest.TestCase):
         audit = f"\n      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: audit}}"
         changed = {
             "another ref": self.MONITOR.replace(SHA, "v1") + "\n" + self.CHECKOUT,
-            "another allow-list": self.MONITOR.replace("{egress-policy: block}",
-                                                       "{egress-policy: block, allowed-endpoints: '*:*'}")
+            "another allow-list": self.MONITOR.replace("{egress-policy: block,",
+                                                       "{egress-policy: block, allowed-endpoints: '*:*',")
                                   + "\n" + self.CHECKOUT,
             "may fail": self.MONITOR + "\n        continue-on-error: true\n" + self.CHECKOUT,
             "its own env": self.MONITOR + "\n        env: {X: y}\n" + self.CHECKOUT,
@@ -419,14 +421,14 @@ class EgressTest(unittest.TestCase):
                       f"          - uses: step-security/harden-runner@{SHA}\n            with: {{egress-policy: audit}}"))
         for one_way, another in pairs:
             steps = [text if text.startswith("      ") else
-                     self.MONITOR.replace("{egress-policy: block}", f"{{egress-policy: block, {text}}}") + "\n" + self.CHECKOUT
+                     self.MONITOR.replace("{egress-policy: block,", f"{{egress-policy: block, {text},") + "\n" + self.CHECKOUT
                      for text in (one_way, another)]
             with self.subTest(one_way=one_way[:40], another=another[:40]):
                 self.assertNotEqual(*(baseline.key(self.egress(steps=text)) for text in steps))
 
     def test_a_number_too_long_to_print_among_a_monitors_inputs_is_no_traceback(self):
         """Found by the fourth review, when the identity was built from the parsed values."""
-        steps = self.MONITOR.replace("{egress-policy: block}", "{egress-policy: block, x: 0x" + "f" * 6000 + "}")
+        steps = self.MONITOR.replace("{egress-policy: block,", "{egress-policy: block, x: 0x" + "f" * 6000 + ",")
         f = self.egress(steps=steps + "\n" + self.CHECKOUT)
         self.assertEqual(f.kind, "unverified-monitor")
         json.loads(report.to_json(check(agent_workflow(steps=steps + "\n" + self.CHECKOUT))))
@@ -450,8 +452,8 @@ class EgressTest(unittest.TestCase):
         import time
         anchors = "x1: &a1 [a, a, a, a, a, a, a, a, a, a]\n" + "".join(
             f"x{n}: &a{n} [{', '.join([f'*a{n - 1}'] * 10)}]\n" for n in range(2, 12))
-        steps = (f"      - uses: step-security/harden-runner@{SHA}\n        with: {{egress-policy: block, x: *a11}}\n"
-                 + self.CHECKOUT)
+        steps = (f"      - uses: step-security/harden-runner@{SHA}\n"
+                 "        with: {egress-policy: block, disable-sudo-and-containers: true, x: *a11}\n" + self.CHECKOUT)
         started = time.monotonic()
         result = check(anchors + agent_workflow(steps=steps))
         self.assertLess(time.monotonic() - started, 5)

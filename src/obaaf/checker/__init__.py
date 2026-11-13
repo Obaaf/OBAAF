@@ -20,6 +20,7 @@ from pathlib import Path
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
 from obaaf.checker import acceptance as acceptance_mod
+from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker import repo as repo_checks
@@ -143,12 +144,17 @@ def _copied_script_targets(run_text: str, root: Path) -> list[str]:
 def _agent_via_script(job, root: Path, commands: list) -> str | None:
     """A job whose run step calls a repository script that itself invokes an agent CLI is an agent
     job, whatever else it is (companion R1-R4). Only scripts readable under `root` are inspected, so this
-    is best-effort; what it cannot read (fetched or generated scripts) is covered by the lane note."""
+    is best-effort; what it cannot read (fetched or generated scripts) is covered by the lane note.
+    Every step found doing so is recorded on the job, for the egress control (OBAAF-GHA-020)."""
     if not commands:
         return None
     root_r = root.resolve()
+    found = None
     for step in job.steps:
-        for tok in _script_targets(step.run) + _copied_script_targets(step.run, root_r):
+        run = step.run
+        if step.confines and isinstance(step.with_.get("run"), str):
+            run = step.with_["run"]     # the command OBAAF's egress action runs
+        for tok in _script_targets(run) + _copied_script_targets(run, root_r):
             try:
                 path = (root / tok).resolve()
                 if path != root_r and root_r not in path.parents:
@@ -160,8 +166,10 @@ def _agent_via_script(job, root: Path, commands: list) -> str | None:
             except (OSError, RuntimeError):
                 continue
             if any(rx.search(text) for rx in commands):
-                return f"runs an agent in the script {tok}"
-    return None
+                job.agent_script_steps.add(step.index)
+                found = found or f"runs an agent in the script {tok}"
+                break
+    return found
 
 
 def _script_commands(catalog: "Catalog", config: "Config") -> list:
@@ -171,10 +179,9 @@ def _script_commands(catalog: "Catalog", config: "Config") -> list:
 
 def _apply_script_detection(workflow, root: Path, commands: list) -> None:
     for job in workflow.jobs.values():
-        if not job.in_lane("agent"):
-            reason = _agent_via_script(job, root, commands)
-            if reason:
-                job.add_lane("agent", reason)
+        reason = _agent_via_script(job, root, commands)
+        if reason and not job.in_lane("agent"):
+            job.add_lane("agent", reason)
 
 
 class ConfigError(ValueError):
@@ -442,6 +449,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     suspect_jobs: list[tuple[str, str]] = []
     declared = _LaneDeclarations(config, root, is_repo, on_its_own, workflows_sought=platform != "jenkins",
                                  jenkins_sought=jenkins_sought)
+    # The policy file of GitHub's native egress firewall is read from the repository, never for files
+    # checked on their own, whose repository the checker does not know.
+    firewall = egress_mod.read_firewall_policy(root) if is_repo else None
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
@@ -468,7 +478,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 # Whatever other lane the job is in: a declaration must not be a way to silence this.
                 suspect_jobs.append((rel, job.id))
         try:
-            found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets).run()
+            found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
+                                            agents=config.agents, firewall=firewall).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")

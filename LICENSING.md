@@ -6,10 +6,11 @@ OBAAF is free and open (NFR1). Two licenses apply, by material:
 | --- | --- | --- |
 | Code, templates, tools and tests (`src/`, `templates/`, `actions/`, `tests/`) | Apache License 2.0 | [LICENSE](LICENSE) |
 | Specifications, guides and documentation (`spec/`, `docs/`, and the data in `src/obaaf/data/`) | Creative Commons Attribution 4.0 International (CC BY 4.0) | [LICENSE-docs](LICENSE-docs) |
+| The Public Suffix List, `src/obaaf/data/public_suffix_list.dat`, shipped unchanged from [publicsuffix/list](https://github.com/publicsuffix/list) (not OBAAF's work) | Mozilla Public License 2.0 | In the file's header, and at <https://mozilla.org/MPL/2.0/> |
 
 Copyright (c) 2026 Osita Sean Keluo-Udeke.
 
-The data in `src/obaaf/data/` is both: it is the specification (CC BY 4.0) and it ships inside the Python package the code uses (Apache-2.0). The package therefore declares the SPDX license expression `Apache-2.0 AND CC-BY-4.0`, with both texts listed as license files, in [pyproject.toml](pyproject.toml). The split is also recorded in [NOTICE](NOTICE).
+The data in `src/obaaf/data/` is both: it is the specification (CC BY 4.0) and it ships inside the Python package the code uses (Apache-2.0). The package therefore declares the SPDX license expression `Apache-2.0 AND CC-BY-4.0 AND MPL-2.0`, with the first two texts listed as license files, in [pyproject.toml](pyproject.toml); `MPL-2.0` is for the Public Suffix List, a file of its own whose header carries its notice (accepted by Sean in the session on 2026-11-13, plan slice 2c.3). The split is also recorded in [NOTICE](NOTICE).
 
 ## Reusing OBAAF
 

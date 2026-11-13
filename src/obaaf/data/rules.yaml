@@ -339,24 +339,28 @@ rules:
     agent_controls: [R7]
     supports: [FR7]
     description: >-
-      Nothing in the workflow enforces a limit on the agent job's network access. GitHub-hosted
-      runners have no native egress allow-list. A policy declared in `OBAAF_EGRESS`, or a blocking
-      monitor that runs only under a condition, is reported too, so it is not mistaken for enforcement.
-      The finding is reported for every agent job, with the one control that clears it. A blocking
-      monitor that always runs (`step-security/harden-runner` with `egress-policy: block` and no
-      `if:`) as the job's first step is reported as "cannot tell": whether it limits the agent
-      depends on its version and on the job being unable to undo it with sudo or a container, and
-      the checker reads neither yet. A baseline entry that accepts that case is for the workflow
-      file as it stood, byte for byte, and stops counting when the file changes. A monitor that starts after
-      other steps, in a `parallel` group or in the background lets other steps run without it and
-      is "not met". No egress control is reported as verified yet, so today the finding can be
-      accepted and cannot be cleared.
+      Nothing the checker can verify limits the agent job's network access. The finding is reported
+      for every agent job, with the one control that clears it, and it is cleared only when the
+      checker read that control from the workflow and the repository and every condition that makes
+      it hold. Two controls can be verified: GitHub's native egress firewall (the job runs on
+      `ubuntu-24.04-firewall` and `.github/egress-firewall.yaml` sets `mode: enforce`), which covers
+      the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit
+      OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
+      agent as its command (no other step and no `env` of the job is given a credential, and the job
+      cannot request OIDC tokens) and no step but `actions/upload-artifact` after it. OBAAF lists no
+      released commit of the action yet. Harden-Runner is "cannot tell" at best, because the
+      repository's tier is not in the workflow, and "not met" at a listed release before v2.16.0 or
+      with `sudo` and containers left to the job; its version is read only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell".
+      A policy declared in `OBAAF_EGRESS`, or a control behind a condition, is reported too, so it is
+      not mistaken for enforcement. A baseline entry that accepts "cannot tell" is for the workflow
+      file as it stood, byte for byte. A cleared finding still says what the control does not stop.
     fix: >-
-      Limit the agent job's egress to the inference proxy, with ephemeral self-hosted runners behind a
-      network policy or a blocking runtime egress monitor that always runs, and declare the policy in
-      the job's `OBAAF_EGRESS` environment variable. When the network enforces it outside the
-      workflow, or a blocking monitor is in place that the checker cannot verify, record that with an
-      ignore entry that names an owner, a reason and an expiry date.
+      Run the agent job on GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with a
+      `.github/egress-firewall.yaml` in `enforce` mode) where the repository can use it, or wrap the
+      agent's command in OBAAF's egress action with the host names it needs, or use GitHub Agentic
+      Workflows for a new agent workflow. Ephemeral self-hosted runners behind a network policy also
+      limit egress, but outside what the checker reads: record them with an ignore entry that names
+      an owner, a reason and an expiry date.
 
   - id: OBAAF-GHA-021
     title: Agent output applied without verifying its record

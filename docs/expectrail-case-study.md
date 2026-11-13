@@ -144,7 +144,7 @@ All of this is on the `flagship` branch at `7fb8cac`, after release 0.3.0, and i
   - a host name the command asks the proxy for still leaves the runner in a DNS query, although the proxy refuses it;
   - model keys are refused for now;
   - (both of these changed later on `flagship`, in slice 2c.4: the proxy's resolver answers only listed names, and model keys go to AWF's API proxy, never to the command; see [the egress page](egress-control.md));
-  - the checker does not credit it yet (2c.3, 2c.4).
+  - the checker does not credit it yet (2c.3).
 
 **What Expectrail would see if it moved its pin today.** This was computed on a copy of its files at `da06323`, with OBAAF at `7fb8cac`.
 
