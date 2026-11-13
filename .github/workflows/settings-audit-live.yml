@@ -99,9 +99,9 @@ jobs:
             echo "::notice::Expectrail/Expectrail could not be cloned, so its settings are audited without its workflow files."
             clone=""
           fi
-          obaaf audit ${clone:+"$clone"} --repo Expectrail/Expectrail --no-token --fail-on never \
+          obaaf audit --repo Expectrail/Expectrail --no-token --fail-on never \
             --snapshot-out audit-live/rulesets.json \
-            --record audit-live/rulesets > audit-live/rulesets.txt || code=$?
+            --record audit-live/rulesets ${clone:+"$clone"} > audit-live/rulesets.txt || code=$?
           cat audit-live/rulesets.txt
           python scripts/check_live_audit.py audit-live/rulesets.json --report audit-live/rulesets.txt \
             --exit-code "$code" --repo Expectrail/Expectrail --rate-limit-ok --unreadable-ok \

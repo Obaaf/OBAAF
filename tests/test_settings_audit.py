@@ -1947,6 +1947,24 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         self.assertEqual(text.count("--repo Expectrail/Expectrail"), 2)   # the command, and its check
         self.assertEqual(text.count('--repo "$GITHUB_REPOSITORY"'), 4)
 
+    def test_the_adopter_is_audited_with_its_own_files_cloned_with_no_credentials(self):
+        # Slice 2b.4: the twelve rules that compare settings with workflow files run on the adopter's own
+        # files. The clone sends nothing a token could be in, and both the command and its check are given
+        # it, the check with --workflows-read so that a clone whose files were not all read fails the step.
+        text = (ROOT / ".github" / "workflows" / "settings-audit-live.yml").read_text(encoding="utf-8")
+        step = text.split("- name: A public repository that has rulesets, with no token")[1].split("- name:")[0]
+        clone = next(line for line in step.splitlines() if " clone " in line)
+        self.assertIn("git -c credential.helper= clone", clone)
+        self.assertIn("GIT_TERMINAL_PROMPT=0", clone)
+        self.assertIn("https://github.com/Expectrail/Expectrail.git", step)
+        self.assertNotIn("token", step.split("obaaf audit")[0].lower().replace("--no-token", ""))
+        self.assertNotIn("env:", step)
+        self.assertIn('files=(--path "$clone" --workflows-read)', step)
+        self.assertIn('${clone:+"$clone"}', step.split("obaaf audit --repo Expectrail/Expectrail")[1]
+                      .split("check_live_audit.py")[0])
+        self.assertIn('"${files[@]}"', step.split("check_live_audit.py")[1])
+        self.assertIn("rev-parse HEAD", step)   # the report is of the files at a commit the log names
+
 
 class DocumentedSettingsTest(unittest.TestCase):
     def test_every_setting_the_audit_reads_is_described_in_the_guide(self):
