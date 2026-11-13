@@ -287,8 +287,8 @@ _DETACHING_RE = re.compile(
 def leaves_process(script: str) -> str | None:
     """What in a script may leave a process running after its step ends, or None: `&` as an operator
     (not `&&`, `2>&1`, `&>` or `|&`), or a mention anywhere of `nohup`, `setsid`, `disown`,
-    `daemonize`, `start-stop-daemon`, `systemd-run`, `coproc`, `batch`, `at` with a time or an
-    option, a container engine (`docker`, `docker-compose`, `podman`, `podman-compose`, `nerdctl`)
+    `daemonize`, `start-stop-daemon`, `systemd-run`, `coproc`, `batch`, `at` followed by a time word,
+    a digit or an option, a container engine (`docker`, `docker-compose`, `podman`, `podman-compose`, `nerdctl`)
     or a terminal multiplexer (`screen`, `tmux`)."""
     text = script or ""
     if _AMPERSAND_RE.search(text):
