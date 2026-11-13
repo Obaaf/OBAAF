@@ -1,6 +1,6 @@
 # The landscape: what else checks GitHub Actions, and where OBAAF fits
 
-*Original comparison checked 2026-11-11. H2 measurements added 2026-11-13 UTC for Checkov, Semgrep and ci-agent-audit. Part 1 covers ten workflow scanners. [Part 2](#part-2-tools-that-enforce-and-what-github-itself-provides) covers tools that enforce while a job runs, GitHub's own features, and the standards for build provenance. [Part 3](#part-3-enterprise-products-and-tools-aimed-at-ai-agents-in-ci) covers seven enterprise products and the tools aimed at AI agents in CI. [Positioning](#positioning-where-obaaf-stands-and-what-it-plans-to-do-about-it) says what OBAAF plans to do about all of it.*
+*Original comparison checked 2026-11-11. H2 measurements added 2026-11-13 UTC for Checkov, Semgrep and ci-agent-audit, with OBAAF re-run on the same inputs. Part 1 covers ten workflow scanners. [Part 2](#part-2-tools-that-enforce-and-what-github-itself-provides) covers tools that enforce while a job runs, GitHub's own features, and the standards for build provenance. [Part 3](#part-3-enterprise-products-and-tools-aimed-at-ai-agents-in-ci) covers seven enterprise products and the tools aimed at AI agents in CI. [Positioning](#positioning-where-obaaf-stands-and-what-it-plans-to-do-about-it) says what OBAAF plans to do about all of it.*
 
 The aim is a fair comparison a team can rely on. The original comparison uses the 2026-11-11 sources and runs. The separately dated H2 section records new runs and their limits; other products were not rechecked. Where a source did not say, this page says "not stated" rather than guess.
 
@@ -42,7 +42,7 @@ Running offline matters. zizmor's online audits (impostor commits, known-vulnera
 | [Gato-X](https://github.com/AdnaneKhan/gato-x) | 1.4.0 (25 April, year inferred) | Apache-2.0 | Workflow files across repositories, and run logs for self-hosted runners | No. Its docs say it "does not check for best practices like GitHub Actions version pinning, branch protection, secure defaults" | Reports, and can exploit what it finds (it is an offensive tool) | None found |
 | [Checkov](https://github.com/bridgecrewio/checkov) | 3.4.0 (28 October, year inferred) | Apache-2.0 | Workflow files (8 checks) and, as a separate framework, organisation and repository settings (26 checks) | Yes: two-factor, SSO, branch protection, webhooks, repository creation. No check title covers rulesets, environments, Actions policies, default token permissions or fork pull request approval | Reports; exit code 1; SARIF; skip lists | None found |
 | [KICS](https://github.com/Checkmarx/kics) | 2.1.21 (30 July, year inferred) | Apache-2.0 | Workflow files (4 queries) | No | Reports; exit codes by severity; ignore comments | None found |
-| [Semgrep rules](https://github.com/semgrep/semgrep-rules) | No releases; a rules repository | Semgrep Rules License v1.0 (its text was not read) | Files, through the Semgrep CLI; H2 ran the local GitHub Actions security rules | Not tested in H2 | Rules can carry autofixes; H2 used reporting only | No agent-specific rule in the selected GitHub Actions security directory; other rule directories were not assessed |
+| [Semgrep rules](https://github.com/semgrep/semgrep-rules) | No releases; a rules repository | Semgrep Rules License v1.0 (its text was not read) | Files, through the Semgrep CLI; H2 ran the local GitHub Actions security rules | Not stated; not tested in H2 | Rules can carry autofixes; H2 used reporting only | The H2 session read no agent-specific rule in the selected GitHub Actions security directory (not checked by the reviewing run, which could not reach the rules repository); other rule directories were not assessed |
 
 Notes on single tools:
 
@@ -78,7 +78,7 @@ Notes on single tools:
 
 None of these was judged here as a true or false positive for Expectrail; that belongs to its maintainers.
 
-**What OBAAF found that the others did not.** The 38 agent findings, 34 of which exist only because Expectrail listed its agent jobs by hand. None of the five scanners in the original run had an agent-job model. H2 adds ci-agent-audit, which does have agent rules but returned no findings on these Expectrail workflows. Its separate fixture results are below. The original documentation search found no agent rule in nine of the ten tools; H2 read only Semgrep's GitHub Actions security directory.
+**What OBAAF found that the others did not.** The 38 agent findings, 34 of which exist only because Expectrail listed its agent jobs by hand. None of the five scanners in the original run had an agent-job model. H2 adds ci-agent-audit, which does have agent rules but returned no findings on these Expectrail workflows (how many files it read there was not recorded on this page). It finds agents by name, and 17 of Expectrail's 19 agent jobs start their model from the project's own code. Its separate fixture results are below. The original documentation search found no agent rule in the nine of the ten tools whose rules could be read (Semgrep's could not then); H2 read only Semgrep's GitHub Actions security directory.
 
 Those 38 findings are also the ones Expectrail accepts wholesale in its baseline, because OBAAF offers no way to resolve them yet ([flagship plan](flagship.md), item 2a). Being the only tool to report something is not the same as the report being useful.
 
@@ -123,12 +123,12 @@ What the table says:
 - **On script injection, OBAAF 0.2.0 was behind.** zizmor, Octoscan and actionlint all reported the `expression-spellings` workflow, and OBAAF 0.2.0 misses the spellings in it. The fix (slice 2d.1 of the flagship work) is in version 0.3.0.
 - **zizmor has a rule next to GHA-024.** Its `secrets-outside-env` audit (auditor persona) reports a secret used by a job with no environment. It reported the GHA-024 test workflow, and nothing on Expectrail, whose jobs declare their environment. OBAAF's rule differs in being told which secret belongs to which environment.
 - **None of the four linters in the original fixture table has the agent or effect framing, but zizmor reported some of the same underlying facts without it**, and it does recognise publishing workflows (`cache-poisoning` and `use-trusted-publishing` on `clinejection-release`). In its default persona: the trigger of a release workflow (`dangerous-triggers` on `release-from-comment`, which is what GHA-015 is about), and a job left with default token permissions (`excessive-permissions` on `clinejection-triage`, the condition GHA-003 names for an agent job). Not in its default persona: write permissions and `id-token: write` on the agent workflow (the facts behind GHA-003 and 004), and a secret used outside an environment, both on the agent workflow (GHA-005) and on the publishing job of `clinejection-release` (the fact GHA-014 names).
-- **None of the four linters in the original fixture table reported, in any persona, what these rules are about:** a low-trust workflow that can write the default-branch cache (GHA-007); an agent that reads instructions from the change under review (GHA-012) or can reach the whole network (GHA-020); agent output applied without verification or approval (GHA-021, 022); a release without a provenance check or provenance (GHA-016, 017); and a signing key in the build (GHA-018). H2 subsequently ran Checkov: CKV_GHA_5 and CKV_GHA_6 produced no findings on these fixtures. H2 also observed ci-agent-audit AIA006 on two agent workflows, overlapping GHA-020.
+- **None of the four linters in the original fixture table reported, in any persona, what these rules are about:** a low-trust workflow that can write the default-branch cache (GHA-007); an agent that reads instructions from the change under review (GHA-012) or can reach the whole network (GHA-020); agent output applied without verification or approval (GHA-021, 022); a release without a provenance check or provenance (GHA-016, 017); and a signing key in the build (GHA-018). H2 later ran Checkov on 14 of the 15 (it could not read `clinejection-triage`); its CKV_GHA_5 and 6, listed for builds without cosign signing or attestation, reported nothing, the two fixtures where OBAAF reports GHA-017 included. H2 also observed ci-agent-audit AIA006 on two agent workflows, overlapping GHA-020.
 - **Two rules have no single counterpart.** For GHA-001 (a secret reachable from an untrusted trigger), zizmor reports the trigger and, outside its default persona, the secret, as separate findings on three of the four test workflows; poutine's findings on two of them list the secrets the job references. GHA-023 is about OBAAF's own templates.
 
 ## H2: measured runs of Checkov, Semgrep and ci-agent-audit
 
-*Run 2026-11-13 UTC on Linux x86_64, Python 3.12.14. These are observations on fixed inputs, not a ranking or a recall benchmark.*
+*Run 2026-11-13 UTC on Linux x86_64, Python 3.12.14, by a ChatGPT session working on task H2 of the [flagship plan](flagship.md) ("the comparison tools no session could install"). These are observations on fixed inputs, not a ranking or a recall benchmark. The third-party tools were run once, by that session, and not reproduced: a Claude session recounted every number from the saved output, and the reviewing run re-ran OBAAF on the same inputs and got the same counts, but neither could install Checkov, Semgrep or ci-agent-audit. The raw output is kept with the H2 handover and is not published.*
 
 ### Inputs, versions and commands
 
@@ -145,7 +145,7 @@ Each third-party tool was installed in its own fresh virtual environment. Build 
 
 `RULES` denotes the local checkout at the full rules commit above. Semgrep loaded 13 rule definitions; its summaries report 12 rules run on these inputs. This is the selected GitHub Actions security directory, not all Semgrep rules or a hosted product. Checkov's installed list contains eight distinct GitHub Actions check IDs. Its settings framework was not run.
 
-The ci-agent-audit installation was checked first against its PyPI metadata and the repository's build configuration. It used a published wheel, with PyYAML as its runtime dependency. Its published 0.1.4 package has 16 signature files. The source at `4a88ee6` discussed in part 3 has 20 and differs in scanner code despite declaring the same version. The measured results here describe the published package, not that later source snapshot.
+The ci-agent-audit installation was checked first against its PyPI metadata and the repository's build configuration. It used a published wheel, with PyYAML as its runtime dependency. Its published 0.1.4 package has 16 signature files. The source at `4a88ee6` discussed in part 3 has 20 and differs in scanner code despite declaring the same version. The measured results here describe the published package, not that source snapshot.
 
 ### Counts, including incomplete coverage
 
@@ -173,7 +173,7 @@ OBAAF rule IDs above omit only the `OBAAF-` prefix. The rerun used newer OBAAF c
 | Target | Rejected workflow | Schema errors observed |
 | --- | --- | --- |
 | OBAAF | `release-pypi.yml` | `attestations` is not an allowed permission key |
-| Expectrail | `case-spend.yml`, `fix-matrix.yml`, `mutation-bench.yml` | `ubuntu-24.04` is absent from the schema's runner list; additional errors concern matrix expressions and boolean fields |
+| Expectrail | `case-spend.yml`, `fix-matrix.yml`, `mutation-bench.yml` | The diagnostic named `ubuntu-24.04` as absent from the schema's runner list, with further errors on matrix expressions and boolean fields. All 27 Expectrail workflows use `runs-on: ubuntu-24.04`, the 24 Checkov read included, so the runner is not what separates these three. What only these three have, in the files: an expression where a list or number is expected (`strategy.matrix.include` in `case-spend.yml` and `mutation-bench.yml`, `strategy.max-parallel` in `fix-matrix.yml`), and `merge-multiple: true` (checked by the reviewing run on 2026-11-13) |
 | Risky workflows | `clinejection-triage.yml` | Unexpected top-level `cache-mode` |
 
 The rejection is by Checkov 3.4.0's schema; it is not a judgement that all those workflows are invalid in GitHub Actions. No input was rewritten to satisfy the scanner. A file absent from its checks is not counted as a pass.
@@ -190,24 +190,24 @@ The OBAAF rules expected by the unit tests remain in the earlier fixture table. 
 | `clinejection-release` | None | `github-actions-mutable-action-tag` (2) | None |
 | `clinejection-triage` | Not read: schema rejected | `github-actions-mutable-action-tag` (2) | `AIA005`, `AIA006` |
 | `effect-without-checks` | None | None | None |
-| `expression-spellings` | None | None | None |
+| `expression-spellings` | None | None (Semgrep reported errors on this file) | None |
 | `nx-title-injection` | `CKV2_GHA_1`, `CKV_GHA_2` | `run-shell-injection` | None |
 | `promptpwnd-issue-agent` | None | `audit.third-party-action-not-pinned-to-commit-sha`, `github-actions-mutable-action-tag` (2) | `AIA001`, `AIA004`, `AIA005`, `AIA006` |
 | `protected-secret-repo-scope` | None | None | None |
 | `pwn-request` | `CKV2_GHA_1` | `github-actions-mutable-action-tag`, `pull-request-target-code-checkout` | None |
 | `pytorch-self-hosted` | `CKV2_GHA_1` | `github-actions-mutable-action-tag` | None |
 | `release-from-comment` | None | None | None |
-| `signing-key-in-build` | None | None | None |
+| `signing-key-in-build` | None | None (Semgrep reported errors on this file) | None |
 | `template-placeholder` | None | None | None |
 | `tj-actions-unpinned` | None | `audit.third-party-action-not-pinned-to-commit-sha`, `github-actions-mutable-action-tag` | None |
 | `unsafe-checkout-opt-in` | None | `pull-request-target-code-checkout` | None |
 
 ### What these runs add to the comparison
 
-- **Checkov reports manual inputs that OBAAF does not.** Its CKV_GHA_7 returned one finding on OBAAF's `checker-demo.yml` and 17 on Expectrail, for nonempty `workflow_dispatch.inputs`. OBAAF's rerun returned no corresponding finding. These are policy differences, not a judgement that the inputs are exploitable.
+- **Checkov reports manual inputs that OBAAF does not.** Its CKV_GHA_7 returned one finding on OBAAF's `checker-demo.yml` and 17 on Expectrail, for nonempty `workflow_dispatch.inputs` (OBAAF's `release-pypi.yml` and three Expectrail workflows also have such inputs; they are the four files Checkov did not read). OBAAF's rerun returned no corresponding finding. These are policy differences, not a judgement that the inputs are exploitable.
 - **Semgrep reports the download-to-shell installation pattern.** Its ten `gha-curl-pipe-shell` findings on Expectrail name the installation commands already highlighted by poutine in the original comparison. OBAAF's rerun reported secrets and missing egress controls on those agent jobs, but no finding about those installations. On the fixtures, Semgrep also returned injection, unpinned-action and untrusted-checkout findings alongside corresponding OBAAF rules. Two of its action-pinning rules can report the same step, so totals are not unique weaknesses.
 - **ci-agent-audit reports prompt input as prompt input.** AIA001 reports the `with.prompt` block at `promptpwnd-issue-agent.yml:21`; `github.event.issue.body` is on source line 23. OBAAF reports permissions, secrets, egress and unpinned actions on that workflow, but its output contains no prompt-input finding. The AIA005 token-permission and AIA006 egress findings on two agent fixtures overlap OBAAF's GHA-003 and GHA-020. Its AIA004 finding concerns the moving `v1` tag, alongside OBAAF's pinning rule; this run did not establish a vulnerable-version finding.
-- **OBAAF still reports workflows that these runs do not.** On Expectrail it returned 19 GHA-005 and 19 GHA-020 findings with the repository's declarations, while ci-agent-audit returned none. On `effect-without-checks` OBAAF returned GHA-021 and GHA-022; all three new scanners returned none. On the release fixtures OBAAF returned GHA-016 and GHA-017; Checkov returned no CKV_GHA_5 or CKV_GHA_6 finding. These are statements about these inputs and versions, not claims that the other tools lack all related rules.
+- **OBAAF still reports weaknesses that these runs do not.** On Expectrail it returned 19 GHA-005 and 19 GHA-020 findings with the repository's declarations, while ci-agent-audit returned none. On `effect-without-checks` OBAAF returned GHA-021 and GHA-022; all three new scanners returned none. On the release fixtures OBAAF returned GHA-016 and GHA-017; Checkov returned no CKV_GHA_5 or CKV_GHA_6 finding. These are statements about these inputs and versions, not claims that the other tools lack all related rules.
 
 No finding was adjudicated here as an exploit or a false positive. A coverage error is kept separate from a zero result. The positioning conclusions below remain for the maintainers to review; H2 changes their evidence, not their recommendations.
 
@@ -460,7 +460,7 @@ What the seven have in common, and what that means for OBAAF:
 
 #### ci-agent-audit: the nearest open-source neighbour
 
-[ci-agent-audit](https://github.com/layer8labs8/ci-agent-audit) "reads your GitHub Actions and GitLab CI files and warns you when an AI agent such as Claude Code, Gemini CLI, or Codex is set up in a way that an outsider could abuse." It is MIT-licensed, written in Python (about 3,400 lines), marked alpha, at version 0.1.4. It "only reads YAML files", writes text, JSON, SARIF and GitHub annotations, can fix three kinds of finding itself, and runs as a command, an action or a pre-commit hook. How many people use it was not established.
+[ci-agent-audit](https://github.com/layer8labs8/ci-agent-audit) "reads your GitHub Actions and GitLab CI files and warns you when an AI agent such as Claude Code, Gemini CLI, or Codex is set up in a way that an outsider could abuse." It is MIT-licensed, written in Python (about 3,400 lines), marked alpha, at version 0.1.4 (read at commit `4a88ee6`; the published 0.1.4 package differs, see H2 above). It "only reads YAML files", writes text, JSON, SARIF and GitHub annotations, can fix three kinds of finding itself, and runs as a command, an action or a pre-commit hook. How many people use it was not established.
 
 It finds agents by name: 20 signature files, one per tool, listing, where they apply, the action names, the command-line program and package, the inputs and flags that carry a prompt, the settings that are dangerous, and, for one, a minimum safe version. Its eleven rules, in its own words:
 
@@ -531,7 +531,7 @@ Inputs to the positioning section (item 1.4), not decisions.
 
 ## Positioning: where OBAAF stands, and what it plans to do about it
 
-*Written 2026-11-11, from parts 1 to 3. These are the positions the [flagship plan](flagship.md) works to. They are proposals until OBAAF's maintainers accept them.*
+*Written 2026-11-11, from parts 1 to 3; the H2 measurements of 2026-11-13 were added to the rows and bullets they change. These are the positions the [flagship plan](flagship.md) works to. They are proposals until OBAAF's maintainers accept them.*
 
 OBAAF is a small open-source project with one adopter, and that adopter is its author's own. A third of its 24 GitHub Actions rules report what larger tools report too, and on its own subject it is no longer alone. So the position is narrow on purpose:
 
@@ -569,13 +569,13 @@ Each of these is something a test can check.
 
 ### What OBAAF alone does
 
-Checked against OBAAF's code on 2026-11-11, and against the tools in parts 1 to 3 as far as their pages and the runs show.
+Checked against OBAAF's code on 2026-11-11, and against the tools in parts 1 to 3 as far as their pages and the runs show; the H2 measurements of 2026-11-13 were added where they apply.
 
 Today:
 
 - **A job can be declared an agent job, whatever starts the agent.** A job the checker would otherwise class as trusted or untrusted can be declared an agent, effect or release job; a declaration cannot move a job to a lane with fewer rules. This is how Expectrail's 17 home-grown agent jobs are checked at all.
 - **A secret can be tied to the environment it belongs in**, and a job that uses it without naming that environment is reported (OBAAF-GHA-024). OBAAF knows this only from its configuration file; like zizmor, it cannot see where the secret is stored. zizmor has a neighbouring audit that is not told which secret belongs where.
-- **Rules for the job that applies an agent's output** (OBAAF-GHA-021, 022) and for releases (016 to 018). No tool that was run reported these. By their rule lists, ci-agent-audit's AIA010 and AIA011 and Checkov's CKV_GHA_5 and 6 come close; H2 ran both published packages and observed none of those four rule IDs on these fixtures.
+- **Rules for the job that applies an agent's output** (OBAAF-GHA-021, 022) and for releases (016 to 018). No tool that was run reported these. By their rule lists, ci-agent-audit's AIA010 and AIA011 and Checkov's CKV_GHA_5 and 6 come close. In H2, Checkov's CKV_GHA_5 and 6 reported nothing on the 14 fixtures it read, the two where OBAAF reports GHA-016 and 017 among them; it did not read `clinejection-triage` or OBAAF's own `release-pypi.yml`. ci-agent-audit reported neither AIA010 nor AIA011, but no fixture gives them a case: it finds agents by name, the effect fixture names none, and no fixture pushes to `main`. So the runs neither confirm nor rule out the overlap.
 - **Signed records of an agent's run and of a person's approval**, and commands that refuse a release or an agent's proposal without them. Expectrail uses only `obaaf proposal check`; no adopter uses the signed records or `obaaf verify`.
 
 Planned in the flagship work, and not built yet:
@@ -588,32 +588,32 @@ Not alone, and not to be claimed as such: asking what an agent job in CI can rea
 
 ### Rule by rule
 
-R means another tool reported the same or a neighbouring weakness on that rule's test workflow, in the original runs or the dated H2 measurements. "R: none" does not mean the tools were silent on the file, and H2's coverage errors limit negative results. D means a documented overlap not observed in these runs; it no longer implies that the tool itself was not run.
+R means another tool reported the same or a neighbouring weakness on that rule's test workflow, in the original runs or the dated H2 measurements. "R: none" does not mean the tools were silent on the file, and H2's coverage errors limit negative results. D means an overlap read from a tool's rule list and not observed: either the tool was not run, or it ran in H2 and reported nothing on the test workflow (the H2 rows say which).
 
 Positions: *Shared* means at least one other tool reports the same weakness. *Partly shared* means another tool reports part of it. *OBAAF's subject* means agents in CI, where OBAAF is not alone. *OBAAF's* means no tool that was run reported the same weakness; a neighbouring report is named in the row.
 
 | OBAAF rule | What it reports | Who else reports it | Position |
 | --- | --- | --- | --- |
-| GHA-010 | Untrusted event text expanded in a script | R: zizmor `template-injection`, CodeQL `actions/code-injection`, poutine `injection`, Octoscan `expression-injection`, actionlint | Shared |
-| GHA-002, GHA-019 | A pull request's code checked out in a privileged workflow | R: CodeQL `actions/untrusted-checkout`, poutine `untrusted_checkout_exec`, Octoscan `dangerous-checkout`; zizmor `dangerous-triggers` reports the trigger | Shared |
-| GHA-008 | An action or image not pinned to a digest | R: zizmor `unpinned-uses`, CodeQL `actions/unpinned-tag`. GitHub can also enforce pinning by policy and by lockfile | Shared |
-| GHA-009 | Token permissions not declared | R: zizmor `excessive-permissions`, CodeQL `actions/missing-workflow-permissions`, poutine `default_permissions_on_risky_events` | Shared |
+| GHA-010 | Untrusted event text expanded in a script | R: zizmor `template-injection`, CodeQL `actions/code-injection`, poutine `injection`, Octoscan `expression-injection`, actionlint; in H2, Semgrep `run-shell-injection` and Checkov `CKV_GHA_2` on `nx-title-injection` | Shared |
+| GHA-002, GHA-019 | A pull request's code checked out in a privileged workflow | R: CodeQL `actions/untrusted-checkout`, poutine `untrusted_checkout_exec`, Octoscan `dangerous-checkout`; zizmor `dangerous-triggers` reports the trigger; in H2, Semgrep `pull-request-target-code-checkout` | Shared |
+| GHA-008 | An action or image not pinned to a digest | R: zizmor `unpinned-uses`, CodeQL `actions/unpinned-tag`; in H2, Semgrep's two pinning rules and ci-agent-audit AIA004. GitHub can also enforce pinning by policy and by lockfile | Shared |
+| GHA-009 | Token permissions not declared | R: zizmor `excessive-permissions`, CodeQL `actions/missing-workflow-permissions`, poutine `default_permissions_on_risky_events`; in H2, Checkov `CKV2_GHA_1` on `pwn-request` and `pytorch-self-hosted` | Shared |
 | GHA-011 | Checkout leaves the job token on disk | R: zizmor `artipacked`, which is wider: OBAAF's rule covers agent jobs and untrusted triggers only | Shared |
 | GHA-013 | Self-hosted runner used for untrusted work | R: poutine `pr_runs_on_self_hosted`; Octoscan and actionlint `runner-label` | Shared |
 | GHA-006 | A release job can read a shared cache | R: zizmor `cache-poisoning` | Shared |
 | GHA-015 | A release workflow started by untrusted input | R: zizmor `dangerous-triggers`, which reports the trigger and not that the workflow releases | Partly shared |
 | GHA-001 | A secret reachable from an untrusted trigger | R: zizmor reports the trigger and, outside its default persona, the secret, as separate findings | Partly shared. The combination is OBAAF's |
 | GHA-014 | A release job not behind a protected environment | R: zizmor `secrets-outside-env`, outside its default persona, reports the secret used with no environment | Partly shared. Means little until the settings audit can read the environment |
-| GHA-003, 004, 005 | An agent job can write, can request cloud credentials, holds a secret | R: zizmor reports some of the same facts, most outside its default persona, without knowing the job runs an agent. R: ci-agent-audit AIA005 on token permissions in two H2 fixtures | OBAAF's subject |
-| GHA-012 | An agent reads instructions from the change under review | R: none. D: ci-agent-audit AIA008 is close | OBAAF's subject |
-| GHA-020 | An agent job with no egress restriction | R: ci-agent-audit AIA006 in two H2 fixtures | OBAAF's subject. Slice 2c is to make it checkable |
-| GHA-021, 022 | An agent's output applied without verifying its record, or without approval | R: none. D: ci-agent-audit AIA010 and AIA011 are close | OBAAF's subject |
+| GHA-003, 004, 005 | An agent job can write, can request cloud credentials, holds a secret | R: zizmor reports some of the same facts, most outside its default persona, without knowing the job runs an agent. R: ci-agent-audit AIA005 in two H2 fixtures (`promptpwnd-issue-agent`, and `clinejection-triage`, where it overlaps GHA-003 only) | OBAAF's subject |
+| GHA-012 | An agent reads instructions from the change under review | R: none. D: ci-agent-audit AIA008 is close; it ran in H2 and reported nothing on this rule's test workflow | OBAAF's subject |
+| GHA-020 | An agent job with no egress restriction | R: ci-agent-audit AIA006 on `promptpwnd-issue-agent` and `clinejection-triage` in H2; not on `claude-action-toctou` | OBAAF's subject. Slice 2c is to make it checkable |
+| GHA-021, 022 | An agent's output applied without verifying its record, or without approval | R: none. D: ci-agent-audit AIA010 and AIA011 are close; they ran in H2 and reported nothing, and no fixture gives them a case | OBAAF's subject |
 | GHA-007 | A low-trust workflow can write the default branch's cache | R: none. CodeQL's three cache poisoning queries are about this weakness; run on this rule's test workflow, they reported nothing | OBAAF's, and close to CodeQL's by its rule list |
-| GHA-016, 017 | A release uploaded without a provenance check, or built without provenance | R: none. D: Checkov CKV_GHA_5 and 6 sit next to GHA-017 | OBAAF's |
+| GHA-016, 017 | A release uploaded without a provenance check, or built without provenance | R: none. D: Checkov CKV_GHA_5 and 6 sit next to GHA-017; they ran in H2 and reported nothing on the 14 fixtures Checkov read | OBAAF's |
 | GHA-018 | A signing key available to build steps | R: none | OBAAF's |
 | GHA-024 | A protected secret used outside its environment | R: zizmor `secrets-outside-env`, outside its default persona, is close | OBAAF's |
 | GHA-023 | A placeholder left in an OBAAF template | Not applicable | Housekeeping |
-| REPO-001, REPO-002, INS-001 | No code owner for CI files or instruction files; hidden characters in an instruction file | D: the scanners for agent configuration in part 3 cover instruction files | Kept small |
+| REPO-001, REPO-002, INS-001 | No code owner for CI files or instruction files; hidden characters in an instruction file | D: the scanners for agent configuration in part 3 cover instruction files; they were not run | Kept small |
 
 Eight of the 24 GitHub Actions rules are shared outright and three partly. OBAAF has one adopter. GitHub wrote in April 2025 that during the preview of CodeQL's workflow analysis it had "helped secure over 158,000 repositories"; use of the other tools was not measured. On those eight rules OBAAF adds little that a team running zizmor, poutine and CodeQL does not already have; they stay because rule ids are stable and the one adopter gates on them. The 15 Jenkins rules are advisory and are not in the table.
 
@@ -646,7 +646,7 @@ Read on 2026-11-11.
 - KICS: [repository](https://github.com/Checkmarx/kics), [CI/CD queries](https://docs.kics.io/latest/queries/cicd-queries/), [documentation](https://docs.kics.io/latest/documentation/)
 - Semgrep rules: [repository](https://github.com/semgrep/semgrep-rules), [licence file](https://github.com/semgrep/semgrep-rules/blob/develop/LICENSE)
 
-Not read, and so not relied on: poutine's rule documentation, Octoscan's licence file, and the full text of the Semgrep rules licence. H2 read and ran the GitHub Actions security rules at the pinned commit; other Semgrep rule directories were not assessed.
+Not read, and so not relied on: poutine's rule documentation, Octoscan's licence file, and the text of the Semgrep rules licence. H2 read and ran the GitHub Actions security rules at the pinned commit; other Semgrep rule directories were not assessed.
 
 ### Part 2
 
