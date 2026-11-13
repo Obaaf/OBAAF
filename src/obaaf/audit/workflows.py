@@ -165,19 +165,38 @@ def _file(path: str, text: str) -> dict:
     if workflow.error:
         return {"path": path, "error": wf_mod.one_line(workflow.error, 200), "problems": [], "triggers": {},
                 "jobs": []}
-    raw_jobs = workflow.raw.get("jobs")
-    odd = [str(job_id) for job_id, value in raw_jobs.items() if not isinstance(value, dict)] \
-        if isinstance(raw_jobs, dict) else []
-    if odd:
+    refused = _refused(workflow)
+    if refused:
         # GitHub refuses the whole file, so none of its jobs runs: reading the others as if they did would
         # count checks that never report.
-        return {"path": path, "error": wf_mod.one_line(f"job {odd[0]!r} is not a mapping, and GitHub refuses a "
-                                                       "file with such a job", 200),
+        return {"path": path, "error": wf_mod.one_line(f"{refused}, and GitHub refuses such a file", 200),
                 "problems": [], "triggers": {}, "jobs": []}
     triggers = {event: _filters(config) for event, config in workflow.triggers.items()}
     return {"path": path, "error": None,
             "problems": [wf_mod.one_line(p, 200) for p in workflow.problems],
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
+
+
+# Filters that GitHub's workflow syntax says cannot be used together on one event.
+EXCLUSIVE_FILTERS = (("branches", "branches-ignore"), ("tags", "tags-ignore"), ("paths", "paths-ignore"))
+
+
+def _refused(workflow) -> str:
+    """Why GitHub would refuse the file, for the ways this module knows of; empty when it knows none. It
+    knows few: what it does not know is read as a file that runs."""
+    raw_jobs = workflow.raw.get("jobs")
+    if isinstance(raw_jobs, dict):
+        for job_id, value in raw_jobs.items():
+            if not isinstance(value, dict):
+                return f"job {str(job_id)!r} is not a mapping"
+            if "runs-on" not in value and "uses" not in value:
+                return f"job {str(job_id)!r} has neither runs-on nor uses"
+    for event, config in workflow.triggers.items():
+        if isinstance(config, dict):
+            for one, other in EXCLUSIVE_FILTERS:
+                if one in config and other in config:
+                    return f"the event {str(event)!r} has both {one} and {other}"
+    return ""
 
 
 def called_path(job: dict) -> str | None:

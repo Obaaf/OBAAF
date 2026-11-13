@@ -764,10 +764,11 @@ class NeverAPassTest(unittest.TestCase):
         snap, _ = take(ADMIN, token=TOKEN)
         found = rules.evaluate(snap, workflows.not_read("no directory was given"))
         reads_files = {r.id for r in rules.RULES if r.files}
-        self.assertEqual(len(reads_files), 13)
+        self.assertEqual(len(reads_files), 12)
         self.assertEqual({r["status"] for r in found["rules"] if r["id"] in reads_files}, {"cannot-tell"})
         self.assertIn("no directory was given", of(found, "OBAAF-SET-001")[0]["message"])
-        # The bypass and the approvals are settings and nothing else, so those two rules still answer.
+        # The bypass, the approvals and whether workflows may approve are settings and nothing else, so
+        # those three rules still answer (the recording does not let workflows approve).
         self.assertEqual([r["rule"] for r in found["results"] if r["state"] == "finding"],
                          ["OBAAF-SET-004", "OBAAF-SET-005"])
 
@@ -779,8 +780,9 @@ class NeverAPassTest(unittest.TestCase):
     def test_a_workflow_file_that_does_not_parse_makes_every_quiet_rule_cannot_tell(self):
         files = {"ci.yml": workflow("  pull_request:\n", job("build")), "broken.yml": "on: [push\njobs: {"}
         found = assess_files(ADMIN, files)
-        self.assertNotIn("no-finding", {r["status"] for r in found["rules"]})
-        self.assertNotIn("not-applicable", {r["status"] for r in found["rules"]})
+        reads_files = {r.id for r in rules.RULES if r.files}
+        self.assertNotIn("no-finding", {r["status"] for r in found["rules"] if r["id"] in reads_files})
+        self.assertNotIn("not-applicable", {r["status"] for r in found["rules"] if r["id"] in reads_files})
         self.assertIn("broken.yml", of(found, "OBAAF-SET-010")[0]["message"])
 
     def test_a_rule_that_fails_is_cannot_tell_and_the_command_exits_1(self):
@@ -894,17 +896,16 @@ class FirstReviewTest(unittest.TestCase):
         finding, = of(assess_files(limited(ADMIN, ("rel*", "branch")), target), "OBAAF-SET-002")
         self.assertIn("was not read or rests on a pattern", finding["message"])
 
-    def test_pull_request_target_runs_as_the_pull_requests_base_branch(self):
-        # Review of 2026-11-13: the environment admits `release`, not the default branch, and a pull
-        # request into `release` runs this job with `release` as its branch.
+    def test_pull_request_target_runs_as_the_default_branch_whatever_the_base(self):
+        # GitHub's changelog of 2025-11-07: from 2025-12-08, for pull_request_target "environment rules
+        # evaluate against the default branch", whatever the pull request's base. A review on 2026-11-13
+        # first said the base branch; the third pass read the changelog.
         target = {"t.yml": workflow("  pull_request_target:\n    branches: [release]\n",
                                     job("j", "    environment: main-only\n", self.READS_KEY))}
-        finding, = of(assess_files(limited(ADMIN, ("release", "branch")), target), "OBAAF-SET-002")
-        self.assertEqual((finding["state"], finding["severity"]), ("finding", "high"))
-        self.assertIn("runs as the pull request's base branch", finding["message"])
-        # An environment that admits tags alone shuts every branch out, the base branch included.
-        tags_only = assess_files(limited(ADMIN, ("v*", "tag")), target)
-        self.assertEqual(status(tags_only, "OBAAF-SET-002"), "no-finding")
+        self.assertEqual(status(assess_files(limited(ADMIN, ("release", "branch")), target), "OBAAF-SET-002"),
+                         "no-finding")
+        finding, = of(assess_files(limited(ADMIN, ("main", "branch")), target), "OBAAF-SET-002")
+        self.assertIn("admits the default branch", finding["message"])
 
     def test_an_environment_that_holds_no_secret_is_low_and_says_what_it_does_not_know(self):
         empty = with_body(ADMIN, f"{R}/environments/main-only/secrets?per_page=100",
@@ -1305,8 +1306,9 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("The workflow files were not read:", out)
         self.assertIn("name the directory that holds them", out)
-        # The two rules that read settings only still answer; the thirteen that compare cannot.
-        self.assertIn("FINDINGS: 2 (1 high, 1 medium, 0 low). CANNOT TELL: 13, from 13 of 15 rules", out)
+        # The three rules that read settings only still answer; the twelve that compare cannot.
+        self.assertIn("FINDINGS: 2 (1 high, 1 medium, 0 low). CANNOT TELL: 12, from 12 of 15 rules", out)
+        self.assertIn("OBAAF-SET-004, OBAAF-SET-005 and OBAAF-SET-013 read settings only", out)
         self.assertEqual(audit_command(ADMIN, None, token=True)[0], 1)
 
     def test_a_directory_that_is_named_is_compared_and_the_report_says_whose_it_looks_like(self):
@@ -1380,6 +1382,13 @@ class DocumentedTest(unittest.TestCase):
         for rule in rules.RULES:
             self.assertIn(f"| `{rule.id}` | {rule.title} | {rule.severity} |", guide, rule.id)
 
+    def test_the_guides_table_row_is_the_rules_own_definition(self):
+        guide = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8")
+        for rule in rules.RULES:
+            reads = ", ".join(f"`{key}`" for key in rule.reads)
+            self.assertIn(f"| `{rule.id}` | {rule.title} | {rule.severity} | {reads} | {rule.compares} |", guide,
+                          rule.id)
+
 
 class SecondReviewTest(unittest.TestCase):
     """What the second review (2026-11-13, run redshank) found: each case gave "no finding" or "does not
@@ -1437,6 +1446,42 @@ class SecondReviewTest(unittest.TestCase):
         found = assess_files(self.require(("test", 15368)), files)
         for rule in ("OBAAF-SET-006", "OBAAF-SET-007", "OBAAF-SET-008"):
             self.assertEqual(status(found, rule), "cannot-tell", rule)
+
+    # -- the third pass
+    def test_other_files_github_refuses(self):
+        for name, text in (
+                ("both branch filters", workflow("  pull_request:\n    branches: [main]\n    branches-ignore: [wip]\n",
+                                                 job("test"))),
+                ("both path filters", workflow("  pull_request:\n    paths: [src]\n    paths-ignore: [docs]\n",
+                                               job("test"))),
+                ("no runs-on", workflow("  pull_request:\n", "  test:\n    steps:\n      - run: make\n")),
+                ("runs_on misspelt", workflow("  pull_request:\n", "  test:\n    runs_on: ubuntu-latest\n"
+                                                                    "    steps:\n      - run: make\n"))):
+            found = assess_files(self.require(("test", 15368)), {"ci.yml": text})
+            for rule in ("OBAAF-SET-006", "OBAAF-SET-007", "OBAAF-SET-008"):
+                self.assertEqual(status(found, rule), "cannot-tell", (name, rule))
+        usage = workflows._file(".github/workflows/ci.yml", workflow("  pull_request:\n", "  test:\n    steps: []\n"))
+        self.assertIn("'test' has neither runs-on nor uses, and GitHub refuses such a file", usage["error"])
+
+    def test_a_negated_entry_in_branches_ignore_is_left_to_the_patterns(self):
+        files = {"ci.yml": workflow("  pull_request:\n    branches-ignore: [main, '!main']\n", job("lint"))}
+        found = assess_files(self.require(("test (3.13)", 15368)), files)
+        self.assertEqual(status(found, "OBAAF-SET-008"), "cannot-tell")
+
+    def test_a_requirement_tied_to_another_app_is_not_met_by_the_actions_job(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
+        finding, = of(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008", "finding")
+        self.assertIn("ci.yml#test", finding["subject"])
+        self.assertEqual(status(assess_files(self.require(("test", 15368)), files), "OBAAF-SET-008"), "no-finding")
+        self.assertEqual(status(assess_files(self.require(("test", None)), files), "OBAAF-SET-008"), "no-finding")
+        matrix = {"ci.yml": workflow("  pull_request:\n", job("t", "    strategy:\n      matrix:\n        v: [a, b]\n"))}
+        found = assess_files(self.require(("t (a)", 99), ("t (b)", 99)), matrix)
+        self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 1)
+
+    def test_any_self_hosted_job_shows_the_repository_has_a_runner_a_fork_can_name(self):
+        files = {"ci.yml": workflow("  push:\n", "  build:\n    runs-on: [self-hosted, linux]\n    steps:\n      - run: make\n")}
+        finding, = of(assess_files(ADMIN, files), "OBAAF-SET-014", "finding")
+        self.assertIn("so the repository has one", finding["message"])
 
 
 if __name__ == "__main__":

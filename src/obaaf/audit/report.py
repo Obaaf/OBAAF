@@ -242,9 +242,9 @@ RULE_STATUS = {"findings": "", "cannot-tell": "cannot tell", "no-finding": "no f
 
 def _usage_line(usage: dict) -> str:
     if not usage["read"]:
-        return (f"The workflow files were not read: {plain(usage['reason'], 300)}. The thirteen rules that compare "
-                "a setting with what the workflows use answer \"cannot tell\"; OBAAF-SET-004 and OBAAF-SET-005 "
-                "read settings only and still answer.")
+        return (f"The workflow files were not read: {plain(usage['reason'], 300)}. The twelve rules that compare "
+                "a setting with what the workflows use answer \"cannot tell\"; OBAAF-SET-004, OBAAF-SET-005 and "
+                "OBAAF-SET-013 read settings only and do not need the files.")
     files = usage["files"]
     unread = sum(1 for file in files if file["error"])
     line = f"Compared with {_count(len(files) - unread, 'workflow file')} in the directory {quoted(usage.get('shown') or '.', 200)}"
