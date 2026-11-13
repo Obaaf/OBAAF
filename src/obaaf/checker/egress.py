@@ -158,6 +158,10 @@ def read_firewall_policy(root) -> FirewallPolicy:
         if char in text:
             return FirewallPolicy("unreadable", digest=digest,
                                   detail=f"it contains {shown}, which YAML readers do not agree is a line break")
+    if re.search(r"(?:^|[\s{,])<<[ \t]*:", text):
+        return FirewallPolicy("unreadable", digest=digest,
+                              detail="it uses a merge key (<<), which YAML 1.1 readers merge and YAML 1.2 readers "
+                                     "take for a key of that name")
     try:
         raw = yamlutil.load(text)
     except Exception as exc:     # YAML errors, duplicate keys, bytes that are not UTF-8
@@ -212,14 +216,50 @@ AWF_RE = re.compile(r"(?:^|[;&|(`])[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:[^\s;&
 
 
 def uncommented(script: str) -> str:
-    """A shell script without its comments: from a `#` at the start of a word to the end of the line.
-    Approximate (a `#` inside quotes after a space is taken for one), which can only hide a match."""
-    return re.sub(r"(?:^|(?<=\s))#[^\n]*", "", script or "")
+    """A shell script without its comments: from a `#` at the start of a word, outside quotes, to the
+    end of the line. Quotes are followed as the shell does for `'` and `"` (a backslash escapes in
+    double quotes and outside them); anything this cannot follow is left in, which can only add a
+    match, never hide one."""
+    out: list[str] = []
+    quote = ""
+    i, text = 0, script or ""
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            out.append(ch)
+            quote = "" if ch == "'" else quote
+        elif ch == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 1
+        elif quote == '"':
+            out.append(ch)
+            quote = "" if ch == '"' else quote
+        elif ch in "'\"":
+            out.append(ch)
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
-# A process a step leaves running after it ends: `&` at the end of a command (not `&&`), `nohup`,
-# `setsid`, `disown`, or a detached container.
-BACKGROUND_RE = re.compile(r"(?<![&|>])&(?![&>])[ \t]*(?:$|[;)\n#])|\b(?:nohup|setsid|disown)\b|docker[ \t]+run\b[^\n]*[ \t](?:-d|--detach)\b",
-                           re.M)
+# A process a step leaves running after it ends, in the forms the checker recognises: `&` as an
+# operator anywhere (not `&&`, `2>&1`, `&>` or `|&`; one inside quotes counts too, which can only add
+# a match), `nohup`, `setsid`, `disown`, `daemonize`, `start-stop-daemon`, `systemd-run`, `at`, a
+# detached container (`docker run` with `-d` among its short options, `--detach`, or `compose up -d`),
+# `screen -d` and `tmux new -d`.
+BACKGROUND_RE = re.compile(
+    r"(?<![&|>])&(?![&>])"
+    r"|\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run)\b"
+    r"|(?:^|[;&|(`])[ \t]*at[ \t]"
+    r"|\b(?:docker|podman)[ \t]+(?:container[ \t]+)?(?:run|start)\b[^\n]*[ \t](?:-[A-Za-z]*d[A-Za-z]*|--detach)\b"
+    r"|\b(?:docker[ \t]+compose|docker-compose|podman-compose)\b[^\n]*\bup\b[^\n]*[ \t](?:-[A-Za-z]*d[A-Za-z]*|--detach)\b"
+    r"|\bscreen\b[^\n]*[ \t]-[A-Za-z]*d"
+    r"|\btmux\b[^\n]*\bnew(?:-session)?\b[^\n]*[ \t]-[A-Za-z]*d",
+    re.M)
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).
 AWF_UNSAFE_RE = re.compile(r"--enable-dind\b")

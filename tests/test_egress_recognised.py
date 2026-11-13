@@ -173,6 +173,13 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertIn("larger than", detail(f))
 
+    def test_a_merge_key_in_the_policy_is_cannot_tell(self):
+        """Found by the second review: YAML 1.1 readers merge `<<`, YAML 1.2 readers see a key."""
+        for policy in ("<<: {mode: enforce}\nallow: [api.example.com]\n",
+                       "base: &b {mode: enforce}\n<<: *b\nallow: [api.example.com]\n"):
+            with self.subTest(policy=policy):
+                self.assertEqual(verdict(self.firewall(policy=policy)), CANNOT_TELL)
+
     def test_a_disputed_line_break_in_the_policy_is_cannot_tell(self):
         """Found by the first review: a reader that does not break at U+2028 sees mode inside a comment."""
         for char in ("\u2028", "\u2029", "\u0085"):
@@ -402,7 +409,11 @@ class EgressActionTest(unittest.TestCase):
     def test_a_step_before_it_that_leaves_a_process_running_is_cannot_tell(self):
         """Found by the first review: a loop left running by an earlier step ran what the command wrote."""
         for run in ("nohup sh -c 'while sleep 5; do sh ./x.sh; done' &", "./watch.sh &", "setsid ./watch.sh",
-                    "docker run -d --name w example/watcher"):
+                    "docker run -d --name w example/watcher",
+                    # Found by the second review.
+                    "./scripts/watch.sh & echo \"started as $!\"", "docker run -dit --name h -v /:/host alpine sh",
+                    "git log -1 --format=\" #%h\" ; ./scripts/watch.sh &", "docker compose up -d",
+                    "screen -dmS w ./scripts/watch.sh", "tmux new -d -s w ./scripts/watch.sh"):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
