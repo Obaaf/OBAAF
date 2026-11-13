@@ -346,8 +346,8 @@ RULE_TYPES = {
     # dependencies to comply with the organization's license policy". OBAAF-SET-004 counts each as something a
     # bypass skips. What gives the result, and on which pull requests, is not compared with the workflow files:
     # OBAAF-SET-006 answers "cannot tell" for each (OBAAF-SET-007 for the merge queue, whose runs are not the
-    # pull request's), and OBAAF-SET-008 names them in a finding, because a job that gives such a result holds
-    # the merge up when it fails.
+    # pull request's), and a finding of OBAAF-SET-008 names each but the merge queue, because a job that gives
+    # such a result may hold the merge up when it fails.
     **dict.fromkeys(("merge_queue", "required_deployments", "workflows", "code_scanning", "code_quality",
                      "code_coverage", "license_compliance_scanning"), "gate"),
     # "Only allow users with bypass permission to update matching refs": who may merge is then decided by who
@@ -366,6 +366,12 @@ RULE_TYPES = {
                      "file_extension_restriction", "max_file_size"), "neither"),
 }
 RULE_TYPE_KINDS = ("checks", "approvals", "gate", "merge", "review", "neither")
+# The parameters of a `required_status_checks` rule, by the same reference: the checks (each a `context` and an
+# optional `integration_id`), "do_not_enforce_on_create" and "strict_required_status_checks_policy" (both true or
+# false; neither changes which checks are required). A parameter or a field of a check outside these, or one of
+# them in another form, makes the branch's list of required checks not whole: it may add a check.
+CHECKS_PARAMETERS = ("do_not_enforce_on_create", "required_status_checks", "strict_required_status_checks_policy")
+CHECK_FIELDS = ("context", "integration_id")
 # Rules of a ruleset whose results come from workflows, other tools or reviewers: what a bypass lets someone
 # merge without (OBAAF-SET-004).
 GATES = tuple(sorted(t for t, kind in RULE_TYPES.items() if kind in ("checks", "approvals", "gate")))
@@ -556,10 +562,15 @@ def _requirements(run: _Run, branch: str) -> dict:
            # (type, ruleset id, parameters); who may merge, as clauses; where Copilot is asked to review; and
            # the fields of a classic answer this version does not know, as clauses.
            "gates": [], "merge_unread": [], "copilot_review": [], "classic_fields": []}
-    rules, _ = run.got("branch_rules")
+    rules, whole = run.got("branch_rules")
     if rules is None or branch not in rules:
         out["checks_whole"] = out["approvals_whole"] = False
         out["gaps"].append("branch_rules")
+        if rules is not None and whole:
+            # Read in full, and this branch is not in it: only a snapshot file can say that.
+            missing = "the rules in force on it, which the snapshot does not hold"
+            out["checks_unread"].append(missing)
+            out["approvals_unread"].append(missing)
     else:
         for rule in rules[branch]:
             out["rulesets"].setdefault(rule["ruleset_id"], []).append(rule["type"])
@@ -588,6 +599,16 @@ def _requirements(run: _Run, branch: str) -> dict:
                     out["checks_unread"].append(f"the checks of the required_status_checks rule of {where}, which "
                                                 "are not in the form GitHub's reference gives")
                     continue
+                odd = [f"{_q(name, 60)} = {_shown(parameters[name])}" for name in sorted(parameters, key=str)
+                       if name not in CHECKS_PARAMETERS or (name != "required_status_checks"
+                                                            and not isinstance(parameters[name], bool))]
+                odd += [f"a check with {_shown(check)}" for check in listed
+                        if set(check) - set(CHECK_FIELDS) or ("integration_id" in check and check["integration_id"]
+                                                               is not None and not _is_int(check["integration_id"]))]
+                if odd:
+                    out["checks_whole"] = False
+                    out["checks_unread"].append(f"the required_status_checks rule of {where} has {_names(odd, 3)}, "
+                                                "not in the form GitHub's reference gives")
                 for check in listed:
                     app = check.get("integration_id")
                     out["apps"].setdefault(check["context"], set()).add(app if _is_int(app) else None)
@@ -626,6 +647,13 @@ def _requirements(run: _Run, branch: str) -> dict:
                     out["approvals_whole"] = False
                     out["approvals_unread"].append("the number of approvals the classic protection rule requires, "
                                                    "which GitHub's answer did not give")
+            # Who may push to the branch, and so merge into it, beside the approvals.
+            if rule["restrictions"]["restricted"]:
+                out["merge_unread"].append("the classic protection rule's restrictions on who may push to the branch "
+                                           "(restrictions), so who may merge is not decided by the approvals alone")
+            if rule["lock_branch"] is True:
+                out["merge_unread"].append("the classic protection rule's lock_branch, by which, in GitHub's reference, "
+                                           "\"users will not be able to push to the branch\"")
             _classic_fields(out, rule)
         return out
     # Classic protection was not read. GitHub shows anyone the required checks of a classic rule; it
@@ -1804,7 +1832,9 @@ def rule_013(run: _Run) -> None:
                                    "workflow's approval count" if need["code_owner"] else
                                    ". A rule about its reviews was not read in full, so whether it also requires a "
                                    "code owner's review is not known; that could stop the workflow's approval being "
-                                   "the one that counts") + ". What was not read",
+                                   "the one that counts")
+                       + (". What was not read" if need["approvals_unread"] or any(
+                           run.settings[k]["status"] in ("unread", "partial") for k in need["gaps"]) else ""),
                        *sorted(set(need["gaps"])), clauses=need["approvals_unread"])
             _also(run, odd)
             continue

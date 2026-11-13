@@ -17,7 +17,7 @@ import copy
 import json
 import unittest
 
-from test_settings_audit import TOKEN, R, recording, replace, take
+from test_settings_audit import SETTINGS_DIR, TOKEN, R, recording, replace, take
 from test_settings_rules import (ADMIN, BRANCH_RULES, COLLABORATORS, assess_files, job, of, status, with_body,
                                  workflow)
 
@@ -74,6 +74,13 @@ def classic_only(entries, body: dict) -> list[dict]:
     """The recording with no ruleset in force on main and a classic protection rule GitHub answered with ``body``."""
     entries = with_body(entries, BRANCH_RULES, lambda rules_body: rules_body.clear())
     return replace(entries, PROTECTION, status=200, body=body)
+
+
+def unrestricted(body: dict) -> dict:
+    """A classic answer with no push restrictions: with them, who may merge is not decided by approvals alone."""
+    body = copy.deepcopy(body)
+    del body["restrictions"]
+    return body
 
 
 def messages(found: dict, rule: str) -> str:
@@ -338,7 +345,9 @@ class ClassicFieldsTest(unittest.TestCase):
         schema = json.loads(data_text("schemas/settings-snapshot.schema.json"))
         exists = schema["$defs"]["classic_protection"]["oneOf"][1]
         places = exists["properties"]["other_fields"]["propertyNames"]["enum"]
-        self.assertEqual(set(places), {k or settings.CLASSIC_TOP for k in settings.CLASSIC_FIELDS})
+        self.assertEqual(set(places), set(settings.CLASSIC_PLACES))
+        self.assertEqual(set(settings.CLASSIC_PLACES) - {settings.CLASSIC_CHECKS},
+                         {k or settings.CLASSIC_TOP for k in settings.CLASSIC_FIELDS})
         self.assertNotIn("other_fields", exists["required"])
 
     def test_a_field_about_reviews_makes_the_approval_rules_cannot_tell(self):
@@ -354,7 +363,7 @@ class ClassicFieldsTest(unittest.TestCase):
             self.assertNotIn("require_two_people", messages(found, rule), rule)
 
     def test_a_field_about_checks_makes_the_check_rules_cannot_tell(self):
-        body = copy.deepcopy(REFERENCE_CLASSIC)
+        body = unrestricted(REFERENCE_CLASSIC)
         body["required_status_checks"]["required_deployments"] = ["staging"]
         found = assess_files(people(classic_only(ADMIN, body), 3), CI)
         for rule in CHECK_RULES:
@@ -373,19 +382,141 @@ class ClassicFieldsTest(unittest.TestCase):
         self.assertEqual(unknown["subject"], 'branch "main": classic protection: fields this audit does not know')
 
 
+    def test_a_field_of_a_required_check_is_kept_and_the_check_rules_cannot_tell(self):
+        # The reference gives an entry of `checks` a context and an app id, and nothing else.
+        body = unrestricted(REFERENCE_CLASSIC)
+        body["required_status_checks"]["checks"][0]["enforcement"] = "evaluate_only"
+        snap, _ = take(classic_only(ADMIN, body), token=TOKEN)
+        value = snap["settings"]["branch_protection"]["value"]["main"]
+        self.assertEqual(value["other_fields"], {"required_status_checks.checks": {"enforcement": ["evaluate_only"]}})
+        files = dict(CI, **{"lint.yml": workflow("  pull_request:\n", job("lint"))})
+        found = assess_files(people(classic_only(ADMIN, body), 3), files)
+        for rule in CHECK_RULES:
+            unknown = of(found, rule, "cannot-tell")
+            self.assertTrue(unknown, rule)
+            self.assertIn('"required_status_checks.checks.enforcement" = ["evaluate_only"]', unknown[0]["message"])
+        self.assertEqual(status(found, "OBAAF-SET-005"), "no-finding")
+
+    def test_a_known_object_in_another_form_is_kept_not_read_as_not_known(self):
+        # Read as GitHub's reference gives it, `lock_branch` is an object with `enabled`. `true` there used to
+        # become null, and a rule passed over it.
+        for change, place, name, value in (
+                (lambda b: b.__setitem__("lock_branch", True), "branch_protection", "lock_branch", True),
+                (lambda b: b["required_pull_request_reviews"].__setitem__("dismissal_restrictions", ["x"]),
+                 "required_pull_request_reviews", "dismissal_restrictions", ["x"]),
+                (lambda b: b["allow_fork_syncing"].__setitem__("enabled", "yes"), "allow_fork_syncing", "enabled",
+                 "yes")):
+            body = unrestricted(REFERENCE_CLASSIC)
+            change(body)
+            snap, _ = take(classic_only(ADMIN, body), token=TOKEN)
+            value_read = snap["settings"]["branch_protection"]["value"]["main"]
+            self.assertEqual(value_read["other_fields"], {place: {name: value}}, name)
+            found = assess_files(people(classic_only(ADMIN, body), 3), CI)
+            self.assertEqual(status(found, "OBAAF-SET-005"), "cannot-tell", name)
+
+
+class ClassicWhoMayPushTest(unittest.TestCase):
+    """Push restrictions and a locked branch decide who may merge, as a ruleset's `update` rule does."""
+
+    def test_push_restrictions_make_the_approvals_rule_cannot_tell(self):
+        found = assess_files(people(approving(classic_only(ADMIN, REFERENCE_CLASSIC)), 3), CI)
+        unknown, = of(found, "OBAAF-SET-005")
+        self.assertEqual(unknown["state"], "cannot-tell")
+        self.assertIn("the classic protection rule's restrictions on who may push to the branch (restrictions)",
+                      unknown["message"])
+        self.assertEqual(status(assess_files(people(classic_only(ADMIN, unrestricted(REFERENCE_CLASSIC)), 3), CI),
+                                "OBAAF-SET-005"), "no-finding")
+        self.assertEqual(len(of(found, "OBAAF-SET-013", "finding")), 1)
+
+    def test_a_locked_branch_makes_it_cannot_tell(self):
+        body = unrestricted(REFERENCE_CLASSIC)
+        body["lock_branch"]["enabled"] = True
+        unknown, = of(assess_files(people(classic_only(ADMIN, body), 3), CI), "OBAAF-SET-005")
+        self.assertEqual(unknown["state"], "cannot-tell")
+        self.assertIn('lock_branch, by which, in GitHub\'s reference, "users will not be able to push to the branch"',
+                      unknown["message"])
+
+
+class RequiredChecksInAnotherFormTest(unittest.TestCase):
+    """The parameters of a ruleset's `required_status_checks` rule, as the reference gives them."""
+
+    def change(self, fn) -> list[dict]:
+        return with_body(ADMIN, BRANCH_RULES, lambda body: fn(next(
+            r for r in body if r["type"] == "required_status_checks")["parameters"]))
+
+    def test_the_recorded_answers_have_nothing_else(self):
+        for name in ("live-expectrail-2026-11-13", "admin-token"):
+            for entry in recording(name):
+                if "/rules/branches/" in entry["path"]:
+                    for rule in entry["body"]:
+                        if rule["type"] == "required_status_checks":
+                            self.assertLessEqual(set(rule["parameters"]), set(rules.CHECKS_PARAMETERS), name)
+                            for check in rule["parameters"]["required_status_checks"]:
+                                self.assertLessEqual(set(check), set(rules.CHECK_FIELDS), name)
+
+    def test_a_parameter_or_a_field_it_does_not_know_may_add_a_check(self):
+        for fn, text in (
+                (lambda p: p.__setitem__("required_check_suites", ["deploy"]), '"required_check_suites" = ["deploy"]'),
+                (lambda p: p.__setitem__("strict_required_status_checks_policy", "yes"),
+                 '"strict_required_status_checks_policy" = "yes"'),
+                (lambda p: p["required_status_checks"][0].__setitem__("enforcement", "evaluate"), '"enforcement"'),
+                (lambda p: p["required_status_checks"][0].__setitem__("integration_id", "15368"),
+                 '"integration_id": "15368"')):
+            found = assess_files(self.change(fn), CI)
+            for rule in CHECK_RULES:
+                unknown = of(found, rule, "cannot-tell")
+                self.assertTrue(unknown, (rule, text))
+                self.assertIn(text, unknown[0]["message"], rule)
+                self.assertIn("not in the form GitHub's reference gives", unknown[0]["message"], rule)
+
+    def test_without_them_nothing_changes(self):
+        found = assess_files(self.change(lambda p: p.pop("do_not_enforce_on_create")), CI)
+        for rule in CHECK_RULES:
+            self.assertEqual(of(found, rule, "cannot-tell"), [], rule)
+
+
+class EveryCannotTellSaysWhyTest(unittest.TestCase):
+    def test_a_snapshot_file_that_leaves_out_an_audited_branch(self):
+        from test_settings_rules import tree
+        from obaaf.audit import rules as audit_rules, workflows
+        from test_settings_audit import TempDir
+        snap, _ = take(people(approving(ADMIN), 3), token=TOKEN)
+        snap["settings"]["branch_rules"]["value"] = {}
+        self.assertEqual(snapshot_mod.problems(snap), [])
+        with TempDir() as tmp:
+            found = audit_rules.evaluate(snap, workflows.read(tree(tmp, CI)))
+        for rule in ("OBAAF-SET-005", "OBAAF-SET-006", "OBAAF-SET-013"):
+            for result in of(found, rule, "cannot-tell"):
+                self.assertIn("the rules in force on it, which the snapshot does not hold", result["message"], rule)
+                self.assertFalse(result["message"].endswith("What was not read."), rule)
+
+
+class TheReportTest(unittest.TestCase):
+    def test_a_type_it_does_not_know_is_printed_quoted_and_says_so(self):
+        from test_settings_audit import full_report
+        snap, _ = take(add_rule(ADMIN, "required_status_checks (deploy)"), token=TOKEN)
+        text = full_report(snap)
+        self.assertIn('"required_status_checks (deploy)" (a type this audit does not know)', text)
+
+
 class DriftTest(unittest.TestCase):
     """The snapshot changed: a classic protection rule may now carry ``other_fields``. A snapshot taken before,
     which has none, is still compared with one taken now."""
 
+    BEFORE = SETTINGS_DIR / "classic-before-2b6" / "snapshot.json"
+
     def snapshots(self, body):
-        expected, _ = take(classic_only(ADMIN, REFERENCE_CLASSIC), token=TOKEN)
+        # Written by the code before this slice (the fixture's README says how), and read as a committed file.
+        expected = snapshot_mod.load(self.BEFORE)
         live, _ = take(classic_only(ADMIN, body), token=TOKEN)
         return expected, live
 
     def test_an_earlier_snapshot_matches_one_taken_now_of_the_same_settings(self):
         expected, live = self.snapshots(REFERENCE_CLASSIC)
+        self.assertEqual(expected["settings"]["branch_protection"], live["settings"]["branch_protection"])
         result = drift.compare(expected, live)
         self.assertFalse(drift.failed(result))
+        self.assertEqual(result["outcomes"]["branch_protection"], "matches")
 
     def test_a_field_the_earlier_reader_dropped_shows_as_added(self):
         body = copy.deepcopy(REFERENCE_CLASSIC)

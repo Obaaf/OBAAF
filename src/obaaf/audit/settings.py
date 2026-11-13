@@ -87,6 +87,12 @@ CLASSIC_FIELDS = {
 }
 # The name ``other_fields`` gives the object at the top of the answer; every other place is named by its path.
 CLASSIC_TOP = "branch_protection"
+# The fields of each entry of `required_status_checks.checks`, by the same reference. Fields outside them are
+# kept under the place ``required_status_checks.checks``, each with the values the entries gave it.
+CLASSIC_CHECK_FIELDS = ("context", "app_id")
+CLASSIC_CHECKS = "required_status_checks.checks"
+# Every place ``other_fields`` may name.
+CLASSIC_PLACES = tuple(k or CLASSIC_TOP for k in CLASSIC_FIELDS) + (CLASSIC_CHECKS,)
 
 
 @dataclass(frozen=True)
@@ -841,22 +847,49 @@ def _classic_protection(body: dict) -> dict:
     return out
 
 
+def _at(body: dict, where: str):
+    obj = body
+    for step in where.split(".") if where else ():
+        obj = obj.get(step) if isinstance(obj, dict) else None
+    return obj
+
+
 def _other_fields(body: dict) -> dict:
-    """The fields of a classic protection answer that :data:`CLASSIC_FIELDS` does not list, as GitHub sent
-    them, by the object they are in (:data:`CLASSIC_TOP` for the answer itself). Empty when there are none."""
+    """The fields of a classic protection answer that the reader does not read, as GitHub sent them, by the
+    place they are in (:data:`CLASSIC_PLACES`). Empty when there are none.
+
+    That is: a field :data:`CLASSIC_FIELDS` does not list; a known field that should be an object and is
+    something else (``"lock_branch": true``), which the reader would otherwise record as not known and
+    pass over; a flag's ``enabled`` that is not true or false; and a field of an entry of
+    ``required_status_checks.checks`` other than its context and app, with every value the entries gave it."""
+    what = "the branch protection"
     out: dict = {}
+
+    def keep(place: str, name: str, value) -> None:
+        out.setdefault(place, {})[_clean(name, what)] = _json_safe(value, what)
+
     for where, known in CLASSIC_FIELDS.items():
-        obj = body
-        for step in where.split(".") if where else ():
-            obj = obj.get(step) if isinstance(obj, dict) else None
+        obj = _at(body, where)
         if not isinstance(obj, dict):
             continue
-        extra = {name: _json_safe(value, "the branch protection") for name, value in obj.items()
-                 if name not in known}
-        if extra:
-            out[where or CLASSIC_TOP] = {_clean(name, "the branch protection"): value
-                                         for name, value in sorted(extra.items())}
-    return out
+        for name, value in obj.items():
+            path = f"{where}.{name}" if where else name
+            if name not in known:
+                keep(where or CLASSIC_TOP, name, value)
+            elif path in CLASSIC_FIELDS and value is not None and not isinstance(value, dict):
+                keep(where or CLASSIC_TOP, name, value)
+            elif name == "enabled" and value is not None and not isinstance(value, bool):
+                keep(where, name, value)
+    checks = _at(body, CLASSIC_CHECKS)
+    if isinstance(checks, list):
+        extra: dict = {}
+        for item in checks:
+            for name, value in (item.items() if isinstance(item, dict) else ()):
+                if name not in CLASSIC_CHECK_FIELDS:
+                    extra.setdefault(name, []).append(_json_safe(value, what))
+        for name, values in extra.items():
+            keep(CLASSIC_CHECKS, name, sorted(values, key=lambda v: json.dumps(v, sort_keys=True)))
+    return {place: dict(sorted(fields.items())) for place, fields in sorted(out.items())}
 
 
 def _environment(item: dict) -> dict:
