@@ -26,7 +26,8 @@ def add_parser(sub) -> None:
                     "environments, the names of secrets, Actions permissions and policies) and compare them "
                     "with the workflow files in a clone. Only GET requests are sent. A rule reports a finding, "
                     "or \"cannot tell\" when a setting it needs was not read; every setting that could not be "
-                    "read is listed by name with the reason. See docs/settings-audit.md.")
+                    "read is listed by name with the reason. With --expected it also compares the settings with "
+                    "a committed snapshot and reports every difference. See docs/settings-audit.md.")
     x.add_argument("path", nargs="?", default=None,
                    help="a clone of the repository: its origin remote gives OWNER/REPO, and its workflow files "
                         "are what the settings are compared with (default: .)")
@@ -38,7 +39,8 @@ def add_parser(sub) -> None:
                    help="report from a saved snapshot instead of asking GitHub; no request is sent")
     x.add_argument("--snapshot-out", metavar="FILE", help="write the snapshot (JSON) to FILE")
     x.add_argument("--format", choices=("text", "json"), default="text",
-                   help="text for people (default), or json: the rules' results and the snapshot in one document")
+                   help="text for people (default), or json: the rules' results and the snapshot in one document "
+                        "(with --expected, the comparison with the committed snapshot under the key drift)")
     x.add_argument("--output", "-o", help="write the report to a file instead of standard output")
     x.add_argument("--no-token", action="store_true",
                    help="send no token even if one is set; reads what GitHub shows anyone about a public repository")
@@ -53,6 +55,11 @@ def add_parser(sub) -> None:
     x.add_argument("--fail-on-unread", action="store_true",
                    help="exit 1 if any setting that applies was not read in full")
     x.add_argument("--no-fixes", action="store_true", help="leave the fix out of each finding in the text report")
+    x.add_argument("--expected", metavar="FILE",
+                   help="a committed snapshot of the settings as they should be (written by --snapshot-out). "
+                        "Every difference from it is a finding. The command exits 1 if there is one, if something "
+                        "was read by one of the two and not by the other, or if nothing could be compared. Its "
+                        "branches are audited too")
     x.add_argument("--record", metavar="DIR",
                    help="also save GitHub's answers as received (no request headers, so no token) to "
                         "DIR/responses.json, for a bug report or a test")
@@ -162,6 +169,17 @@ def _plain(text: object, limit: int = 140) -> str:
     return plain(text, limit)
 
 
+def _same_file(one: str, other: str) -> bool:
+    """Whether two paths name one file: the same path, or (when both exist) the same file by any name,
+    a hard link or another letter case on a file system that ignores case included."""
+    try:
+        if Path(one).resolve() == Path(other).resolve():
+            return True
+        return os.path.exists(one) and os.path.exists(other) and os.path.samefile(one, other)
+    except (OSError, RuntimeError, ValueError):
+        return True  # cannot tell, so do not risk it
+
+
 def _emit(text: str, output: str | None) -> None:
     if output:
         Path(output).parent.mkdir(parents=True, exist_ok=True)
@@ -196,8 +214,9 @@ def cmd_audit(args) -> int:
         return EXIT_FAIL
 
 
-def _json(snap: dict, usage: dict, assessment: dict) -> str:
-    """The JSON output: the rules' results, what was compared, and the snapshot they rest on."""
+def _json(snap: dict, usage: dict, assessment: dict, drift_result: dict | None = None) -> str:
+    """The JSON output: the rules' results, what was compared, the comparison with a committed snapshot
+    (under `drift`, only with --expected), and the snapshot they rest on."""
     import json
 
     document = {"format": "obaaf-settings-audit/v0.1", "repository": snap["repository"],
@@ -206,24 +225,50 @@ def _json(snap: dict, usage: dict, assessment: dict) -> str:
                               "note": usage.get("note", ""), "config": usage["config"],
                               "config_error": usage["config_error"],
                               "files": [{"path": f["path"], "error": f["error"], "jobs": len(f["jobs"])}
-                                        for f in usage["files"]]},
-                "snapshot": snap}
+                                        for f in usage["files"]]}}
+    if drift_result is not None:
+        document["drift"] = drift_result
+    document["snapshot"] = snap
     return json.dumps(document, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
 
 
 def _run(args) -> int:
     from obaaf import audit
-    from obaaf.audit import report, rules, snapshot as snapshot_mod
+    from obaaf.audit import drift, report, rules, snapshot as snapshot_mod
     from obaaf.audit.settings import check_branches
 
+    expected = None
     try:
+        if args.expected is not None:
+            for flag, value in (("--snapshot-out", args.snapshot_out), ("--output", args.output)):
+                if value and _same_file(value, args.expected):
+                    # Writing there would replace the committed record with what it is being checked against.
+                    raise UsageError(f"{flag} names the same file as --expected")
+            # Read before anything is asked of GitHub: a file that cannot be used stops the command here,
+            # and its branches are audited along with any named on the command line.
+            try:
+                expected = snapshot_mod.load(args.expected)
+            except snapshot_mod.SnapshotError as exc:
+                raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+            try:
+                extra = drift.branches_to_read(expected)
+            except drift.DriftError as exc:
+                raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+            if args.from_snapshot is None:
+                args.branch = list(dict.fromkeys([*args.branch, *extra]))
+                if len(args.branch) > drift.MAX_EXPECTED_BRANCHES:
+                    raise UsageError(f"--expected: with the branches named on the command line, more than "
+                                     f"{drift.MAX_EXPECTED_BRANCHES} branches would be audited")
         if args.from_snapshot is not None:
             for flag, value in (("--no-token", args.no_token), ("--token-env", args.token_env),
                                 ("--api-url", args.api_url), ("--record", args.record), ("--branch", args.branch),
                                 ("--snapshot-out", args.snapshot_out)):
                 if value:
                     raise UsageError(f"{flag} has no meaning with --from-snapshot, which sends no request")
-            snap = snapshot_mod.load(args.from_snapshot)
+            try:
+                snap = snapshot_mod.load(args.from_snapshot)
+            except snapshot_mod.SnapshotError as exc:
+                raise UsageError(f"--from-snapshot {_plain(args.from_snapshot)}: {exc}") from None
             if args.repo and args.repo.lower() not in (snap["repository"].lower(),
                                                        str(snap.get("requested_as", "")).lower()):
                 raise UsageError(f"{_plain(args.from_snapshot)} is a snapshot of {_plain(snap['repository'])}, "
@@ -240,6 +285,12 @@ def _run(args) -> int:
                 check_branches(args.branch)
             except ValueError as exc:
                 raise UsageError(str(exc)) from None
+            if expected is not None:
+                # Checked again on what was read, below; this stops a wrong file before any request is sent.
+                try:
+                    drift.check_comparable(expected, {"api": api, "repository": repository})
+                except drift.DriftError as exc:
+                    raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
             token, token_from = _token(args, api, audit.DEFAULT_API)
             client = audit.Client(api=api, token=token)
             snap = audit.take(client, repository, tuple(args.branch))
@@ -259,8 +310,23 @@ def _run(args) -> int:
     usage = usage_for(args.path, snap["repository"], str(snap.get("requested_as", "")),
                       github_com=snap["api"] == audit.DEFAULT_API)
     assessment = rules.evaluate(snap, usage)
-    _emit(_json(snap, usage, assessment) if args.format == "json" else report.to_text(
-        snap, origin=origin, assessment=assessment, usage=usage, show_fixes=not args.no_fixes), args.output)
+    result = None
+    if expected is not None:
+        try:
+            drift.check_comparable(expected, snap)
+        except drift.DriftError as exc:
+            raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+        try:
+            result = drift.compare(expected, snap, expected_name=args.expected, live_name=args.from_snapshot or "")
+        except drift.DriftError as exc:  # it names the file at fault
+            raise UsageError(f"cannot compare: {exc}") from None
+    if args.format == "json":
+        text = _json(snap, usage, assessment, result)
+    else:
+        text = report.to_text(snap, origin=origin, assessment=assessment, usage=usage, show_fixes=not args.no_fixes)
+        if result is not None:
+            text = drift.to_text(result) + "\n" + text
+    _emit(text, args.output)
     if args.snapshot_out and args.from_snapshot is None:
         print(f"Snapshot written to {_plain(args.snapshot_out)}.", file=sys.stderr)
     if snap["settings"]["repository"]["status"] != "read":
@@ -285,5 +351,11 @@ def _run(args) -> int:
     if args.fail_on_unread and unread:
         print(f"error: {len(unread)} setting(s) were not read in full (--fail-on-unread): {', '.join(unread)}",
               file=sys.stderr)
+        code = EXIT_FAIL
+    if result is not None and drift.failed(result):
+        summary = result["summary"]
+        print(f"error: the settings drifted from {_plain(args.expected)} or could not all be compared: "
+              f"{summary['findings']} difference(s), {summary['parts_not_compared']} part(s) not compared, "
+              f"{summary['compared']} setting(s) compared (--expected).", file=sys.stderr)
         code = EXIT_FAIL
     return code
