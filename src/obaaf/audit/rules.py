@@ -4,8 +4,9 @@ Each rule compares a setting with something a workflow in the repository uses or
 a job names, the checks its jobs report, the events that start it, the secrets it reads. A setting no
 workflow depends on is not judged; this is not a checklist for an organisation.
 
-Two rules, OBAAF-SET-004 and OBAAF-SET-005, read settings only: what they are about, who can skip a
-branch's rules and whether its approvals can be given, is what every workflow's result feeds.
+Three rules, OBAAF-SET-004, OBAAF-SET-005 and OBAAF-SET-013, read settings only: what they are about, who
+can skip a branch's rules, whether its approvals can be given and whether a workflow can give one, is what
+every workflow's result feeds (and a workflow on any branch can ask for the token the third is about).
 
 A rule gives one of two kinds of result, each about one thing (an environment, a branch, a job):
 
@@ -292,10 +293,27 @@ class _Run:
 
 
 # ---------------------------------------------------------------- what a branch requires
+ACTIONS_OR_ANY = frozenset((None, ACTIONS_APP))
+
+
 def _branch_requirements(run: _Run, branch: str) -> dict:
     """The checks and approvals required on a branch, from rulesets and from classic protection, with
-    whether each list is known to be whole."""
-    out = {"checks": {}, "checks_whole": True, "approvals": None, "approvals_whole": True, "gaps": [],
+    whether each list is known to be whole.
+
+    Every requirement holds at once (GitHub aggregates rulesets and layers them with classic protection),
+    so one check name can be required from more than one app. ``apps`` keeps every app each name is
+    required from (None: from any). ``checks`` gives one app per name for the rules that ask whether a
+    workflow job can meet every requirement: an app that is not GitHub Actions if there is one, then
+    GitHub Actions, then None."""
+    out = _requirements(run, branch)
+    out["checks"] = {context: next((a for a in sorted(apps, key=str) if a not in ACTIONS_OR_ANY),
+                                   ACTIONS_APP if ACTIONS_APP in apps else None)
+                     for context, apps in out["apps"].items()}
+    return out
+
+
+def _requirements(run: _Run, branch: str) -> dict:
+    out = {"apps": {}, "checks_whole": True, "approvals": None, "approvals_whole": True, "gaps": [],
            "rulesets": {}, "from_public_view": False, "classic": None, "classic_unknown": False,
            "code_owner": False}
     rules, _ = run.got("branch_rules")
@@ -315,7 +333,7 @@ def _branch_requirements(run: _Run, branch: str) -> dict:
                     continue
                 for check in listed:
                     app = check.get("integration_id")
-                    out["checks"][check["context"]] = app if _is_int(app) else None
+                    out["apps"].setdefault(check["context"], set()).add(app if _is_int(app) else None)
             elif rule["type"] == "pull_request":
                 count = parameters.get("required_approving_review_count") if isinstance(parameters, dict) else None
                 if not _is_int(count) or count < 0:
@@ -334,7 +352,7 @@ def _branch_requirements(run: _Run, branch: str) -> dict:
                 apps = {c["context"]: c["app_id"] for c in checks["checks"] or []}
                 for context in set(checks["contexts"]) | set(apps):
                     app = apps.get(context)
-                    out["checks"].setdefault(context, app if _is_int(app) and app > 0 else None)
+                    out["apps"].setdefault(context, set()).add(app if _is_int(app) and app > 0 else None)
             if reviews["required"]:
                 count = reviews["required_approving_review_count"]
                 out["code_owner"] = out["code_owner"] or reviews["require_code_owner_reviews"] is True
@@ -357,7 +375,7 @@ def _branch_requirements(run: _Run, branch: str) -> dict:
         apps = {c["context"]: c["app_id"] for c in checks["checks"] or []}
         for context in set(checks["contexts"]) | set(apps):
             app = apps.get(context)
-            out["checks"].setdefault(context, app if _is_int(app) and app > 0 else None)
+            out["apps"].setdefault(context, set()).add(app if _is_int(app) and app > 0 else None)
     else:
         out["checks_whole"] = False
     out["approvals_whole"] = False
@@ -1058,6 +1076,8 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
+                if not (need["apps"][context] & ACTIONS_OR_ANY):
+                    continue  # required from another app only: what that app reports is not read (OBAAF-SET-006)
                 matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
@@ -1119,14 +1139,13 @@ def _check_rules(run: _Run, kind: str) -> None:
                     # Every check the job reports must be required: one of a matrix's checks, or one of a
                     # called workflow's, being required leaves the others free to fail.
                     compared += 1
-                    # A requirement tied to another app is not met by a check GitHub Actions reports.
-                    loose = [name for name in names if name not in required
-                             or required[name] not in (None, ACTIONS_APP)]
+                    # A requirement tied to another app alone is not one a failing Actions check holds up.
+                    loose = [name for name in names if not (need["apps"].get(name, set()) & ACTIONS_OR_ANY)]
                     if loose:
                         unrequired.append((file, job, loose, len(names)))
                     continue
-                verdicts = [_reports(job, context) for context, app in required.items()
-                            if app in (None, ACTIONS_APP)]
+                verdicts = [_reports(job, context) for context, apps in need["apps"].items()
+                            if apps & ACTIONS_OR_ANY]
                 if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
                     compared += 1
                     unrequired.append((file, job, None, None))
@@ -1152,9 +1171,12 @@ def _check_rules(run: _Run, kind: str) -> None:
                              "calls": f"reports the checks of the workflow it calls as {_q(name + ' / ...')}, "
                                       "none of which is"}.get(job["check"]["kind"],
                                                               f"reports the check {_q(name)}, which is not")
+                elsewhere = [n for n in (loose or []) if n in need["apps"]]
+                also = (f" {_names(_q(n) for n in elsewhere)} {'is' if len(elsewhere) == 1 else 'are'} required only "
+                        "from another app, which a failing GitHub Actions check does not hold up." if elsewhere else "")
                 run.finding(f"{subject}: job {_job_label(file, job)}", "medium",
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
-                            f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
+                            f"required ({_do(len(required), 'check', 'is', 'are')} required there).{also} A pull "
                             f"request can merge while the job is failing.{source}")
             if unsure:
                 run.cannot_tell(f"{subject}: jobs whose check names could not be written out",
@@ -1386,6 +1408,12 @@ def rule_013(run: _Run) -> None:
                 run.unread(subject, f"{lead[:-1]}, and how many approvals {_q(branch)} requires is not known",
                            *sorted(set(need["gaps"])))
             continue
+        if need["code_owner"] and count == 1 and not need["approvals_whole"]:
+            run.unread(subject, f"{lead[:-1]}, and {_q(branch)} requires at least 1 approval and a code owner's "
+                                "review; how many approvals its classic protection rule requires is not known, "
+                                "and two or more would let the workflow's approval count",
+                       *sorted(set(need["gaps"])))
+            continue
         if need["code_owner"] and count == 1:
             # The one approval must then come from a code owner where a file has one; a workflow is no code
             # owner. Whether every file has one (the CODEOWNERS file) is not read.
@@ -1418,7 +1446,7 @@ def rule_014(run: _Run) -> None:
                    "fork_pull_requests")
         return
     if public:
-        run.compared = "the approval rule for fork pull requests, and the runners the pull_request jobs name"
+        run.compared = "the approval rule for fork pull requests, and the runners the jobs name"
         policy = value["approval_policy"]
         if policy == "all_external_contributors":
             return
@@ -1441,13 +1469,14 @@ def rule_014(run: _Run) -> None:
         return
     private = value["private_repository"]
     kind = plain(repository["visibility"] or "private", 20)
+    article = "an" if kind[:1] in "aeiou" else "a"
     run.compared = f"what fork pull requests are sent in this {kind} repository"
     if not private["run_workflows_from_fork_pull_requests"]:
         return
     sent = [what for key, what in (("send_secrets_and_variables", "secrets and variables"),
                                    ("send_write_tokens_to_workflows", "a write token")) if private[key]]
     if sent:
-        run.finding(f"fork pull requests in a {kind} repository", "high",
+        run.finding(f"fork pull requests in {article} {kind} repository", "high",
                     f"Fork pull requests run workflows here and are sent {' and '.join(sent)}. A fork's pull "
                     "request runs its own copy of the workflow files, so it can read every secret it is sent, "
                     "whatever the jobs here do.")

@@ -132,6 +132,15 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str]]:
     return used, sorted(set(loose))
 
 
+def _runner(job: wf_mod.Job) -> str:
+    kind = job.runner_kind
+    if kind == "self-hosted":
+        sets = job.runner_label_sets() or [job.runs_on]
+        if not any(label.lower() == "self-hosted" for labels in sets for label in labels):
+            return "unknown"
+    return kind
+
+
 def _job(job: wf_mod.Job) -> dict:
     names = job.secret_names()
     passed = job.raw.get("secrets") if job.reusable else None
@@ -153,8 +162,9 @@ def _job(job: wf_mod.Job) -> dict:
         "permissions": _permissions(job),
         # Only the literal `true` counts: a job whose result GitHub always reports as a success.
         "advisory": job.raw.get("continue-on-error") is True,
-        # github-hosted, self-hosted, or unknown (a label of the repository's own, an expression).
-        "runner": None if job.reusable else job.runner_kind,
+        # github-hosted, self-hosted, or unknown (a label of the repository's own, an expression, a runner
+        # group alone: a group can hold larger GitHub-hosted runners).
+        "runner": None if job.reusable else _runner(job),
         "actions": used,
         "unpinned": loose,
     }

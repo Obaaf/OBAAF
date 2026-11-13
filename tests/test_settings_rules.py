@@ -1478,6 +1478,46 @@ class SecondReviewTest(unittest.TestCase):
         found = assess_files(self.require(("t (a)", 99), ("t (b)", 99)), matrix)
         self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 1)
 
+    # -- the fourth pass
+    def test_one_check_required_from_two_apps(self):
+        def second(app):
+            def change(body):
+                body.append({"type": "required_status_checks", "ruleset_source_type": "Repository",
+                             "ruleset_source": "example-studio/game", "ruleset_id": 73,
+                             "parameters": {"required_status_checks": [{"context": "test", "integration_id": app}]}})
+            return change
+        files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
+        for first, then in ((99, 15368), (15368, 99)):
+            entries = with_body(self.require(("test", first)), BRANCH_RULES, second(then))
+            found = assess_files(entries, files)
+            # Both requirements hold: the app's is not something the audit reads...
+            self.assertEqual(status(found, "OBAAF-SET-006"), "cannot-tell", (first, then))
+            # ...and the Actions one holds the job up, so its failure blocks a merge.
+            self.assertEqual(status(found, "OBAAF-SET-008"), "no-finding", (first, then))
+
+    def test_a_check_required_only_from_another_app_is_said_so(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
+        finding, = of(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008", "finding")
+        self.assertIn("required only from another app", finding["message"])
+        filtered = {"ci.yml": workflow("  pull_request:\n    paths: ['src/**']\n", job("test"))}
+        self.assertEqual(of(assess_files(self.require(("test", 99)), filtered), "OBAAF-SET-007"), [])
+
+    def test_one_approval_and_a_code_owner_with_classic_protection_unread(self):
+        approve = ActionsSettingsRulesTest.token_default(None, "read", True)
+
+        def owners(body):
+            next(r for r in body if r["type"] == "pull_request")["parameters"]["require_code_owner_review"] = True
+        entries = refused(with_body(approve, BRANCH_RULES, owners), f"{R}/branches/main/protection")
+        result, = of(assess_files(entries, {}), "OBAAF-SET-013")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("branch_protection", result["unread"])
+        self.assertIn("two or more would let the workflow's approval count", result["message"])
+
+    def test_a_runner_group_alone_does_not_show_a_self_hosted_runner(self):
+        files = {"ci.yml": workflow("  push:\n", "  build:\n    runs-on:\n      group: big-runners\n"
+                                                  "    steps:\n      - run: make\n")}
+        self.assertEqual(status(assess_files(ADMIN, files), "OBAAF-SET-014"), "cannot-tell")
+
     def test_any_self_hosted_job_shows_the_repository_has_a_runner_a_fork_can_name(self):
         files = {"ci.yml": workflow("  push:\n", "  build:\n    runs-on: [self-hosted, linux]\n    steps:\n      - run: make\n")}
         finding, = of(assess_files(ADMIN, files), "OBAAF-SET-014", "finding")
