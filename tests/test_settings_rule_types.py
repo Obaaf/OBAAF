@@ -409,7 +409,9 @@ class ClassicFieldsTest(unittest.TestCase):
                 (lambda b: b["allow_fork_syncing"].__setitem__("enabled", "yes"), "allow_fork_syncing", "enabled",
                  "yes"),
                 # null is "not known" in a snapshot: an `enabled` GitHub sent as null is not read as not locked.
-                (lambda b: b["lock_branch"].__setitem__("enabled", None), "lock_branch", "enabled", None)):
+                (lambda b: b["lock_branch"].__setitem__("enabled", None), "lock_branch", "enabled", None),
+                # A flag with no `enabled` at all, which the reader would also record as not known.
+                (lambda b: b.__setitem__("lock_branch", {}), "branch_protection", "lock_branch", {})):
             body = unrestricted(REFERENCE_CLASSIC)
             change(body)
             snap, _ = take(classic_only(ADMIN, body), token=TOKEN)

@@ -860,7 +860,7 @@ def _other_fields(body: dict) -> dict:
 
     That is: a field :data:`CLASSIC_FIELDS` does not list; a known field that should be an object and is
     something else (``"lock_branch": true``), which the reader would otherwise record as not known and
-    pass over; a flag's ``enabled`` that is not true or false (null included); and a field of an entry of
+    pass over; a flag's ``enabled`` that is not true or false (null included), or a flag with none; and a field of an entry of
     ``required_status_checks.checks`` other than its context and app, as a list of the context, app and value
     of each entry that has it."""
     what = "the branch protection"
@@ -872,6 +872,10 @@ def _other_fields(body: dict) -> dict:
     for where, known in CLASSIC_FIELDS.items():
         obj = _at(body, where)
         if not isinstance(obj, dict):
+            continue
+        if known == ("enabled",) and "enabled" not in obj:
+            # A flag sent with no `enabled` would be recorded as not known: kept whole, at the top.
+            keep(CLASSIC_TOP, where, obj)
             continue
         for name, value in obj.items():
             path = f"{where}.{name}" if where else name
