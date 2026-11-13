@@ -1,0 +1,76 @@
+# OBAAF settings drift (optional; docs/settings-audit.md, "Drift").
+#
+# A setting can change without any file in the repository changing: an environment opened to every
+# branch, a bypass added to a ruleset, a required check dropped. This workflow reads the repository's
+# GitHub settings once a day, read-only, and compares them with the snapshot committed at
+# .github/obaaf-settings.json. Any difference fails the run, and so does a setting the snapshot holds
+# that this run could not read: a check that could not look has not shown that nothing changed.
+#
+# Getting started, with no file written by hand:
+#   1. Copy this file to .github/workflows/ and pin setup-obaaf to an OBAAF release (obaaf check
+#      reports the placeholder until you do).
+#   2. Run it once from the Actions tab (workflow_dispatch). With no snapshot committed yet it fails on
+#      purpose and keeps what it read as the artifact obaaf-settings-live.
+#   3. Download obaaf-settings.json from that artifact, read it, and commit it as
+#      .github/obaaf-settings.json in a pull request. The next run compares against it.
+# Take the committed snapshot with the same token the job uses (this file uses the workflow's own
+# token), or the settings only the other token could read are reported as not compared.
+#
+# When a setting changes on purpose, commit a new snapshot the same way. Put .github/obaaf-settings.json
+# under code-owner review: whoever can change it decides what counts as drift.
+#
+# The snapshot holds what the job's token can read. With the workflow's token on a public repository
+# that is what anyone can see, plus how many accounts hold each role (counts, never names). Anyone who
+# can read the repository can read the job's log and the artifact; with a more capable token they would
+# also show the names (never the values) of secrets. GitHub turns off scheduled workflows in a public
+# repository after 60 days without activity.
+name: OBAAF settings drift
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/obaaf-settings.json
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the committed snapshot
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/obaaf-settings.json
+          sparse-checkout-cone-mode: false
+
+      - name: Set up OBAAF
+        uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
+
+      - name: Compare the settings with the committed snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p obaaf-settings-live
+          if [ ! -f .github/obaaf-settings.json ]; then
+            obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out obaaf-settings-live/obaaf-settings.json
+            echo "::error::No snapshot is committed at .github/obaaf-settings.json. Download obaaf-settings.json from this run's artifact obaaf-settings-live, read it, and commit it there in a pull request."
+            exit 1
+          fi
+          obaaf audit --repo "$GITHUB_REPOSITORY" --expected .github/obaaf-settings.json \
+            --snapshot-out obaaf-settings-live/obaaf-settings.json
+
+      - name: Keep what was read
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: obaaf-settings-live
+          path: obaaf-settings-live/
+          if-no-files-found: warn
+          retention-days: 7

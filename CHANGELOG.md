@@ -105,6 +105,18 @@ GitHub hands an action its inputs as environment variables named in upper case, 
 - `obaaf audit --from-snapshot FILE` reports from a saved snapshot with no network, after checking the file against a schema that covers every value. `--fail-on-unread` exits 1 when a setting that applies was not read in full. Reading nothing at all (repository not found, rate limited at the first request) exits 1, and so does any failure the command did not foresee.
 - Tested from recordings written by hand from the examples in GitHub's REST reference, and from two recordings of what GitHub itself answered a caller with no token, for this repository and for the first adopter's. Run against GitHub by a workflow in this repository, with the workflow's own token and with no token: the settings GitHub shows anyone were read, and the administrative ones were refused and reported as not read. It has not been run with a token that can read the administrative settings. See [docs/settings-audit.md](docs/settings-audit.md).
 
+### Settings drift
+
+A setting can change without any file changing, and every real incident in the first adopter's first two days was a setting. There was no way to notice one changing.
+
+- **`obaaf audit --expected FILE` compares the settings with a snapshot you committed** (written earlier by `--snapshot-out`) and reports every difference as a finding, `OBAAF-DRIFT-001`: one for each part that differs (a ruleset, an environment, a branch, a secret's name, a field), with each change listed as "was …, now …", "new" or "gone". The report begins with the comparison and is followed by the usual report. Exit 1 if anything differs.
+- **What could not be compared fails too.** A setting the committed snapshot holds and this run could not read (other access, a refusal, a rate limit, the last bypass actor of a ruleset removed) is "not compared", never "no drift", and exits 1; so does a comparison in which nothing was compared. A setting the committed snapshot did not read is listed as "not covered" and does not fail.
+- Lists are compared without regard to their order and values as JSON, so `true` is not `1` and `null` is not `false`. Only the `settings` part is compared.
+- The committed file is checked like `--from-snapshot`, and must also be of the repository audited and the same API address, may not give two rulesets, environments, policies or secrets one id or name, and may name at most 50 branches; otherwise exit 2. Its branches are audited along with the default one.
+- `--format json` with `--expected` prints one document, `obaaf-settings-drift/v0.1`, with every change and the live snapshot.
+- New optional template [`templates/github-actions/optional/obaaf-settings-drift.yml`](templates/github-actions/optional/obaaf-settings-drift.yml) runs the comparison daily with the workflow's own token; its first run keeps the snapshot to commit, so no file is written by hand. `obaaf templates install` does not install it. This repository runs it as `.github/workflows/settings-drift.yml`. See [docs/settings-audit.md](docs/settings-audit.md#drift).
+- Nothing changes for anyone who does not pass `--expected`.
+
 ### Release policy
 
 - This repository's own release policy now sets `agents.since` to the commit of release 0.3.0, the first release that passed the full `obaaf verify release` gate. Once this is on `main`, a release checks commits from OBAAF's agent lane (a record trailer, a record file, or the effect lane's identity) from that commit to the released one, and no longer over the whole history (D-025). There were none in the history up to 0.3.0. Commits written with an AI assistant and merged through ordinary review are not what this check counts. Nothing changes for adopters.

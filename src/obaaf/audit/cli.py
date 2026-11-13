@@ -24,8 +24,9 @@ def add_parser(sub) -> None:
         help="read a repository's GitHub settings (read-only) and record what was and was not read",
         description="Read the GitHub settings that workflows depend on: rulesets, branch protection, "
                     "environments, the names of secrets, Actions permissions and policies. Only GET requests "
-                    "are sent. Every setting that could not be read is listed by name with the reason. This "
-                    "version reads and records; it applies no rule yet. See docs/settings-audit.md.")
+                    "are sent. Every setting that could not be read is listed by name with the reason. With "
+                    "--expected it compares the settings with a committed snapshot and reports every difference. "
+                    "It applies no other rule yet. See docs/settings-audit.md.")
     x.add_argument("path", nargs="?", default=".",
                    help="a clone of the repository, used to find OWNER/REPO from its origin remote (default: .)")
     x.add_argument("--repo", metavar="OWNER/REPO", help="the repository to audit (default: from the clone's origin "
@@ -46,6 +47,10 @@ def add_parser(sub) -> None:
     x.add_argument("--api-url", metavar="URL", help="API address of a GitHub Enterprise Server (https; not tested)")
     x.add_argument("--fail-on-unread", action="store_true",
                    help="exit 1 if any setting that applies was not read in full")
+    x.add_argument("--expected", metavar="FILE",
+                   help="a committed snapshot of the settings as they should be (written by --snapshot-out). "
+                        "Every difference from it is a finding, and the command exits 1 if there is one, or if "
+                        "something the file holds could not be read now. Its branches are audited too")
     x.add_argument("--record", metavar="DIR",
                    help="also save GitHub's answers as received (no request headers, so no token) to "
                         "DIR/responses.json, for a bug report or a test")
@@ -138,10 +143,24 @@ def cmd_audit(args) -> int:
 
 def _run(args) -> int:
     from obaaf import audit
-    from obaaf.audit import report, snapshot as snapshot_mod
+    from obaaf.audit import drift, report, snapshot as snapshot_mod
     from obaaf.audit.settings import check_branches
 
+    expected = None
     try:
+        if args.expected is not None:
+            # Read before anything is asked of GitHub: a file that cannot be used stops the command here,
+            # and its branches are audited along with any named on the command line.
+            try:
+                expected = snapshot_mod.load(args.expected)
+            except snapshot_mod.SnapshotError as exc:
+                raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+            try:
+                extra = drift.branches_to_read(expected)
+            except drift.DriftError as exc:
+                raise UsageError(f"{_plain(args.expected)}: {exc}") from None
+            if args.from_snapshot is None:
+                args.branch = list(dict.fromkeys([*args.branch, *extra]))
         if args.from_snapshot is not None:
             for flag, value in (("--no-token", args.no_token), ("--token-env", args.token_env),
                                 ("--api-url", args.api_url), ("--record", args.record), ("--branch", args.branch),
@@ -181,16 +200,34 @@ def _run(args) -> int:
                 snapshot_mod.write(snap, args.snapshot_out)
     except (audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
         raise UsageError(str(exc)) from None
-    _emit(snapshot_mod.dumps(snap) if args.format == "json" else report.to_text(snap, origin=origin), args.output)
+    result = None
+    if expected is not None:
+        try:
+            drift.check_comparable(expected, snap)
+            result = drift.compare(expected, snap, expected_name=args.expected, live_name=args.from_snapshot or "")
+        except drift.DriftError as exc:
+            raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+    if result is not None:
+        _emit(drift.document(result, snap) if args.format == "json" else
+              drift.to_text(result) + "\n" + report.to_text(snap, origin=origin), args.output)
+    else:
+        _emit(snapshot_mod.dumps(snap) if args.format == "json" else report.to_text(snap, origin=origin), args.output)
     if args.snapshot_out and args.from_snapshot is None:
         print(f"Snapshot written to {_plain(args.snapshot_out)}.", file=sys.stderr)
     if snap["settings"]["repository"]["status"] != "read":
         # Reading nothing must not look like a pass.
         print(f"error: {report.why_unread(snap)}. Nothing was audited.", file=sys.stderr)
         return EXIT_FAIL
+    code = EXIT_OK
     unread = report.unread_keys(snap)
     if args.fail_on_unread and unread:
         print(f"error: {len(unread)} setting(s) were not read in full (--fail-on-unread): {', '.join(unread)}",
               file=sys.stderr)
-        return EXIT_FAIL
-    return EXIT_OK
+        code = EXIT_FAIL
+    if result is not None and drift.failed(result):
+        summary = result["summary"]
+        print(f"error: the settings drifted from {_plain(args.expected)} or could not all be compared: "
+              f"{summary['findings']} difference(s), {summary['parts_not_compared']} part(s) not compared, "
+              f"{summary['compared']} setting(s) compared (--expected).", file=sys.stderr)
+        code = EXIT_FAIL
+    return code
