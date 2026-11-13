@@ -1,6 +1,6 @@
 # The settings audit: `obaaf audit`
 
-*Status: first part, not in a release yet. The command reads a repository's GitHub settings and records what it read and what it could not. **It applies no rule yet**, so it reports no findings; the rules are the next slice of the [flagship plan](flagship.md) (2b.2). What has and has not been run against GitHub is listed [at the end](#what-has-been-run-and-what-has-not).*
+*Status: first part, not in a release yet. The command reads a repository's GitHub settings and records what it read and what it could not. **It applies no rule yet**; the rules are the next slice of the [flagship plan](flagship.md) (2b.2). The one finding it can report is [drift](#drift): a difference between the settings now and a snapshot you committed. What has and has not been run against GitHub is listed [at the end](#what-has-been-run-and-what-has-not).*
 
 `obaaf check` reads workflow files. Some of what decides whether a workflow is safe is not in any file: which branches may use an environment, who may bypass a ruleset, which checks are required, which events GitHub lets start a workflow. In the first adopter's first two days every real incident was one of those settings, and `obaaf check` saw none of them.
 
@@ -72,8 +72,8 @@ Exit codes:
 | Code | When |
 | --- | --- |
 | 0 | The audit ran. Some settings may not have been read; they are listed first in the report |
-| 1 | Not even the repository could be read; or `--fail-on-unread` and something was not read in full; or an output file could not be written; or the command failed in a way it did not foresee (it says so, and says that nothing was established) |
-| 2 | A usage error, or a snapshot file that cannot be used |
+| 1 | Not even the repository could be read; or `--fail-on-unread` and something was not read in full; or `--expected` and the settings differ from that snapshot, or something it holds could not be read now, or nothing could be compared (see [Drift](#drift)); or an output file could not be written; or the command failed in a way it did not foresee (it says so, and says that nothing was established) |
+| 2 | A usage error, or a snapshot file that cannot be used (also the one given to `--expected`, or one of another repository or server) |
 
 ### In a workflow
 
@@ -184,11 +184,109 @@ The `settings` part depends only on the settings and on what the caller may see:
 
 What is in it that you might not want to publish: the names of secrets (never their values; GitHub does not return them), and the logins and team names that the settings themselves name: environment reviewers, and the people, teams and apps on classic branch protection's push and review-bypass lists. For a public repository the environment reviewers are already public; the secret names and the classic protection lists are not. There is no token in it, and no list of collaborators, only how many hold each role.
 
-A snapshot given to `--from-snapshot` is checked before it is used, because a committed snapshot can be edited by anyone who can open a pull request: it must be under 20 MB, strict JSON with no key given twice, not deeply nested, in this format, and every setting must be present with a value of the documented shape. Only three settings can be marked as not applying (the bypass list, environment secrets and organisation secrets); a file that says so of any other is refused. A file that fails is refused (exit 2). A file that passes still says only what it says; drift detection (slice 2b.3) is what compares one with live settings. The format is a draft and may change before it is released.
+A snapshot given to `--from-snapshot` is checked before it is used, because a committed snapshot can be edited by anyone who can open a pull request: it must be under 20 MB, strict JSON with no key given twice, not deeply nested, in this format, and every setting must be present with a value of the documented shape. Only three settings can be marked as not applying (the bypass list, environment secrets and organisation secrets); a file that says so of any other is refused. A file that fails is refused (exit 2). A file that passes still says only what it says; [drift](#drift) is what compares one with live settings. The format is a draft and may change before it is released.
 
 ### Recordings
 
 `--record DIR` writes `DIR/responses.json`: each path requested, the status, a few response headers, and the body GitHub sent. It exists so that a wrong reading can be reported and turned into a test. It holds more than a snapshot (GitHub's full answers, including the logins of collaborators when that list was read), so look before sharing one. Request headers are not in it.
+
+## Drift
+
+A setting can change without any file in the repository changing: someone opens an environment to every branch, adds a bypass to a ruleset, drops a required check. In the first adopter's first two days, every real incident was a setting changed or set that way. Drift detection compares the settings as they are with a snapshot you committed when you last agreed with them, and reports every difference.
+
+```bash
+obaaf audit --snapshot-out .github/obaaf-settings.json    # once: commit this file in a reviewed pull request
+obaaf audit --expected .github/obaaf-settings.json        # later: exit 1 if anything differs
+```
+
+`--expected FILE` takes a snapshot written by `--snapshot-out`. The settings are read as usual (or taken from `--from-snapshot`, to compare two files with no network), the branches the file covers are audited as well as the default one, and the report begins with the comparison, followed by the usual report of what was read.
+
+This is what it printed for a copy of the first adopter's public settings, read with no token on 2026-11-12 (the recording `live-expectrail-no-token`), in which one environment had been opened to every branch, one approval was required where none had been, and one of the eleven required checks had been dropped (the list of what is not covered is shortened here):
+
+```text
+Settings drift of Expectrail/Expectrail
+Expected: the snapshot expected.json, taken 2026-11-12 01:00 UTC without a token.
+Now: the snapshot now.json, taken 2026-11-12 01:00 UTC without a token.
+Branches: main
+
+DRIFT: 2 part(s) of 2 setting(s) differ from the expected snapshot. Each is a finding (OBAAF-DRIFT-001).
+  Rulesets and their rules
+    ruleset 26914817 "Protect main"
+      rules[pull_request].parameters.required_approving_review_count: was 0, now 1
+      rules[required_status_checks].parameters.required_status_checks[test]: gone; the expected snapshot has {"context": "test", "integration_id": 15368}
+  Environments: reviewers and which branches may deploy
+    environment "main-only"
+      branch_policies: gone; the expected snapshot has [{"name": "main", "type": "branch"}]
+      deployment_branches: was "selected", now "any"
+  If the change was meant, take a new snapshot with the same access and commit it in a reviewed pull request (obaaf audit --snapshot-out FILE). If it was not, put the setting back.
+
+NOT COVERED: 10. Neither snapshot read these in full, so they were not compared, or only what both read was:
+  Who may bypass each ruleset
+  Classic branch protection
+  ...
+
+15 settings: 5 compared (3 match, 2 differ), 0 not compared, 10 not covered; 13 part(s) compared. 2 finding(s).
+```
+
+(In a real change of the ruleset, "Rules in force on each audited branch" would differ too; this example changed the rulesets only.)
+
+### What counts
+
+Each setting, and each part of one (a ruleset, an environment, a branch, a secret's name, a field), comes out one of four ways:
+
+| Outcome | When | Fails the check |
+| --- | --- | --- |
+| **Matches** | Both snapshots read it and the values are the same | No |
+| **Differs** | Both read it and something is not the same. Each part that differs is one finding, `OBAAF-DRIFT-001`, with every change in it listed | Yes |
+| **Not compared** | One snapshot read it and the other did not. Whether it changed is not known | Yes |
+| **Not covered** | Neither snapshot read it in full, so there is nothing to compare, or only what both read was compared | No; it is listed |
+
+"Not compared" works in both directions on purpose. A part the committed snapshot holds and this run could not read has not been checked. A part this run read and the committed snapshot did not is not checked either: GitHub may have left it out when the snapshot was taken (an error, or a bypass list it never shows as empty), or someone may have marked it as not read in the file; either way a change in it would otherwise go unreported. The cure is the same: take the snapshot again, with the token the check uses.
+
+The check also fails when no setting was compared at all. A difference in either direction counts, tighter as well as looser: the committed snapshot is the reviewed statement of what the settings are, and a setting that no longer matches it means one of the two is wrong. A difference has no severity and cannot be accepted with an owner and an expiry date the way a finding of `obaaf check` can; it is resolved by putting the setting back or by committing a new snapshot.
+
+How values are compared:
+
+- Only the `settings` part of a snapshot. The list of branches decides which branches each side audited. Who read it, when, and which requests were sent differ on every run and are not compared.
+- **Lists are compared without regard to their order.** The snapshot keeps GitHub's order inside a rule's parameters and a ruleset's conditions, and no list in a snapshot means anything by its order. A list of objects is matched element by element by a field that names each one (an id, a name, a check's context, a rule's type), so a change is shown where it is; a list with no such field is compared as a multiset, so a duplicate counts.
+- **Values are compared as JSON**, so `true` is not `1`, `1` is not `1.0`, and `null` (not known) is not `false` or an empty list.
+- A setting that did not apply and now does (or the reverse) is a difference, as well as whatever parts it now has.
+- A branch only one side audited (one named with `--branch` that the committed file does not cover, or a new default branch) is not compared, never "new".
+- An environment both sides read only in part (its branch and tag patterns failed to load both times) has the rest of what was read compared, and a difference there counts; it is also listed as not covered, for the part neither read.
+
+When a part is "not compared", in practice:
+
+- **The two were read with different access.** Take the committed snapshot with the same token the scheduled job will use. A snapshot taken with an administrator's token, compared by a job that has only the workflow's token, reports every administrative setting as not compared; a snapshot taken with no token, compared by a job with the workflow's token, reports the collaborator count as not compared.
+- **GitHub refused, rate-limited or failed** for something one side holds, now or when the snapshot was taken.
+- **A ruleset's bypass list changed between empty and not empty.** GitHub's empty bypass list is never believed (see [the bypass list](#the-bypass-list)), so an empty list is recorded as not read: adding the first bypass actor, or removing the last, shows as "not compared". Check the ruleset in the repository's settings, then commit a new snapshot.
+
+### What it can watch
+
+Only what the token can read. With the workflow's own token, on a public repository, that is the repository, its rulesets and their rules, the rules in force on each audited branch, the public view of each branch (whether GitHub calls it protected, and the required checks a classic protection rule shows), the environments with their reviewers and branch rules, and how many accounts hold each role. **The bypass list of a ruleset, classic branch protection (its required reviews, whether administrators are held to it, force pushes and deletions), the names of secrets, the Actions permissions and policies, the default token permissions and the approval rule for fork pull requests are not readable with that token, so a scheduled job that uses it never watches them**: they stay "not covered". To watch them the job needs a token that can read them (a fine-grained token or a GitHub App with the read permissions in [the table above](#what-it-reads), kept in an environment limited to the default branch), and the bypass list and Actions policies need more than read access, which OBAAF never asks for.
+
+The collaborator count is the number of accounts GitHub lists with access to the repository. Going by GitHub's reference (not tried), on an organisation's repository with a base permission that list includes every member of the organisation, so a member joining or leaving the organisation is a difference.
+
+### The committed file
+
+The file is read the way `--from-snapshot` reads one (size, strict JSON, the whole format, no number too large to be finite), and more is checked, because anyone who can open a pull request can change it: it must be of the repository being audited and read from the same API address, checked before any request is sent and again on what was read; no two rulesets, policies, environments or secrets in it may share an id or a name, which the schema does not forbid and which would hide one behind the other; the branch data it holds must be for exactly the branches it lists, as the reader writes it; and it may name at most 50 branches, each a plain branch name. A file that fails any of these is refused (exit 2) and nothing is compared. `--snapshot-out` and `--output` may not name the same file as `--expected`, so the record cannot be overwritten with what it is checked against. After GitHub renames the repository, take a new snapshot: the old one is refused as another repository's.
+
+Whoever can change the file decides what counts as drift: a pull request that edits a value in it to match a weakened setting makes the difference disappear, and one that removes a branch from its list stops that branch from being audited. A part marked as not read in the file does not hide a change, as above. Review changes to the file like changes to a workflow, under a code owner.
+
+### On a schedule
+
+[`templates/github-actions/optional/obaaf-settings-drift.yml`](../templates/github-actions/optional/obaaf-settings-drift.yml) runs the comparison once a day and when the committed snapshot changes in a pull request, with the workflow's own read-only token. It is not installed by `obaaf templates install`, because it fails until a snapshot is committed. To start, with no file written by hand:
+
+1. Copy it to `.github/workflows/` and pin `setup-obaaf` to an OBAAF release (`obaaf check` reports the placeholder until you do).
+2. Run it once from the Actions tab. With no snapshot committed it fails on purpose and keeps what it read as the artifact `obaaf-settings-live`.
+3. Download `obaaf-settings.json` from that artifact, read it (above all, whether anything you expected to be read is listed as not read), and commit it as `.github/obaaf-settings.json` in a pull request. That pull request runs the comparison, which shows whether the file matches the live settings. It is not a safeguard against a hostile change: a pull request runs its own copy of the workflow. Code-owner review is.
+
+The template also asks for `actions: read`, because GitHub's reference names the Actions permission for reading environments; that matters on a private repository and has not been tried on one. A report and an artifact of a public repository can be read by anyone who can read the repository. With the workflow's token the snapshot holds what anyone can see plus how many accounts hold each role; with a token that can read more, it also holds the names (never the values) of secrets. GitHub turns off scheduled workflows in a public repository after 60 days without activity.
+
+[`.github/workflows/settings-drift.yml`](../.github/workflows/settings-drift.yml) is this repository's own use of it, against [`.github/obaaf-settings.json`](../.github/obaaf-settings.json), which is what its first run read on 2026-11-13 with the workflow's token. This repository's `main` is protected by a classic protection rule and no ruleset, so its own job watches the required checks that rule shows publicly and not the rest of the rule.
+
+The template needs an OBAAF that has `obaaf audit --expected`. No release has it yet (0.3.0 does not); until one does, it has to be pinned to a commit that has it.
+
+With `--format json` and `--expected` the output is one document, `obaaf-settings-drift/v0.1`: the summary, each difference with every change (`path`, `change`, and the `expected` and `live` values), what was not compared and what was not covered, with the reasons, and the live snapshot under `snapshot`. The text report shows the first 20 changes of a part; the JSON has them all.
 
 ## What it does not read
 

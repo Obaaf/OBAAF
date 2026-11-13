@@ -1,0 +1,298 @@
+{
+  "format": "obaaf-settings-snapshot/v0.1",
+  "repository": "Obaaf/OBAAF",
+  "api": "https://api.github.com",
+  "api_version": "2026-03-10",
+  "taken_at": "2026-11-13T03:22:04Z",
+  "tool": "obaaf 0.4.0.dev0",
+  "viewer": {
+    "authenticated": true,
+    "repository_permissions": {
+      "admin": false,
+      "maintain": false,
+      "pull": false,
+      "push": false,
+      "triage": false
+    }
+  },
+  "branches": [
+    "main"
+  ],
+  "settings": {
+    "repository": {
+      "status": "read",
+      "value": {
+        "full_name": "Obaaf/OBAAF",
+        "visibility": "public",
+        "default_branch": "main",
+        "owner": "Obaaf",
+        "owner_type": "Organization",
+        "fork": false,
+        "archived": false
+      }
+    },
+    "rulesets": {
+      "status": "read",
+      "value": []
+    },
+    "ruleset_bypass_actors": {
+      "status": "not_applicable",
+      "reason": "no ruleset applies to this repository"
+    },
+    "branch_rules": {
+      "status": "read",
+      "value": {
+        "main": []
+      }
+    },
+    "branches": {
+      "status": "read",
+      "value": {
+        "main": {
+          "protected": true,
+          "public_protection": {
+            "enabled": true,
+            "required_status_checks": {
+              "strict": null,
+              "enforcement_level": "everyone",
+              "contexts": [
+                "Build resource site",
+                "actionlint",
+                "package",
+                "setup-action (macos-latest)",
+                "setup-action (ubuntu-latest)",
+                "setup-action (windows-latest)",
+                "test (3.10)",
+                "test (3.13)"
+              ],
+              "checks": [
+                {
+                  "context": "Build resource site",
+                  "app_id": 15368
+                },
+                {
+                  "context": "actionlint",
+                  "app_id": 15368
+                },
+                {
+                  "context": "package",
+                  "app_id": 15368
+                },
+                {
+                  "context": "setup-action (macos-latest)",
+                  "app_id": 15368
+                },
+                {
+                  "context": "setup-action (ubuntu-latest)",
+                  "app_id": 15368
+                },
+                {
+                  "context": "setup-action (windows-latest)",
+                  "app_id": 15368
+                },
+                {
+                  "context": "test (3.10)",
+                  "app_id": 15368
+                },
+                {
+                  "context": "test (3.13)",
+                  "app_id": 15368
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "branch_protection": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Administration\" repository permission (read)",
+      "accepted_permissions": "administration=read"
+    },
+    "environments": {
+      "status": "read",
+      "value": [
+        {
+          "name": "github-pages",
+          "deployment_branches": "selected",
+          "wait_timer": 0,
+          "reviewers": [],
+          "prevent_self_review": null,
+          "other_protection_rules": [],
+          "can_admins_bypass": true,
+          "branch_policies": [
+            {
+              "name": "main",
+              "type": "branch"
+            }
+          ]
+        },
+        {
+          "name": "pypi",
+          "deployment_branches": "selected",
+          "wait_timer": 0,
+          "reviewers": [
+            {
+              "type": "User",
+              "name": "FehintolaObafemi",
+              "id": 22969702
+            },
+            {
+              "type": "User",
+              "name": "Ofonna-N",
+              "id": 108894366
+            },
+            {
+              "type": "User",
+              "name": "seanudeke",
+              "id": 55066947
+            }
+          ],
+          "prevent_self_review": true,
+          "other_protection_rules": [],
+          "can_admins_bypass": false,
+          "branch_policies": [
+            {
+              "name": "v*",
+              "type": "tag"
+            }
+          ]
+        }
+      ]
+    },
+    "environment_secrets": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "none of 2 could be read; one of them: this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Environments\" repository permission (read)",
+      "accepted_permissions": "environments=read"
+    },
+    "repository_secrets": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Secrets\" repository permission (read)",
+      "accepted_permissions": "secrets=read"
+    },
+    "organization_secrets": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Secrets\" repository permission (read)",
+      "accepted_permissions": "secrets=read"
+    },
+    "actions_permissions": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Administration\" repository permission (read)",
+      "accepted_permissions": "administration=read"
+    },
+    "workflow_permissions": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Administration\" repository permission (read)",
+      "accepted_permissions": "administration=read"
+    },
+    "fork_pull_requests": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Administration\" repository permission (read)",
+      "accepted_permissions": "administration=read"
+    },
+    "actions_policies": {
+      "status": "unread",
+      "reason_code": "forbidden",
+      "reason": "this caller is not allowed to read it (HTTP 403); GitHub said \"Resource not accessible by integration\"",
+      "needs": "\"Administration\" repository permission (write)",
+      "accepted_permissions": "administration=write"
+    },
+    "collaborators": {
+      "status": "read",
+      "value": {
+        "total": 3,
+        "by_role": {
+          "admin": 3,
+          "maintain": 0,
+          "write": 0,
+          "triage": 0,
+          "read": 0
+        }
+      }
+    }
+  },
+  "requests": [
+    {
+      "path": "/repos/Obaaf/OBAAF",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/rulesets?includes_parents=true&per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/rules/branches/main?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/branches/main",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/branches/main/protection",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/github-pages/deployment-branch-policies?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/pypi/deployment-branch-policies?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/github-pages/secrets?per_page=100",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/pypi/secrets?per_page=100",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/secrets?per_page=100",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/organization-secrets?per_page=100",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/permissions",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/permissions/workflow",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/permissions/fork-pr-contributor-approval",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/actions/policies?has_parents=true&per_page=100",
+      "status": 403
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/collaborators?affiliation=all&per_page=100",
+      "status": 200
+    }
+  ]
+}
