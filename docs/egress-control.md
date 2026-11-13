@@ -1,148 +1,143 @@
-# Egress control for agent jobs: design
+# Egress control for agent jobs
 
-*Design note for flagship slice 2c.1, written 2026-11-12. Nothing described here is built yet. **Nothing here was run**: the session that wrote it had no Docker daemon, so every statement about another tool comes from that tool's own pages, read on 2026-11-12 and listed under [Sources](#sources). Where those pages disagree with each other the note says so and does not pick one. Running it is the first task of slice 2c.2.*
+*Built in flagship slice 2c.2 (2026-11-13) as the action [`actions/egress`](../actions/egress/action.yml). What this page says holds is what the escape tests in [`.github/workflows/egress-escape-tests.yml`](../.github/workflows/egress-escape-tests.yml) showed on GitHub-hosted `ubuntu-24.04` runners, in the runs it links. Statements about the Agent Workflow Firewall's internals come from its source at v0.29.13 (commit `62b7e8f`) or its pages, and say which. Slice 2c.1 wrote the design on 2026-11-12 without running anything; where running it settled a question, the answer is under [What running it settled](#what-running-it-settled).*
 
-## What is wanted
+## In short
 
-An action in this repository that runs one command with its network access limited to a declared list of hosts, blocks and logs everything else, and cannot be switched off by the command it confines. It has to work on GitHub-hosted Linux runners, where every step can use `sudo` without a password. OBAAF's own CI has to try to get out of it and fail.
+`actions/egress` runs one command with its network limited to a list of host names. Everything else the command tries is refused, and the refused names are listed in the job summary. It runs the command under GitHub's Agent Workflow Firewall (AWF, `github/gh-aw-firewall`, MIT), pinned by OBAAF, in AWF's default mode: the command's container sits on a Docker network with no route out, and a Squid proxy that allows only the listed names is its one way out. The command runs with no privileges (`sudo` refuses), sees none of the runner's environment except variables the workflow names, and can write only to a scratch copy of the workspace, its own scratch home and scratch `TMPDIR`. The runner's own workspace, home directory, `/tmp` and file-command files are out of its reach.
 
-The reason is rule OBAAF-GHA-020, "Agent job without an egress restriction". Today an adopter has no fix for it that OBAAF can check, and the one adopter has accepted it 19 times in a baseline.
+On a hosted runner, OBAAF's CI tried 22 ways out from inside it. Each was first tried outside the sandbox, where all but the two IPv6 ones got out; inside, a packet capture on the runner's external interface saw none of them leave, and a request to the listed host worked. The two IPv6 attempts could not be tested, because the runner itself had no IPv6 route.
 
-## The decision
+It does not make an agent safe to hold a secret. Anything it can send to a listed host it can send there; **a name it asks the proxy for leaves the runner in a DNS query even when the proxy refuses it**, which is a channel for data (shown in the tests, below); and it confines one command, not the job. Read [What it blocks, and what it does not](#what-it-blocks-and-what-it-does-not) before relying on it.
 
-The action pins and wraps GitHub's Agent Workflow Firewall (AWF, `github/gh-aw-firewall`, MIT). OBAAF does not write a firewall. This is decision F-20 in the [flagship plan](flagship.md), confirmed by the maintainer on 2026-11-11.
+## Using it
 
-Whether OBAAF needs a mechanism of its own instead depends on two things the plan names: whether AWF can be pinned and verified, and whether it holds against OBAAF's escape tests.
+```yaml
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@<commit> # pin it
+        with:
+          persist-credentials: false   # the action refuses a workspace whose .git/config holds a token
+      - id: agent
+        uses: Obaaf/OBAAF/actions/egress@<commit> # pin it to a commit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          allow: api.anthropic.com
+          env: ANTHROPIC_API_KEY
+          run: ./scripts/run-agent.sh
+      - uses: actions/upload-artifact@<commit>
+        with:
+          name: agent-output
+          path: ${{ steps.agent.outputs.workspace }}
+```
 
-- **Pinned and verified: yes, by its documentation.** The setup action is used at a full commit; it takes a `version` input, and its `image-tag` output can carry a digest for each container image, to be passed to `awf --image-tag`. The images are signed with cosign (keyless, GitHub's OIDC issuer). The setup action says it checks the release's signed identity, its artifact attestations and its checksums before installing. Two weak points: the documented cosign identity is a pattern for the whole repository and not one workflow, and the only check of a release asset documented for doing by hand is a checksum file, which is not a signature.
-- **Holds against escape tests: not known.** OBAAF has not run it. AWF's repository has no published security advisory ("There aren't any published security advisories", its security page). Its own automated reports say that a daily review on 2026-07-27 found no critical or high weakness and three medium ones, and that an escape test on 2026-08-04 blocked all 13 techniques it tried, 122 in all runs so far. Those reports are written by agents in GitHub's repositories and name no AWF version. They are a reason to start from AWF, not evidence that OBAAF's action works.
+- **`allow`** (required): host names, separated by commas, spaces or new lines. A name covers its subdomains, so `github.com` allows every account and repository on GitHub. Plain names only: an entry with `*`, an address, a port, a scheme, a path, a trailing dot or a single label is refused before anything runs.
+- **`run`** (required): the command, run with `bash -e` in a copy of the workspace.
+- **`env`**: names of variables from the step's `env` to pass in. Nothing else of the runner's environment reaches the command, `GITHUB_TOKEN` and `ACTIONS_RUNTIME_TOKEN` included. Variables that change how a shell, a loader or the network behaves (`PATH`, `HOME`, `LD_PRELOAD`, `BASH_ENV`, the proxy variables, `GIT_SSH_COMMAND` and others) and the runner's file-command variables are refused, as are names starting `AWF_`, `ACTIONS_`, `SQUID_` or `OBAAF_EGRESS_`.
+- **Outputs:** `workspace` (the copy the command ran in and could change), `scratch`, `log-dir` (the proxy's log, outside the scratch directory), `denied` (names the proxy refused) and `exit-code`. The step fails with the command's exit status. It fails with status 3, and the command does not run, if the probe described below gets out, if the sandbox does not start, or if the runner's file-command files changed.
+- **Treat what the command wrote as data.** Upload it, diff it, read it; do not run or load anything from `steps.<id>.outputs.workspace` or `scratch` in a later step of the same job, because later steps have the full network. Slice 2c.3 will make the checker read this.
 
-So nothing has failed, and nothing has been tried. Slice 2c.2 tries it. OBAAF designs its own mechanism, or recommends a control that covers the whole job instead, in three cases: a test in the "must block" list below fails on the pinned version and cannot be closed by how the wrapper calls AWF; the verification above cannot be made to work in CI; or the open question under [What the command leaves behind](#what-the-command-leaves-behind) has no answer.
+Linux x64 runners with Docker only. It downloads AWF's binary from GitHub's release page and its images from `ghcr.io`, so those must be reachable from the runner. A run takes about 40 seconds longer than the command, most of it pulling the images.
 
-## How AWF confines a command
+**Not tried:** an agent that is itself an action (it cannot be wrapped; see below), a real model key or model call (see the API proxy under [What it blocks, and what it does not](#what-it-blocks-and-what-it-does-not)), self-hosted or larger runners, `ubuntu-22.04`, a repository larger than OBAAF's.
 
-**AWF's pages disagree about how it works by default, and which is true of the version OBAAF pins is not known.**
+## What it blocks, and what it does not
 
-- The documentation site (security architecture, command reference) describes `sudo awf` with firewall rules, as set out below.
-- The notes for release v0.28.71 call that mode `--legacy-security` and give the default as "strict security (network-isolation + api-proxy)", a mode that "Requires no sudo/NET_ADMIN". The notes say only that it enforces egress "via Docker network topology (internal network + dual-homed proxy) instead of iptables". They do not say what stops the command from changing that.
+Each "blocked" line is an attempt in the escape tests that got out when made outside the sandbox and was not seen leaving the runner when made inside it, judged from a packet capture on the runner's external interface. The confined command's own exit statuses are recorded and decide nothing. The runs: [43425789742](https://github.com/Obaaf/OBAAF/actions/runs/43425789742) (the head this page was written from) and [43425073087](https://github.com/Obaaf/OBAAF/actions/runs/43425073087) (the commit before, same verdicts); a later head's run is linked from the pull request that merged this.
 
-The two keep a command in by different means, so slice 2c.2 settles this before anything else. What follows is the mode the documentation site describes.
+**Blocked (tested):**
 
-- `sudo awf --allow-domains a.example,b.example -- <command>` runs the command in a container on a Docker network of its own. A second container runs a Squid proxy. Rules in the agent container send ports 80 and 443 to Squid, which allows a request by the host name in the TLS handshake or the `Host` header, and answers 403 otherwise. Every other protocol is dropped, not filtered. Rules in the host's `DOCKER-USER` chain drop whatever else leaves that network.
-- DNS goes only to the configured resolvers. The command reference says these are found from the host's own resolvers, with 8.8.8.8 and 8.8.4.4 used if that fails; the security architecture page gives the two Google addresses as the default.
-- The command runs as the calling user, not root, inside a `chroot` of the host's filesystem.
-- A name on the list allows all its subdomains. With no list, nothing is allowed.
+| Attempt | How |
+| --- | --- |
+| An unlisted host over HTTPS and over HTTP | `curl https://example.org`, `curl http://example.net`, through the proxy the sandbox sets |
+| The same, ignoring the proxy | `NO_PROXY='*'`, `curl --noproxy '*'` |
+| A proxy of one's own | `HTTPS_PROXY=http://208.67.220.123:443` |
+| A direct address, through the proxy and not | `https://1.1.1.1`, `https://1.0.0.1`, a TCP connection to 208.67.220.220:8443 |
+| Another DNS resolver, over UDP and over TCP | `dig @9.9.9.9`, `dig +tcp @149.112.112.112` |
+| DNS over HTTPS, by name and by address | `https://cloudflare-dns.com/dns-query`, `https://1.1.1.3/dns-query` |
+| Two DNS queries in one TCP segment | to 149.112.112.10:53 |
+| Raw socket calls | UDP `sendto` and `sendmsg` to 1.1.1.2 and 1.0.0.2 |
+| A TLS handshake with no server name | `openssl s_client -noservername -connect 149.112.112.11:443` |
+| A child process | Python started from bash, connecting to 9.9.9.11 |
+| A process that outlives the command | started with `setsid nohup`, firing 20 seconds later; the capture ran 35 seconds after the step |
+| `sudo`, then a connection; `sudo` to flush the firewall rules, then a connection | `sudo` refuses: the "no new privileges" flag is set |
+| The Docker socket | AWF binds `/dev/null` over `/var/run/docker.sock` and `/run/docker.sock`; `docker run --network host` fails |
+| Changing what later steps see | writing `~/.local/bin/git`, `~/.config/git/config`, `~/.gitconfig`, `/tmp`, `RUNNER_TEMP`, the real workspace and its `.git/hooks`, and the runner's file-command files all failed (the places are absent or read-only inside); `::set-env` and `::add-path` printed by the command did not take effect, with `ACTIONS_ALLOW_UNSECURE_COMMANDS` set so that they would have without the action |
 
-**How the command is kept from undoing it, in that mode.** The rules are in two places the command should not be able to change. The container's own rules need `CAP_NET_ADMIN`, which the security architecture page says is dropped before the command starts; AWF's review of 2026-07-27 says the agent container never has it, and that `NET_RAW` and `SYS_ADMIN` are dropped too. The host's rules need root on the host, and the page says the Docker socket is hidden from the command. About `sudo` inside the sandbox no page says anything. The escape report says `no-new-privs=1` is set inside; if so, `sudo` should gain nothing. That is an inference, and it was not run. It is the first escape test.
+**Not testable on a hosted runner:** IPv6. The runner had no IPv6 route out, so the same attempts outside the sandbox did not get out either (a direct connection to `[2606:4700:4700::1111]:443`, `dig -6 @2620:fe::fe`). Inside, the container has an IPv6 address only on its loopback interface and no IPv6 route. That is evidence, not a test; on a runner with IPv6 it would need testing.
 
-In that mode AWF itself needs `sudo` on the runner to set the rules. That is not a weakness in the confinement: the step that starts AWF is written by the workflow's author.
+**Not blocked, by design or by limit:**
 
-## What AWF does not do
+- **Anything sent to a listed host.** "If it can reach an allowed destination, it can send that data there" (AWF's documentation). A listed name covers its subdomains. Allowing `github.com` allows uploading to any repository on it.
+- **A different `Host` behind an allowed name.** Recorded, not asserted: a request to `https://api.github.com/` with `Host: example.org` reached GitHub's server, which answered 400. The proxy sees only the name in the TLS handshake. A server that routes by `Host` (a shared CDN front) would route it.
+- **Data in a host name, through the proxy.** Recorded, not asserted, and it got out: when the command asked the proxy for `https://<label>-proxy.example.com/`, the proxy refused the request, but a DNS query for that name left the runner. So did queries for the other unlisted names asked of the proxy over HTTPS (`example.org`, `example.com`, `cloudflare-dns.com`). A confined command can therefore send data out by asking for names under a domain whose DNS server it controls, a few dozen bytes a name, as many names as it likes. A model key fits in one or two. The likely cause, from AWF's source and not tested on its own: AWF's Squid configuration has an access rule of type `dst` for the API proxy's address (`src/squid/config-sections.ts`), and Squid resolves a requested name to evaluate such a rule before it reaches the rule that refuses unlisted names. The command's own resolver (Docker's, at 127.0.0.11) did not send the names the command looked up itself off the runner. AWF's documentation says DNS tunnelling "is still theoretically possible"; here it is shown through the proxy. Plan slice 2c.4 is to close it or say why it cannot be closed.
+- **What the command does with what it can read.** It can read the copy of the workspace, the system directories (read-only) and the variables it was given. Give it no secret it does not need. This control does not clear OBAAF-GHA-005.
+- **Other steps of the job.** It confines one command. Every other step, and every post step, runs with the full network.
+- **The runner itself.** AWF's container is "not a security boundary against runner-host compromise" (AWF's documentation). A kernel exploit from inside is out of scope.
 
-The quoted sentences are AWF's. They go into OBAAF's documentation as they are, and none may be described as blocked.
+**AWF's API proxy is untested here.** AWF always starts a sidecar meant to hold model keys so that the agent never sees them, and a variable such as `ANTHROPIC_API_KEY` passed through `env` may be routed to it rather than to the command (AWF's README; its code sets `AWF_API_PROXY_*_URL` in the command's environment, which the escape test's facts show). No run here used a real key, so what an agent receives in its place, and whether it works, is not known.
 
-- **Data can go wherever the list allows.** "If it can reach an allowed destination, it can send that data there." Allowing `github.com` allows every account and repository on it.
-- **DNS can carry data out.** Tunnelling through the allowed resolvers "is still theoretically possible, as the trusted DNS server will recursively resolve any domain". A model key is short enough to leave in a few DNS queries. So this control does not make it safe to give an agent a secret, and it does not clear OBAAF-GHA-005 by itself; that rule is slice 2a.2.
-- **It is not a boundary against the runner.** The container, chroot and firewall rules are "not a security boundary against runner-host compromise". In the documented mode, a root process on the host that removes the `DOCKER-USER` rules opens it.
-- **What the command can read and write is not clear.** The security architecture page says "Filesystem access is unrestricted", that the command can read `.ssh` and `.aws` under the home directory, and that the home directory and `/tmp` are writable. The command reference describes selective mounts, with only some directories under the home directory writable (it names `.cache`, `.config` and `.local`). The review of 2026-07-27 says credentials are hidden. Not run.
-- **IPv6** is turned off in the container by a setting whose failure is only a warning (AWF's review, rated medium).
-- **Some flags remove the protection.** `--enable-dind` lets the command "bypass all firewall restrictions". `--env-all` "May expose sensitive credentials". `--ssl-bump` changes the security model.
-- **Three more options are ones we distrust; AWF gives no warning on them.** `--legacy-security` changes the mode. `--enable-host-access` gives "access to host services via host.docker.internal". `--upstream-proxy` sends the proxy's traffic through another proxy, taken from the host's proxy variables when it is not set.
+## What running it settled
 
-One more limit is our inference, not AWF's statement: without TLS inspection the proxy reads only the server name, so a request to an allowed name on a shared address may carry a different `Host` inside. A researcher reported bypassing Bullfrog this way ([landscape](landscape.md), part 2).
+Slice 2c.1 left five questions for this slice. The answers come from the escape tests' facts, which the attempts script records from inside the sandbox, and from AWF's source at v0.29.13.
 
-## What OBAAF's action adds
+1. **Which mode runs by default: network isolation, with no `sudo`.** In v0.29.13 the default ("strict security") forces `--network-isolation` and the API proxy on, and turns `--enable-dind`, `--dns-over-https` and host access off with a warning (`src/commands/validators/security-mode.ts`). The run log shows the networks `awf-net` and `…_awf-ext`; inside, the only route is `172.30.0.0/24`. `awf` ran as the runner user, without `sudo`. The documentation site's description (`sudo awf` and host firewall rules) is the `--legacy-security` mode, which the action never passes.
+2. **Whether `sudo` does anything inside: no.** `NoNewPrivs` is 1 and the effective capability set is empty; `sudo -n -l` answers that the "no new privileges" flag prevents it from running as root.
+3. **Where the command can write.** With AWF's defaults: the workspace, the host's `/tmp`, and the tool directories under the home directory (`.cache`, `.config`, `.local/bin` and others; `src/config/sandbox-mount-policy.json`), all read-write. That is enough to plant a program for a later step. The action narrows it: it gives AWF a home directory of its own making and a copy of the workspace, both under one scratch directory in `/tmp`, and AWF's own option `filesystem.allowWrite` with only that directory, which makes every other host mount read-only. Inside, writable: the scratch directory; `/dev/shm`, AWF's `/tmp/gh-aw/…` paths and AWF's working directory, which are `tmpfs` in the container and never reach the runner's disk; and AWF's log and session directories, which the action deletes after the run. Read-only or absent: `/tmp`, `/home/runner`, `RUNNER_TEMP`, the runner's file-command files, the real workspace, `/usr/local/bin`, `/opt`.
+4. **IPv6 and DNS for an unlisted name.** No IPv6 route inside. DNS goes to Docker's resolver at 127.0.0.11; names the command looked up itself were not seen leaving the runner. Names it asked the proxy for over HTTPS were: see "Data in a host name, through the proxy" above.
+5. **Can the action keep what the command wrote away from later steps and post steps?** Yes, as far as the tests reach: nothing outside the scratch directory changed (the judge compares the files above before and after), and what is in the scratch directory is reached only through the action's outputs. The condition the action cannot enforce is the workflow's: a later step that runs or loads something from the output runs it with the full network. Slice 2c.3 is to make the checker refuse to credit the control in that case.
 
-The wrapper exists so that the confinement is the same every time and can be checked from the workflow file.
+Two findings about AWF on the way, neither a weakness in the confinement: with the host's `/tmp` read-only, Docker could not create the mount points for AWF's hidden `/tmp/gh-aw/…` directories, so the action creates them first; and after the run AWF tries to repair file ownership with the image's tag rather than its digest, which fails with a warning when the image was pulled by digest.
 
-1. **Everything pinned.** The action carries one AWF version, the setup action's commit and the image digests, all tested together by OBAAF's CI. The adopter pins OBAAF's action by commit and gets those. Nothing is fetched as `latest`. AWF moves fast (release pages found by a search on 2026-11-12 go up to 0.28.71, and its README says releases 0.25.21 to 0.25.39 were retired), so a scheduled job proposes each new version and the escape tests decide.
-2. **A fixed command line.** The action builds the whole `awf` command from a fixed list of options. It has no input that passes options through, so no input can reach a flag that removes the protection. Proxy variables from the host are cleared first.
-3. **A literal allow-list.** Plain host names only. An entry with `*` is refused (AWF's review says `*.com` is accepted), and so is a single-label name. Because a name allows all its subdomains, a name under which anyone can register a host (`workers.dev`, `github.io`) allows everyone; the action's documentation says so, and the checker reports it (below).
-4. **Named environment only.** The adopter lists the variables the command gets. What AWF passes by default was not established.
-5. **A check from inside, before the command.** The action runs, inside the same sandbox and immediately before the adopter's command, a probe that must fail to reach a host that is not on the list, must find no IPv6 route out, and must find `sudo` useless. If the probe gets out, the step fails and the command never starts. This turns AWF's warning-only cases into errors. The probe also tells a firewall that did not start from a command that failed, which AWF's exit code does not.
-6. **Output that cannot give orders.** The runner reads workflow commands from a step's output. The action prints the command's output with workflow commands stopped, and restores the runner's `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT` and `GITHUB_STATE` files to what they were, failing if the command changed them.
-7. **A record.** The action collects AWF's logs, lists the blocked hosts in the job summary and uploads the logs.
+## What the action adds to AWF
 
-### What the command leaves behind
+1. **Everything pinned.** AWF's binary by SHA-256 and each of its nine images by digest, read from the release's `checksums.txt` and `containers.txt`, which its `release-identity.txt` binds to the tag. A new AWF version is a change to `egress.py` and must pass the escape tests. The action does not check AWF's signatures or attestations at run time; the SHA-256 is the check.
+2. **A fixed command line.** No input reaches an AWF option. `--enable-dind`, `--env-all`, `--legacy-security`, `--enable-host-access`, `--ssl-bump` and `--upstream-proxy` are never passed, and AWF runs with only `PATH`, `HOME` and `LANG` in its environment, so it finds no proxy to chain through and no token to pass on.
+3. **A plain allow-list.** As above.
+4. **Writes narrowed** to the scratch directory, as above.
+5. **A probe before the command.** Inside the same sandbox, immediately before the command, it tries a direct address, a direct IPv6 address, an unlisted host with and without the proxy, `sudo` and the Docker socket. If any succeeds, the command does not run and the step fails with status 3.
+6. **Workflow commands stopped** while the command's output is printed, with a token the command cannot know, and the step fails if `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE` or `GITHUB_STEP_SUMMARY` changed while it ran.
+7. **A record.** Names the proxy refused go in the job summary and the `denied` output; the proxy's log stays in `log-dir`.
 
-This is the open question of the design, and it can sink it.
+## How others do it, and where they are the better choice
 
-The confinement ends when the command ends. Whatever the command could write is still there for the rest of the job, and anything a later step executes or loads from such a place runs with the full network. The workspace is one such place; it is the agent's output. By AWF's pages, so are `/tmp` and at least some directories under the home directory. On a hosted runner, as far as we know without having run it, `~/.local/bin` is on the `PATH` ahead of the system directories and `git` reads `~/.config/git/config`, and actions used earlier in the job (`actions/checkout`, for one) run a post step after the last step. A program planted as `~/.local/bin/git` would then run, unconfined, in a post step that the workflow's author never sees.
+**GitHub Agentic Workflows (gh-aw)** runs its agents inside AWF too, so the confinement is the same mechanism. The difference is the rest: gh-aw is a whole way of writing agent workflows (its compiler generates the job, an MCP gateway gives the agent its tools, and the agent's changes come out as "safe outputs" that a later job applies), while this action wraps a `run` command in a workflow that already exists. **For a new agent workflow, gh-aw is the better choice** (decision F-21, confirmed by the maintainer on 2026-11-12). This action is for the jobs that exist already, like the first adopter's 19, which start their agents from their own code.
 
-So the rule for the job is: **after the confined step, nothing runs or loads anything from a place the command could write, and nothing saves such a place to a cache**, post steps included. A cache saved by a post step is restored, and may be executed, by another run. Those places are the workspace, `/tmp`, the writable home directories and any directory on the `PATH`. The agent's output leaves as an artifact, and another job treats it as data. That is the effect lane OBAAF already describes.
+**Harden-Runner** works differently. Its community agent for Linux (`step-security/agent`, read at commit `1ff3fa6`, 2026-11-03) runs on the runner's own virtual machine and covers every step of the job: it points the runner's DNS at a proxy of its own that answers only for allowed names, adds an `iptables` rule accepting each address an allowed name resolved to, in the `OUTPUT` chain and in `DOCKER-USER`, rejects and logs the rest, and with `disable-sudo` or `disable-sudo-and-containers` removes `/etc/sudoers.d/runner` and Docker's sockets. So it filters by address, after a name was resolved, where AWF filters by name at a proxy. **Harden-Runner is the better choice when the whole job must be covered**, including agents that are actions and post steps; it needs v2.16.0 or later with `sudo` and containers removed, or a step with `sudo` can undo it, and its free tier covers public repositories only ([landscape](landscape.md), part 2). Its source was read; it was not run here.
 
-Whether a job can be written to meet that rule is not known. It depends on which places the pinned AWF really lets the command write, and on whether the action can keep those writes away from the rest of the job (a scratch home directory for the command, or restoring the writable directories afterwards). Slice 2c.2 establishes both. If it cannot be done, a command wrapper is not enough on a hosted runner and OBAAF says so.
+**GitHub's native egress firewall** (`runs-on: ubuntu-24.04-firewall`, technical preview) sits outside the runner's virtual machine, so nothing in the job can touch it, and it covers every step and post step. **Where a repository can use it, use it and not this action.** Not tried here.
 
-### What it covers and what it does not
-
-It confines a command. An agent that is itself an action (`uses: anthropics/claude-code-action`) is a separate step and cannot be wrapped by this; for those the answer is a control that covers the whole job, below.
-
-The adopter's 19 agent jobs all start their agent from a `run` step, 17 of them from the project's own code ([flagship plan](flagship.md), slice 1.3), so in principle they could be wrapped. That was not tried. A rough count by the reviewer of this note, not checked: 11 of the 19 have `run` steps after the step that holds the model key (what those steps run was read in six jobs only), which the rule above may not allow as they stand, and 10 mention bubblewrap in their steps.
-
-## The escape tests (for slice 2c.2)
-
-A job in OBAAF's CI runs each attempt inside the action.
-
-- **The judge is outside the sandbox.** A packet capture on the runner decides whether anything left for a host that is not allowed. The confined command's own exit code is not evidence.
-- **Every attempt has a control.** Each is first made outside the sandbox and must get out. If it does not (a hosted runner may have no IPv6 route at all), the attempt is reported as not testable here, never as blocked.
-
-Must block, or the action does not ship as enforcement:
-
-- a host that is not on the list, over HTTPS and over HTTP
-- a direct connection to an IP address, on 443 and on another port
-- another DNS resolver over UDP and over TCP, and DNS over HTTPS to a resolver that is not on the list
-- IPv6
-- `sudo`; the firewall rules; the Docker socket and a new container (Harden-Runner's `disable-sudo` was evaded through Docker, and a researcher reported that Bullfrog's removal of `sudo` was undone through the `docker` group)
-- a child process, a background process that outlives the command, and proxy variables such as `NO_PROXY=*`
-- traffic sent with `sendto` and `sendmsg` (it escaped Harden-Runner's log), and a second DNS query in one TCP segment (a researcher reported that it escaped Bullfrog)
-- a TLS handshake with no server name
-- anything left behind that takes effect later: a line in `GITHUB_ENV`, `GITHUB_PATH` or `GITHUB_OUTPUT`, a workflow command on the output, a program planted in `~/.local/bin`, a git configuration file
-
-Must still work: a host on the list, and the command's exit code and output.
-
-Recorded, not asserted: data in DNS queries to the allowed resolvers, which AWF says it does not stop; and a `Host` header that differs from the allowed server name, which we expect it does not stop. The test records what happened, and the documentation says it.
-
-If full enforcement turns out not to be achievable on hosted runners, the documentation says exactly what is and is not blocked, and nothing is shipped that looks like enforcement and is not.
-
-## Where another tool is the better choice
-
-- **GitHub's native egress firewall** (`runs-on: ubuntu-24.04-firewall`, technical preview). It sits outside the runner's virtual machine, so nothing in the job can touch it, and it covers every step. As far as we can tell, that also answers the question of what a command leaves behind; it was not tried. Where a repository can use it, use it and not this action.
-- **GitHub Agentic Workflows** for a new agent workflow (decision F-21, still the maintainer's to confirm). It runs the agent behind AWF, whose key proxy is meant to keep the model key from the agent. That proxy has not been tested here.
-- **Harden-Runner** when the whole job is to be limited, including agents that are actions. It needs version 2.16.0 or later with `sudo` and containers removed, and its free tier does not cover private repositories ([landscape](landscape.md), part 2).
-- **Cimon** (Cycode) also covers the whole job, with an eBPF sensor. Its action is Apache-2.0 and downloads a binary whose source the pages read do not show; it says it usually ignores traffic between containers and the 10.0.0.0/8 and 172.16.0.0/12 networks; whether a root process can turn it off is not stated.
-- **Self-hosted runners behind a network policy.** The boundary is outside the machine. AWF's own page recommends this for self-hosted runners.
+**Cimon** (Cycode) also covers the whole job, with an eBPF sensor whose source the pages read do not show. **Self-hosted runners behind a network policy** put the boundary outside the machine, which AWF's own page recommends for self-hosted runners.
 
 ## For the checker (slice 2c.3)
 
-OBAAF-GHA-020 clears for this action only when all of these can be read from the workflow:
+OBAAF-GHA-020 should clear for this action only when all of these can be read from the workflow; where one cannot, the result is "cannot tell":
 
-- the action is pinned to a commit OBAAF lists as released;
-- the agent command is inside the action's `run` input, and no other step of the job, before or after, is given a secret, and job-level `env` holds none. The checker recognises few agents by name (2 of the adopter's 19), so it cannot see for itself that no other step is the agent; without this condition a job could wrap `true` and run its agent in an ordinary step. The condition rests on an agent needing a key. A job whose agent needs none cannot be told from a look-alike, and slice 2c.3 has to decide what to say about it;
-- the allow-list is written out in the workflow (no expression), and has no single-label name and no name on the public suffix list, its private section included (the names under which anyone can register a host). A shared name that is not on that list passes. The report shows the allow-list;
-- nothing after the confined step, post steps included, runs or loads anything from a place the command could write, and nothing saves such a place to a cache. Until slice 2c.2 shows which places those are, this cannot be read, and the result is "cannot tell".
-
-Where any of it cannot be read, the result is "cannot tell", not a pass.
+- the action is used from a commit OBAAF lists as released;
+- the agent command is in the action's `run` input, and no other step of the job is given a secret, and job-level `env` holds none (the checker recognises few agents by name, so a job could otherwise wrap `true` and run its agent in an ordinary step; a job whose agent needs no key cannot be told from that, and 2c.3 has to say so);
+- the allow-list is written out in the workflow, with no expression, and has no name on the public suffix list, private section included (names under which anyone can register a host, such as `github.io` or `workers.dev`);
+- the report says, beside the cleared finding, that a host name asked of the proxy leaves the runner in a DNS query (until slice 2c.4 closes it), and that the listed hosts can receive anything;
+- no later step, post steps included, runs or loads anything from the action's `workspace` or `scratch` output or from the scratch directory under `/tmp`, or saves them to a cache. These are the only places the command can write that outlive it (above). Uploading them as an artifact, reading them as data and comparing them are fine.
 
 ## Not done
 
-- Nothing was run. The default mode, the behaviour of `sudo` inside the sandbox, what the command can write, IPv6 and DNS are all from AWF's pages, which disagree in places.
-- The source of Harden-Runner's agent and of Cimon's sensor was not read; only their pages and Cimon's `action.yml`.
-- Whether this repository can use the native firewall's runner label was not tried.
-- AWF's README says its key proxy is always on, the v0.28.71 notes put it in the default mode, and the command reference lists it as a flag that is off by default. Which is true decides part of slice 2a.2 and was not established.
-- What a hosted runner puts on the `PATH`, what its post steps run and save, and that the runner reads workflow commands from a step's output, are from memory and not from a run.
+- The proxy's DNS channel is open (above); slice 2c.4.
+- IPv6 was not testable on the runners used.
+- No real model key or model call went through the sandbox, so AWF's API proxy is untested.
+- Only `ubuntu-24.04` hosted runners. Not tried: `ubuntu-22.04`, larger runners, self-hosted runners, ARC.
+- An agent that is itself an action cannot be wrapped.
+- The source of Cimon's sensor was not read; Harden-Runner and GitHub's native firewall were not run.
 
 ## Sources
 
-All read on 2026-11-12. The pages were read through a tool that returns extracts, so each quotation above was checked a second time by an independent reviewer, through the same kind of tool.
+Read on 2026-11-13 unless marked.
 
-- AWF security architecture: <https://github.github.io/gh-aw-firewall/reference/security-architecture/>
-- AWF command reference: <https://github.github.io/gh-aw-firewall/reference/cli-reference/>
-- AWF README and documentation home: <https://github.com/github/gh-aw-firewall>, <https://github.github.io/gh-aw-firewall>
-- AWF in GitHub Actions, image verification, compatibility: <https://github.com/github/gh-aw-firewall/blob/main/docs/github_actions.md>, <https://github.com/github/gh-aw-firewall/blob/main/docs/image-verification.md>, <https://github.com/github/gh-aw-firewall/blob/main/docs/compatibility.md>
-- AWF security page (policy and advisories): <https://github.com/github/gh-aw-firewall/security>
-- Notes for AWF release v0.28.71, on a third-party page that copies GitHub's release notes: <https://newreleases.io/project/github/github/gh-aw-firewall/release/v0.28.71>
-- AWF daily security review, 2026-07-27: <https://github.com/github/gh-aw-firewall/discussions/6624>
-- Firewall escape test report, 2026-08-04: <https://github.com/github/gh-aw/discussions/50187>
-- Dependency findings in AWF's container images, not weaknesses in the firewall: <https://github.com/github/gh-aw/issues/49920>, <https://github.com/github/gh-aw/pull/49766>
-- Cimon: <https://cycode.com/blog/introducing-cimon-build-hardening/>, <https://github.com/marketplace/actions/cimon-by-cycode>, <https://github.com/CycodeLabs/cimon-action>
-- Harden-Runner and Bullfrog advisories, and GitHub's native firewall: [landscape](landscape.md), part 2.
+- AWF v0.29.13 source, commit `62b7e8ff1884aa476185369fa6be85585029f4c9`: `action.yml`, `README.md`, `docs/sandbox-design.md`, `docs/network-isolation-design.md`, `docs/mount-policy.md`, `docs/awf-config-spec.md` (section 4.1), `src/commands/validators/security-mode.ts`, `src/cli-options.ts`, `src/config/sandbox-mount-policy.json`, `src/services/agent-volumes/workspace-mounts.ts`, `src/services/agent-volumes/filesystem-write-policy.ts`, `src/services/agent-volumes/docker-socket.ts`, `src/services/agent-service.ts`, `src/sensitive-paths.ts`, `src/host-identity.ts`, `src/squid/config-generator.ts` (log format).
+- AWF v0.29.13 release files: `checksums.txt`, `containers.txt`, `release-identity.txt`, at `https://github.com/github/gh-aw-firewall/releases/download/v0.29.13/`.
+- Harden-Runner's community agent, `https://github.com/step-security/agent`, commit `1ff3fa6`: `firewall.go`, `dnsproxy.go`, `sudo.go`.
+- From slice 2c.1, read on 2026-11-12: AWF's security architecture page and command reference (<https://github.github.io/gh-aw-firewall/>), its security page, its daily review of 2026-07-27 (<https://github.com/github/gh-aw-firewall/discussions/6624>), the escape test report of 2026-08-04 (<https://github.com/github/gh-aw/discussions/50187>), Cimon's pages, and the Harden-Runner, Bullfrog and native-firewall material in [landscape](landscape.md), part 2.
