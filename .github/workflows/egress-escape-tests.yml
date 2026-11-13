@@ -200,14 +200,27 @@ jobs:
           env: HTTPS_PROXY
           run: "true"
 
+      - name: A model key name is refused, not silently dropped
+        id: modelkey
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          ANTHROPIC_API_KEY: not-a-key
+        with:
+          allow: api.anthropic.com
+          env: ANTHROPIC_API_KEY
+          run: "true"
+
       - name: Check what happened
         env:
           FAILS_OUTCOME: ${{ steps.fails.outcome }}
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
+          FAILS_LOG_DIR: ${{ steps.fails.outputs.log-dir }}
           WILDCARD_OUTCOME: ${{ steps.wildcard.outcome }}
           ADDRESS_OUTCOME: ${{ steps.address.outcome }}
           RESERVED_OUTCOME: ${{ steps.reserved.outcome }}
+          MODELKEY_OUTCOME: ${{ steps.modelkey.outcome }}
         run: |
           set -euo pipefail
           fail=0
@@ -220,5 +233,8 @@ jobs:
           check "a wildcard is refused" '[ "$WILDCARD_OUTCOME" = failure ]'
           check "an address is refused" '[ "$ADDRESS_OUTCOME" = failure ]'
           check "a withheld variable is refused" '[ "$RESERVED_OUTCOME" = failure ]'
-          check "AWF's working directory is gone after the run" '! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work" >/dev/null'
+          check "a model key name is refused" '[ "$MODELKEY_OUTCOME" = failure ]'
+          check "AWF's directories (work, work-chroot-home) are gone after the run" '! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null'
+          check "what the command wrote to its home is nowhere under RUNNER_TEMP" '[ -z "$(find "$RUNNER_TEMP" -name written-in-home 2>/dev/null)" ]'
+          check "only the proxy's log is left of the run's private directory" '[ -d "$FAILS_LOG_DIR" ] && [ "$(find "$(dirname "$FAILS_LOG_DIR")" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]'
           exit "$fail"

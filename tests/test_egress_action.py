@@ -67,7 +67,10 @@ class EnvNames(unittest.TestCase):
 
     def test_refused(self):
         env = {name: "x" for name in ("PATH", "HTTPS_PROXY", "no_proxy", "LD_PRELOAD", "GITHUB_ENV",
-                                       "AWF_ANYTHING", "ACTIONS_RUNTIME_TOKEN", "BASH_ENV", "GIT_SSH_COMMAND")}
+                                       "AWF_ANYTHING", "ACTIONS_RUNTIME_TOKEN", "BASH_ENV", "GIT_SSH_COMMAND",
+                                       "OTEL_EXPORTER_OTLP_ENDPOINT", "ANTHROPIC_API_TARGET", "OPENAI_BASE_URL",
+                                       "OPENAI_ENDPOINT_OVERRIDE", "FOUNDRY_ENDPOINT",
+                                       "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")}
         env.update({"MULTI": "a\nb", "NUL": "a\0b"})
         for bad in list(env) + ["1BAD", "BAD-NAME", "MISSING"]:
             with self.subTest(bad=bad):

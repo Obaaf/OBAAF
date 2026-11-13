@@ -108,7 +108,24 @@ RESERVED_NAMES = frozenset(
         "GITHUB_STEP_SUMMARY", "GITHUB_WORKSPACE", "RUNNER_TEMP",
     }
 )
-RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_")
+RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_", "OTEL_", "FOUNDRY_")
+# Names AWF reads from the environment file for its own configuration (an
+# OpenTelemetry endpoint is added to the proxy's allow-list, for one), so a
+# value would reconfigure AWF rather than reach the command.
+RESERVED_SUFFIXES = ("_API_TARGET", "_API_BASE_PATH", "_BASE_URL", "_ENDPOINT_OVERRIDE")
+# Model keys and GitHub tokens: AWF v0.29.13 withholds these from the command
+# and hands model keys to its API proxy (src/services/agent-environment/
+# excluded-vars.ts). This action does not set up the API proxy (OBAAF has not
+# tested it), so passing one would silently give the command nothing.
+WITHHELD_BY_AWF = frozenset(
+    {
+        "AGENT_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_API_KEY",
+        "COPILOT_GITHUB_TOKEN", "COPILOT_PROVIDER_API_KEY", "GEMINI_API_KEY",
+        "GOOGLE_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "GITHUB_API_TOKEN", "GITHUB_PAT", "GH_ACCESS_TOKEN",
+    }
+)
 
 RUNNER_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY")
 
@@ -172,8 +189,10 @@ def parse_env_names(text: str, environ: dict[str, str]) -> dict[str, str]:
     for name in names:
         if not _NAME_RE.match(name):
             raise UsageError(f"env: {name!r} is not a variable name")
-        if name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES):
-            raise UsageError(f"env: {name} cannot be passed to the command; the action sets or withholds it on purpose")
+        if name in WITHHELD_BY_AWF:
+            raise UsageError(f"env: {name} is a model key or GitHub token name, which AWF withholds from the command and this action does not route to AWF's API proxy (untested); see docs/egress-control.md")
+        if name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES):
+            raise UsageError(f"env: {name} cannot be passed to the command; the action sets or withholds it on purpose, or AWF reads it as its own configuration")
         if name not in environ:
             raise UsageError(f"env: {name} is not set in the step's environment; set it under the step's env: key")
         value = environ[name]
@@ -432,11 +451,28 @@ def run(environ: dict[str, str]) -> int:
     except OSError:
         pass
     # AWF's own directories for this run, some of which it mounts writable
-    # for the command (its log and session directories). Nothing later
-    # should find them; the proxy's log is kept apart.
-    shutil.rmtree(awf_work, ignore_errors=True)
-    if awf_work.exists():
-        print(f"::warning::obaaf-egress: could not remove AWF's working directory {awf_work}; do not run or load anything from it")
+    # for the command: its log and session directories inside the working
+    # directory, and the command's home, which AWF creates beside it as
+    # "work-chroot-home". Nothing later should find them. Only the proxy's
+    # log, which the command cannot write, is kept.
+    left = []
+    for path in sorted(private.iterdir()):
+        if path == logs:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if path.exists() or path.is_symlink():
+            left.append(str(path))
+    if left:
+        print(f"::error::obaaf-egress: could not remove {', '.join(left)}, which the command could write; the step fails")
+        changed_left = True
+    else:
+        changed_left = False
 
     after = _runner_file_hashes(environ)
     changed = [name for name in before if before[name] != after.get(name)]
@@ -467,6 +503,8 @@ def run(environ: dict[str, str]) -> int:
 
     if changed:
         print(f"::error::The runner's {', '.join(changed)} changed while the command ran; the step fails")
+        return EXIT_NOT_CONFINED
+    if changed_left:
         return EXIT_NOT_CONFINED
     if not probe_ok:
         print("::error::The egress sandbox did not start or did not hold, so the command did not run. See the probe lines above.")

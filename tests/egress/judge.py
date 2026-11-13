@@ -121,6 +121,30 @@ def _addresses_seen(headers: str) -> set[str]:
     return seen
 
 
+def _answers(headers: str, hosts: list[str]) -> dict[str, set[str]]:
+    """Addresses that DNS answers in a capture gave for each host.
+
+    tcpdump prints a query as "id+ A? name. (n)" and its answer as
+    "id n/n/n A addr, A addr (n)" without the name, so answers are matched to
+    queries by DNS id. Used so that a host whose addresses changed after they
+    were resolved at the start is still recognised.
+    """
+    names: dict[str, str] = {}
+    found: dict[str, set[str]] = {host: set() for host in hosts}
+    for line in headers.splitlines():
+        query = re.search(r": (\d+)\+?\s.*?\b(?:A|AAAA)\? ([A-Za-z0-9.-]+)\. ", line)
+        if query:
+            names[query.group(1)] = query.group(2).lower()
+            continue
+        answer = re.search(r": (\d+)\*?-? \d+/\d+/\d+ (.*)$", line)
+        if answer and answer.group(1) in names:
+            name = names[answer.group(1)]
+            for host in hosts:
+                if name == host or name.endswith("." + host):
+                    found[host].update([a.rstrip(",.") if a.count(".") != 3 else a.rstrip(",") for a in re.findall(r"\b(?:AAAA|A) ([0-9A-Fa-f:.]+)", answer.group(2))])
+    return found
+
+
 def _results(path: Path) -> dict[str, list[str]]:
     results: dict[str, list[str]] = {}
     plants: list[str] = []
@@ -154,10 +178,15 @@ def judge(args: argparse.Namespace) -> int:
     rows: list[tuple[str, str, str, str]] = []
     forbidden: set[str] = set()
 
+    hosts = sorted({h for spec in ATTEMPTS.values() for h in spec.get("hosts", [])})
+    learned = _answers(out_headers, hosts)
+    for host, addresses in _answers(in_headers, hosts).items():
+        learned[host].update(addresses)
     for attempt, spec in ATTEMPTS.items():
         ips = list(spec.get("ips", []))
         for host in spec.get("hosts", []):
             ips.extend(resolved.get(host, []))
+            ips.extend(sorted(learned.get(host, set())))
         forbidden.update(ips)
         labels = spec.get("labels", [])
 
