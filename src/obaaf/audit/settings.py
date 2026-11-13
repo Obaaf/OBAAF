@@ -58,6 +58,35 @@ ROLE_ORDER = ("admin", "maintain", "push", "triage", "pull")
 ROLE_NAMES = {"admin": "admin", "maintain": "maintain", "push": "write", "triage": "triage", "pull": "read"}
 CLASSIC_FLAGS = ("required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations",
                  "required_conversation_resolution", "required_signatures", "lock_branch")
+# Every field of classic branch protection, by the object it is in, as GitHub's REST reference gives them
+# ("Get branch protection" and "Update branch protection", https://docs.github.com/en/rest/branches/branch-protection,
+# API version 2026-03-10, read on 2026-11-13). The two examples differ (the first has no `block_creations`,
+# `required_signatures`, `checks` or `strict`), so the fields of both, and of the update's body parameters, are
+# here. A field in none of these is kept with its value under ``other_fields`` (its place written as a dotted
+# path), and the settings rules answer "cannot tell" for its branch: a field this version does not know may add
+# a requirement, or a way around one. `allow_fork_syncing` is known and read by no rule: it is about pulling
+# from upstream into a locked branch. Inside `restrictions`, `dismissal_restrictions` and the bypass allowances,
+# the members of `users`, `teams` and `apps` are GitHub's user, team and app objects and are not checked here.
+CLASSIC_FIELDS = {
+    "": ("url", "required_status_checks", "enforce_admins", "required_pull_request_reviews", "restrictions",
+         "required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations",
+         "required_conversation_resolution", "required_signatures", "lock_branch", "allow_fork_syncing"),
+    "required_status_checks": ("url", "strict", "contexts", "contexts_url", "checks", "enforcement_level"),
+    "enforce_admins": ("url", "enabled"),
+    "required_pull_request_reviews": ("url", "dismissal_restrictions", "dismiss_stale_reviews",
+                                      "require_code_owner_reviews", "required_approving_review_count",
+                                      "require_last_push_approval", "bypass_pull_request_allowances"),
+    "required_pull_request_reviews.dismissal_restrictions": ("url", "users_url", "teams_url", "users", "teams",
+                                                             "apps"),
+    "required_pull_request_reviews.bypass_pull_request_allowances": ("users", "teams", "apps"),
+    "restrictions": ("url", "users_url", "teams_url", "apps_url", "users", "teams", "apps"),
+    "required_signatures": ("url", "enabled"),
+    **{flag: ("enabled",) for flag in ("required_linear_history", "allow_force_pushes", "allow_deletions",
+                                       "block_creations", "required_conversation_resolution", "lock_branch",
+                                       "allow_fork_syncing")},
+}
+# The name ``other_fields`` gives the object at the top of the answer; every other place is named by its path.
+CLASSIC_TOP = "branch_protection"
 
 
 @dataclass(frozen=True)
@@ -796,14 +825,38 @@ def _classic_protection(body: dict) -> dict:
             # Absent could mean nobody or not shown, and "nobody" is the comfortable reading: null.
             "bypass_allowances": _who(_obj(allowances, "the review bypass allowances"),
                                       "the review bypass allowances") if allowances is not None else None}
-    return {"exists": True, "enforce_admins": admins,
-            "required_status_checks": {"required": True, **_status_checks(checks)} if checks is not None
-            else {"required": False},
-            "required_pull_request_reviews": reviews if reviews is not None else {"required": False},
-            "restrictions": {"restricted": True, **_who(_obj(restrictions, "the push restrictions"),
-                                                        "the push restrictions")} if restrictions is not None
-            else {"restricted": False},
-            **{key: _enabled(body, key) for key in CLASSIC_FLAGS}}
+    out = {"exists": True, "enforce_admins": admins,
+           "required_status_checks": {"required": True, **_status_checks(checks)} if checks is not None
+           else {"required": False},
+           "required_pull_request_reviews": reviews if reviews is not None else {"required": False},
+           "restrictions": {"restricted": True, **_who(_obj(restrictions, "the push restrictions"),
+                                                       "the push restrictions")} if restrictions is not None
+           else {"restricted": False},
+           **{key: _enabled(body, key) for key in CLASSIC_FLAGS}}
+    other = _other_fields(body)
+    if other:
+        # Written only when there is one, so that a snapshot an earlier version took, which has no such
+        # field, still compares equal with one taken now of the same settings (drift, 2b.3).
+        out["other_fields"] = other
+    return out
+
+
+def _other_fields(body: dict) -> dict:
+    """The fields of a classic protection answer that :data:`CLASSIC_FIELDS` does not list, as GitHub sent
+    them, by the object they are in (:data:`CLASSIC_TOP` for the answer itself). Empty when there are none."""
+    out: dict = {}
+    for where, known in CLASSIC_FIELDS.items():
+        obj = body
+        for step in where.split(".") if where else ():
+            obj = obj.get(step) if isinstance(obj, dict) else None
+        if not isinstance(obj, dict):
+            continue
+        extra = {name: _json_safe(value, "the branch protection") for name, value in obj.items()
+                 if name not in known}
+        if extra:
+            out[where or CLASSIC_TOP] = {_clean(name, "the branch protection"): value
+                                         for name, value in sorted(extra.items())}
+    return out
 
 
 def _environment(item: dict) -> dict:
