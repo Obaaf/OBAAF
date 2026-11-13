@@ -5,15 +5,16 @@ branch, adds a bypass to a ruleset, drops a required check. A team commits a sna
 should be (``obaaf audit --snapshot-out FILE``), and ``obaaf audit --expected FILE`` reads the live settings
 and reports every difference from it as a finding of the rule ``OBAAF-DRIFT-001``.
 
-Three outcomes for each setting, and a fourth for a setting the committed snapshot does not hold:
+Four outcomes for each setting and each part of one:
 
 - **matches**: both snapshots read it, and the values are the same once lists are taken without regard to
   their order (the snapshot keeps GitHub's order inside a rule's parameters and a ruleset's conditions).
 - **differs**: both read it and something is not the same. Each part that differs (one environment, one
   ruleset, one field) is one finding, with every change in it listed.
-- **not compared**: the committed snapshot holds it, and this run could not read it (or a part of it). Whether
-  it changed is not known, and that is never reported as "no drift".
-- **not covered**: the committed snapshot itself did not read it, so there is nothing to compare with.
+- **not compared**: one side read it (or a part of it) and the other did not. Whether it changed is not known,
+  and that is never reported as "no drift". This includes a part the committed snapshot marks as not read
+  and this run could read, so a hole in the committed file never hides a change.
+- **not covered**: neither side read it, so there is nothing to compare.
 
 The committed file can be edited by anyone who can open a pull request, so it is read through
 ``snapshot.load``, which checks its whole shape, and then checked again here for what the schema does not
@@ -176,10 +177,13 @@ def changes(expected, live, path: list | None = None, out: list | None = None) -
     if isinstance(expected, list) and isinstance(live, list):
         fields = _element_key(expected, live)
         if fields:
-            ours = {tuple(item[f] for f in fields): item for item in expected}
-            theirs = {tuple(item[f] for f in fields): item for item in live}
-            for ident in sorted(set(ours) | set(theirs), key=lambda i: tuple(canon(p) for p in i)):
-                where = path + [ident]
+            # Keyed by canonical text, not by the values: in Python 5, 5.0 and True are one dict key, and
+            # a file could use that to make two elements one.
+            ours = {tuple(canon(item[f]) for f in fields): item for item in expected}
+            theirs = {tuple(canon(item[f]) for f in fields): item for item in live}
+            for ident in sorted(set(ours) | set(theirs)):
+                shown = ours.get(ident, theirs.get(ident))
+                where = path + [tuple(shown[f] for f in fields)]
                 if ident not in theirs:
                     out.append(_change(where, "removed", expected=ours[ident]))
                 elif ident not in ours:
@@ -203,11 +207,12 @@ def changes(expected, live, path: list | None = None, out: list | None = None) -
 
 
 # ---------------------------------------------------------------- dividing a setting into parts
-def parts(key: str, value) -> dict[str, object]:
+def parts(key: str, value, side: str = "") -> dict[str, object]:
     """A setting's value as its parts, by key. Raises DriftError when two parts share a key, which no
-    snapshot the reader writes has, and which would otherwise hide one of them."""
+    snapshot the reader writes has, and which would otherwise hide one of them. ``side`` names the file in
+    the message."""
     shape = SHAPES[key]
-    where = BY_KEY[key].title
+    where = (f"{side}: " if side else "") + BY_KEY[key].title
     if shape[0] == "fields":
         if not isinstance(value, dict):
             raise DriftError(f"{where}: the value is not an object")
@@ -259,48 +264,94 @@ def _problem_keys(entry: dict) -> dict[str, dict]:
     return {str(p.get("key")): p for p in entry.get("problems", []) if isinstance(p, dict)}
 
 
+KNOWN = ("read", "partial", "not_applicable")
+RETAKE = ("Take the expected snapshot again, with the token this check uses, so that it covers what this run can "
+          "read.")
+
+
+def _branch_gaps(key: str, snap: dict, names: set[str]) -> dict[str, dict]:
+    """For a setting kept by branch, which of ``names`` a snapshot did not audit: it knows nothing of them, so
+    a branch only one side audited is not compared, never "new" or "gone"."""
+    if SHAPES[key] != ("map", "branch"):
+        return {}
+    audited = set(snap.get("branches") or [])
+    return {name: {"reason_code": "not_audited", "reason": "this branch was not audited"}
+            for name in names - audited}
+
+
 def compare(expected: dict, live: dict, expected_name: str = "", live_name: str = "") -> dict:
-    """Compare two snapshots of one repository's settings. Both must be in the snapshot format."""
+    """Compare two snapshots of one repository's settings. Both must be in the snapshot format.
+
+    For each setting, and for each part of it, there are four cases. Both read it: compared. Neither read it:
+    not covered, listed, and not a failure. The expected snapshot read it and this run did not: not compared,
+    a failure, because whether it changed is not known. This run read it and the expected snapshot did not:
+    not compared too, and a failure for the same reason. The last case is what keeps a hole in the committed
+    file from hiding a change: a part the file marks as not read (by GitHub's doing or by an edit) and that
+    this run can read is never passed over."""
+    their_side = f"the expected snapshot {expected_name}".rstrip()
+    our_side = f"the snapshot {live_name}" if live_name else "the settings read now"
     differences: list[dict] = []
     not_compared: list[dict] = []
     not_covered: list[dict] = []
     outcome: dict[str, str] = {}  # each setting: matches, differs, in part, not compared, not covered
+    parts_compared = 0
+
+    def unknown(entry: dict, prefix: str) -> str:
+        return prefix + str(entry.get("reason", "")) + (f" ({entry['reason_code']})" if entry.get("reason_code") else "")
+
     for setting in SETTINGS:
         key = setting.key
         theirs, ours = expected["settings"][key], live["settings"][key]
         e_status, l_status = _status(theirs), _status(ours)
-        if e_status == "unread":
+        e_known, l_known = e_status in KNOWN, l_status in KNOWN
+        if not e_known and not l_known:
             not_covered.append({"setting": key, "item": None, "what": setting.title,
                                 "reason_code": theirs.get("reason_code"),
-                                "why": "the expected snapshot did not read it: " + str(theirs.get("reason", ""))})
+                                "why": unknown(theirs, "neither snapshot read it; the expected one: ")})
             outcome[key] = "not covered"
             continue
-        if l_status == "unread":
+        if not l_known:
             not_compared.append({"setting": key, "item": None, "what": setting.title,
-                                 "reason_code": ours.get("reason_code"), "why": str(ours.get("reason", ""))})
+                                 "reason_code": ours.get("reason_code"),
+                                 "why": unknown(ours, "the expected snapshot holds it, and it was not read now: ")})
             outcome[key] = "not compared"
             continue
-        found_before = (len(differences), len(not_compared))
+        if not e_known:
+            not_compared.append({"setting": key, "item": None, "what": setting.title,
+                                 "reason_code": theirs.get("reason_code"),
+                                 "why": unknown(theirs, "it was read now, and the expected snapshot did not read it: ")
+                                 + ". " + RETAKE})
+            outcome[key] = "not compared"
+            continue
+        before = (len(differences), len(not_compared), len(not_covered), parts_compared)
         if (e_status == "not_applicable") != (l_status == "not_applicable"):
             differences.append({
                 "setting": key, "item": None, "what": setting.title,
                 "changes": [{"path": "", "change": "status", "expected": e_status, "live": l_status}]})
-        e_parts = {} if e_status == "not_applicable" else parts(key, theirs.get("value"))
-        l_parts = {} if l_status == "not_applicable" else parts(key, ours.get("value"))
-        e_unknown, l_unknown = _problem_keys(theirs), _problem_keys(ours)
+        e_parts = {} if e_status == "not_applicable" else parts(key, theirs.get("value"), their_side)
+        l_parts = {} if l_status == "not_applicable" else parts(key, ours.get("value"), our_side)
+        e_problems, l_problems = _problem_keys(theirs), _problem_keys(ours)
+        names = set(e_parts) | set(l_parts) | set(e_problems) | set(l_problems)
+        e_unknown = {**_branch_gaps(key, expected, names), **e_problems}
+        l_unknown = {**_branch_gaps(key, live, names), **l_problems}
         for ident in sorted(set(e_parts) | set(l_parts) | set(e_unknown) | set(l_unknown)):
             what = label(key, ident, e_parts.get(ident), l_parts.get(ident))
-            if ident in e_unknown:
-                problem = e_unknown[ident]
-                not_covered.append({"setting": key, "item": ident, "what": f"{setting.title}: {what}",
-                                    "reason_code": problem.get("reason_code"),
-                                    "why": "the expected snapshot did not read it: " + str(problem.get("reason", ""))})
+            here = {"setting": key, "item": ident, "what": f"{setting.title}: {what}"}
+            if ident in e_unknown and ident in l_unknown:
+                not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
+                                    "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})
                 continue
             if ident in l_unknown:
-                problem = l_unknown[ident]
-                not_compared.append({"setting": key, "item": ident, "what": f"{setting.title}: {what}",
-                                     "reason_code": problem.get("reason_code"), "why": str(problem.get("reason", ""))})
+                not_compared.append({**here, "reason_code": l_unknown[ident].get("reason_code"),
+                                     "why": unknown(l_unknown[ident], "the expected snapshot holds it, and it was not "
+                                                                      "read now: ")})
                 continue
+            if ident in e_unknown:
+                not_compared.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
+                                     "why": unknown(e_unknown[ident], "it was read now, and the expected snapshot did "
+                                                                      "not read it: ") + ". " + RETAKE})
+                continue
+            parts_compared += 1
             if ident not in l_parts:
                 differences.append({"setting": key, "item": ident, "what": what,
                                     "changes": [_change([], "removed", expected=e_parts[ident])]})
@@ -311,8 +362,14 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                 found = changes(e_parts[ident], l_parts[ident])
                 if found:
                     differences.append({"setting": key, "item": ident, "what": what, "changes": found})
-        outcome[key] = ("differs" if len(differences) > found_before[0] else
-                        "in part" if len(not_compared) > found_before[1] else "matches")
+        if len(differences) > before[0]:
+            outcome[key] = "differs"
+        elif len(not_compared) > before[1]:
+            outcome[key] = "in part"
+        elif parts_compared == before[3] and len(not_covered) > before[2]:
+            outcome[key] = "not covered"  # every part it has was unread on both sides
+        else:
+            outcome[key] = "matches"  # including a setting with no parts on either side, such as no environments
     tally = Counter(outcome.values())
     return {
         "format": FORMAT,
@@ -328,8 +385,8 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                     "compared": tally["matches"] + tally["differs"] + tally["in part"],
                     "matching": tally["matches"], "differing": tally["differs"], "compared_in_part": tally["in part"],
                     "not_compared": tally["not compared"], "not_covered": tally["not covered"],
-                    "findings": len(differences), "parts_not_compared": len(not_compared),
-                    "parts_not_covered": len(not_covered)},
+                    "parts_compared": parts_compared, "findings": len(differences),
+                    "parts_not_compared": len(not_compared), "parts_not_covered": len(not_covered)},
         "outcomes": outcome,
         "differences": differences,
         "not_compared": not_compared,
@@ -375,11 +432,6 @@ def _change_text(change: dict) -> str:
         " it" if change.get("expected") is True else f" {_shown(change['expected'])}")
 
 
-def _count_parts(texts: list[str]) -> str:
-    # "3 of them not compared" reads as parts once the sentence says "parts".
-    return " and ".join(t.replace(" of them ", " part(s) ", 1) for t in texts)
-
-
 def to_text(result: dict) -> str:
     summary = result["summary"]
     expected, live = result["expected"], result["live"]
@@ -390,9 +442,13 @@ def to_text(result: dict) -> str:
              (f"Now: the snapshot {plain(live['file'], 140)}, taken {_when(live['taken_at'])} "
               f"{how[live['authenticated']]}." if live["file"] else
               f"Now: read {_when(live['taken_at'])} {how[live['authenticated']]}.")]
+    e_branches, l_branches = [plain(b, 60) for b in expected["branches"]], [plain(b, 60) for b in live["branches"]]
+    lines.append(f"Branches: {', '.join(e_branches) or 'none'}" if e_branches == l_branches else
+                 f"Branches: {', '.join(e_branches) or 'none'} in the expected snapshot; "
+                 f"{', '.join(l_branches) or 'none'} now.")
     if expected["authenticated"] != live["authenticated"]:
         lines.append("The two were read with different access, so a setting one could read and the other could "
-                     "not is listed as not compared or not covered, not as a difference.")
+                     "not is listed as not compared, not as a difference.")
     lines.append("")
     if result["differences"]:
         lines.append(f"DRIFT: {summary['findings']} part(s) of {summary['differing']} setting(s) differ from the "
@@ -417,8 +473,8 @@ def to_text(result: dict) -> str:
                      "pull request (obaaf audit --snapshot-out FILE). If it was not, put the setting back.")
         lines.append("")
     if result["not_compared"]:
-        lines.append(f"NOT COMPARED: {summary['parts_not_compared']}. The expected snapshot holds these and this run "
-                     "could not read them, so whether they changed is not known. This fails the check.")
+        lines.append(f"NOT COMPARED: {summary['parts_not_compared']}. One snapshot read these and the other did not, "
+                     "so whether they changed is not known. This fails the check.")
         for entry in result["not_compared"]:
             lines.append(f"  {plain(entry['what'], 160)}")
             lines.append(f"      {plain(entry['why'], 300)}")
@@ -431,17 +487,14 @@ def to_text(result: dict) -> str:
         lines.append(f"NO DRIFT in the {summary['compared']} setting(s) compared.")
         lines.append("")
     if result["not_covered"]:
-        lines.append(f"NOT COVERED: {summary['parts_not_covered']}. The expected snapshot did not read these, so "
-                     "they were not compared:")
+        lines.append(f"NOT COVERED: {summary['parts_not_covered']}. Neither snapshot read these, so they were not "
+                     "compared:")
         for entry in result["not_covered"]:
             lines.append(f"  {plain(entry['what'], 160)}")
         lines.append("")
     in_part = f", {summary['compared_in_part']} only in part" if summary["compared_in_part"] else ""
-    left_out = [f"{n} of them not compared" if key == "compared" else f"{n} of them not covered"
-                for key, n in (("compared", summary["parts_not_compared"] - summary["not_compared"]),
-                               ("covered", summary["parts_not_covered"] - summary["not_covered"])) if n]
-    parts_line = f" Within the settings compared, {_count_parts(left_out)}." if left_out else ""
     lines.append(f"{summary['settings']} settings: {summary['compared']} compared ({summary['matching']} match, "
                  f"{summary['differing']} differ{in_part}), {summary['not_compared']} not compared, "
-                 f"{summary['not_covered']} not covered.{parts_line} {summary['findings']} finding(s).")
+                 f"{summary['not_covered']} not covered; {summary['parts_compared']} part(s) compared. "
+                 f"{summary['findings']} finding(s).")
     return "\n".join(lines) + "\n"

@@ -1,10 +1,15 @@
 # OBAAF settings drift (optional; docs/settings-audit.md, "Drift").
 #
 # A setting can change without any file in the repository changing: an environment opened to every
-# branch, a bypass added to a ruleset, a required check dropped. This workflow reads the repository's
-# GitHub settings once a day, read-only, and compares them with the snapshot committed at
-# .github/obaaf-settings.json. Any difference fails the run, and so does a setting the snapshot holds
-# that this run could not read: a check that could not look has not shown that nothing changed.
+# branch, a reviewer removed, a required check dropped. This workflow reads the repository's GitHub
+# settings once a day, read-only, and compares them with the snapshot committed at
+# .github/obaaf-settings.json. Any difference fails the run, and so does anything one side read and the
+# other did not: a check that could not look has not shown that nothing changed.
+#
+# It watches only what its token can read. The workflow's own token reads the rulesets and their rules,
+# the environments, the public view of each branch and how many accounts hold each role. It cannot read
+# who may bypass a ruleset, the names of secrets, or the Actions settings, so this job never watches
+# those (docs/settings-audit.md, "What it can watch").
 #
 # Getting started, with no file written by hand:
 #   1. Copy this file to .github/workflows/ and pin setup-obaaf to an OBAAF release (obaaf check
@@ -14,10 +19,12 @@
 #   3. Download obaaf-settings.json from that artifact, read it, and commit it as
 #      .github/obaaf-settings.json in a pull request. The next run compares against it.
 # Take the committed snapshot with the same token the job uses (this file uses the workflow's own
-# token), or the settings only the other token could read are reported as not compared.
+# token), or what only one of the two tokens could read is reported as not compared, and fails.
 #
 # When a setting changes on purpose, commit a new snapshot the same way. Put .github/obaaf-settings.json
-# under code-owner review: whoever can change it decides what counts as drift.
+# under code-owner review: whoever can change it decides what counts as drift. The run on a pull request
+# shows whether a new snapshot matches the live settings; it is not a safeguard, because a pull request
+# runs its own copy of this workflow.
 #
 # The snapshot holds what the job's token can read. With the workflow's token on a public repository
 # that is what anyone can see, plus how many accounts hold each role (counts, never names). Anyone who
@@ -36,6 +43,9 @@ on:
 
 permissions:
   contents: read
+  # GitHub's reference names the Actions permission for reading environments. It matters on a private
+  # repository; this has not been tried on one.
+  actions: read
 
 jobs:
   drift:

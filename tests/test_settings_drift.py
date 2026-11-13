@@ -297,6 +297,95 @@ class WhatCannotBeComparedTest(unittest.TestCase):
         self.assertIn("NOTHING COMPARED", drift.to_text(result))
 
 
+class HolesInTheExpectedSnapshotTest(unittest.TestCase):
+    """A part the committed snapshot did not read, by GitHub's doing or by an edit, must not hide a change
+    that this run can see (found by the first review of the slice)."""
+
+    def test_a_first_bypass_actor_added_where_the_expected_list_was_empty(self):
+        expected = take()  # ruleset 73's bypass list came back empty, which is never believed
+        entries = recording("admin-token")
+        for entry in entries:
+            if entry["path"].endswith("/rulesets/73?includes_parents=true"):
+                entry["body"]["bypass_actors"] = [{"actor_type": "Integration", "actor_id": 99, "bypass_mode": "always"}]
+        result = drift.compare(expected, take(entries=entries))
+        self.assertIn(("ruleset_bypass_actors", "73"), [(e["setting"], e["item"]) for e in result["not_compared"]])
+        self.assertTrue(drift.failed(result))
+
+    def test_an_environment_the_expected_snapshot_read_only_in_part(self):
+        entries = recording("admin-token")
+        for entry in entries:
+            if entry["path"].endswith("/environments/release/deployment-branch-policies?per_page=100"):
+                entry.update(status=500, body={"message": "Server Error"})
+        expected = take(entries=entries)  # a passing error while the snapshot was taken
+        live = take()
+        release = env(live, "release")
+        release["deployment_branches"], release["reviewers"], release["wait_timer"] = "any", [], 0
+        del release["branch_policies"]
+        result = drift.compare(expected, live)
+        self.assertIn(("environments", "release"), [(e["setting"], e["item"]) for e in result["not_compared"]])
+        self.assertTrue(drift.failed(result))
+
+    def test_a_problem_written_into_the_file_by_hand_hides_nothing(self):
+        expected = take()
+        live = copy.deepcopy(expected)
+        live["settings"]["workflow_permissions"]["value"]["default_workflow_permissions"] = "write"
+        forged = copy.deepcopy(expected)
+        forged["settings"]["workflow_permissions"] = {
+            "status": "partial", "value": forged["settings"]["workflow_permissions"]["value"],
+            "problems": [{"key": "default_workflow_permissions", "what": "x", "reason_code": "network", "reason": "x"}],
+            "needs": "x"}
+        forged["settings"]["environments"] = {
+            "status": "partial", "value": forged["settings"]["environments"]["value"],
+            "problems": [{"key": "staging", "what": "x", "reason_code": "network", "reason": "x"}], "needs": "x"}
+        live["settings"]["environments"]["value"].append(
+            {"name": "staging", "deployment_branches": "any", "wait_timer": 0, "reviewers": [],
+             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": None})
+        self.assertEqual(snapshot_mod.problems(forged), [])
+        result = drift.compare(forged, live)
+        not_compared = [(e["setting"], e["item"]) for e in result["not_compared"]]
+        self.assertIn(("workflow_permissions", "default_workflow_permissions"), not_compared)
+        self.assertIn(("environments", "staging"), not_compared)
+        self.assertTrue(drift.failed(result))
+
+    def test_a_whole_setting_marked_as_not_read_in_the_file_hides_nothing(self):
+        expected = take()
+        live = copy.deepcopy(expected)
+        env(live, "release")["reviewers"] = []
+        expected["settings"]["environments"] = {"status": "unread", "reason_code": "network", "reason": "x",
+                                                "needs": "x"}
+        result = drift.compare(expected, live)
+        self.assertIn(("environments", None), [(e["setting"], e["item"]) for e in result["not_compared"]])
+        self.assertTrue(drift.failed(result))
+
+    def test_a_token_that_reads_more_than_the_expected_snapshot_did_fails_until_it_is_taken_again(self):
+        result = drift.compare(take("public-no-token", token=None), take())
+        self.assertIn("collaborators", {e["setting"] for e in result["not_compared"]})
+        self.assertIn("Take the expected snapshot again", drift.to_text(result))
+        self.assertTrue(drift.failed(result))
+
+    def test_numbers_that_python_takes_for_one_another_are_two_elements(self):
+        expected = take()
+        actors = expected["settings"]["ruleset_bypass_actors"]["value"][0]["actors"]
+        actors.insert(0, {"actor_type": "RepositoryRole", "actor_id": 5.0, "bypass_mode": "always"})
+        result = drift.compare(expected, take())
+        self.assertEqual([c for _, _, _, c in changed(result)], ["removed"])
+        self.assertTrue(drift.failed(result))
+
+    def test_a_branch_only_one_side_audited_is_not_compared_not_new(self):
+        live = take(branches=("release",), entries=recording("admin-token") + [
+            {"path": f"/repos/{REPO}/rules/branches/release?per_page=100", "status": 200, "headers": {}, "body": []},
+            {"path": f"/repos/{REPO}/branches/release", "status": 200, "headers": {},
+             "body": {"name": "release", "protected": False}},
+            {"path": f"/repos/{REPO}/branches/release/protection", "status": 404, "headers": {},
+             "body": {"message": "Branch not protected"}}])
+        result = drift.compare(take(), live)
+        self.assertEqual(result["differences"], [])
+        self.assertEqual({(e["setting"], e["item"]) for e in result["not_compared"]},
+                         {("branch_rules", "release"), ("branches", "release"), ("branch_protection", "release")})
+        self.assertIn("Branches: main in the expected snapshot; main, release now.", drift.to_text(result))
+
+
+
 class CommittedFileTest(unittest.TestCase):
     """The expected snapshot is a committed file anyone can change in a pull request."""
 
@@ -380,6 +469,26 @@ class CommittedFileTest(unittest.TestCase):
             code, _, err = run_cli("audit", "--from-snapshot", tmp / "live.json", "--expected", tmp / "missing.json")
             self.assertEqual(code, 2)
 
+    def test_an_infinite_number_is_refused(self):
+        with TempDir() as tmp:
+            write(take(), tmp / "live.json")
+            text = (tmp / "live.json").read_text(encoding="utf-8").replace('"wait_timer": 30', '"wait_timer": 1e999')
+            (tmp / "expected.json").write_text(text, encoding="utf-8")
+            code, _, err = run_cli("audit", "--from-snapshot", tmp / "live.json", "--expected", tmp / "expected.json",
+                                   "--format", "json")
+            self.assertEqual(code, 2, err)
+            self.assertIn("too large", err)
+
+    def test_a_fault_in_the_other_file_is_named_as_that_file(self):
+        snap = take()
+        doubled = copy.deepcopy(snap)
+        doubled["settings"]["environments"]["value"].append(copy.deepcopy(env(doubled, "release")))
+        code, _, err = self.run_files(snap, doubled)
+        self.assertEqual(code, 2)
+        self.assertIn("the snapshot", err)
+        self.assertIn("live.json", err)
+        self.assertNotIn("expected snapshot", err)
+
     def test_its_branches_must_be_plain_names_and_not_too_many(self):
         snap = take()
         for branches, words in ((["main", "release/*"], "not one plain branch name"),
@@ -430,6 +539,13 @@ class LiveReadTest(unittest.TestCase):
         self.assertIn(f"/repos/{REPO}/branches/release", transport.missing)  # it asked
         self.assertEqual(code, 1)
         self.assertIn("NOT COMPARED", out)  # and could not read it from this recording, so it fails
+
+    def test_a_file_of_another_repository_stops_the_command_before_any_request(self):
+        expected = take("live-expectrail-no-token", token=None, repository="Expectrail/Expectrail")
+        code, _, err, transport = self.run_live(recording("admin-token"), expected, token=TOKEN)
+        self.assertEqual(code, 2)
+        self.assertEqual(transport.seen, [])
+        self.assertIn("is of Expectrail/Expectrail", err)
 
     def test_a_live_read_that_matches(self):
         expected = take()

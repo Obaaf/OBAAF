@@ -37,7 +37,8 @@ def add_parser(sub) -> None:
                    help="report from a saved snapshot instead of asking GitHub; no request is sent")
     x.add_argument("--snapshot-out", metavar="FILE", help="write the snapshot (JSON) to FILE")
     x.add_argument("--format", choices=("text", "json"), default="text",
-                   help="text for people (default), or json: the snapshot itself")
+                   help="text for people (default), or json: the snapshot itself (with --expected, the "
+                        "comparison with the live snapshot inside it)")
     x.add_argument("--output", "-o", help="write the report to a file instead of standard output")
     x.add_argument("--no-token", action="store_true",
                    help="send no token even if one is set; reads what GitHub shows anyone about a public repository")
@@ -158,9 +159,12 @@ def _run(args) -> int:
             try:
                 extra = drift.branches_to_read(expected)
             except drift.DriftError as exc:
-                raise UsageError(f"{_plain(args.expected)}: {exc}") from None
+                raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
             if args.from_snapshot is None:
                 args.branch = list(dict.fromkeys([*args.branch, *extra]))
+                if len(args.branch) > drift.MAX_EXPECTED_BRANCHES:
+                    raise UsageError(f"--expected: with the branches named on the command line, more than "
+                                     f"{drift.MAX_EXPECTED_BRANCHES} branches would be audited")
         if args.from_snapshot is not None:
             for flag, value in (("--no-token", args.no_token), ("--token-env", args.token_env),
                                 ("--api-url", args.api_url), ("--record", args.record), ("--branch", args.branch),
@@ -184,6 +188,12 @@ def _run(args) -> int:
                 check_branches(args.branch)
             except ValueError as exc:
                 raise UsageError(str(exc)) from None
+            if expected is not None:
+                # Checked again on what was read, below; this stops a wrong file before any request is sent.
+                try:
+                    drift.check_comparable(expected, {"api": api, "repository": repository})
+                except drift.DriftError as exc:
+                    raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
             token, token_from = _token(args, api, audit.DEFAULT_API)
             client = audit.Client(api=api, token=token)
             snap = audit.take(client, repository, tuple(args.branch))
@@ -204,9 +214,12 @@ def _run(args) -> int:
     if expected is not None:
         try:
             drift.check_comparable(expected, snap)
-            result = drift.compare(expected, snap, expected_name=args.expected, live_name=args.from_snapshot or "")
         except drift.DriftError as exc:
             raise UsageError(f"--expected {_plain(args.expected)}: {exc}") from None
+        try:
+            result = drift.compare(expected, snap, expected_name=args.expected, live_name=args.from_snapshot or "")
+        except drift.DriftError as exc:  # it names the file at fault
+            raise UsageError(f"cannot compare: {exc}") from None
     if result is not None:
         _emit(drift.document(result, snap) if args.format == "json" else
               drift.to_text(result) + "\n" + report.to_text(snap, origin=origin), args.output)
