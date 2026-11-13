@@ -25,6 +25,7 @@ checked here, value by value, before they are used.
 from __future__ import annotations
 
 import fnmatch
+import json
 from dataclasses import dataclass
 
 from obaaf.audit.github import plain, quoted
@@ -295,6 +296,36 @@ class _Run:
 # ---------------------------------------------------------------- what a branch requires
 ACTIONS_OR_ANY = frozenset((None, ACTIONS_APP))
 
+# The parameters of a ruleset's `pull_request` rule, as GitHub's REST reference lists them (the request body
+# of "Create a repository ruleset", https://docs.github.com/en/rest/repos/rules, read on 2026-11-13). Every
+# parameter is in one of the two sets below. One in neither is new, and the rules about approvals
+# (OBAAF-SET-005 and OBAAF-SET-013) answer "cannot tell" for its branch, naming it, until it is placed here:
+# a parameter that may add a requirement is never read as one that adds none.
+#
+# Read by the rules, each with what the reference and the page "Available rules for rulesets" say it does:
+# - required_approving_review_count: "The number of approving reviews that are required".
+# - require_code_owner_review: "Require an approving review in pull requests that modify files that have a
+#   designated code owner".
+# - require_last_push_approval: "Whether the most recent reviewable push must be approved by someone other
+#   than the person who pushed it". With one approval or more it changes nothing the rules decide: an author
+#   who pushes last needs an approval from someone else anyway. With none, whether it asks for an approval
+#   of its own is not established, so it is "cannot tell".
+# - require_extra_approval_for_unattributed_changes: "When Copilot opens a pull request without a human
+#   collaborator, require one more approving review if a non-zero approval count is required"; the page
+#   adds "This setting has no effect if the ruleset requires zero approvals" (public preview).
+# - required_reviewers: teams that must approve changes to files matching patterns, each with
+#   "minimum_approvals"; "If set to zero, the team will be added to the pull request but approval is
+#   optional". Who is in a team is not read, so a minimum above zero is "cannot tell".
+APPROVAL_PARAMETERS = frozenset((
+    "required_approving_review_count", "require_code_owner_review", "require_last_push_approval",
+    "require_extra_approval_for_unattributed_changes", "required_reviewers"))
+# Known, and about neither how many approvals a branch needs nor who can give them: which merge methods are
+# allowed, that approvals are dismissed by a new push (they can be given again), who may dismiss a review,
+# and that conversations must be resolved.
+OTHER_PULL_REQUEST_PARAMETERS = frozenset((
+    "allowed_merge_methods", "dismiss_stale_reviews_on_push", "dismissal_restriction",
+    "required_review_thread_resolution"))
+
 
 def _held_by_actions(apps: set) -> bool:
     """Whether a check of this name from GitHub Actions is one the requirements wait for: required from
@@ -314,16 +345,127 @@ def _branch_requirements(run: _Run, branch: str) -> dict:
     workflow job can meet every requirement: an app that is not GitHub Actions if there is one, then
     GitHub Actions, then None."""
     out = _requirements(run, branch)
+    _approval_parameters(out)
     out["checks"] = {context: next((a for a in sorted(apps, key=str) if a not in ACTIONS_OR_ANY),
                                    ACTIONS_APP if ACTIONS_APP in apps else None)
                      for context, apps in out["apps"].items()}
     return out
 
 
+def _shown(value, limit: int = 100) -> str:
+    """A parameter's value as JSON on one line, short and safe to print."""
+    try:
+        text = json.dumps(value, sort_keys=True, ensure_ascii=True)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return plain(text, limit)
+
+
+def _actor(item) -> bool:
+    """An entry of `dismissal_restriction.allowed_actors` in the reference's form: an id and a type."""
+    return (isinstance(item, dict) and set(item) <= {"id", "type"} and _is_int(item.get("id"))
+            and isinstance(item.get("type"), str))
+
+
+def _other_form(name: str, value) -> bool:
+    """Whether a parameter about neither the count nor who approves has the form GitHub's reference gives it.
+    One in another form may not be the parameter the code knows, so it is not passed over."""
+    if name in ("dismiss_stale_reviews_on_push", "required_review_thread_resolution"):
+        return isinstance(value, bool)
+    if name == "allowed_merge_methods":
+        return _strings(value) is not None
+    if name == "dismissal_restriction":
+        return (isinstance(value, dict) and set(value) <= {"enabled", "allowed_actors"}
+                and isinstance(value.get("enabled"), bool)
+                and isinstance(value.get("allowed_actors", []), list)
+                and all(_actor(a) for a in value.get("allowed_actors", [])))
+    return False
+
+
+def _pull_request_parameters(out: dict, parameters: dict, count: int | None, ruleset) -> None:
+    """Read the parameters of one `pull_request` rule beyond its count, into ``out``: whether it asks for a
+    code owner's review, its parameters about approvals that the rules cannot judge (``parameters_unread``,
+    each a clause naming the parameter), and what the rules make of the two whose effect depends on the
+    branch's count once every rule is read (``last_push``, ``extra``)."""
+    where = f"ruleset {plain(ruleset, 20)}"
+    unread = out["parameters_unread"]
+    for name in sorted(parameters, key=str):
+        value = parameters[name]
+        label = _q(name, 60)
+        if name == "required_approving_review_count":
+            continue
+        if name in OTHER_PULL_REQUEST_PARAMETERS:
+            if not _other_form(name, value):
+                unread.append(f"{label} = {_shown(value)} ({where}), not in the form GitHub's reference gives")
+        elif name not in APPROVAL_PARAMETERS:
+            unread.append(f"{label} = {_shown(value)} ({where}), a parameter this audit does not know")
+        elif name == "required_reviewers":
+            teams = _required_reviewers(value)
+            if teams is None:
+                unread.append(f"{label} = {_shown(value)} ({where}), not in the form GitHub's reference gives")
+            for team, minimum, patterns in teams or ():
+                if minimum > 0:
+                    files = _names([_q(p, 40) for p in patterns], 3) if patterns else "no pattern"
+                    unread.append(f"required_reviewers asks team {plain(team, 20)} for {_n(minimum, 'approval')} "
+                                  f"on changes to files matching {files} ({where}), and who is in the team is "
+                                  "not read")
+        elif not isinstance(value, bool):
+            unread.append(f"{label} = {_shown(value)} ({where}), not true or false")
+        elif value and name == "require_code_owner_review":
+            out["code_owner"] = True
+        elif value and name == "require_last_push_approval":
+            out["last_push"].append(where)
+        elif value and name == "require_extra_approval_for_unattributed_changes" and count is not None:
+            out["extra"].append((where, count))  # with no count known, the rule is "cannot tell" anyway
+
+
+def _required_reviewers(value):
+    """The teams a `required_reviewers` parameter names, as (team id, minimum approvals, file patterns), or
+    None when it is not in the form GitHub's reference gives (each entry a team with an id, file patterns and
+    a minimum, and nothing else: a field the reference does not list could add a requirement)."""
+    if not isinstance(value, list):
+        return None
+    teams = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"reviewer", "file_patterns", "minimum_approvals"}:
+            return None
+        reviewer, minimum, patterns = item["reviewer"], item["minimum_approvals"], _strings(item["file_patterns"])
+        if (not isinstance(reviewer, dict) or set(reviewer) != {"id", "type"} or not _is_int(reviewer["id"])
+                or reviewer["type"] != "Team" or not _is_int(minimum) or minimum < 0 or patterns is None):
+            return None
+        teams.append((reviewer["id"], minimum, patterns))
+    return teams
+
+
+def _approval_parameters(out: dict) -> None:
+    """What the two parameters whose effect depends on the count come to, once every rule is read.
+
+    - require_last_push_approval asks that the last push be approved by someone other than whoever pushed it.
+      With one approval or more an author can always push last, and their pull request needs an approval
+      from someone else anyway, so the rules' answers stand. With none, whether it asks for an approval of
+      its own is not established.
+    - require_extra_approval_for_unattributed_changes: when Copilot opens a pull request without a person,
+      "the ruleset requires one more approval than the number you configured", from "people with write
+      access", and "This setting has no effect if the ruleset requires zero approvals" (the rulesets page).
+      So it adds one to its own rule's count, and nothing where that count is zero, whatever other rules
+      ask. ``copilot`` is the approvals such a pull request needs on the branch."""
+    approvals = out["approvals"] or 0
+    if out["last_push"] and not approvals:
+        out["parameters_unread"].append(
+            f"require_last_push_approval is set ({', '.join(out['last_push'])}) where no approval is known to be "
+            "required, and whether it then asks for an approval of its own is not established")
+    for where, count in out["extra"]:
+        if count:
+            out["copilot"] = max(out["copilot"], approvals, count + 1)
+        else:
+            out["no_effect"].append(where)
+
+
 def _requirements(run: _Run, branch: str) -> dict:
     out = {"apps": {}, "checks_whole": True, "approvals": None, "approvals_whole": True, "gaps": [],
            "rulesets": {}, "from_public_view": False, "classic": None, "classic_unknown": False,
-           "code_owner": False}
+           "code_owner": False, "parameters_unread": [], "last_push": [], "extra": [], "copilot": 0,
+           "no_effect": []}
     rules, _ = run.got("branch_rules")
     if rules is None or branch not in rules:
         out["checks_whole"] = out["approvals_whole"] = False
@@ -347,9 +489,11 @@ def _requirements(run: _Run, branch: str) -> dict:
                 if not _is_int(count) or count < 0:
                     out["approvals_whole"] = False
                     out["gaps"].append("branch_rules")
+                    if isinstance(parameters, dict):  # its other parameters are still named
+                        _pull_request_parameters(out, parameters, None, rule["ruleset_id"])
                     continue
                 out["approvals"] = max(out["approvals"] or 0, count)
-                out["code_owner"] = out["code_owner"] or parameters.get("require_code_owner_review") is True
+                _pull_request_parameters(out, parameters, count, rule["ruleset_id"])
     classic, _ = run.got("branch_protection")
     if classic is not None and branch in classic:
         rule = classic[branch]
@@ -364,6 +508,8 @@ def _requirements(run: _Run, branch: str) -> dict:
             if reviews["required"]:
                 count = reviews["required_approving_review_count"]
                 out["code_owner"] = out["code_owner"] or reviews["require_code_owner_reviews"] is True
+                if reviews["require_last_push_approval"] is True:
+                    out["last_push"].append("the classic protection rule")
                 if _is_int(count) and count >= 0:
                     out["approvals"] = max(out["approvals"] or 0, count)
                 else:
@@ -990,23 +1136,49 @@ def rule_004(run: _Run) -> None:
         run.idle = "no ruleset or classic rule that asks for checks or reviews is in force on an audited branch"
 
 
+def _parameters_text(need: dict) -> str:
+    """The parameters about approvals that the rules could not judge on a branch, as one clause."""
+    return "; ".join(need["parameters_unread"])
+
+
+def _also(run: _Run, clause: str, who: str = "Its rules") -> None:
+    """Name what was not weighed in the result just given, when that result was given for another reason."""
+    if clause and run.results:
+        run.results[-1]["message"] += f" {who} also ask for what this audit cannot weigh: {clause}."
+
+
+OWNER_CLAUSE = ("a code owner's review where a changed file has a code owner (require_code_owner_review), and the "
+                "CODEOWNERS file, which says who the code owners are, is not read")
+
+
 def rule_005(run: _Run) -> None:
     branches = _branches(run)
     collaborators, people_known = run.got("collaborators")
-    compared = 0
+    compared, copilot, no_effect = 0, [], []
     for branch in branches:
         need = _branch_requirements(run, branch)
         subject = f"branch {_q(branch)}"
         required = need["approvals"]
+        odd = _parameters_text(need)
+        # A code owner's review may be one nobody but the author can give; who the code owners are is not read.
+        weigh = "; ".join(([OWNER_CLAUSE] if need["code_owner"] else []) + ([odd] if odd else []))
         if not required:
             if not need["approvals_whole"]:
                 run.unread(subject, "how many approvals it requires is not known",
                            *sorted(set(need["gaps"])))
+                _also(run, weigh)
+            elif weigh:
+                run.cannot_tell(subject, f"{_q(branch)} requires no approval by count, and it asks for what this "
+                                         f"audit cannot weigh: {weigh}. Whether a pull request needs an approval, "
+                                         "and whether it can be given, is not known.")
+            if need["no_effect"]:
+                no_effect.append(branch)
             continue
         compared += 1
         if collaborators is None or not people_known:
             run.unread(subject, f"it requires {_n(required, 'approval')}, and how many accounts can give one is "
                                 "not known", "collaborators")
+            _also(run, weigh)
             continue
         roles = collaborators["by_role"]
         can = sum(roles[r] for r in PUSH_ROLES)
@@ -1014,19 +1186,46 @@ def rule_005(run: _Run) -> None:
             run.unread(subject, f"its rulesets require {_n(required, 'approval')}, which {_n(can, 'account')} "
                                 "can give each other, and a classic protection rule may ask for more",
                        *sorted(set(need["gaps"])))
+            _also(run, weigh)
         elif can - 1 < required:
+            copilot_text = ""
+            if need["copilot"] > required:
+                copilot_text = (f" A pull request Copilot opens without a person needs {need['copilot']} "
+                                f"(require_extra_approval_for_unattributed_changes), more than {_n(can, 'account')} "
+                                "can give.")
             run.finding(subject, "medium",
                         f"{_q(branch)} requires {_n(required, 'approval')}, and {_n(can, 'account')} "
                         f"{'has' if can == 1 else 'have'} the write access an approval needs. Nobody can "
                         "approve their own pull request, so a pull request from "
                         f"{'that account' if can == 1 else 'any of them'} can get at most "
                         f"{_n(max(can - 1, 0), 'approval')}: it merges only by a bypass."
+                        + copilot_text
                         + ("" if need["approvals_whole"] else " (The classic protection rule was not read; it "
-                           "can only ask for more.)"))
+                           "can only ask for more.)")
+                        + (f" Its rules also ask for what this audit cannot weigh: {weigh}." if weigh else ""))
+        elif weigh:
+            run.cannot_tell(subject, f"{_q(branch)} requires {_n(required, 'approval')}, which {_n(can, 'account')} "
+                                     f"can give each other, and it asks for what this audit cannot weigh: {weigh}. "
+                                     "Whether more is required than they can give is not known.")
+        elif need["copilot"] > required:
+            copilot.append(branch)
+        if need["no_effect"] and required:
+            no_effect.append(branch)  # on a rule of its own that counts 0, beside one that asks for approvals
+    zero = (f"require_extra_approval_for_unattributed_changes is on a rule counting 0 on "
+            f"{_names([_q(b, 40) for b in no_effect], 2)}, where it adds none")
     if compared:
-        run.compared = f"the approvals required on {_n(compared, 'branch', 'branches')} and the accounts that can give them"
+        run.compared = (f"the approvals required on {_n(compared, 'branch', 'branches')} and the accounts that can "
+                        "give them")
+        if copilot:
+            # Nobody is the author of a pull request Copilot opens without a person, so every account with write
+            # access may approve it, and one more than the count is at most what they can give when there is no
+            # finding (the count is at most their number less one).
+            run.compared += (f"; on {_names([_q(b, 40) for b in copilot], 2)} a pull request Copilot opens "
+                             "without a person needs one more, which they can give, none being its author")
+        if no_effect:
+            run.compared += f"; {zero}"
     elif not run.results:
-        run.idle = "no audited branch requires an approval"
+        run.idle = "no audited branch requires an approval" + (f" ({zero})" if no_effect else "")
 
 
 def _check_rules(run: _Run, kind: str) -> None:
@@ -1412,6 +1611,8 @@ def rule_013(run: _Run) -> None:
         run.unread("whether workflows may approve pull requests",
                    "a workflow on any branch can ask for a token that writes to pull requests, and whether "
                    "workflows are allowed to approve them is not known", "workflow_permissions")
+        odd = [f"on {_q(b)}, {t}" for b in _branches(run) if (t := _parameters_text(_branch_requirements(run, b)))]
+        _also(run, "; ".join(odd), "The audited branches' rules")
         return
     branches = _branches(run)
     run.compared = (f"whether workflows may approve pull requests, and the approvals {_n(len(branches), 'audited branch')} "
@@ -1424,10 +1625,17 @@ def rule_013(run: _Run) -> None:
         need = _branch_requirements(run, branch)
         subject = f"branch {_q(branch)}"
         count = need["approvals"]
+        odd = _parameters_text(need)
+        also = f" Its rules also ask for what this audit cannot weigh: {odd}." if odd else ""
         if not count:
             if not need["approvals_whole"]:
                 run.unread(subject, f"{lead[:-1]}, and how many approvals {_q(branch)} requires is not known",
                            *sorted(set(need["gaps"])))
+                _also(run, odd)
+            elif odd:
+                run.cannot_tell(subject, f"{lead} {_q(branch)} requires no approval by count, and it asks for what "
+                                         f"this audit cannot weigh: {odd}. Whether it requires an approval, and "
+                                         "whether a workflow's could be it, is not known.")
             continue
         if count == 1 and not need["approvals_whole"]:
             run.unread(subject, f"{lead[:-1]}, and {_q(branch)} requires at least 1 approval"
@@ -1438,6 +1646,7 @@ def rule_013(run: _Run) -> None:
                                    "code owner's review is not known; that could stop the workflow's approval being "
                                    "the one that counts"),
                        *sorted(set(need["gaps"])))
+            _also(run, odd)
             continue
         if need["code_owner"] and count == 1:
             # The one approval must then come from a code owner where a file has one; a workflow is no code
@@ -1445,13 +1654,13 @@ def rule_013(run: _Run) -> None:
             run.cannot_tell(subject, f"{lead} {_q(branch)} requires 1 approval and a code owner's review. Where "
                                      "every changed file has a code owner, the workflow's approval cannot be the "
                                      "one that counts; where one has none, it can. The CODEOWNERS file is not "
-                                     "read.")
+                                     f"read.{also}")
             continue
         extra = (" A code owner's review is required as well, and a workflow's approval still counts towards the "
                  "number." if need["code_owner"] else "")
         run.finding(subject, "medium",
                     f"{lead} {_q(branch)} requires {_n(count, 'approval')}, so a run of such a workflow can give "
-                    f"one.{extra}")
+                    f"one.{extra}{also}")
 
 
 def rule_014(run: _Run) -> None:
