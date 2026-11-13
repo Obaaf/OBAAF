@@ -1,0 +1,217 @@
+# Escape tests for the OBAAF egress control (actions/egress, slice 2c.2).
+#
+# Every attempt is made twice: outside the sandbox, where it must get out (the
+# control), then inside it, where it must not. The judge is a packet capture on
+# the runner's external interface, taken outside the sandbox; the confined
+# command's own exit statuses decide nothing. See docs/egress-control.md.
+name: Egress escape tests
+
+on:
+  pull_request:
+    paths:
+      - actions/egress/**
+      - tests/egress/**
+      - .github/workflows/egress-escape-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - actions/egress/**
+      - tests/egress/**
+      - .github/workflows/egress-escape-tests.yml
+  schedule:
+    # Weekly, so a change on GitHub's runners shows up without a change here.
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  escape:
+    name: Escape attempts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the judge
+        id: prep
+        run: |
+          set -euo pipefail
+          if ! command -v tcpdump >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq tcpdump; fi
+          if ! command -v dig >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq dnsutils; fi
+          iface="$(ip route show default | awk '{print $5; exit}')"
+          {
+            echo "iface=$iface"
+            echo "pfx_out=obaafctl$(openssl rand -hex 6)"
+            echo "pfx_in=obaafin$(openssl rand -hex 6)"
+            echo "pfx_rec=obaafrec$(openssl rand -hex 6)"
+          } >> "$GITHUB_OUTPUT"
+          python3 -I -c '
+          import json, socket
+          out = {}
+          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com"):
+              out[host] = sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
+          print(json.dumps(out, indent=1))
+          ' > "$RUNNER_TEMP/resolved.json"
+          cat "$RUNNER_TEMP/resolved.json"
+          python3 -I tests/egress/judge.py snapshot "$RUNNER_TEMP/before.json"
+          echo "--- the runner, outside the sandbox"
+          echo "interface: $iface"
+          docker version --format 'docker {{.Server.Version}}'
+          docker compose version
+          ip -6 route || true
+          grep -E '^nameserver' /etc/resolv.conf || true
+          echo "PATH=$PATH"
+
+      - name: Controls, outside the sandbox (each must get out)
+        env:
+          IFACE: ${{ steps.prep.outputs.iface }}
+          PFX_OUT: ${{ steps.prep.outputs.pfx_out }}
+        run: |
+          set -euo pipefail
+          sudo tcpdump -i "$IFACE" -U -w "$RUNNER_TEMP/outside.pcap" >/dev/null 2>&1 &
+          sleep 3
+          bash tests/egress/attempts.sh outside "$PFX_OUT" "$RUNNER_TEMP/outside-results.txt"
+          sleep 3
+          sudo pkill -INT -x tcpdump
+          sleep 2
+
+      - name: Start the judge's capture
+        env:
+          IFACE: ${{ steps.prep.outputs.iface }}
+        run: |
+          sudo tcpdump -i "$IFACE" -U -w "$RUNNER_TEMP/inside.pcap" >/dev/null 2>&1 &
+          sleep 3
+
+      - name: Escape attempts, inside the sandbox
+        id: inside
+        uses: ./actions/egress
+        env:
+          PFX_IN: ${{ steps.prep.outputs.pfx_in }}
+          PFX_REC: ${{ steps.prep.outputs.pfx_rec }}
+          REAL_WORKSPACE: ${{ github.workspace }}
+        with:
+          allow: api.github.com
+          env: PFX_IN PFX_REC REAL_WORKSPACE
+          run: bash tests/egress/attempts.sh inside "$PFX_IN" "$PFX_REC" egress-results-inside.txt "$REAL_WORKSPACE"
+
+      - name: Stop the capture and judge
+        if: always()
+        env:
+          PFX_OUT: ${{ steps.prep.outputs.pfx_out }}
+          PFX_IN: ${{ steps.prep.outputs.pfx_in }}
+          PFX_REC: ${{ steps.prep.outputs.pfx_rec }}
+          ACTION_EXIT: ${{ steps.inside.outputs.exit-code }}
+          INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
+          LOG_DIR: ${{ steps.inside.outputs.log-dir }}
+        run: |
+          set -euo pipefail
+          # The background attempt fires 20 seconds after it starts; keep listening past that.
+          sleep 35
+          sudo pkill -INT -x tcpdump || true
+          sleep 2
+          mkdir -p "$RUNNER_TEMP/egress-results"
+          cp "$RUNNER_TEMP/outside-results.txt" "$RUNNER_TEMP/egress-results/" || true
+          cp "$INSIDE_WORKSPACE/egress-results-inside.txt" "$RUNNER_TEMP/egress-results/" || true
+          if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then sudo cp -r "$LOG_DIR" "$RUNNER_TEMP/egress-results/proxy-logs" && sudo chown -R "$(id -u)" "$RUNNER_TEMP/egress-results"; fi
+          python3 -I tests/egress/judge.py judge \
+            --outside-pcap "$RUNNER_TEMP/outside.pcap" \
+            --inside-pcap "$RUNNER_TEMP/inside.pcap" \
+            --resolved "$RUNNER_TEMP/resolved.json" \
+            --outside-prefix "$PFX_OUT" --inside-prefix "$PFX_IN" --record-prefix "$PFX_REC" \
+            --outside-results "$RUNNER_TEMP/outside-results.txt" \
+            --inside-results "$INSIDE_WORKSPACE/egress-results-inside.txt" \
+            --snapshot "$RUNNER_TEMP/before.json" \
+            --action-exit "$ACTION_EXIT" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --json-out "$RUNNER_TEMP/egress-results/verdict.json"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: egress-escape-results
+          path: ${{ runner.temp }}/egress-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  behaviour:
+    name: Exit status, output, environment and refusals
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: A command that fails, writes a file and reads a named variable
+        id: fails
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          PASSED: passed-value
+          NOT_PASSED: not-passed-value
+        with:
+          allow: api.github.com
+          env: PASSED
+          run: |
+            test "$PASSED" = passed-value
+            test -z "${NOT_PASSED:-}"
+            test -z "${GITHUB_TOKEN:-}"
+            test -z "${ACTIONS_RUNTIME_TOKEN:-}"
+            echo from-inside > written.txt
+            exit 7
+
+      - name: A wildcard in the allow-list is refused before anything runs
+        id: wildcard
+        continue-on-error: true
+        uses: ./actions/egress
+        with:
+          allow: "*.github.com"
+          run: "true"
+
+      - name: An address in the allow-list is refused
+        id: address
+        continue-on-error: true
+        uses: ./actions/egress
+        with:
+          allow: "1.1.1.1"
+          run: "true"
+
+      - name: A variable the action withholds cannot be passed
+        id: reserved
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          HTTPS_PROXY: http://example.invalid:3128
+        with:
+          allow: api.github.com
+          env: HTTPS_PROXY
+          run: "true"
+
+      - name: Check what happened
+        env:
+          FAILS_OUTCOME: ${{ steps.fails.outcome }}
+          FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
+          FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
+          WILDCARD_OUTCOME: ${{ steps.wildcard.outcome }}
+          ADDRESS_OUTCOME: ${{ steps.address.outcome }}
+          RESERVED_OUTCOME: ${{ steps.reserved.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() { if eval "$2"; then echo "ok: $1"; else echo "FAILED: $1"; fail=1; fi; }
+          check "the command's exit status 7 is the action's exit-code output" '[ "$FAILS_EXIT" = 7 ]'
+          check "the step failed with the command" '[ "$FAILS_OUTCOME" = failure ]'
+          check "a named variable reached the command and nothing else did (else the status would not be 7)" '[ "$FAILS_EXIT" = 7 ]'
+          check "the file the command wrote is in the copy" '[ -f "$FAILS_WORKSPACE/written.txt" ]'
+          check "the real workspace is unchanged" '[ ! -e written.txt ]'
+          check "a wildcard is refused" '[ "$WILDCARD_OUTCOME" = failure ]'
+          check "an address is refused" '[ "$ADDRESS_OUTCOME" = failure ]'
+          check "a withheld variable is refused" '[ "$RESERVED_OUTCOME" = failure ]'
+          exit "$fail"

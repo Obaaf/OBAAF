@@ -1,0 +1,80 @@
+name: OBAAF egress control
+description: >-
+  Run one command with its network limited to a list of host names, on a
+  GitHub-hosted Linux runner. The command runs under the Agent Workflow
+  Firewall (github/gh-aw-firewall) at a version OBAAF's CI has tried to escape;
+  everything else is refused and logged. The command can write only to a
+  scratch copy of the workspace, and cannot change the runner's files. Read
+  docs/egress-control.md for what this blocks and what it does not.
+author: Osita Sean Keluo-Udeke
+branding:
+  icon: shield
+  color: red
+inputs:
+  allow:
+    description: >-
+      Host names the command may reach over HTTP and HTTPS, separated by commas,
+      spaces or new lines. A name covers its subdomains. Plain names only: no
+      wildcard, address, port or scheme.
+    required: true
+  run:
+    description: >-
+      The command, run with bash -e in a copy of the workspace. It sees none of
+      the runner's environment except the variables named in env.
+    required: true
+  env:
+    description: >-
+      Names of variables from the step's env to pass to the command, separated
+      by commas, spaces or new lines. Values are not printed.
+    required: false
+    default: ""
+outputs:
+  workspace:
+    description: >-
+      The copy of the workspace the command ran in and could change. Treat what
+      is in it as data: do not run or load anything from it in a later step.
+    value: ${{ steps.run.outputs.workspace }}
+  scratch:
+    description: The scratch directory that holds the copy, the command's home and TMPDIR.
+    value: ${{ steps.run.outputs.scratch }}
+  log-dir:
+    description: The proxy's log, outside the scratch directory.
+    value: ${{ steps.run.outputs.log-dir }}
+  denied:
+    description: Hosts the proxy refused, separated by commas.
+    value: ${{ steps.run.outputs.denied }}
+  exit-code:
+    description: The command's exit status.
+    value: ${{ steps.run.outputs.exit-code }}
+runs:
+  using: composite
+  steps:
+    - name: Check the inputs and the runner
+      shell: bash
+      env:
+        INPUT_ALLOW: ${{ inputs.allow }}
+        INPUT_ENV: ${{ inputs.env }}
+        OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
+          echo "::error::The OBAAF egress control runs on Linux x64 runners only."
+          exit 2
+        fi
+        /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" check-allow
+
+    - name: Install the pinned Agent Workflow Firewall
+      shell: bash
+      env:
+        OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
+      run: /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" install
+
+    - name: Run the command with its network limited
+      id: run
+      shell: bash
+      env:
+        INPUT_ALLOW: ${{ inputs.allow }}
+        INPUT_ENV: ${{ inputs.env }}
+        INPUT_RUN: ${{ inputs.run }}
+        OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
+      run: /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" run
