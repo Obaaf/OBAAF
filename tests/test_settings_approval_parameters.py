@@ -84,11 +84,21 @@ class GitHubsOwnAnswersTest(unittest.TestCase):
             self.assertEqual(status(found, "OBAAF-SET-005"), "not-applicable", name)
             note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-005")
             self.assertEqual(note, 'no audited branch requires an approval (require_extra_approval_for_unattributed'
-                                   '_changes on "main" adds one only to a count above 0)')
+                                   '_changes is on a rule counting 0 on "main", where it adds none)')
             # Whether workflows may approve is not shown without a token, so the other rule cannot tell, and
             # for that reason only.
             unknown, = of(found, "OBAAF-SET-013")
             self.assertEqual((unknown["state"], unknown["unread"]), ("cannot-tell", ["workflow_permissions"]))
+
+
+    def test_beside_a_parameter_the_rules_do_not_know_it_is_cannot_tell_not_does_not_apply(self):
+        entries = with_body(recording("live-expectrail-2026-11-13"), BRANCH_RULES.replace(
+            "example-studio/game", "Expectrail/Expectrail"), lambda body: next(
+                r for r in body if r["type"] == "pull_request")["parameters"].update(require_human_approval=True))
+        found = assess_files(entries, CI, token=None, repository="Expectrail/Expectrail")
+        result, = of(found, "OBAAF-SET-005")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn('"require_human_approval" = true', result["message"])
 
 
 class TheParameterListTest(unittest.TestCase):
@@ -107,7 +117,7 @@ class AParameterTheRulesDoNotKnowTest(unittest.TestCase):
         for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
             result, = of(found, rule)
             self.assertEqual((result["state"], result["subject"]), ("cannot-tell", 'branch "main"'), rule)
-            self.assertIn("require_human_approval = true (ruleset 42), a parameter this audit does not know",
+            self.assertIn('"require_human_approval" = true (ruleset 42), a parameter this audit does not know',
                           result["message"], rule)
         # Without it, both have nothing to say.
         plain = assess_files(approving(pull_request(ADMIN, required_approving_review_count=0)), CI)
@@ -121,7 +131,7 @@ class AParameterTheRulesDoNotKnowTest(unittest.TestCase):
                 r for r in body if r["type"] == "pull_request").__setitem__("parameters", p))
             result, = of(assess_files(entries, CI), "OBAAF-SET-005")
             self.assertEqual(result["state"], "cannot-tell", value)
-            self.assertIn("future_review_rule = ", result["message"])
+            self.assertIn('"future_review_rule" = ', result["message"])
 
     def test_with_approvals_the_accounts_can_give_it_is_cannot_tell_not_no_finding(self):
         entries = people(pull_request(ADMIN, require_human_approval=True), 3)
@@ -133,25 +143,56 @@ class AParameterTheRulesDoNotKnowTest(unittest.TestCase):
     def test_a_finding_by_count_stays_a_finding_and_names_it(self):
         finding, = of(assess_files(pull_request(ADMIN, require_human_approval=True), CI), "OBAAF-SET-005")
         self.assertEqual(finding["state"], "finding")  # one account, one approval: as before
-        self.assertIn("Its pull-request rules also carry what this audit cannot weigh: require_human_approval",
+        self.assertIn('Its rules also ask for what this audit cannot weigh: "require_human_approval"',
                       finding["message"])
         workflow_finding, = of(assess_files(approving(pull_request(ADMIN, require_human_approval=True)), CI),
                                "OBAAF-SET-013")
         self.assertEqual(workflow_finding["state"], "finding")
-        self.assertIn("require_human_approval = true", workflow_finding["message"])
+        self.assertIn('"require_human_approval" = true', workflow_finding["message"])
+
+    def test_a_cannot_tell_given_for_another_reason_still_names_it(self):
+        refused_protection = replace(pull_request(ADMIN, required_approving_review_count=0, future=True),
+                                     PROTECTION, status=403, body={"message": "Resource not accessible"})
+        result, = of(assess_files(refused_protection, CI), "OBAAF-SET-005")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn('"future" = true (ruleset 42)', result["message"])
+        no_people = replace(pull_request(ADMIN, future=True), COLLABORATORS, status=403,
+                            body={"message": "Resource not accessible"})
+        result, = of(assess_files(no_people, CI), "OBAAF-SET-005")
+        self.assertEqual((result["state"], result["unread"]), ("cannot-tell", ["collaborators"]))
+        self.assertIn('"future" = true (ruleset 42)', result["message"])
+        found = assess_files(approving(refused_protection), CI)
+        result, = of(found, "OBAAF-SET-013")
+        self.assertIn('"future" = true (ruleset 42)', result["message"])
+        # A count of 1 with classic protection not read: the classic rule may ask for more, and the parameter
+        # is still named, in both rules.
+        one = replace(people(pull_request(ADMIN, future=True), 3), PROTECTION, status=403,
+                      body={"message": "Resource not accessible"})
+        for rule, entries in (("OBAAF-SET-005", one), ("OBAAF-SET-013", approving(one))):
+            result, = of(assess_files(entries, CI), rule)
+            self.assertEqual((result["state"], result["unread"]), ("cannot-tell", ["branch_protection"]), rule)
+            self.assertIn('"future" = true (ruleset 42)', result["message"], rule)
+        owner = approving(pull_request(ADMIN, require_code_owner_review=True, future=True))
+        result, = of(assess_files(owner, CI), "OBAAF-SET-013")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("CODEOWNERS file is not read", result["message"])
+        self.assertIn('"future" = true (ruleset 42)', result["message"])
 
     def test_a_parameter_on_another_rulesets_rule_counts_as_well(self):
         entries = people(second_ruleset(ADMIN, required_approving_review_count=0, new_thing=1), 3)
         result, = of(assess_files(entries, CI), "OBAAF-SET-005")
         self.assertEqual(result["state"], "cannot-tell")
-        self.assertIn("new_thing = 1 (ruleset 99)", result["message"])
+        self.assertIn('"new_thing" = 1 (ruleset 99)', result["message"])
 
     def test_a_name_or_value_that_would_forge_a_line_of_the_report_is_made_plain(self):
         entries = approving(pull_request(ADMIN, required_approving_review_count=0,
                                          **{"x\n  HIGH    forged‮": "a\nb"}))
         found = assess_files(entries, CI)
-        for result in of(found, "OBAAF-SET-005") + of(found, "OBAAF-SET-013"):
+        both = of(found, "OBAAF-SET-005") + of(found, "OBAAF-SET-013")
+        self.assertEqual(len(both), 2)
+        for result in both:
             self.assertEqual(result["state"], "cannot-tell")
+            self.assertIn("HIGH forged", result["message"])
             self.assertNotIn("\n", result["message"])
             self.assertNotIn("‮", result["message"])
 
@@ -163,10 +204,25 @@ class KnownParametersTest(unittest.TestCase):
                                           {"id": 1, "type": "Team"}]},
                                       required_review_thread_resolution=True), 3)
         self.assertEqual(status(assess_files(entries, CI), "OBAAF-SET-005"), "no-finding")
-        zero = approving(pull_request(ADMIN, required_approving_review_count=0, dismissal_restriction="odd"))
+        zero = approving(pull_request(ADMIN, required_approving_review_count=0, dismissal_restriction={
+            "enabled": False, "allowed_actors": []}))
         found = assess_files(zero, CI)
         self.assertEqual(status(found, "OBAAF-SET-005"), "not-applicable")
         self.assertEqual(status(found, "OBAAF-SET-013"), "no-finding")
+
+    def test_one_of_them_in_another_form_may_not_be_the_parameter_the_code_knows(self):
+        for name, value in (("dismiss_stale_reviews_on_push", "yes"), ("required_review_thread_resolution", 1),
+                            ("allowed_merge_methods", "squash"), ("dismissal_restriction", "odd"),
+                            ("dismissal_restriction", {"enabled": True, "allowed_actors": [],
+                                                       "require_two_approvals_after_dismissal": 2}),
+                            ("dismissal_restriction", {"enabled": True, "allowed_actors": [{"id": 1}]})):
+            entries = approving(pull_request(ADMIN, required_approving_review_count=0, **{name: value}))
+            found = assess_files(entries, CI)
+            for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
+                result, = of(found, rule)
+                self.assertEqual(result["state"], "cannot-tell", (name, value, rule))
+                self.assertIn(f'"{name}" = ', result["message"])
+                self.assertIn("not in the form GitHub's reference gives", result["message"])
 
     def test_a_flag_that_is_not_true_or_false_is_cannot_tell(self):
         for name in ("require_code_owner_review", "require_last_push_approval", EXTRA):
@@ -175,7 +231,7 @@ class KnownParametersTest(unittest.TestCase):
             for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
                 result, = of(found, rule)
                 self.assertEqual(result["state"], "cannot-tell", (name, rule))
-                self.assertIn(f'{name} = "true" (ruleset 42), not true or false', result["message"])
+                self.assertIn(f'"{name}" = "true" (ruleset 42), not true or false', result["message"])
 
     def test_last_push_approval_with_no_approval_by_count_is_cannot_tell(self):
         entries = approving(pull_request(ADMIN, required_approving_review_count=0, require_last_push_approval=True))
@@ -243,7 +299,8 @@ class TheExtraApprovalTest(unittest.TestCase):
         found = assess_files(people(pull_request(ADMIN, **{EXTRA: True}), 2), CI)
         self.assertEqual(status(found, "OBAAF-SET-005"), "no-finding")
         note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-005")
-        self.assertIn('a pull request Copilot opens without a person needs one more on "main"', note)
+        self.assertIn('on "main" a pull request Copilot opens without a person needs one more, which they can give, '
+                      'none being its author', note)
         self.assertLessEqual(len(note), 300)  # the report prints notes up to 300 characters
 
     def test_a_finding_by_count_says_the_copilot_pull_request_cannot_get_its_approvals_either(self):
@@ -251,11 +308,28 @@ class TheExtraApprovalTest(unittest.TestCase):
         self.assertIn("A pull request Copilot opens without a person needs 2", finding["message"])
         self.assertNotIn("cannot weigh", finding["message"])
 
-    def test_on_a_rule_of_zero_beside_another_rule_that_asks_for_approvals_is_cannot_tell(self):
-        entries = people(second_ruleset(ADMIN, required_approving_review_count=0, **{EXTRA: True}), 3)
-        result, = of(assess_files(entries, CI), "OBAAF-SET-005")
-        self.assertEqual(result["state"], "cannot-tell")
-        self.assertIn("on a rule that counts 0 approvals while the branch requires 1", result["message"])
+    def test_on_a_rule_of_zero_beside_another_rule_that_asks_for_approvals_it_adds_none(self):
+        # "This setting has no effect if the ruleset requires zero approvals": its own ruleset.
+        entries = people(second_ruleset(ADMIN, required_approving_review_count=0, **{EXTRA: True}), 2)
+        found = assess_files(entries, CI)
+        self.assertEqual(status(found, "OBAAF-SET-005"), "no-finding")
+        note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-005")
+        self.assertIn('require_extra_approval_for_unattributed_changes is on a rule counting 0 on "main", where '
+                      'it adds none', note)
+        self.assertNotIn("Copilot opens", note)
+
+    def test_it_adds_one_to_its_own_rules_count_and_the_branch_needs_the_most_any_rule_asks(self):
+        # Two rulesets with the flag, counting 2 and 1: a pull request Copilot opens without a person needs 3.
+        entries = second_ruleset(pull_request(ADMIN, required_approving_review_count=2, **{EXTRA: True}),
+                                 required_approving_review_count=1, **{EXTRA: True})
+        finding, = of(assess_files(entries, CI), "OBAAF-SET-005")
+        self.assertIn("A pull request Copilot opens without a person needs 3", finding["message"])
+        # A rule of 1 with the flag beside a rule of 3: such a pull request needs 3, not 2, which is the count.
+        entries = people(second_ruleset(ADMIN, required_approving_review_count=3), 4)
+        entries = pull_request(entries, **{EXTRA: True})
+        found = assess_files(entries, CI)
+        self.assertEqual(status(found, "OBAAF-SET-005"), "no-finding")
+        self.assertNotIn("Copilot", next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-005"))
 
     def test_false_or_absent_changes_nothing(self):
         for value in (False, None):
@@ -287,11 +361,16 @@ class RequiredReviewersTest(unittest.TestCase):
 
     def test_one_not_in_the_form_of_githubs_reference_is_cannot_tell(self):
         for value in ("team", [{"reviewer": {"id": "31"}, "file_patterns": ["*"], "minimum_approvals": 1}],
-                      [dict(self.TEAM, minimum_approvals=-1)], [dict(self.TEAM, file_patterns="*")], [None]):
+                      [dict(self.TEAM, minimum_approvals=-1)], [dict(self.TEAM, file_patterns="*")], [None],
+                      # The reference gives the reviewer an id and the type "Team", and an entry nothing more: a
+                      # field it does not list could add a requirement, even where the minimum is 0.
+                      [dict(self.TEAM, reviewer={"id": 31})], [dict(self.TEAM, reviewer={"id": 31, "type": "User"})],
+                      [dict(self.TEAM, minimum_approvals=0, approvals_required_from_outside_team=2)],
+                      [dict(self.TEAM, reviewer={"id": 31, "type": "Team", "also": 1})]):
             entries = pull_request(ADMIN, required_approving_review_count=0, required_reviewers=value)
             result, = of(assess_files(entries, CI), "OBAAF-SET-005")
             self.assertEqual(result["state"], "cannot-tell", value)
-            self.assertIn("not in a form the audit reads", result["message"])
+            self.assertIn("not in the form GitHub's reference gives", result["message"])
 
 
 class NothingElseMovesTest(unittest.TestCase):
