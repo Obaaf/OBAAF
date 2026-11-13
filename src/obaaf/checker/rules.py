@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from obaaf.catalog import Catalog
+from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
@@ -166,11 +167,16 @@ def _bypasses_failure(raw) -> bool:
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
-    def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None) -> None:
+    def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
+                 agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
         self.protected = dict(protected or {})
+        # The `agents` section of the configuration, and what was read of the repository's policy for
+        # GitHub's native egress firewall (None when no repository was checked, only files).
+        self.agents = dict(agents or {})
+        self.firewall = firewall
         self.findings: list[Finding] = []
 
     def add(self, rule: str, line: int, template: str, job: Job | None = None, step: Step | None = None,
@@ -553,26 +559,451 @@ class WorkflowRules:
             "unverified-monitor": "Agent job '{job}' runs a blocking egress monitor ({monitor}) as its first "
                                   "step (workflow file sha256 {written}). The checker cannot yet tell whether "
                                   "it limits the agent.",
+            "weak-monitor": "Agent job '{job}' runs a blocking egress monitor ({monitor}) as its first step, but: "
+                            "{weaknesses}.",
+            "firewall-runner": "Agent job '{job}' runs on {runner}, GitHub's native egress firewall, and "
+                               "{policy} (workflow file sha256 {written}).",
+            "egress-action": "Agent job '{job}' runs a command under OBAAF's egress action ({action}), allowing "
+                             "{allow} (workflow file sha256 {written}).",
+            "awf": "Agent job '{job}' runs a command under the Agent Workflow Firewall in step '{where}' "
+                   "(workflow file sha256 {written}).",
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
+    EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
+    EGRESS_ID = "egress-enforced"
+    # After a cleared GHA-020: what the control does not stop, so the report never reads as more.
+    _LEAKS = ("Not blocked: anything the confined command sends to a listed host, and data in a host name "
+              "asked of the proxy, which leaves the runner in a DNS query even when the proxy refuses it "
+              "(until slice 2c.4)")
+
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
         which case of OBAAF-GHA-020 it is, and that case's values.
 
-        Nothing is `verified` yet. A step that uses a known monitor in block mode, with no
-        condition, as the job's first step is "cannot tell": whether it holds depends on its version
-        and on the job being unable to undo it with sudo or a container, which are not read. The
-        finding for it is identified by the workflow file as it stands, so an acceptance covers the
-        file that was looked at and no later one. A monitor that is not the first step, on its own,
-        lets other steps run without it, and a monitor behind a condition or a declaration alone
-        enforces nothing: each is "not met"."""
-        name = "a control the checker recognises limits the job's network access to an allow-list"
-        ident = "egress-enforced"
+        Each control the job might have is read on its own (GitHub's native firewall, OBAAF's egress
+        action, Harden-Runner, the Agent Workflow Firewall in a script), and the one that comes out
+        best stands: one real control is enough. A control is `verified` only where every condition
+        that makes it hold was read and holds; where one does not hold it is "not met", and where one
+        cannot be read it is "cannot tell". A declaration (`OBAAF_EGRESS`) is never a control."""
+        cache = self.__dict__.setdefault("_egress_cache", {})
+        if job.id not in cache:
+            cache[job.id] = self._egress_reading(job)
+        return cache[job.id]
+
+    def _egress_reading(self, job: Job) -> tuple[Control, str, dict]:
+        readings = [r for r in (self._native_firewall(job), self._egress_action(job), self._harden_runner(job),
+                                self._awf(job)) if r is not None]
+        if readings:
+            rank = {VERIFIED: 0, CANNOT_TELL: 1, NOT_MET: 2}
+            best = min(readings, key=lambda r: rank[r.verdict])     # the first of the best, in the order above
+            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
+        kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
+        if declared:
+            return (Control(self.EGRESS_NAME, NOT_MET, "OBAAF_EGRESS is a declaration, and nothing in the job "
+                                                       "enforces it", self.EGRESS_ID), kind, values)
+        return Control(self.EGRESS_NAME, NOT_MET, "no blocking egress control in the job", self.EGRESS_ID), kind, values
+
+    def _written(self) -> str:
+        # An acceptance of "cannot tell" is for the workflow file that was looked at, byte for
+        # byte. Anything narrower has to say which differences GitHub cannot see, and the reader
+        # this checker uses does not read YAML as GitHub's does (numbers, groups, aliases).
+        return (self.wf.digest or hashlib.sha256(self.wf.text.encode("utf-8", "surrogatepass")).hexdigest())[:32]
+
+    def _no_egress_kind(self, job: Job) -> tuple[str, dict]:
+        declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
+        return ("declared", {"declared": str(declared)}) if declared else ("none", {})
+
+    # ---- GitHub's native egress firewall
+    def _native_firewall(self, job: Job) -> egress_mod.Reading | None:
+        """The firewall covers every step of the job, post steps included, from outside the runner's
+        virtual machine. It holds when the job runs on `ubuntu-24.04-firewall` and the repository's
+        `.github/egress-firewall.yaml` sets `mode: enforce`, with a token that can read the file
+        (without `contents: read` the README says no file-based policy is enforced, and no warning is
+        given). Larger runners with the firewall image carry labels of their owner's choosing, so a
+        job on labels the checker cannot name, in a repository whose policy enforces, is "cannot tell"."""
+        if job.reusable:
+            return None
+        sets = job.runner_label_sets()
+        firewall = egress_mod.FIREWALL_LABEL
+        on = [s for s in (sets or []) if len(s) == 1 and s[0].strip().lower() == firewall]
+        policy = self.firewall
+        if not on:
+            # A larger runner can be in a runner group (`group:`), which the checker otherwise counts as
+            # self-hosted; a runner labelled `self-hosted` never has GitHub's firewall.
+            plain_self_hosted = any(label.strip().lower() == "self-hosted" for label in job.runs_on)
+            if (policy is not None and policy.state == "read" and policy.mode == "enforce"
+                    and job.runner_kind != "github-hosted" and not plain_self_hosted):
+                detail = (f"{egress_mod.FIREWALL_POLICY} sets mode: enforce, and the job runs on "
+                          f"{one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 120)}, which "
+                          "may or may not be a larger runner with GitHub's firewall image: its labels do not say")
+                return egress_mod.Reading(CANNOT_TELL, detail, "firewall-runner",
+                                          {"runner": ", ".join(job.runs_on) or "unknown labels",
+                                           "policy": self._policy_shown(policy), "written": self._written()})
+            return None
+        problems: list[str] = []
+        unsure: list[str] = []
+        if len(on) != len(sets):
+            others = sorted({", ".join(s) for s in sets if s not in on})
+            problems.append(f"some runs of the job use {one_line('; '.join(others), 120)}, without the firewall")
+        if policy is None:
+            unsure.append(f"{egress_mod.FIREWALL_POLICY} was not read, because a single workflow file was checked "
+                          "rather than a repository")
+        elif policy.state == "missing":
+            problems.append(f"the repository has no {egress_mod.FIREWALL_POLICY}, so the firewall enforces no policy")
+        elif policy.state == "misnamed":
+            problems.append(f"the policy file is {policy.detail}, and the firewall reads only "
+                            f"{egress_mod.FIREWALL_POLICY} (the name is case sensitive), so it enforces nothing")
+        elif policy.state == "unreadable":
+            unsure.append(f"{egress_mod.FIREWALL_POLICY} could not be read: {policy.detail}")
+        elif policy.mode == "log":
+            problems.append(f"{egress_mod.FIREWALL_POLICY} sets mode: log, which records traffic and blocks nothing")
+        elif policy.mode != "enforce":
+            unsure.append(f"{egress_mod.FIREWALL_POLICY} sets mode to "
+                          f"{one_line(repr(policy.mode) if policy.mode is not None else 'nothing the checker can read', 60)}, "
+                          "which is neither enforce nor log")
+        if "workflow_call" in job.triggers():
+            unsure.append("other workflows can call this one, and whose policy file and token the firewall uses "
+                          "for a called workflow is not established")
+        perms = job.permissions
+        if perms is not None and perms.level("contents") not in ("read", "write"):
+            problems.append("the job's token has no contents permission, and without contents: read the firewall "
+                            "enforces no policy file and gives no warning")
+        if policy is not None and policy.state == "read":
+            odd = [entry for entry in policy.allow if not egress_mod.HOST_RE.match(entry.strip().lower())]
+            wide = [entry for entry in policy.allow
+                    if entry not in odd and egress_mod.public_suffix_at_or_under(entry.strip())]
+            if odd:
+                unsure.append(f"the policy allows {one_line(', '.join(odd[:5]), 120)}, which is not a plain host name, "
+                              "and the firewall's README describes no other kind of entry")
+            if wide:
+                unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
+                              "a public suffix (where anyone can register a name), and the firewall's README does "
+                              "not say whether an allowed name covers the names under it")
+        verdict = egress_mod.worst(problems, unsure)
+        if verdict == VERIFIED:
+            listed = ", ".join(policy.allow) or "nothing"
+            listed += " and nothing else" if policy.no_defaults else " and GitHub's default endpoints"
+            detail = (f"the job runs on {firewall} and {egress_mod.FIREWALL_POLICY} sets mode: enforce, allowing "
+                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host "
+                      "is not blocked")
+        else:
+            detail = egress_mod.joined(problems or unsure)
+        return egress_mod.Reading(verdict, detail, "firewall-runner",
+                                  {"runner": firewall, "policy": self._policy_shown(policy), "written": self._written()})
+
+    @staticmethod
+    def _policy_shown(policy) -> str:
+        if policy is None:
+            return "its policy file was not read"
+        if policy.state == "read":
+            return f"its policy file sets mode {policy.mode or 'unreadable'} (file sha256 {policy.digest})"
+        if policy.state == "missing":
+            return "the repository has no policy file"
+        if policy.state == "misnamed":
+            return f"its policy file is misnamed ({policy.detail})"
+        return f"its policy file cannot be read (file sha256 {policy.digest or 'none'})"
+
+    # ---- OBAAF's egress action
+    @staticmethod
+    def _without_registry_credentials(rest: dict) -> dict:
+        """A job's keys without the `credentials` of its container and services, which GitHub uses to
+        pull their images and hands to no step."""
+        out = dict(rest)
+        container = out.get("container")
+        if isinstance(container, dict):
+            out["container"] = {k: v for k, v in container.items() if k != "credentials"}
+        services = out.get("services")
+        if isinstance(services, dict):
+            out["services"] = {name: ({k: v for k, v in svc.items() if k != "credentials"}
+                                      if isinstance(svc, dict) else svc) for name, svc in services.items()}
+        return out
+
+    def _credentials(self, value) -> list[str]:
+        """The credentials a part of the workflow is given: every secret, GITHUB_TOKEN included, and
+        `github.token` (also through `toJSON(github)` or a computed index). A condition written without
+        `${{ }}` is read too."""
+        found: list[str] = []
+        bodies = list(expressions(value))
+        seen: set = set()
+
+        def conditions(item) -> None:
+            if id(item) in seen:
+                return
+            if isinstance(item, dict):
+                seen.add(id(item))
+                cond = item.get("if")
+                if isinstance(cond, str) and expr_mod.OPEN not in cond:
+                    bodies.append(cond)
+                for sub in item.values():
+                    conditions(sub)
+            elif isinstance(item, list):
+                seen.add(id(item))
+                for sub in item:
+                    conditions(sub)
+        conditions(value)
+        for body in bodies:
+            for ref in expr_mod.refs(body):
+                path = ref.path
+                head = path[0].value.lower()
+                if head == "secrets":
+                    name = (path[1].value if len(path) > 1 and path[1].kind == expr_mod.NAME else "all secrets")
+                    shown = f"secrets.{one_line(name, 60)}" if name != "all secrets" else name
+                    if shown not in found:
+                        found.append(shown)
+                elif head == "github" and expr_mod.reaches(path, ({"github"}, {"token"}), ref.extracted):
+                    if "github.token" not in found:
+                        found.append("github.token")
+        return found
+
+    def _agent_step(self, step: Step, text: str) -> str | None:
+        """Why the checker takes the step to run an agent, or None."""
+        actions = list(self.detection.get("agent_actions", [])) + list(self.agents.get("actions", ()) or ())
+        commands = [re.compile(p, re.M) for p in
+                    list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
+        for prefix in actions:
+            if step.uses_action(prefix):
+                return f"uses {one_line(step.action, 80)}"
+        if text and any(rx.search(text) for rx in commands):
+            return "runs an agent CLI"
+        return None
+
+    _OUTPUTS = frozenset({"workspace", "scratch"})
+
+    def _reads_output(self, step: Step, ids: set) -> list[str]:
+        """Where a step refers to what a confined command could write: an `outputs.workspace` or
+        `outputs.scratch` of a confined step (also through `steps.*`, a computed index or `toJSON`),
+        or the scratch directory by its name, `obaaf-egress`. Returns the input names it does so in
+        (`run`, `with.path`, `env.X`, ...)."""
+        where: list[str] = []
+
+        pattern = ({"steps"}, ids, {"outputs"}, set(self._OUTPUTS))
+
+        def refers(text: str) -> bool:
+            # The scratch directory is /tmp/obaaf-egress.<random>, so a step that names /tmp can reach it
+            # through a pattern (`/tmp/obaaf*`, `/tmp/*`) as well as by its name.
+            if "obaaf-egress" in text.lower() or "/tmp" in text:
+                return True
+            return any(expr_mod.reaches(ref.path[:len(pattern)], pattern, ref.extracted or len(ref.path) > len(pattern))
+                       for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
+
+        seen: set = set()
+
+        def walk(label: str, value) -> None:
+            if isinstance(value, (dict, list)):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
+            if isinstance(value, str):
+                if refers(value):
+                    where.append(label)
+            elif isinstance(value, dict):
+                for key, sub in value.items():
+                    if not label and key == "name":
+                        continue        # a step's name is only shown
+                    walk(f"{label}.{input_name(key) if label == 'with' else key}" if label else str(key), sub)
+            elif isinstance(value, list):
+                for n, sub in enumerate(value):
+                    walk(f"{label}[{n}]", sub)
+            elif value is not None:
+                if refers(str(value)):
+                    where.append(label)
+        walk("", step.raw)
+        return where
+
+    def _egress_action(self, job: Job) -> egress_mod.Reading | None:
+        """OBAAF's egress action confines one command: its `run` input. The control holds for the job
+        only when every condition below can be read and holds (decision D-050):
+
+        - the action is used from a commit OBAAF lists as released, on the runner it was tested on;
+        - its allow-list is written out, every entry a host name the action accepts and none a public
+          suffix (a listed name covers the names under it);
+        - the agent is the confined command: no other step, and no `env` of the job or workflow, is
+          given a credential, and no other step runs an agent the checker recognises. A job whose
+          steps get no credential at all is "cannot tell" unless the checker recognises the agent in
+          the confined command itself, because an agent that needs no key could run in any step;
+        - no credential reaches the confined command either: the action refuses model-key names, and
+          a key under another name could leave through a listed host or the proxy's DNS (slice 2c.4);
+        - no step that can run after or beside it reads its `workspace` or `scratch` output or the
+          scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
+          any other use is "cannot tell", because the checker cannot tell reading from running."""
+        confined = [step for step in job.steps if step.confines]
+        if not confined or job.reusable:
+            return None
+        released = {str(sha).lower() for sha in self.detection.get("egress_action_releases", []) or []}
+        problems: list[str] = []
+        unsure: list[str] = []
+        allow_shown: list[str] = []
+        for step in confined:
+            where = f"step '{one_line(step.name, 80)}'"
+            uses = (step.uses or "").strip()
+            ref = uses.split("@", 1)[1] if "@" in uses else ""
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                unsure.append(f"{where} uses the action at '{one_line(ref, 60)}', not a commit; a tag or "
+                              "branch can move")
+            elif ref not in released:
+                unsure.append(f"{where} uses the action at {ref[:12]}, which is not a commit OBAAF lists as "
+                              f"released ({len(released) or 'none'} listed)")
+            given = step.raw.get("with")
+            if not isinstance(given, dict):
+                unsure.append(f"{where} gives the action its inputs {'from an expression' if given else 'not at all'}")
+                continue
+            allow = step.with_.get("allow")
+            if not isinstance(allow, str) or not allow.strip():
+                if allow is None or (isinstance(allow, str) and not allow.strip()):
+                    problems.append(f"{where} gives no allow input, so the action refuses to run")
+                else:
+                    unsure.append(f"{where} gives allow as {type(allow).__name__}, not as text")
+            elif expr_mod.OPEN in allow:
+                unsure.append(f"{where} computes its allow-list when the job runs ({one_line(allow, 80)})")
+                allow_shown.append(allow)
+            else:
+                for entry in egress_mod.split_list(allow):
+                    name = entry.lower()
+                    allow_shown.append(name)
+                    if "*" in name or len(name) > 253 or not egress_mod.HOST_RE.match(name):
+                        problems.append(f"{where} allows '{one_line(entry, 60)}', which the action refuses, so it "
+                                        "does not run")
+                    elif egress_mod.public_suffix_at_or_under(name):
+                        suffix = egress_mod.public_suffix_at_or_under(name)
+                        what = "a public suffix" if suffix == name else f"which has the public suffix {suffix} under it"
+                        problems.append(f"{where} allows {name}, {what}: anyone can register a name there, and a "
+                                        "listed name covers every name under it")
+            command = step.with_.get("run")
+            if not isinstance(command, str) or not command.strip():
+                problems.append(f"{where} gives no run input, so the action refuses to run")
+        # The runner the action was tested on.
+        sets = job.runner_label_sets()
+        if job.raw.get("container") is not None:
+            unsure.append("the job runs in a container, where the action has not been tried")
+        if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
+            unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
+                          "the action was tested only on GitHub-hosted ubuntu-24.04 runners")
+        # Where the agent is.
+        others = [step for step in job.steps if not step.confines]
+        outside: list[str] = []
+        for label, value in (("the workflow's env", self.wf.raw.get("env")),):
+            names = self._credentials(value)
+            if names:
+                outside.append(f"{label} holds {', '.join(names[:3])}")
+        rest = self._without_registry_credentials({key: value for key, value in job.raw.items() if key != "steps"})
+        names = self._credentials(rest)
+        if names:
+            outside.append(f"the job gives {', '.join(names[:3])} outside its steps")
+        for step in others:
+            names = self._credentials(step.raw)
+            if names:
+                outside.append(f"step '{one_line(step.name, 80)}' is given {', '.join(names[:3])}")
+        # Credentials no expression hands over: every step can ask for an OIDC token when the job may
+        # (and turn it into a cloud credential, a model provider's included), and every action is given
+        # the job's token without being asked, which calls GitHub Models when the token has `models`.
+        # The confined command gets neither: the action passes it only the variables it names, and
+        # refuses names starting ACTIONS_ and the GitHub token names.
+        perms = job.permissions
+        if perms is not None and perms.oidc:
+            outside.append("the job can request OIDC tokens (id-token: write), which any step can turn into a "
+                           "cloud credential")
+        if perms is not None and perms.level("models") in ("read", "write"):
+            outside.append("the job's token can call GitHub Models (models permission), and every action is given "
+                           "that token")
+        unread_token = perms is None
+        agents_outside = []
+        for step in others:
+            why = self._agent_step(step, step.agent_text())
+            if why or step.index in job.agent_script_steps:
+                agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
+        inside = []
+        for step in confined:
+            inside.extend(self._credentials(step.raw))
+        if agents_outside:
+            problems.append(f"{egress_mod.joined(agents_outside, 3)}, outside the confined command")
+        if outside:
+            problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
+                            "(the checker tells where an agent runs by where its key goes)")
+        elif inside:
+            unsure.append(f"the confined command can be given {', '.join(sorted(set(inside))[:3])}; the action "
+                          "refuses model-key names, and a key under another name could leave through a listed "
+                          "host or the proxy's DNS (slice 2c.4)")
+        elif not agents_outside:
+            recognised = [step for step in confined if self._agent_step(step, step.agent_text())
+                          or step.index in job.agent_script_steps]
+            if not recognised:
+                unsure.append("no step of the job is given a credential and the checker recognises no agent in the "
+                              "confined command, so it cannot tell where the agent runs: an agent that needs no key "
+                              "could run in any step")
+        if unread_token and not outside:
+            unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
+                          "which the checker does not read, and every action is given that token")
+        # What runs after (or beside) the confined command. Only `actions/upload-artifact` may: it saves
+        # files as data. A script, or any other action, could run or load what the command wrote, and
+        # the checker cannot tell reading from running. Steps before it are read for what their post
+        # steps or the processes they leave running could reach: the outputs, the scratch directory by
+        # its name, or /tmp.
+        first = min(step.index for step in confined)
+        groups = {step.group for step in confined if step.group is not None}
+        concurrent = any(step.background for step in confined)
+        ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
+        defaults = job.raw.get("defaults")
+        if defaults is not None and self._reads_output(Step(index=-1, raw={"defaults": defaults}, line=0), ids):
+            unsure.append("the job's defaults name /tmp or the confined command's output, and the checker cannot "
+                          "tell whether a step runs or loads anything from it")
+        services = job.raw.get("services")
+        if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
+                                              for svc in services.values()):
+            unsure.append("the job's service containers are given volumes or options, and run beside the confined "
+                          "command, which the checker does not read")
+        after: list[str] = []
+        for step in others:
+            before = (step.index < first and not step.background and not concurrent
+                      and (step.group is None or step.group not in groups))
+            where = f"step '{one_line(step.name, 80)}'"
+            refs = self._reads_output(step, ids)
+            if refs and step.uses_action("actions/cache"):
+                problems.append(f"{where} saves /tmp or the confined command's output to a cache (its post step "
+                                "saves after the job), from which a later run can load it")
+                continue
+            if not before:
+                if step.uses_action("actions/upload-artifact"):
+                    continue
+                after.append(where)
+            elif refs:
+                unsure.append(f"{where}, before it, names /tmp or the scratch directory ({', '.join(refs[:3])}), "
+                              "and its post step or a process it leaves running could reach what the command wrote")
+            elif egress_mod.leaves_process(step.run):
+                unsure.append(f"{where}, before it, may leave a process running beside it "
+                              f"({egress_mod.leaves_process(step.run)}), which could reach what the command wrote")
+        if after:
+            unsure.append(f"{egress_mod.joined(after, 3)} can run after it or beside it, and the checker cannot tell "
+                          "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
+                          "taken to save files as data)")
+        verdict = egress_mod.worst(problems, unsure)
+        if verdict == VERIFIED:
+            detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
+                      f"allowing {one_line(', '.join(allow_shown), 160)}, and nothing but actions/upload-artifact "
+                      f"runs after it. {self._LEAKS}")
+        else:
+            detail = egress_mod.joined(problems or unsure)
+        action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
+        return egress_mod.Reading(verdict, detail, "egress-action",
+                                  {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()})
+
+    # ---- Harden-Runner
+    def _harden_runner(self, job: Job) -> egress_mod.Reading | None:
+        """Harden-Runner runs beside the job on the same machine. It covers the job only when it starts
+        first, in block mode, with no condition; at v2.16.0 or later (two published bypasses of the block
+        policy are fixed there), the version read from a commit OBAAF lists and never from a comment;
+        with `sudo` and containers removed (`disable-sudo-and-containers: true`), or a step with either
+        can undo its rules; with its policy written in the step rather than fetched from StepSecurity's
+        policy store, which it falls back from to audit mode when the fetch fails; on a GitHub-hosted
+        runner; and in a repository its tier covers (the free tier does not cover private ones). The
+        last is not in the workflow, so the best it can be from `obaaf check` is "cannot tell"."""
         known = [step for step in job.steps
                  if any(step.uses_action(a) for a in self.detection.get("egress_actions", []))]
+        if not known:
+            return None
+        name_kind, name_values = self._no_egress_kind(job)
         monitors = [step for step in known if input_name(step.with_.get("egress-policy", "")) == "block"]
         enforced = [m for m in monitors if "if" not in m.raw]
         if enforced:
@@ -591,36 +1022,93 @@ class WorkflowRules:
             else:
                 place = ""
             if place:
-                return (Control(name, NOT_MET, f"{where} starts the blocking egress monitor {place}, so other "
-                                               "steps can run without it", ident),
-                        "late-monitor", {"monitor": uses, "place": place})
-            # An acceptance of "cannot tell" is for the workflow file that was looked at, byte for
-            # byte. Anything narrower has to say which differences GitHub cannot see, and the reader
-            # this checker uses does not read YAML as GitHub's does (numbers, groups, aliases).
-            written = (self.wf.digest or hashlib.sha256(self.wf.text.encode("utf-8", "surrogatepass")).hexdigest())[:32]
-            detail = (f"{where} uses {one_line(first.action, 80)} in block mode as the job's first step, but the "
-                      "checker does not read what makes that hold: its version, and that the job cannot undo it "
-                      "with sudo or a container")
-            return (Control(name, CANNOT_TELL, detail, ident), "unverified-monitor",
-                    {"monitor": uses, "written": written})
-        kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
+                return egress_mod.Reading(NOT_MET, f"{where} starts the blocking egress monitor {place}, so other "
+                                                   "steps can run without it",
+                                          "late-monitor", {"monitor": uses, "place": place})
+            weaknesses: list[str] = []
+            unsure: list[str] = []
+            ref = uses.split("@", 1)[1] if "@" in uses else ""
+            releases = {str(k).lower(): str(v) for k, v in (self.detection.get("harden_runner_releases") or {}).items()}
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                unsure.append(f"it is used at '{one_line(ref, 60)}', not a commit, and the checker reads its version only "
+                              "from a commit OBAAF lists, never from a tag or a comment")
+            elif ref not in releases:
+                unsure.append(f"{ref[:12]} is not a commit OBAAF lists as a release of Harden-Runner, so its version "
+                              "is not known")
+            else:
+                version = tuple(int(part) for part in releases[ref].split("."))
+                if version < (2, 16, 0):
+                    weaknesses.append(f"it is v{releases[ref]}, before v2.16.0, which fixed two published bypasses "
+                                      "of the block policy")
+            given = first.with_
+            raw_with = first.raw.get("with") if isinstance(first.raw.get("with"), dict) else {}
+            # The value as written: GitHub hands a YAML true to the action as "true", and Harden-Runner
+            # reads it with getBooleanInput, which takes true, True and TRUE (src/setup.ts at v2.16.0).
+            flag = next((value for key, value in raw_with.items() if input_name(key) == "disable-sudo-and-containers"),
+                        None)
+            if flag is True or (isinstance(flag, str) and flag.strip() in ("true", "True", "TRUE")):
+                pass
+            elif isinstance(flag, str) and expr_mod.OPEN in flag:
+                unsure.append("whether sudo and containers are removed is computed when the job runs")
+            else:
+                kept = "containers are kept" if _truthy(given.get("disable-sudo", "")) else "sudo and containers are kept"
+                weaknesses.append(f"{kept} (disable-sudo-and-containers is not true), so a step can undo its rules")
+            if job.raw.get("container") is not None and job.runner_kind == "github-hosted":
+                weaknesses.append("the job runs in a container on a GitHub-hosted runner, where it sets up nothing "
+                                  "(src/setup.ts at v2.16.0 returns at once)")
+            store = given.get("policy")
+            if (isinstance(store, str) and store.strip()) or (store is not None and not isinstance(store, str)) \
+                    or str(given.get("use-policy-store", "")).strip().lower() not in ("", "false"):
+                unsure.append("its policy comes from StepSecurity's policy store, which the checker cannot read, and "
+                              "it falls back to audit mode on some errors in fetching it")
+            if str(given.get("deploy-on-self-hosted-vm", "")).strip().lower() not in ("", "false") \
+                    or job.runner_kind != "github-hosted":
+                unsure.append(f"the job runs on a {job.runner_kind} runner, where how it works was not read")
+            unsure.append("whether the repository is public, or covered by a paid tier (the free tier does not "
+                          "cover private repositories), is not in the workflow, and obaaf check does not read it")
+            if weaknesses:
+                return egress_mod.Reading(NOT_MET, f"{where} uses {one_line(first.action, 80)} as the job's first step, "
+                                                   f"but {egress_mod.joined(weaknesses)}",
+                                          "weak-monitor", {"monitor": uses,
+                                                           "weaknesses": Fact(weaknesses, "; ".join(weaknesses))})
+            detail = (f"{where} uses {one_line(first.action, 80)} in block mode as the job's first step, but "
+                      f"{egress_mod.joined(unsure)}")
+            return egress_mod.Reading(CANNOT_TELL, detail, "unverified-monitor", {"monitor": uses, "written": self._written()})
         if monitors:
             condition = str(monitors[0].raw.get("if"))
-            return (Control(name, NOT_MET, f"its blocking egress monitor runs only if {one_line(condition, 120)}",
-                            ident), "conditional", {"condition": condition})
+            return egress_mod.Reading(NOT_MET, f"its blocking egress monitor runs only if {one_line(condition, 120)}",
+                                      "conditional", {"condition": condition})
         unread = [step for step in known
                   if not isinstance(step.raw.get("with"), dict) and step.raw.get("with") is not None
                   or "${{" in str(step.with_.get("egress-policy", ""))]
         if unread:
             # The step is there and what it is set to is computed when the job runs. The finding is
             # the one reported before (no blocking monitor that can be read); the verdict says why.
-            return (Control(name, CANNOT_TELL, f"step '{one_line(unread[0].name, 80)}' uses an egress monitor "
-                                               "whose egress-policy is not written out, so the checker cannot "
-                                               "tell whether it blocks", ident), kind, values)
-        if declared:
-            return (Control(name, NOT_MET, "OBAAF_EGRESS is a declaration, and nothing in the job enforces it",
-                            ident), kind, values)
-        return Control(name, NOT_MET, "no blocking egress control in the job", ident), kind, values
+            return egress_mod.Reading(CANNOT_TELL, f"step '{one_line(unread[0].name, 80)}' uses an egress monitor "
+                                                   "whose egress-policy is not written out, so the checker cannot "
+                                                   "tell whether it blocks", name_kind, name_values)
+        return None
+
+    # ---- the Agent Workflow Firewall in a script
+    def _awf(self, job: Job) -> egress_mod.Reading | None:
+        """A `run:` script that starts a command under AWF. Which AWF it is, with which options, and
+        whether the agent is the command it wraps are read from a shell command line, which the checker
+        does not do well enough to call it verified, so the best it is is "cannot tell". With
+        `--enable-dind`, which AWF's documentation says allows a bypass, it is "not met"."""
+        found = [step for step in job.steps
+                 if not step.confines and egress_mod.AWF_RE.search(egress_mod.uncommented(step.run))]
+        if not found:
+            return None
+        step = found[0]
+        where = one_line(step.name, 80)
+        if any(egress_mod.AWF_UNSAFE_RE.search(s.run) for s in found):
+            return egress_mod.Reading(NOT_MET, f"step '{where}' runs AWF with --enable-dind, which hands the "
+                                               "command the Docker socket and, in AWF's documentation, allows "
+                                               "a bypass", "awf", {"where": where, "written": self._written()})
+        detail = (f"step '{where}' runs a command under AWF, and the checker does not read a shell command line well "
+                  "enough to establish which AWF version runs, with which options, and that the agent is the "
+                  "command it wraps")
+        return egress_mod.Reading(CANNOT_TELL, detail, "awf", {"where": where, "written": self._written()})
 
     def _secret_controls(self, job: Job, names: set) -> list[Control]:
         """Two controls about where an agent job's secrets come from. The first is read from the

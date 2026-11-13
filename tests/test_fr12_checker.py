@@ -238,10 +238,13 @@ class CheckerBypassesTest(unittest.TestCase):
             enforced = wf.replace("    steps:\n", "    steps:\n"
                                   f"      - uses: step-security/harden-runner@{SHA}\n"
                                   "        with: {egress-policy: block, allowed-endpoints: 'proxy.example:443'}\n")
-            # A blocking monitor that always runs is no longer a pass: the checker does not read what
-            # makes it hold (its version, its place before the agent, whether the job can undo it),
-            # so the finding stays and says "cannot tell".
+            # A blocking monitor that always runs is no longer a pass. With sudo and containers left
+            # to the job it is "not met" (a step can undo it); with them removed it is "cannot tell",
+            # because the checker cannot read the repository's tier (slice 2c.3).
             found = [f for f in findings_for(tmp, enforced) if f.rule == "OBAAF-GHA-020"]
+            self.assertEqual([(f.kind, f.state) for f in found], [("weak-monitor", "new")])
+            removed = enforced.replace("allowed-endpoints:", "disable-sudo-and-containers: true, allowed-endpoints:")
+            found = [f for f in findings_for(tmp, removed) if f.rule == "OBAAF-GHA-020"]
             self.assertEqual([(f.kind, f.state) for f in found], [("unverified-monitor", "cannot-tell")])
 
     def test_an_effect_job_gated_by_a_needed_job_counts_only_without_always(self):
