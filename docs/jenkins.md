@@ -169,8 +169,17 @@ In a Jenkinsfile, set a stage's lane in its `environment` (`OBAAF_LANE = 'agent'
 pipeline's, each enclosing stage's, the stage's own, and a `lanes:` entry in the configuration for
 the file (`Jenkinsfile`), the stage (`Jenkinsfile#Ship`) or a stage it is nested in. None of them
 hides another, so a stage declared `release` in the file and `agent` in the configuration gets the
-rules of both. A value that is not a lane, or one computed when the build runs, is listed in the
-report's notes.
+rules of both. A value that is not a lane, or one computed when the build runs, declares nothing.
+Where it reaches at least one step it is reported as the finding `OBAAF-CFG-001`, on its line in
+the Jenkinsfile, with the labels of the stages it reaches as `--lanes` prints them (a method
+that nothing in the file calls is `name()`, a `post` block `post always`), except that steps
+outside any stage have the empty label and not `pipeline`. So is a `lanes:` entry that names a stage the file does
+not have, in the configuration file; a stage written without a block (`stage 'Build'`) holds no
+step and counts as one the file does not have. Unlike the OBAAF-JEN rules it is not advisory about the
+controller: it says the checker did not get a declaration its author wrote. Two things are not
+read as declarations and not reported: an assignment (`env.OBAAF_LANE = 'agent'`), and the
+variable under another spelling (`obaaf_lane`). See
+[the configuration guide](checker-configuration.md#a-declaration-that-does-nothing).
 
 On a stage, `agent` and `release` are the lanes that change what is checked. `agent` says the
 stage's shell steps, and its steps whose code is not in the file (shared-library steps, outside

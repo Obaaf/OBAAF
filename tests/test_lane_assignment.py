@@ -173,18 +173,23 @@ class DeclarationsAreReadForgivinglyAndNeverSilentlyDroppedTest(unittest.TestCas
         with TempDir() as tmp:
             result = check(tmp, wf)
         self.assertNotIn("OBAAF-GHA-003", rules(result))
-        self.assertTrue(any("agnet" in note and "wf.yml" in note for note in result.notes), result.notes)
+        found = [(f.path, f.job, f.severity) for f in result.findings if f.rule == "OBAAF-CFG-001"
+                 and "'agnet'" in f.message]
+        self.assertEqual(found, [("wf.yml", "work", "high")], result.findings)
 
     def test_a_value_that_is_not_a_lane_in_the_configuration_is_reported(self):
         with TempDir() as tmp:
             result = check(tmp, job("      - run: ./work.sh\n"), config=checker.Config(lanes={"wf.yml#work": "probe"}))
-        self.assertTrue(any("probe" in note and "wf.yml#work" in note for note in result.notes), result.notes)
+        found = [f.message for f in result.findings if f.rule == "OBAAF-CFG-001"]
+        self.assertEqual(len(found), 1, result.findings)
+        self.assertIn("'wf.yml#work' is set to 'probe', which is not a lane", found[0])
 
     def test_an_expression_is_not_a_lane_and_is_reported(self):
         wf = job("      - run: ./work.sh\n", env="OBAAF_LANE: '${{ vars.LANE }}'")
         with TempDir() as tmp:
             result = check(tmp, wf)
-        self.assertTrue(any("vars.LANE" in note for note in result.notes), result.notes)
+        self.assertTrue(any("vars.LANE" in f.message for f in result.findings if f.rule == "OBAAF-CFG-001"),
+                        result.findings)
 
     def test_a_configured_lane_for_a_job_that_does_not_exist_is_reported(self):
         with TempDir() as tmp:
@@ -195,7 +200,7 @@ class DeclarationsAreReadForgivinglyAndNeverSilentlyDroppedTest(unittest.TestCas
                                            ".github/workflows/wf.yml#work": "agent"})
             result = checker.check(tmp, config=config)
         self.assertIn("OBAAF-GHA-003", rules(result))
-        notes = " ".join(result.notes)
+        notes = " ".join(f.message for f in result.findings if f.rule == "OBAAF-CFG-001")
         self.assertIn("wf.yml#wrok", notes)
         self.assertIn("gone.yml#work", notes)
         self.assertNotIn("wf.yml#work'", notes)
@@ -285,9 +290,20 @@ def repo(tmp, workflow, config=None, name="wf.yml", jenkinsfile=None):
     return path
 
 
+CFG = "OBAAF-CFG-001"
+
+
+def idle(result):
+    """The findings about lane declarations that did nothing."""
+    return [f for f in result.findings if f.rule == CFG]
+
+
 def ignored(result_or_notes):
-    notes = getattr(result_or_notes, "notes", result_or_notes)
-    return [note for note in notes if note.startswith("Lane declaration ignored")]
+    """What was said about lane declarations that did nothing: the messages of a result's findings
+    about them, or, of the notes `--lanes` prints, the ones about them."""
+    if hasattr(result_or_notes, "findings"):
+        return [f.message for f in idle(result_or_notes)]
+    return [note for note in result_or_notes if note.startswith("Lane declaration ignored")]
 
 
 class AcceptedFindingsStayWhereTheBaselineHasThemTest(unittest.TestCase):
@@ -409,20 +425,27 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         self.assertNotIn("OBAAF-GHA-003", rules(result))
         notes = ignored(result)
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("job 'work' sets OBAAF_LANE in the env of the step at line 8, where it is not read", notes[0])
+        self.assertIn("Job 'work' sets OBAAF_LANE to 'agent' in the env of step 'step 1', where it is not read",
+                      notes[0])
+        self.assertEqual([(f.line, f.step, f.severity) for f in idle(result)], [(9, "step 1", "high")])
 
     def test_obaaf_lane_in_an_env_that_is_not_read(self):
-        # The step is named by its place in the file, the number an error about it would use.
+        # A step is named as every other finding names it, and an env reached through an alias is
+        # reported on the line of the step that uses it, not on the line of the anchor.
         wf = ("on: push\njobs:\n  work:\n    runs-on: ubuntu-latest\n"
               "    container: {image: 'node:22', env: {OBAAF_LANE: agent}}\n"
               "    steps:\n      - not-a-step\n      - run: make\n        env: &shared {OBAAF_LANE: agent}\n"
               "      - run: make test\n        env: *shared\n")
         with TempDir() as tmp:
-            notes = ignored(check(tmp, wf))
+            result = check(tmp, wf)
+        notes = ignored(result)
         self.assertEqual(len(notes), 3, notes)
-        for where in ("container.env", "the env of the step at line 8", "the env of the step at line 10"):
+        for where in ("container.env", "the env of step 'step 1'", "the env of step 'step 2'"):
             with self.subTest(where=where):
-                self.assertTrue(any(f"job 'work' sets OBAAF_LANE in {where}," in note for note in notes), notes)
+                self.assertTrue(any(f"Job 'work' sets OBAAF_LANE to 'agent' in {where}," in note for note in notes),
+                                notes)
+        self.assertEqual(sorted((f.kind, f.line) for f in idle(result)),
+                         [("container-env", 5), ("step-env", 9), ("step-env", 10)])
 
     def test_an_env_shared_with_another_job_is_not_this_jobs_env(self):
         # `second` has no lane from `first`'s env, so its step's copy of it is a declaration that does nothing.
@@ -439,7 +462,7 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
             notes = ignored(checker.check(path))
         self.assertEqual(shown, {"first": "agent", "second": "trusted"})
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("job 'second' sets OBAAF_LANE in the env of the step at line", notes[0])
+        self.assertIn("Job 'second' sets OBAAF_LANE to 'agent' in the env of step 'step 1'", notes[0])
 
     def test_no_note_for_obaaf_lane_that_is_read_or_is_not_a_declaration(self):
         # An env shared through an anchor is the job's env; an input of that name is not an env.
@@ -471,6 +494,8 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
         notes = ignored(result)
         self.assertEqual(len(notes), 1, notes)        # the job this file does not have, and no other file's entry
         self.assertIn("wf.yml#wrok", notes[0])
+        # The finding is in the configuration, named from the directory the workflow is named from.
+        self.assertEqual([(f.path, f.line) for f in idle(result)], [("../obaaf.yml", 3)])
         self.assertIn("wf.yml#work: agent (set in the checker configuration)", out)
         self.assertIn("wf.yml#wrok", err)
 
@@ -546,7 +571,8 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
             code, out, err = run_cli("check", path, "--lanes")
         self.assertEqual(code, 0)
         self.assertEqual(out, "wf.yml#work: trusted (default)\n")
-        self.assertIn("note: Lane declaration ignored: wf.yml: job 'work' sets OBAAF_LANE to 'agnet'", err)
+        self.assertIn("note: Lane declaration ignored: wf.yml, line 7: Job 'work' sets OBAAF_LANE to 'agnet'", err)
+        self.assertIn("(`obaaf check` reports it as OBAAF-CFG-001, high.)", err)
 
     def test_declaring_another_lane_does_not_silence_the_note_about_an_agent_like_name(self):
         wf = job("      - run: ./review.sh\n", env="OBAAF_LANE: untrusted").replace("  work:", "  claude-review:")
@@ -687,19 +713,25 @@ class AJenkinsStageDeclarationOnlyAddsRulesTest(unittest.TestCase):
     def test_a_value_computed_when_the_build_runs_is_reported_as_that(self):
         with TempDir() as tmp:
             repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = \"${params.LANE}\" }"))
-            notes = ignored(checker.check(tmp))
+            result = checker.check(tmp)
+            notes = ignored(result)
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("Jenkinsfile, line 6, sets OBAAF_LANE to a value computed when the build runs", notes[0])
+        self.assertIn("OBAAF_LANE is set to a value computed when the build runs", notes[0])
+        self.assertEqual([(f.path, f.line, f.kind, f.severity) for f in idle(result)],
+                         [("Jenkinsfile", 6, "jenkins-computed", "high")])
 
     def test_a_value_in_the_file_that_is_not_a_lane_is_reported(self):
         with TempDir() as tmp:
             repo(tmp, job("      - run: make\n"), jenkinsfile=SHIP % ("", "environment { OBAAF_LANE = 'relaese' }"))
-            notes = ignored(checker.check(tmp))
+            result = checker.check(tmp)
+            notes = ignored(result)
             (tmp / ".github" / "obaaf.yml").write_text("lanes:\n  Jenkinsfile#Deploy: release\n  Jenkinsfile: release\n")
             (tmp / "Jenkinsfile").write_text(NESTED)
             nested = ignored(checker.check(tmp))
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("Jenkinsfile, line 6, sets OBAAF_LANE to 'relaese', which is not a lane", notes[0])
+        self.assertIn("OBAAF_LANE is set to 'relaese', which is not a lane", notes[0])
+        self.assertEqual([(f.path, f.line, f.kind, f.severity) for f in idle(result)],
+                         [("Jenkinsfile", 6, "jenkins-not-a-lane", "high")])
         self.assertEqual(nested, [])
 
 

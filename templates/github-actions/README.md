@@ -11,6 +11,8 @@ Reference workflows for OBAAF's four lanes, plus a pipeline check. They are draf
 | [obaaf-publish.yml](workflows/obaaf-publish.yml) | Release (publish) | Runs from the default branch when a release build completes: verifies the release and shows the result, waits for a person to approve, verifies again with the approvals, then uploads | G6.1, G6.2, G7.2, G8.3; FR4, FR6 (G5.2 marked, not implemented) |
 | [obaaf-pipeline-check.yml](workflows/obaaf-pipeline-check.yml) | - | Runs `obaaf check` on every pull request and push to main | FR12 |
 
+One more is optional and not installed: [optional/obaaf-settings-drift.yml](optional/obaaf-settings-drift.yml) compares the repository's GitHub settings once a day with a snapshot you commit, and fails when they differ. Its comments say how to start it without writing the snapshot by hand; see [Drift](../../docs/settings-audit.md#drift).
+
 ## Install
 
 From a clone of the OBAAF repository:

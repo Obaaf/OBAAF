@@ -1,0 +1,40 @@
+{
+  "format": "obaaf-baseline/v0.1",
+  "tool": "obaaf 0.3.0",
+  "findings": [
+    {
+      "fingerprint": "sha256:ece84487e1cd13c4b59ba182aceeac63d1b4ab47f4cf0ce090665ef10486e9da",
+      "rule": "OBAAF-GHA-001",
+      "severity": "low",
+      "path": ".github/workflows/ci.yml",
+      "job": "test",
+      "message": "Job 'test' receives COVERAGE_TOKEN and runs on pull requests. Forks get no secrets, but branches pushed by anyone with write access do."
+    },
+    {
+      "fingerprint": "sha256:1522badc5ccadbb8c3a9965ab8e909dd3b4c7a1ce543c4bd8949b309c567f33d",
+      "rule": "OBAAF-GHA-008",
+      "severity": "medium",
+      "path": ".github/workflows/ci.yml",
+      "job": "test",
+      "step": "actions/checkout@v4",
+      "message": "Action 'actions/checkout@v4' is pinned to 'v4', not a full commit SHA."
+    },
+    {
+      "fingerprint": "sha256:826011522a7cc4cce9aecf145cd3eba2c5dd71a0c993b173bd6612c748000b98",
+      "rule": "OBAAF-GHA-011",
+      "severity": "medium",
+      "path": ".github/workflows/ci.yml",
+      "job": "test",
+      "step": "actions/checkout@v4",
+      "message": "Step 'actions/checkout@v4' persists the job token for later steps."
+    },
+    {
+      "fingerprint": "sha256:d5a7f0c89c3e9f365d518a5366414575bb036164d77ae3b3dc53353c100df198",
+      "rule": "OBAAF-GHA-001",
+      "severity": "high",
+      "path": ".github/workflows/triage.yml",
+      "job": "triage",
+      "message": "Job 'triage' receives MODEL_API_KEY and can be started by issues."
+    }
+  ]
+}
