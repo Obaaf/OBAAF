@@ -158,14 +158,15 @@ def read_firewall_policy(root) -> FirewallPolicy:
         if char in text:
             return FirewallPolicy("unreadable", digest=digest,
                                   detail=f"it contains {shown}, which YAML readers do not agree is a line break")
-    if re.search(r"(?:^|[\s{,])<<[ \t]*:", text):
-        return FirewallPolicy("unreadable", digest=digest,
-                              detail="it uses a merge key (<<), which YAML 1.1 readers merge and YAML 1.2 readers "
-                                     "take for a key of that name")
     try:
+        merged = _has_merge_key(text)
         raw = yamlutil.load(text)
     except Exception as exc:     # YAML errors, duplicate keys, bytes that are not UTF-8
         return FirewallPolicy("unreadable", digest=digest, detail=f"it is not YAML the checker can read ({_short(exc)})")
+    if merged:
+        return FirewallPolicy("unreadable", digest=digest,
+                              detail="it uses a merge key (<<), which YAML 1.1 readers merge and YAML 1.2 readers "
+                                     "take for a key of that name")
     if not isinstance(raw, dict):
         return FirewallPolicy("unreadable", digest=digest, detail="its top level is not a mapping")
     mode = raw.get("mode")
@@ -179,6 +180,28 @@ def read_firewall_policy(root) -> FirewallPolicy:
     return FirewallPolicy("read", mode=mode if isinstance(mode, str) else None, allow=entries,
                           no_defaults=raw.get("no-default-urls") is True, digest=digest,
                           detail="" if isinstance(mode, str) else "its mode is not written as text")
+
+
+def _has_merge_key(text: str) -> bool:
+    """Whether any mapping in the document has a merge key: a key node the YAML reader tags as a merge
+    (`<<`, `? <<`, `!!merge ...`), however it is spelt. Read from the composed nodes, before the
+    reader merges them away."""
+    import yaml
+    seen: set = set()
+    stack = [yaml.compose(text, Loader=yamlutil._Loader)]
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if key.tag == "tag:yaml.org,2002:merge":
+                    return True
+                stack.extend((key, value))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+    return False
 
 
 def _short(exc: Exception) -> str:
@@ -217,9 +240,10 @@ AWF_RE = re.compile(r"(?:^|[;&|(`])[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:[^\s;&
 
 def uncommented(script: str) -> str:
     """A shell script without its comments: from a `#` at the start of a word, outside quotes, to the
-    end of the line. Quotes are followed as the shell does for `'` and `"` (a backslash escapes in
-    double quotes and outside them); anything this cannot follow is left in, which can only add a
-    match, never hide one."""
+    end of the line, following `'`, `"` and backslashes. Approximate: shell has more quoting than
+    this (`$'...'`, here-documents), so it can take text for a comment that is not one, or the other
+    way round. It is used only for AWF, where hiding a match gives the stricter answer ("not met"
+    rather than "cannot tell")."""
     out: list[str] = []
     quote = ""
     i, text = 0, script or ""
@@ -247,19 +271,48 @@ def uncommented(script: str) -> str:
     return "".join(out)
 
 
-# A process a step leaves running after it ends, in the forms the checker recognises: `&` as an
-# operator anywhere (not `&&`, `2>&1`, `&>` or `|&`; one inside quotes counts too, which can only add
-# a match), `nohup`, `setsid`, `disown`, `daemonize`, `start-stop-daemon`, `systemd-run`, `at`, a
-# detached container (`docker run` with `-d` among its short options, `--detach`, or `compose up -d`),
-# `screen -d` and `tmux new -d`.
-BACKGROUND_RE = re.compile(
-    r"(?<![&|>])&(?![&>])"
-    r"|\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run)\b"
-    r"|(?:^|[;&|(`])[ \t]*at[ \t]"
-    r"|\b(?:docker|podman)[ \t]+(?:container[ \t]+)?(?:run|start)\b[^\n]*[ \t](?:-[A-Za-z]*d[A-Za-z]*|--detach)\b"
-    r"|\b(?:docker[ \t]+compose|docker-compose|podman-compose)\b[^\n]*\bup\b[^\n]*[ \t](?:-[A-Za-z]*d[A-Za-z]*|--detach)\b"
-    r"|\bscreen\b[^\n]*[ \t]-[A-Za-z]*d"
-    r"|\btmux\b[^\n]*\bnew(?:-session)?\b[^\n]*[ \t]-[A-Za-z]*d",
-    re.M)
+# A process a step leaves running after it ends, in the forms the checker recognises. The whole
+# script is searched, comments and quoted text included, so a form written in a comment or a string
+# only adds a "cannot tell". Every pattern is linear in the length of the script.
+_AMPERSAND_RE = re.compile(r"(?<![&|>])&(?![&>])")
+_DETACHING_WORD_RE = re.compile(r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|coproc)\b")
+_AT_RE = re.compile(r"(?:^|[;&|(`])[ \t]*at[ \t]", re.M)
+_SHORT_D_RE = re.compile(r"-[A-Za-z]*d[A-Za-z]*")
+
+
+def leaves_process(script: str) -> str | None:
+    """How a script may leave a process running after its step ends, or None: `&` as an operator
+    (not `&&`, `2>&1`, `&>` or `|&`); `nohup`, `setsid`, `disown`, `daemonize`, `start-stop-daemon`,
+    `systemd-run`, `coproc` or `at`; a container started detached (`docker` or `podman` with `run`
+    and `-d` among its short options or `--detach`, any `start`, or `compose up -d`, `up --wait`,
+    `compose start`); `screen -d...`; `tmux new -d`."""
+    text = script or ""
+    if _AMPERSAND_RE.search(text):
+        return "&"
+    word = _DETACHING_WORD_RE.search(text)
+    if word:
+        return word.group(0)
+    if _AT_RE.search(text):
+        return "at"
+    for line in text.splitlines():
+        tokens = line.replace(";", " ").replace("|", " ").replace("(", " ").replace(")", " ").split()
+        if not tokens:
+            continue
+        names = set(tokens)
+        short_d = any(_SHORT_D_RE.fullmatch(t) for t in tokens)
+        engines = names & {"docker", "podman"}
+        composes = names & {"docker-compose", "podman-compose"} or (engines and "compose" in names)
+        if composes and (("up" in names and (short_d or "--detach" in names or "--wait" in names))
+                         or "start" in names):
+            return "compose"
+        if engines and (("run" in names and (short_d or "--detach" in names)) or "start" in names):
+            return "a detached container"
+        if "screen" in names and short_d:
+            return "screen"
+        if "tmux" in names and names & {"new", "new-session"} and short_d:
+            return "tmux"
+    return None
+
+
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).
 AWF_UNSAFE_RE = re.compile(r"--enable-dind\b")

@@ -971,9 +971,9 @@ class WorkflowRules:
             elif refs:
                 unsure.append(f"{where}, before it, names /tmp or the scratch directory ({', '.join(refs[:3])}), "
                               "and its post step or a process it leaves running could reach what the command wrote")
-            elif egress_mod.BACKGROUND_RE.search(egress_mod.uncommented(step.run)):
-                unsure.append(f"{where}, before it, may leave a process running beside it, which could reach what "
-                              "the command wrote")
+            elif egress_mod.leaves_process(step.run):
+                unsure.append(f"{where}, before it, may leave a process running beside it "
+                              f"({egress_mod.leaves_process(step.run)}), which could reach what the command wrote")
         if after:
             unsure.append(f"{egress_mod.joined(after, 3)} can run after it or beside it, and the checker cannot tell "
                           "whether it runs or loads anything the command wrote (only actions/upload-artifact is "

@@ -176,7 +176,9 @@ class NativeFirewallTest(unittest.TestCase):
     def test_a_merge_key_in_the_policy_is_cannot_tell(self):
         """Found by the second review: YAML 1.1 readers merge `<<`, YAML 1.2 readers see a key."""
         for policy in ("<<: {mode: enforce}\nallow: [api.example.com]\n",
-                       "base: &b {mode: enforce}\n<<: *b\nallow: [api.example.com]\n"):
+                       "base: &b {mode: enforce}\n<<: *b\nallow: [api.example.com]\n",
+                       "? <<\n: {mode: enforce}\nallow: [api.example.com]\n",
+                       "allow: [api.example.com]\n!!merge \"x\": {mode: enforce}\n"):
             with self.subTest(policy=policy):
                 self.assertEqual(verdict(self.firewall(policy=policy)), CANNOT_TELL)
 
@@ -413,11 +415,26 @@ class EgressActionTest(unittest.TestCase):
                     # Found by the second review.
                     "./scripts/watch.sh & echo \"started as $!\"", "docker run -dit --name h -v /:/host alpine sh",
                     "git log -1 --format=\" #%h\" ; ./scripts/watch.sh &", "docker compose up -d",
-                    "screen -dmS w ./scripts/watch.sh", "tmux new -d -s w ./scripts/watch.sh"):
+                    "screen -dmS w ./scripts/watch.sh", "tmux new -d -s w ./scripts/watch.sh",
+                    # Found by the third review: quoting the comment remover misread, and detached forms.
+                    "printf '%s\\n' $'it\\'s #1' ; ./scripts/watch.sh &",
+                    "cat > notes.txt <<'EOF'\nit's done\nEOF\necho ' #a' ; ./scripts/watch.sh &",
+                    "docker create --name h -v /:/host alpine sleep 1d\ndocker start h",
+                    "docker compose up --wait", "coproc ./scripts/watch.sh"):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertEqual(verdict(self.check("      - run: make deps && make lint 2>&1\n" + action())), VERIFIED)
+
+    def test_long_scripts_take_linear_time(self):
+        """Found by the third review: a regular expression with chained `[^\\n]*` took 43 seconds on a
+        14 KB workflow."""
+        import time
+        for line in ("tmux new " * 3000, "docker-compose up " * 2000, "docker run " * 4000, "screen x " * 4000):
+            started = time.monotonic()
+            self.check(f"      - run: {json.dumps('echo ' + line)}\n" + action())
+            with self.subTest(line=line[:20]):
+                self.assertLess(time.monotonic() - started, 5)
 
     def test_credentials_no_expression_hands_over_are_read(self):
         """Found by the first review: OIDC gives any step a cloud credential without a `secrets.`."""
