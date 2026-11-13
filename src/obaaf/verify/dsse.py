@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Any
 
 IN_TOTO_PAYLOAD_TYPE = "application/vnd.in-toto+json"
+# The elliptic curves OBAAF verifies, by the name the cryptography library gives them, and the hash each
+# is verified with. Any other curve is refused when the key is loaded.
+CURVE_HASHES = {"secp256r1": "SHA256", "secp384r1": "SHA384"}
+SUPPORTED_KEYS = "ECDSA P-256 and P-384, Ed25519 and RSA"
 
 
 class SignatureError(ValueError):
@@ -57,13 +61,23 @@ class PublicKey:
 
     @classmethod
     def load(cls, path: str | Path) -> "PublicKey":
+        """Load a PEM public key, refusing any kind of key outside SUPPORTED_KEYS. A key the cryptography
+        library cannot load at all (a binary curve, since its version 47) is refused the same way, not
+        left to raise."""
+        from cryptography.exceptions import UnsupportedAlgorithm
         from cryptography.hazmat.primitives import serialization
 
         data = Path(path).read_bytes()
         try:
             key = serialization.load_pem_public_key(data)
+        except UnsupportedAlgorithm as exc:
+            raise SignatureError(f"{path}: a public key of a kind OBAAF does not verify (the cryptography "
+                                 f"library cannot load it: {exc}); supported: {SUPPORTED_KEYS}") from exc
         except ValueError as exc:
             raise SignatureError(f"{path}: not a PEM public key ({exc})") from exc
+        problem = _unsupported(key)
+        if problem:
+            raise SignatureError(f"{path}: {problem}, which OBAAF does not verify; supported: {SUPPORTED_KEYS}")
         der = key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
         return cls(key=key, key_id=hashlib.sha256(der).hexdigest(), source=str(path))
 
@@ -77,8 +91,10 @@ class PublicKey:
                 self.key.verify(signature, message)
                 return True
             if isinstance(self.key, ec.EllipticCurvePublicKey):
-                algorithm = hashes.SHA384() if self.key.curve.key_size >= 384 else hashes.SHA256()
-                self.key.verify(signature, message, ec.ECDSA(algorithm))
+                name = CURVE_HASHES.get(self.key.curve.name)
+                if name is None:  # load() refuses these; a key built some other way is refused here too
+                    raise SignatureError(f"unsupported curve {self.key.curve.name!r} in {self.source}")
+                self.key.verify(signature, message, ec.ECDSA(getattr(hashes, name)()))
                 return True
             if isinstance(self.key, rsa.RSAPublicKey):
                 for pad in (padding.PKCS1v15(), padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
@@ -92,6 +108,17 @@ class PublicKey:
         except InvalidSignature:
             return False
         raise SignatureError(f"unsupported key type in {self.source}")
+
+
+def _unsupported(key: Any) -> str:
+    """What is wrong with a loaded public key, or "" when OBAAF verifies its kind."""
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+
+    if isinstance(key, ec.EllipticCurvePublicKey):
+        return "" if key.curve.name in CURVE_HASHES else f"an ECDSA key on the curve {key.curve.name!r}"
+    if isinstance(key, (ed25519.Ed25519PublicKey, rsa.RSAPublicKey)):
+        return ""
+    return f"a key of the kind {type(key).__name__.lstrip('_')!r}"
 
 
 def verify_envelope(document: Any, keys: list[PublicKey]) -> tuple[dict, PublicKey]:

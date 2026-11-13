@@ -144,6 +144,7 @@ A setting can change without any file changing, and every real incident in the f
 
 ### Fixed
 
+- **Signature keys outside the documented set are refused when they are loaded.** OBAAF documents ECDSA P-256 and P-384, Ed25519 and RSA for `signing: keys` and `obaaf dsse assemble`, but took a key on any elliptic curve (verifying P-521 with SHA-384, for example) and loaded a DSA, Ed448 or X25519 key only to fail when verifying. Each is now refused with an error that names the file and the kind of key, by `obaaf dsse assemble` (exit 1) and by `obaaf verify release` alike. A binary-curve key, which the cryptography library cannot load since its version 47, ended `obaaf dsse assemble`, `obaaf verify release` and `obaaf verify agent-run` in a traceback; it is the same error now. P-256 is verified with SHA-256 and P-384 with SHA-384, as before.
 - `obaaf check --write-baseline` ended in a Python traceback when a job id contained a lone surrogate character (a name YAML can spell and Unicode cannot encode). The baseline is now written, as valid UTF-8, and read back.
 - Two more tracebacks, both in 0.3.0: `--write-baseline` to a directory that does not exist, and a v0.1 baseline whose `rule` or `severity` is a list. Each is now an error message and exit code 2. So is `obaaf check --output` to a path that cannot be written.
 - An `ignore` entry dated with spaces around a quoted date (`until: " 2027-01-31 "`) is read as that date; 0.3.0 refused it.
