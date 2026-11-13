@@ -69,6 +69,17 @@ AWF_IMAGE_DIGESTS = {
     "enclave-mcp-server": "sha256:fbf3c0033c84a2bb23439b147b0f8ccc5a92f14570d0f2e99334ba02c99f74e5",
 }
 
+# AWF mounts an empty tmpfs over these places inside the command's container,
+# to hide them. With the host's /tmp read-only to the container (see
+# run()), Docker cannot create the mount points, so they must exist on the
+# host first. From AWF v0.29.13, src/sensitive-paths.ts.
+AWF_TMP_MOUNTPOINTS = (
+    "/tmp/gh-aw/mcp-logs",
+    "/tmp/gh-aw/mcp-payloads",
+    "/tmp/gh-aw/sandbox/firewall/logs",
+    "/tmp/gh-aw/sandbox/firewall/audit",
+)
+
 # A fixed PATH for AWF and for the command: the runner's own PATH puts
 # directories under the home directory first.
 FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -345,6 +356,9 @@ def run(environ: dict[str, str]) -> int:
     if shutil.which("docker", path=FIXED_PATH) is None:
         print("::error::Docker is not available on this runner; the egress control needs it")
         return EXIT_NOT_CONFINED
+
+    for mountpoint in AWF_TMP_MOUNTPOINTS:
+        Path(mountpoint).mkdir(parents=True, exist_ok=True)
 
     # The only place the command can write. Under /tmp because AWF mounts the
     # host's /tmp and narrows writes to the listed paths inside mounts it has.
