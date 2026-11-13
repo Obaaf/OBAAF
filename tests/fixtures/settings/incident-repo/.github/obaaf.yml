@@ -1,0 +1,6 @@
+# Which jobs run an agent, and which secrets must stay behind an environment.
+lanes:
+  agent.yml#agent: agent
+protected_secrets:
+  "*_API_KEY": main-only
+  HELDOUT_TOKEN: main-only

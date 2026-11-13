@@ -1,0 +1,14 @@
+name: Scan
+on:
+  pull_request_target:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan the pull request's metadata
+        run: python -c "print('scan')"

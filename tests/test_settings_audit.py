@@ -3,9 +3,10 @@ and above all how it records what it could not read.
 
 Three of the recordings under tests/fixtures/settings/ (public-no-token, workflow-token, admin-token) were
 written by hand from the example responses in GitHub's REST reference (read 2026-11-12). They were not
-recorded from a live repository. The two whose names begin with "live-" are GitHub's own answers to a run
+recorded from a live repository. The three whose names begin with "live-" are GitHub's own answers to a run
 with no token, as the workflow .github/workflows/settings-audit-live.yml printed them (RecordedFromGitHubTest
-says which run). That workflow runs the same reader against GitHub itself whenever the reader changes.
+says which run for the two of 2026-11-12; test_settings_adopter.py is about the one of
+2026-11-13). That workflow runs the same reader against GitHub itself whenever the reader changes.
 """
 
 import contextlib
@@ -27,7 +28,8 @@ from unittest import mock
 from helpers import FIXTURES, ROOT, TempDir, run_cli
 
 from obaaf import audit
-from obaaf.audit import cli as audit_cli, github, report, settings as settings_mod, snapshot as snapshot_mod
+from obaaf.audit import cli as audit_cli, github, report, rules as audit_rules, settings as settings_mod
+from obaaf.audit import snapshot as snapshot_mod
 
 SETTINGS_DIR = FIXTURES / "settings"
 REPO = "example-studio/game"
@@ -79,6 +81,13 @@ def take(entries: list[dict], token: str | None = None, repository: str = REPO, 
     return snap, transport
 
 
+def full_report(snap: dict) -> str:
+    """What `obaaf audit` prints for a snapshot when it is run in this directory with no directory named:
+    the rules' findings, then what was read."""
+    usage = audit_cli.usage_for(None, snap["repository"], str(snap.get("requested_as", "")))
+    return report.to_text(snap, assessment=audit_rules.evaluate(snap, usage), usage=usage)
+
+
 def statuses(snap: dict) -> dict[str, str]:
     return {key: entry["status"] for key, entry in snap["settings"].items()}
 
@@ -103,6 +112,10 @@ class clean_env:
 def cli(entries: list[dict], *args: str, env: dict | None = None):
     """Run `obaaf audit` in-process against a recording. Returns (code, out, err, transport)."""
     transport = audit.ReplayTransport(copy.deepcopy(entries))
+    if "--fail-on" not in args:
+        # These tests are about the reader. What the rules make of a recording is tested in
+        # test_settings_rules.py, and must not decide the exit status here.
+        args = (*args, "--fail-on", "never")
     with clean_env(**(env or {})), mock.patch.object(github, "UrllibTransport", return_value=transport):
         code, out, err = run_cli("audit", *args)
     return code, out, err, transport
@@ -171,7 +184,7 @@ class ReadWithoutATokenTest(unittest.TestCase):
         self.assertLess(text.index("NOT READ: 10 of 15"), text.index("READ: 5 of 15"))
         for key in NEEDS_A_TOKEN + ["ruleset_bypass_actors"]:
             self.assertIn(audit.BY_KEY[key].title, text)
-        self.assertIn("It does not judge them yet", text)
+        self.assertIn("No rule was applied to it", text)
         self.assertIn('"main-only": any branch or tag may deploy', text)
         self.assertIn("8 requests sent, all GET", text)
 
@@ -1329,8 +1342,9 @@ class CommandLineTest(unittest.TestCase):
             code, out, _, _ = cli(recording("public-no-token"), "--repo", REPO, "--format", "json",
                                   "--snapshot-out", tmp / "s.json")
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(out), json.loads((tmp / "s.json").read_text()))
-            self.assertEqual(json.loads(out)["format"], audit.FORMAT)
+            self.assertEqual(json.loads(out)["snapshot"], json.loads((tmp / "s.json").read_text()))
+            self.assertEqual(json.loads(out)["snapshot"]["format"], audit.FORMAT)
+            self.assertEqual(json.loads(out)["format"], "obaaf-settings-audit/v0.1")
             code, out, _, _ = cli(recording("public-no-token"), "--repo", REPO, "-o", tmp / "sub" / "report.txt")
             self.assertEqual((code, out), (0, ""))
             self.assertIn("NOT READ: 10 of 15", (tmp / "sub" / "report.txt").read_text())
@@ -1416,7 +1430,7 @@ class LiveCheckScriptTest(unittest.TestCase):
 
     def check(self, entries, *args, token=None, code=0, report_text=None, mangle=None):
         snap, _ = take(entries, token=token)
-        printed = report.to_text(snap) if report_text is None else report_text
+        printed = full_report(snap) if report_text is None else report_text
         if mangle:
             mangle(snap)
         with TempDir() as tmp, mock.patch("sys.stdout"), mock.patch("sys.stderr"):
@@ -1762,7 +1776,7 @@ class OneReasonForManyPartsTest(unittest.TestCase):
         snap, _ = take(entries)
         check = LiveCheckSecondReviewTest()
         check.script = _load_check_script()
-        code, said = check.check(snap, report.to_text(snap), *LiveCheckScriptTest.READ, "--rate-limit-ok")
+        code, said = check.check(snap, full_report(snap), *LiveCheckScriptTest.READ, "--rate-limit-ok")
         self.assertEqual(code, 1)
         self.assertIn("rulesets was not read (not_found)", said)
 
@@ -1870,24 +1884,24 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
 
     def test_the_report_must_be_the_report_of_that_snapshot_to_the_character(self):
         snap, _ = take(recording("public-no-token"))
-        text = report.to_text(snap)
+        text = full_report(snap)
         self.assertEqual(self.check(snap, text, *self.READ)[0], 0)
         other, _ = take(recording("live-obaaf-no-token"), repository="Obaaf/OBAAF")
         for printed in ("15 settings: 0 read, \n", text[:-1], text + "x", text.replace("main-only", "main-0nly"),
-                        report.to_text(other)):
+                        full_report(other), report.to_text(snap)):
             code, said = self.check(snap, printed, *self.READ)
             self.assertEqual(code, 1, printed[-40:])
             self.assertIn("is not the report of the snapshot", said)
 
     def test_the_snapshot_must_be_of_the_repository_the_step_asked_for(self):
         snap, _ = take(recording("public-no-token"))
-        text = report.to_text(snap)
+        text = full_report(snap)
         code, said = self.check(snap, text, *self.READ, repo="Expectrail/Expectrail")
         self.assertEqual(code, 1)
         self.assertIn("another repository than the one the command was asked for", said)
         self.assertEqual(self.check(snap, text, *self.READ, repo=REPO.upper())[0], 0)
         moved = {**snap, "requested_as": "old-owner/old-name"}
-        self.assertEqual(self.check(moved, report.to_text(moved), *self.READ, repo="old-owner/old-name")[0], 0)
+        self.assertEqual(self.check(moved, full_report(moved), *self.READ, repo="old-owner/old-name")[0], 0)
 
     def test_a_rate_limit_excuses_only_what_it_stopped(self):
         # Rulesets are not found, and only then is the limit reached: the 404 is a fault of its own.
@@ -1895,14 +1909,14 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         entries = replace(entries, f"{R}/environments?per_page=100", status=429, body={"message": "slow down"})
         snap, _ = take(entries)
         self.assertEqual(snap["settings"]["rulesets"]["reason_code"], "not_found")
-        code, said = self.check(snap, report.to_text(snap), *self.READ, "--rate-limit-ok")
+        code, said = self.check(snap, full_report(snap), *self.READ, "--rate-limit-ok")
         self.assertEqual(code, 1)
         self.assertIn("rulesets was not read (not_found)", said)
         # With only the limit in the way, the run still passes with its notice.
         entries = replace(recording("public-no-token"), f"{R}/environments?per_page=100", status=429,
                           body={"message": "slow down"})
         snap, _ = take(entries)
-        code, said = self.check(snap, report.to_text(snap), *self.READ, "--rate-limit-ok")
+        code, said = self.check(snap, full_report(snap), *self.READ, "--rate-limit-ok")
         self.assertEqual(code, 0)
         self.assertIn("::notice::GitHub rate limited this run", said)
 
@@ -1911,17 +1925,17 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         entries = [e if e["path"] == R else {**e, "status": 404, "body": {"message": "Not Found"}}
                    for e in recording("public-no-token")]
         snap, _ = take(entries)
-        code, said = self.check(snap, report.to_text(snap), *self.READ, "--rate-limit-ok", "--unreadable-ok")
+        code, said = self.check(snap, full_report(snap), *self.READ, "--rate-limit-ok", "--unreadable-ok")
         self.assertEqual(code, 1)
         self.assertIn("rulesets was not read (not_found)", said)
 
     def test_a_repository_with_no_ruleset_gets_a_notice_that_none_was_met(self):
         obaaf, _ = take(recording("live-obaaf-no-token"), repository="Obaaf/OBAAF")
-        code, said = self.check(obaaf, report.to_text(obaaf), *self.READ, "--notice-if-no-ruleset")
+        code, said = self.check(obaaf, full_report(obaaf), *self.READ, "--notice-if-no-ruleset")
         self.assertEqual(code, 0)
         self.assertIn("::notice::This repository has no ruleset now", said)
         adopter, _ = take(recording("live-expectrail-no-token"), repository="Expectrail/Expectrail")
-        code, said = self.check(adopter, report.to_text(adopter), *self.READ, "--notice-if-no-ruleset")
+        code, said = self.check(adopter, full_report(adopter), *self.READ, "--notice-if-no-ruleset")
         self.assertEqual(code, 0)
         self.assertNotIn("::notice::", said)
 
@@ -1933,6 +1947,31 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         self.assertIn("--notice-if-no-ruleset", last)
         self.assertEqual(text.count("--repo Expectrail/Expectrail"), 2)   # the command, and its check
         self.assertEqual(text.count('--repo "$GITHUB_REPOSITORY"'), 4)
+
+    def test_the_adopter_is_audited_with_its_own_files_cloned_with_no_credentials(self):
+        # Slice 2b.4: the twelve rules that compare settings with workflow files run on the adopter's own
+        # files. The clone sends nothing a token could be in, and both the command and its check are given
+        # it, the check with --workflows-read so that a clone whose files were not all read fails the step.
+        text = (ROOT / ".github" / "workflows" / "settings-audit-live.yml").read_text(encoding="utf-8")
+        step = text.split("- name: A public repository that has rulesets, with no token")[1].split("- name:")[0]
+        clone = next(line for line in step.splitlines() if " clone " in line)
+        self.assertIn("git -c credential.helper= clone", clone)
+        self.assertIn("GIT_TERMINAL_PROMPT=0", clone)
+        self.assertIn("https://github.com/Expectrail/Expectrail.git", step)
+        self.assertNotIn("token", step.split("obaaf audit")[0].lower().replace("--no-token", ""))
+        self.assertNotIn("${{", step)   # nothing GitHub fills in: no secret, no token, no event text
+        self.assertNotIn("env:", step)
+        job = text.split("jobs:")[1].split("steps:")[0]
+        self.assertNotIn("env:", job)   # nor anything every step of the job is given
+        self.assertEqual(text.count("persist-credentials: false"), 1)
+        self.assertNotIn("persist-credentials: true", text)
+        self.assertEqual(step.count("git -c credential.helper= "), 2)   # the clone, and the sparse checkout
+        self.assertEqual(step.count("GIT_TERMINAL_PROMPT=0 git"), 2)
+        self.assertIn('files=(--path "$clone" --workflows-read)', step)
+        self.assertIn('${clone:+"$clone"}', step.split("obaaf audit --repo Expectrail/Expectrail")[1]
+                      .split("check_live_audit.py")[0])
+        self.assertIn('"${files[@]}"', step.split("check_live_audit.py")[1])
+        self.assertIn("rev-parse HEAD", step)   # the report is of the files at a commit the log names
 
 
 class DocumentedSettingsTest(unittest.TestCase):

@@ -431,11 +431,6 @@ def failed(result: dict) -> bool:
     return bool(result["differences"] or result["not_compared"] or not result["summary"]["compared"])
 
 
-def document(result: dict, snapshot: dict) -> str:
-    """The JSON output: the comparison, and the live snapshot it was made from."""
-    return json.dumps({**result, "snapshot": snapshot}, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
-
-
 # ---------------------------------------------------------------- the report for people
 def _shown(value, limit: int = 160) -> str:
     return plain(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(", ", ": ")), limit)

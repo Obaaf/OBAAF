@@ -1,0 +1,403 @@
+{
+  "format": "obaaf-settings-snapshot/v0.1",
+  "repository": "Expectrail/Expectrail",
+  "api": "https://api.github.com",
+  "api_version": "2026-03-10",
+  "taken_at": "2026-11-13T09:10:57Z",
+  "tool": "obaaf 0.4.0.dev0",
+  "viewer": {
+    "authenticated": false
+  },
+  "branches": [
+    "main"
+  ],
+  "settings": {
+    "repository": {
+      "status": "read",
+      "value": {
+        "full_name": "Expectrail/Expectrail",
+        "visibility": "public",
+        "default_branch": "main",
+        "owner": "Expectrail",
+        "owner_type": "Organization",
+        "fork": false,
+        "archived": false
+      }
+    },
+    "rulesets": {
+      "status": "read",
+      "value": [
+        {
+          "id": 26914817,
+          "name": "Protect main",
+          "target": "branch",
+          "source_type": "Repository",
+          "source": "Expectrail/Expectrail",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion",
+              "parameters": null
+            },
+            {
+              "type": "non_fast_forward",
+              "parameters": null
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ],
+                "dismiss_stale_reviews_on_push": true,
+                "dismissal_restriction": {
+                  "allowed_actors": [],
+                  "enabled": false
+                },
+                "require_code_owner_review": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "require_last_push_approval": false,
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": false,
+                "required_reviewers": []
+              }
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "test",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "obaaf-audit",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "capture-smoke",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "web-capture",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "seeded-bugs",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "agents-gate1",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "agents-harness-verify",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "feedback-offline",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "agents-sandbox",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "agents-bench-compare",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "private-export-scan",
+                    "integration_id": 15368
+                  },
+                  {
+                    "context": "package",
+                    "integration_id": 15368
+                  }
+                ],
+                "strict_required_status_checks_policy": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "ruleset_bypass_actors": {
+      "status": "unread",
+      "reason_code": "withheld",
+      "reason": "GitHub left the bypass list out of its answer, as it does for a caller without write access to the ruleset",
+      "needs": "write access to the ruleset"
+    },
+    "branch_rules": {
+      "status": "read",
+      "value": {
+        "main": [
+          {
+            "type": "deletion",
+            "ruleset_id": 26914817,
+            "ruleset_source_type": "Repository",
+            "ruleset_source": "Expectrail/Expectrail",
+            "parameters": null
+          },
+          {
+            "type": "non_fast_forward",
+            "ruleset_id": 26914817,
+            "ruleset_source_type": "Repository",
+            "ruleset_source": "Expectrail/Expectrail",
+            "parameters": null
+          },
+          {
+            "type": "pull_request",
+            "ruleset_id": 26914817,
+            "ruleset_source_type": "Repository",
+            "ruleset_source": "Expectrail/Expectrail",
+            "parameters": {
+              "allowed_merge_methods": [
+                "merge",
+                "squash",
+                "rebase"
+              ],
+              "dismiss_stale_reviews_on_push": true,
+              "dismissal_restriction": {
+                "allowed_actors": [],
+                "enabled": false
+              },
+              "require_code_owner_review": false,
+              "require_extra_approval_for_unattributed_changes": true,
+              "require_last_push_approval": false,
+              "required_approving_review_count": 0,
+              "required_review_thread_resolution": false,
+              "required_reviewers": []
+            }
+          },
+          {
+            "type": "required_status_checks",
+            "ruleset_id": 26914817,
+            "ruleset_source_type": "Repository",
+            "ruleset_source": "Expectrail/Expectrail",
+            "parameters": {
+              "do_not_enforce_on_create": false,
+              "required_status_checks": [
+                {
+                  "context": "test",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "obaaf-audit",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "capture-smoke",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "web-capture",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "seeded-bugs",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-gate1",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-harness-verify",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "feedback-offline",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-sandbox",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "agents-bench-compare",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "private-export-scan",
+                  "integration_id": 15368
+                },
+                {
+                  "context": "package",
+                  "integration_id": 15368
+                }
+              ],
+              "strict_required_status_checks_policy": false
+            }
+          }
+        ]
+      }
+    },
+    "branches": {
+      "status": "read",
+      "value": {
+        "main": {
+          "protected": true,
+          "public_protection": {
+            "enabled": false,
+            "required_status_checks": {
+              "strict": null,
+              "enforcement_level": "off",
+              "contexts": [],
+              "checks": []
+            }
+          }
+        }
+      }
+    },
+    "branch_protection": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Administration\" repository permission (read)"
+    },
+    "environments": {
+      "status": "read",
+      "value": [
+        {
+          "name": "github-pages",
+          "deployment_branches": "selected",
+          "wait_timer": 0,
+          "reviewers": [],
+          "prevent_self_review": null,
+          "other_protection_rules": [],
+          "can_admins_bypass": true,
+          "branch_policies": [
+            {
+              "name": "main",
+              "type": "branch"
+            }
+          ]
+        },
+        {
+          "name": "main-only",
+          "deployment_branches": "selected",
+          "wait_timer": 0,
+          "reviewers": [],
+          "prevent_self_review": null,
+          "other_protection_rules": [],
+          "can_admins_bypass": true,
+          "branch_policies": [
+            {
+              "name": "main",
+              "type": "branch"
+            }
+          ]
+        },
+        {
+          "name": "unity",
+          "deployment_branches": "any",
+          "wait_timer": 0,
+          "reviewers": [
+            {
+              "type": "User",
+              "name": "seanudeke",
+              "id": 55066947
+            }
+          ],
+          "prevent_self_review": false,
+          "other_protection_rules": [],
+          "can_admins_bypass": true
+        }
+      ]
+    },
+    "environment_secrets": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Environments\" repository permission (read)"
+    },
+    "repository_secrets": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Secrets\" repository permission (read)"
+    },
+    "organization_secrets": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Secrets\" repository permission (read)"
+    },
+    "actions_permissions": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Administration\" repository permission (read)"
+    },
+    "workflow_permissions": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Administration\" repository permission (read)"
+    },
+    "fork_pull_requests": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Administration\" repository permission (read)"
+    },
+    "actions_policies": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "\"Administration\" repository permission (write)"
+    },
+    "collaborators": {
+      "status": "unread",
+      "reason_code": "no_token",
+      "reason": "not requested: no token was given, and GitHub does not show this without one",
+      "needs": "write, maintain or admin access to the repository, by GitHub's reference"
+    }
+  },
+  "requests": [
+    {
+      "path": "/repos/Expectrail/Expectrail",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rulesets?includes_parents=true&per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rulesets/26914817?includes_parents=true",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/rules/branches/main?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/branches/main",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments/github-pages/deployment-branch-policies?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Expectrail/Expectrail/environments/main-only/deployment-branch-policies?per_page=100",
+      "status": 200
+    }
+  ]
+}

@@ -27,12 +27,14 @@ The agent lane gives the agent no secrets (R2, FR7), so it cannot hold the crede
 
 ## Network policy
 
-Agent jobs must reach only the proxy and the package sources the task needs (R7). GitHub-hosted runners have no native egress allow-list, so either:
+Agent jobs must reach only the proxy and the package sources the task needs (R7). Either:
 
-- run the agent job on ephemeral self-hosted runners behind a network policy that allows only the proxy, or
+- run the agent job on GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with `.github/egress-firewall.yaml` in `enforce` mode; a technical preview, on Linux runners), with only the proxy allowed;
+- run the agent's command under [OBAAF's egress action](egress-control.md), with only the proxy's host name allowed;
+- run the agent job on ephemeral self-hosted runners behind a network policy that allows only the proxy; or
 - use a runtime egress monitor that blocks other destinations (the template's optional step, enabled with the repository variable `OBAAF_EGRESS_MONITOR`).
 
-Declare the policy in the job's `OBAAF_EGRESS` variable; the agent-run record copies it. A declaration alone enforces nothing, so `obaaf check` reports agent jobs whose egress is only declared, or limited by a monitor that runs only under a condition, as well as agent jobs with no policy at all (`OBAAF-GHA-020`, low). A monitor that always runs is reported as "cannot tell" until the checker can verify it; see [the controls the checker reads](checker-configuration.md#controls).
+Declare the policy in the job's `OBAAF_EGRESS` variable; the agent-run record copies it. A declaration alone enforces nothing, so `obaaf check` reports agent jobs whose egress is only declared, or limited by a monitor that runs only under a condition, as well as agent jobs with no policy at all (`OBAAF-GHA-020`, low). The firewall and the action can clear the finding; a monitor is "cannot tell" at best. See [the controls the checker reads](checker-configuration.md#controls).
 
 ## Open design points
 

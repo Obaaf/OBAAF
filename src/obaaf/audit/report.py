@@ -1,18 +1,23 @@
-"""The settings audit's report for people. The JSON output is the snapshot itself.
+"""The settings audit's report for people.
 
-The report leads with what was not read, because that is where a reader is most likely to assume more than
-the audit knows. Everything that comes from GitHub or from a snapshot file passes through ``plain`` or
+The report begins with what the rules found and what they could not tell, then lists what was read. That
+list leads with what was not read, because that is where a reader is most likely to assume more than the
+audit knows. Everything that comes from GitHub or from a snapshot file passes through ``plain`` or
 ``quoted`` on its way to the terminal, numbers included: a snapshot file can hold anything.
 """
 
 from __future__ import annotations
 
 from obaaf.audit.github import plain, quoted
+from obaaf.audit.rules import RULE_TYPES
 from obaaf.audit.settings import BY_KEY, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
 CHECKS_SHOWN = 30  # required checks named in one line before "and N more"; the snapshot always has them all
+# A rule's note says what it compared. The longest the rules can write, OBAAF-SET-005's with two branch names of
+# 40 characters in each of its clauses, is about 475 characters.
+NOTE_LIMIT = 600
 
 
 def counts(snapshot: dict) -> dict[str, int]:
@@ -56,7 +61,10 @@ def _rule_text(rule: dict) -> str:
     if kind == "required_status_checks" and isinstance(parameters.get("required_status_checks"), list):
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
         return f"required_status_checks ({_list(names, CHECKS_SHOWN) if names else 'none named'})"
-    return plain(kind, 60)
+    if kind in RULE_TYPES:
+        return kind
+    # A type this version does not know is printed quoted, so that its name cannot read as one of the above.
+    return f"{quoted(kind, 60)} (a type this audit does not know)"
 
 
 def _policy_rule_text(rule: dict) -> str:
@@ -234,7 +242,85 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
     return [plain(value, 300)]
 
 
-def to_text(snapshot: dict, origin: str = "") -> str:
+SEVERITY_LABEL = {"high": "HIGH  ", "medium": "MEDIUM", "low": "LOW   "}
+RULE_STATUS = {"findings": "", "cannot-tell": "cannot tell", "no-finding": "no finding",
+               "not-applicable": "does not apply"}
+
+
+def _usage_line(usage: dict) -> str:
+    if not usage["read"]:
+        return (f"The workflow files were not read: {plain(usage['reason'], 300)}. The twelve rules that compare "
+                "a setting with what the workflows use answer \"cannot tell\"; OBAAF-SET-004, OBAAF-SET-005 and "
+                "OBAAF-SET-013 read settings only and do not need the files.")
+    files = usage["files"]
+    unread = sum(1 for file in files if file["error"])
+    line = f"Compared with {_count(len(files) - unread, 'workflow file')} in the directory {quoted(usage.get('shown') or '.', 200)}"
+    if unread:
+        line += f" ({_count(unread, 'more')} could not be read)"
+    config = usage.get("config")
+    if config:
+        line += f" and the configuration {plain(config['path'], 100)}"
+    line += "."
+    if usage.get("config_error"):
+        line += f" The checker's configuration could not be read: {plain(usage['config_error'], 300)}."
+    if usage.get("note"):
+        line += f" {plain(usage['note'], 300)}"
+    return line
+
+
+def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
+    """The rules' part of the report: findings first, then what the rules could not tell, then one line
+    for every rule, so that a rule that found nothing is never mistaken for a rule that did not run."""
+    from obaaf.audit.rules import RULE_BY_ID
+
+    summary, results = assessment["summary"], assessment["results"]
+    lines = [f"FINDINGS: {summary['findings']} ({summary['high']} high, {summary['medium']} medium, "
+             f"{summary['low']} low). CANNOT TELL: {summary['cannot_tell']}, from {summary['rules_cannot_tell']} of "
+             f"{len(assessment['rules'])} rules. \"Cannot tell\" is never a pass: nothing is established there."]
+    found = [r for r in results if r["state"] == "finding"]
+    order = []
+    for result in found:  # already sorted by severity; a rule's findings are kept together under its first
+        if result["rule"] not in order:
+            order.append(result["rule"])
+    for rule_id in order:
+        rule = RULE_BY_ID[rule_id]
+        lines.append("")
+        lines.append(f"  {rule.id}  {rule.title}")
+        for result in (r for r in found if r["rule"] == rule_id):
+            lines.append(f"    {SEVERITY_LABEL[result['severity']]}  {plain(result['subject'], 300)}")
+            lines.append(f"            {plain(result['message'], 1500)}")
+            lines += [f"            {plain(item, 400)}" for item in result["evidence"]]
+        if show_fixes:
+            lines.append(f"    Fix: {rule.fix}")
+    unknown = [r for r in results if r["state"] == "cannot-tell"]
+    if unknown:
+        lines.append("")
+        lines.append(f"CANNOT TELL: {len(unknown)}. A setting or a file the rule needs was not read, or was not "
+                     "in a form the rule understands.")
+        for rule_id in dict.fromkeys(r["rule"] for r in unknown):
+            lines.append(f"  {rule_id}  {RULE_BY_ID[rule_id].title}")
+            for result in (r for r in unknown if r["rule"] == rule_id):
+                lines.append(f"    CANNOT TELL  {plain(result['subject'], 300)}")
+                lines.append(f"            {plain(result['message'], 1500)}")
+    lines.append("")
+    lines.append(f"RULES: {len(assessment['rules'])}, one line each. A rule with no finding says what it compared, or "
+                 "why it had nothing to compare.")
+    for entry in assessment["rules"]:
+        parts = []
+        if entry["findings"]:
+            parts.append(_count(entry["findings"], "finding"))
+        if entry["cannot_tell"]:
+            parts.append(f"cannot tell ({entry['cannot_tell']})")
+        if not parts:
+            parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], NOTE_LIMIT)}")
+        lines.append(f"  {entry['id']}  {'; '.join(parts)}")
+    return lines
+
+
+def to_text(snapshot: dict, origin: str = "", assessment: dict | None = None, usage: dict | None = None,
+            show_fixes: bool = True) -> str:
+    """The report. With an ``assessment`` (what the rules made of the snapshot) it begins with the rules'
+    findings; without one it lists what was read and what was not, and says that no rule was applied."""
     settings = snapshot["settings"]
     total = len(SETTINGS)
     tally = counts(snapshot)
@@ -244,8 +330,14 @@ def to_text(snapshot: dict, origin: str = "") -> str:
     if snapshot.get("requested_as"):
         lines.append(f"Asked for as {plain(snapshot['requested_as'], 140)}; GitHub now calls it "
                      f"{plain(snapshot['repository'], 140)}.")
-    lines.append("This command reads and records settings. It does not judge them yet: no rule runs on what it "
-                 "read.")
+    if assessment is None:
+        lines.append("This lists what was read and what was not. No rule was applied to it.")
+    else:
+        lines.append(_usage_line(usage))
+        lines.append("")
+        lines += findings_lines(assessment, show_fixes)
+        lines.append("")
+        lines.append("WHAT WAS READ. The rules above rest on this; what was not read is listed first.")
     for status, heading in HEADINGS:
         chosen = [s for s in SETTINGS if settings[s.key]["status"] == status]
         if not chosen:

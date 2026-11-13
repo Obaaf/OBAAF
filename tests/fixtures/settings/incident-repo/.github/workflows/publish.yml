@@ -1,0 +1,16 @@
+name: Publish
+on:
+  workflow_call:
+    secrets:
+      token:
+        required: true
+permissions:
+  contents: read
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload the package
+        run: python tools/upload.py
+        env:
+          PACKAGE_INDEX_TOKEN: ${{ secrets.token }}

@@ -230,7 +230,14 @@
             "required_linear_history": {"$ref": "#/$defs/flag_or_null"}, "allow_force_pushes": {"$ref": "#/$defs/flag_or_null"},
             "allow_deletions": {"$ref": "#/$defs/flag_or_null"}, "block_creations": {"$ref": "#/$defs/flag_or_null"},
             "required_conversation_resolution": {"$ref": "#/$defs/flag_or_null"}, "required_signatures": {"$ref": "#/$defs/flag_or_null"},
-            "lock_branch": {"$ref": "#/$defs/flag_or_null"}
+            "lock_branch": {"$ref": "#/$defs/flag_or_null"},
+            "other_fields": {
+              "description": "Fields of GitHub's answer that this version does not know, by the object they are in. Present only when there is one, so a snapshot taken before it existed still matches.",
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {"enum": ["branch_protection", "required_status_checks", "enforce_admins", "required_pull_request_reviews", "required_pull_request_reviews.dismissal_restrictions", "required_pull_request_reviews.bypass_pull_request_allowances", "restrictions", "required_signatures", "required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations", "required_conversation_resolution", "lock_branch", "allow_fork_syncing", "required_status_checks.checks"]},
+              "additionalProperties": {"type": "object", "minProperties": 1}
+            }
           }
         }
       ]

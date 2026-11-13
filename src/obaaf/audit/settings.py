@@ -58,6 +58,41 @@ ROLE_ORDER = ("admin", "maintain", "push", "triage", "pull")
 ROLE_NAMES = {"admin": "admin", "maintain": "maintain", "push": "write", "triage": "triage", "pull": "read"}
 CLASSIC_FLAGS = ("required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations",
                  "required_conversation_resolution", "required_signatures", "lock_branch")
+# Every field of classic branch protection, by the object it is in, as GitHub's REST reference gives them
+# ("Get branch protection" and "Update branch protection", https://docs.github.com/en/rest/branches/branch-protection,
+# API version 2026-03-10, read on 2026-11-13). The two examples differ (the first has no `block_creations`,
+# `required_signatures`, `checks` or `strict`), so the fields of both, and of the update's body parameters, are
+# here. A field in none of these is kept with its value under ``other_fields`` (its place written as a dotted
+# path), and the settings rules answer "cannot tell" for its branch: a field this version does not know may add
+# a requirement, or a way around one. `allow_fork_syncing` is known and read by no rule: it is about pulling
+# from upstream into a locked branch. Inside `restrictions`, `dismissal_restrictions` and the bypass allowances,
+# the members of `users`, `teams` and `apps` are GitHub's user, team and app objects and are not checked here.
+CLASSIC_FIELDS = {
+    "": ("url", "required_status_checks", "enforce_admins", "required_pull_request_reviews", "restrictions",
+         "required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations",
+         "required_conversation_resolution", "required_signatures", "lock_branch", "allow_fork_syncing"),
+    "required_status_checks": ("url", "strict", "contexts", "contexts_url", "checks", "enforcement_level"),
+    "enforce_admins": ("url", "enabled"),
+    "required_pull_request_reviews": ("url", "dismissal_restrictions", "dismiss_stale_reviews",
+                                      "require_code_owner_reviews", "required_approving_review_count",
+                                      "require_last_push_approval", "bypass_pull_request_allowances"),
+    "required_pull_request_reviews.dismissal_restrictions": ("url", "users_url", "teams_url", "users", "teams",
+                                                             "apps"),
+    "required_pull_request_reviews.bypass_pull_request_allowances": ("users", "teams", "apps"),
+    "restrictions": ("url", "users_url", "teams_url", "apps_url", "users", "teams", "apps"),
+    "required_signatures": ("url", "enabled"),
+    **{flag: ("enabled",) for flag in ("required_linear_history", "allow_force_pushes", "allow_deletions",
+                                       "block_creations", "required_conversation_resolution", "lock_branch",
+                                       "allow_fork_syncing")},
+}
+# The name ``other_fields`` gives the object at the top of the answer; every other place is named by its path.
+CLASSIC_TOP = "branch_protection"
+# The fields of each entry of `required_status_checks.checks`, by the same reference. A field outside them is
+# kept under the place ``required_status_checks.checks``, with the context, app and value of each entry that has it.
+CLASSIC_CHECK_FIELDS = ("context", "app_id")
+CLASSIC_CHECKS = "required_status_checks.checks"
+# Every place ``other_fields`` may name.
+CLASSIC_PLACES = tuple(k or CLASSIC_TOP for k in CLASSIC_FIELDS) + (CLASSIC_CHECKS,)
 
 
 @dataclass(frozen=True)
@@ -796,14 +831,74 @@ def _classic_protection(body: dict) -> dict:
             # Absent could mean nobody or not shown, and "nobody" is the comfortable reading: null.
             "bypass_allowances": _who(_obj(allowances, "the review bypass allowances"),
                                       "the review bypass allowances") if allowances is not None else None}
-    return {"exists": True, "enforce_admins": admins,
-            "required_status_checks": {"required": True, **_status_checks(checks)} if checks is not None
-            else {"required": False},
-            "required_pull_request_reviews": reviews if reviews is not None else {"required": False},
-            "restrictions": {"restricted": True, **_who(_obj(restrictions, "the push restrictions"),
-                                                        "the push restrictions")} if restrictions is not None
-            else {"restricted": False},
-            **{key: _enabled(body, key) for key in CLASSIC_FLAGS}}
+    out = {"exists": True, "enforce_admins": admins,
+           "required_status_checks": {"required": True, **_status_checks(checks)} if checks is not None
+           else {"required": False},
+           "required_pull_request_reviews": reviews if reviews is not None else {"required": False},
+           "restrictions": {"restricted": True, **_who(_obj(restrictions, "the push restrictions"),
+                                                       "the push restrictions")} if restrictions is not None
+           else {"restricted": False},
+           **{key: _enabled(body, key) for key in CLASSIC_FLAGS}}
+    other = _other_fields(body)
+    if other:
+        # Written only when there is one, so that a snapshot an earlier version took, which has no such
+        # field, still compares equal with one taken now of the same settings (drift, 2b.3).
+        out["other_fields"] = other
+    return out
+
+
+def _at(body: dict, where: str):
+    obj = body
+    for step in where.split(".") if where else ():
+        obj = obj.get(step) if isinstance(obj, dict) else None
+    return obj
+
+
+def _other_fields(body: dict) -> dict:
+    """The fields of a classic protection answer that the reader does not read, as GitHub sent them, by the
+    place they are in (:data:`CLASSIC_PLACES`). Empty when there are none.
+
+    That is: a field :data:`CLASSIC_FIELDS` does not list; a known field that should be an object and is
+    something else (``"lock_branch": true``), which the reader would otherwise record as not known and
+    pass over; a flag's ``enabled`` that is not true or false (null included), or a flag with none; and a field of an entry of
+    ``required_status_checks.checks`` other than its context and app, as a list of the context, app and value
+    of each entry that has it."""
+    what = "the branch protection"
+    out: dict = {}
+
+    def keep(place: str, name: str, value) -> None:
+        out.setdefault(place, {})[_clean(name, what)] = _json_safe(value, what)
+
+    for where, known in CLASSIC_FIELDS.items():
+        obj = _at(body, where)
+        if not isinstance(obj, dict):
+            continue
+        if "enabled" in known and "enabled" not in obj:
+            # A flag sent with no `enabled` would be recorded as not known: kept whole, at the top.
+            keep(CLASSIC_TOP, where, obj)
+            continue
+        for name, value in obj.items():
+            path = f"{where}.{name}" if where else name
+            if name not in known:
+                keep(where or CLASSIC_TOP, name, value)
+            elif path in CLASSIC_FIELDS and value is not None and not isinstance(value, dict):
+                keep(where or CLASSIC_TOP, name, value)
+            elif name == "enabled" and not isinstance(value, bool):
+                # null included: the reader would record it as not known, and no rule reads that.
+                keep(where, name, value)
+    checks = _at(body, CLASSIC_CHECKS)
+    if isinstance(checks, list):
+        extra: dict = {}
+        for item in checks:
+            for name, value in (item.items() if isinstance(item, dict) else ()):
+                if name not in CLASSIC_CHECK_FIELDS:
+                    # Kept with the check it is on, so that drift sees it move from one check to another.
+                    extra.setdefault(name, []).append({"context": item.get("context"), "app_id": item.get("app_id"),
+                                                       "value": value})
+        for name, values in extra.items():
+            out.setdefault(CLASSIC_CHECKS, {})[_clean(name, what)] = sorted(
+                _json_safe(values, what), key=lambda v: json.dumps(v, sort_keys=True))
+    return {place: dict(sorted(fields.items())) for place, fields in sorted(out.items())}
 
 
 def _environment(item: dict) -> dict:
