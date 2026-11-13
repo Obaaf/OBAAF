@@ -873,7 +873,7 @@ def _other_fields(body: dict) -> dict:
         obj = _at(body, where)
         if not isinstance(obj, dict):
             continue
-        if known == ("enabled",) and "enabled" not in obj:
+        if "enabled" in known and "enabled" not in obj:
             # A flag sent with no `enabled` would be recorded as not known: kept whole, at the top.
             keep(CLASSIC_TOP, where, obj)
             continue
