@@ -263,7 +263,7 @@ class KnownParametersTest(unittest.TestCase):
         for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
             result, = of(found, rule)
             self.assertEqual(result["state"], "cannot-tell", rule)
-            self.assertIn("require_last_push_approval is set (ruleset 42) where no approval is required",
+            self.assertIn("require_last_push_approval is set (ruleset 42) where no approval is known to be required",
                           result["message"])
 
     def test_last_push_approval_with_approvals_changes_no_answer(self):
@@ -281,7 +281,8 @@ class KnownParametersTest(unittest.TestCase):
                           body=classic)
         result, = of(assess_files(entries, CI), "OBAAF-SET-005")
         self.assertEqual(result["state"], "cannot-tell")
-        self.assertIn("require_last_push_approval is set (the classic protection rule)", result["message"])
+        self.assertIn("require_last_push_approval is set (the classic protection rule) where no approval is known",
+                      result["message"])
         classic["required_pull_request_reviews"]["require_last_push_approval"] = False
         entries = replace(with_body(ADMIN, BRANCH_RULES, lambda body: body.clear()), PROTECTION, status=200,
                           body=classic)

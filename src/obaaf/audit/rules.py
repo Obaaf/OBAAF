@@ -452,8 +452,8 @@ def _approval_parameters(out: dict) -> None:
     approvals = out["approvals"] or 0
     if out["last_push"] and not approvals:
         out["parameters_unread"].append(
-            f"require_last_push_approval is set ({', '.join(out['last_push'])}) where no approval is required, "
-            "and whether it then asks for an approval of its own is not established")
+            f"require_last_push_approval is set ({', '.join(out['last_push'])}) where no approval is known to be "
+            "required, and whether it then asks for an approval of its own is not established")
     for where, count in out["extra"]:
         if count:
             out["copilot"] = max(out["copilot"], approvals, count + 1)
