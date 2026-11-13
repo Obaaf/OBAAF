@@ -63,6 +63,7 @@ jobs:
           echo "interface: $iface"
           docker version --format 'docker {{.Server.Version}}'
           docker compose version
+          ip -4 route
           ip -6 route || true
           grep -E '^nameserver' /etc/resolv.conf || true
           echo "PATH=$PATH"
@@ -111,6 +112,7 @@ jobs:
           PFX_IN: ${{ steps.prep.outputs.pfx_in }}
           PFX_REC: ${{ steps.prep.outputs.pfx_rec }}
           ACTION_EXIT: ${{ steps.inside.outputs.exit-code }}
+          ACTION_CONFINED: ${{ steps.inside.outputs.confined }}
           INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
           LOG_DIR: ${{ steps.inside.outputs.log-dir }}
         run: |
@@ -132,6 +134,7 @@ jobs:
             --inside-results "$INSIDE_WORKSPACE/egress-results-inside.txt" \
             --snapshot "$RUNNER_TEMP/before.json" \
             --action-exit "$ACTION_EXIT" \
+            --action-confined "$ACTION_CONFINED" \
             --summary "$GITHUB_STEP_SUMMARY" \
             --json-out "$RUNNER_TEMP/egress-results/verdict.json"
 
@@ -167,6 +170,10 @@ jobs:
           run: |
             test "$PASSED" = passed-value
             touch "$HOME/written-in-home" "$TMPDIR/written-in-tmp"
+            # AWF mounts these from its own directories and moves them at cleanup.
+            for d in "$HOME/.copilot/logs" "$HOME/.copilot/session-state"; do
+              touch "$d/planted-in-copilot"
+            done
             test -z "${NOT_PASSED:-}"
             test -z "${GITHUB_TOKEN:-}"
             test -z "${ACTIONS_RUNTIME_TOKEN:-}"
@@ -217,6 +224,7 @@ jobs:
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
           FAILS_LOG_DIR: ${{ steps.fails.outputs.log-dir }}
+          FAILS_CONFINED: ${{ steps.fails.outputs.confined }}
           WILDCARD_OUTCOME: ${{ steps.wildcard.outcome }}
           ADDRESS_OUTCOME: ${{ steps.address.outcome }}
           RESERVED_OUTCOME: ${{ steps.reserved.outcome }}
@@ -227,6 +235,7 @@ jobs:
           check() { if eval "$2"; then echo "ok: $1"; else echo "FAILED: $1"; fail=1; fi; }
           check "the command's exit status 7 is the action's exit-code output" '[ "$FAILS_EXIT" = 7 ]'
           check "the step failed with the command" '[ "$FAILS_OUTCOME" = failure ]'
+          check "the status is the command's own, not the action's" '[ "$FAILS_CONFINED" = true ]'
           check "a named variable reached the command and nothing else did (else the status would not be 7)" '[ "$FAILS_EXIT" = 7 ]'
           check "the file the command wrote is in the copy" '[ -f "$FAILS_WORKSPACE/written.txt" ]'
           check "the real workspace is unchanged" '[ ! -e written.txt ]'
@@ -235,6 +244,7 @@ jobs:
           check "a withheld variable is refused" '[ "$RESERVED_OUTCOME" = failure ]'
           check "a model key name is refused" '[ "$MODELKEY_OUTCOME" = failure ]'
           check "AWF's directories (work, work-chroot-home) are gone after the run" '! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null'
-          check "what the command wrote to its home is nowhere under RUNNER_TEMP" '[ -z "$(find "$RUNNER_TEMP" -name written-in-home 2>/dev/null)" ]'
+          check "what the command wrote to its home is nowhere under RUNNER_TEMP or /tmp" '[ -z "$(sudo find "$RUNNER_TEMP" /tmp -name written-in-home 2>/dev/null)" ]'
+          check "what it wrote to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp" '[ -z "$(sudo find "$RUNNER_TEMP" /tmp -name planted-in-copilot 2>/dev/null)" ]'
           check "only the proxy's log is left of the run's private directory" '[ -d "$FAILS_LOG_DIR" ] && [ "$(find "$(dirname "$FAILS_LOG_DIR")" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]'
           exit "$fail"

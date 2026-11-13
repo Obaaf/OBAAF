@@ -46,6 +46,12 @@ outputs:
   exit-code:
     description: The command's exit status.
     value: ${{ steps.run.outputs.exit-code }}
+  confined:
+    description: >-
+      "true" when the step's status is the command's own, from a sandbox whose
+      probe held and that left nothing behind; "false" when the action failed
+      the step itself (status 3).
+    value: ${{ steps.run.outputs.confined }}
 runs:
   using: composite
   steps:

@@ -132,11 +132,12 @@ def _answers(headers: str, hosts: list[str]) -> dict[str, set[str]]:
     names: dict[str, str] = {}
     found: dict[str, set[str]] = {host: set() for host in hosts}
     for line in headers.splitlines():
-        query = re.search(r": (\d+)\+?\s.*?\b(?:A|AAAA)\? ([A-Za-z0-9.-]+)\. ", line)
+        # The id may carry flag characters (+ recursion desired, $ AD, * AA, | TC, % CD, -).
+        query = re.search(r": (\d+)[+*|$%-]* .*?\b(?:A|AAAA)\? ([A-Za-z0-9.-]+)\. ", line)
         if query:
             names[query.group(1)] = query.group(2).lower()
             continue
-        answer = re.search(r": (\d+)\*?-? \d+/\d+/\d+ (.*)$", line)
+        answer = re.search(r": (\d+)[+*|$%-]* (?:[A-Za-z]+ )?\d+/\d+/\d+ (.*)$", line)
         if answer and answer.group(1) in names:
             name = names[answer.group(1)]
             for host in hosts:
@@ -231,6 +232,8 @@ def judge(args: argparse.Namespace) -> int:
     # The action itself must have run the command and returned its status.
     if str(args.action_exit) != "0":
         failures.append(f"the action's exit-code output is {args.action_exit!r}, expected 0 (the attempts script always exits 0)")
+    if str(args.action_confined) != "true":
+        failures.append(f"the action's confined output is {args.action_confined!r}: it failed the step itself (probe, runner files or cleanup)")
 
     # Left behind.
     before = json.loads(Path(args.snapshot).read_text())
@@ -317,7 +320,8 @@ def main() -> int:
     snap.add_argument("out")
     j = sub.add_parser("judge")
     for name in ("outside-pcap", "inside-pcap", "resolved", "outside-prefix", "inside-prefix",
-                 "record-prefix", "outside-results", "inside-results", "snapshot", "action-exit"):
+                 "record-prefix", "outside-results", "inside-results", "snapshot", "action-exit",
+                 "action-confined"):
         j.add_argument(f"--{name}", required=True)
     j.add_argument("--summary")
     j.add_argument("--json-out")

@@ -349,6 +349,28 @@ def _denied_hosts(log_dir: Path) -> list[str]:
     return hosts
 
 
+def _remove(path: Path) -> None:
+    """Delete a file or directory tree that AWF or the action made.
+
+    AWF's entrypoint creates some directories in the command's home as root
+    (.m2 and .gradle), so the runner user cannot always delete them; on a
+    hosted runner the action can use sudo, which the command cannot. A
+    symlink is removed, never followed, and rm does not follow symlinks
+    inside the tree or cross into another file system.
+    """
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+            return
+    except OSError:
+        pass
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists() and not path.is_symlink():
+        subprocess.run(["sudo", "-n", "rm", "-rf", "--one-file-system", "--", str(path)],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False, env={"PATH": FIXED_PATH})
+
+
 def _set_output(environ: dict[str, str], name: str, value: str) -> None:
     path = environ.get("GITHUB_OUTPUT")
     if path:
@@ -403,7 +425,12 @@ def run(environ: dict[str, str]) -> int:
     private = state / run_id
     awf_work = private / "work"
     logs = private / "proxy-logs"
-    for path in (private, awf_work):
+    # AWF moves its log, session, audit and diagnostics directories into its
+    # temporary directory when it cleans up (src/artifact-preservation.ts),
+    # and the command can write the first two. Give AWF a temporary
+    # directory inside the private one, so that they are deleted with it.
+    awf_tmp = private / "awf-tmp"
+    for path in (private, awf_work, awf_tmp):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.chmod(0o700)
 
@@ -427,6 +454,7 @@ def run(environ: dict[str, str]) -> int:
     child_env = {
         "PATH": FIXED_PATH,
         "HOME": str(scratch / "home"),
+        "TMPDIR": str(awf_tmp),
         "LANG": "C.UTF-8",
     }
     argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner))
@@ -459,13 +487,7 @@ def run(environ: dict[str, str]) -> int:
     for path in sorted(private.iterdir()):
         if path == logs:
             continue
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        _remove(path)
         if path.exists() or path.is_symlink():
             left.append(str(path))
     if left:
@@ -503,12 +525,18 @@ def run(environ: dict[str, str]) -> int:
 
     if changed:
         print(f"::error::The runner's {', '.join(changed)} changed while the command ran; the step fails")
+        _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
     if changed_left:
+        _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
     if not probe_ok:
         print("::error::The egress sandbox did not start or did not hold, so the command did not run. See the probe lines above.")
+        _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
+    # Set only when the step's status is the command's own, from a sandbox
+    # that held and left nothing behind.
+    _set_output(environ, "confined", "true")
     return status
 
 
