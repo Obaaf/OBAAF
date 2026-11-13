@@ -240,7 +240,7 @@ attempt "direct IPv6 [{PROBE_IPV6}]:443" curl -sS -6 --noproxy '*' --max-time 5 
 attempt "unlisted host {blocked_host} through the proxy" curl -sS --max-time 10 -o /dev/null https://{blocked_host}/
 attempt "unlisted host {blocked_host} without the proxy" curl -sS --noproxy '*' --max-time 5 -o /dev/null https://{blocked_host}/
 attempt "sudo" sudo -n true
-attempt "Docker socket" test -e /var/run/docker.sock -o -e /run/docker.sock
+attempt "Docker socket" bash -c "curl -sS --max-time 5 --unix-socket /var/run/docker.sock http://localhost/_ping || curl -sS --max-time 5 --unix-socket /run/docker.sock http://localhost/_ping"
 if [ "$failed" -ne 0 ]; then
   echo "obaaf-egress: the sandbox did not hold; the command was not run"
   exit {EXIT_NOT_CONFINED}
@@ -304,7 +304,12 @@ def _runner_file_hashes(environ: dict[str, str]) -> dict[str, str | None]:
 
 
 def _denied_hosts(log_dir: Path) -> list[str]:
-    """Host names or addresses the proxy refused, from Squid's access log."""
+    """Hosts the proxy refused, from Squid's access log.
+
+    AWF v0.29.13 writes the log in its format ``firewall_detailed``:
+    ``time client:port host dest:port version method status code:hierarchy url "agent"``,
+    where ``host`` is the request's Host header (``name:443`` for CONNECT).
+    """
     hosts: list[str] = []
     for log in sorted(log_dir.rglob("access*.log")):
         try:
@@ -312,16 +317,13 @@ def _denied_hosts(log_dir: Path) -> list[str]:
         except OSError:
             continue
         for line in text.splitlines():
-            if "DENIED" not in line and " 403 " not in line:
+            fields = line.split()
+            if len(fields) < 9 or "DENIED" not in fields[7]:
                 continue
-            for field in line.split():
-                if field.startswith(("http://", "https://")):
-                    field = field.split("://", 1)[1]
-                host = field.split("/", 1)[0].rsplit(":", 1)[0]
-                if host and (_HOST_RE.match(host.lower()) or re.match(r"^\d+\.\d+\.\d+\.\d+$", host)):
-                    if host not in hosts:
-                        hosts.append(host)
-                    break
+            host = fields[2] if fields[2] != "-" else fields[8].split("://", 1)[-1].split("/", 1)[0]
+            host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+            if host and host not in hosts:
+                hosts.append(host)
     return hosts
 
 

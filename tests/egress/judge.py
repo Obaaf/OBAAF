@@ -175,6 +175,10 @@ def judge(args: argparse.Namespace) -> int:
         if escaped_ips or escaped_labels:
             verdict = "GOT OUT: " + ", ".join(escaped_ips + escaped_labels)
             failures.append(f"{attempt} got out ({', '.join(escaped_ips + escaped_labels)})")
+        elif attempt not in in_results:
+            # Nothing was tried inside, so nothing was blocked.
+            verdict = "not attempted inside (the confined command did not run it)"
+            failures.append(f"{attempt} was not attempted inside the sandbox")
         elif not control:
             verdict = "not testable here (the control did not get out)"
             if not spec.get("ipv6"):
