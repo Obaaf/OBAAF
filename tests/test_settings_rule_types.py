@@ -388,13 +388,15 @@ class ClassicFieldsTest(unittest.TestCase):
         body["required_status_checks"]["checks"][0]["enforcement"] = "evaluate_only"
         snap, _ = take(classic_only(ADMIN, body), token=TOKEN)
         value = snap["settings"]["branch_protection"]["value"]["main"]
-        self.assertEqual(value["other_fields"], {"required_status_checks.checks": {"enforcement": ["evaluate_only"]}})
+        self.assertEqual(value["other_fields"], {"required_status_checks.checks": {"enforcement": [
+            {"app_id": 15368, "context": "test (3.13)", "value": "evaluate_only"}]}})
         files = dict(CI, **{"lint.yml": workflow("  pull_request:\n", job("lint"))})
         found = assess_files(people(classic_only(ADMIN, body), 3), files)
         for rule in CHECK_RULES:
             unknown = of(found, rule, "cannot-tell")
             self.assertTrue(unknown, rule)
-            self.assertIn('"required_status_checks.checks.enforcement" = ["evaluate_only"]', unknown[0]["message"])
+            self.assertIn('"required_status_checks.checks.enforcement" = [{"app_id": 15368, "context": "test (3.13)", '
+                          '"value": "evaluate_only"}]', unknown[0]["message"])
         self.assertEqual(status(found, "OBAAF-SET-005"), "no-finding")
 
     def test_a_known_object_in_another_form_is_kept_not_read_as_not_known(self):
@@ -405,7 +407,9 @@ class ClassicFieldsTest(unittest.TestCase):
                 (lambda b: b["required_pull_request_reviews"].__setitem__("dismissal_restrictions", ["x"]),
                  "required_pull_request_reviews", "dismissal_restrictions", ["x"]),
                 (lambda b: b["allow_fork_syncing"].__setitem__("enabled", "yes"), "allow_fork_syncing", "enabled",
-                 "yes")):
+                 "yes"),
+                # null is "not known" in a snapshot: an `enabled` GitHub sent as null is not read as not locked.
+                (lambda b: b["lock_branch"].__setitem__("enabled", None), "lock_branch", "enabled", None)):
             body = unrestricted(REFERENCE_CLASSIC)
             change(body)
             snap, _ = take(classic_only(ADMIN, body), token=TOKEN)
@@ -499,6 +503,20 @@ class TheReportTest(unittest.TestCase):
         self.assertIn('"required_status_checks (deploy)" (a type this audit does not know)', text)
 
 
+class ABranchTheSnapshotLeavesOutTest(unittest.TestCase):
+    def test_the_bypass_rule_cannot_tell_and_says_why(self):
+        from test_settings_rules import tree
+        from obaaf.audit import rules as audit_rules, workflows
+        from test_settings_audit import TempDir
+        snap, _ = take(ADMIN, token=TOKEN)
+        snap["settings"]["branch_rules"]["value"] = {}
+        with TempDir() as tmp:
+            found = audit_rules.evaluate(snap, workflows.read(tree(tmp, CI)))
+        unknown, = of(found, "OBAAF-SET-004", "cannot-tell")
+        self.assertEqual(unknown["message"], "Which rulesets are in force on it is not known: the rules in force on "
+                                             "it, which the snapshot does not hold.")
+
+
 class DriftTest(unittest.TestCase):
     """The snapshot changed: a classic protection rule may now carry ``other_fields``. A snapshot taken before,
     which has none, is still compared with one taken now."""
@@ -517,6 +535,17 @@ class DriftTest(unittest.TestCase):
         result = drift.compare(expected, live)
         self.assertFalse(drift.failed(result))
         self.assertEqual(result["outcomes"]["branch_protection"], "matches")
+
+    def test_a_field_that_moves_from_one_required_check_to_another_is_drift(self):
+        def body(on: str) -> dict:
+            body = unrestricted(REFERENCE_CLASSIC)
+            body["required_status_checks"]["checks"] = [{"context": "a", "app_id": 15368},
+                                                        {"context": "b", "app_id": 15368}]
+            next(c for c in body["required_status_checks"]["checks"] if c["context"] == on)["enforcement"] = "evaluate"
+            return body
+        expected, _ = take(classic_only(ADMIN, body("a")), token=TOKEN)
+        live, _ = take(classic_only(ADMIN, body("b")), token=TOKEN)
+        self.assertTrue(drift.failed(drift.compare(expected, live)))
 
     def test_a_field_the_earlier_reader_dropped_shows_as_added(self):
         body = copy.deepcopy(REFERENCE_CLASSIC)

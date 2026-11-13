@@ -350,8 +350,9 @@ RULE_TYPES = {
     # such a result may hold the merge up when it fails.
     **dict.fromkeys(("merge_queue", "required_deployments", "workflows", "code_scanning", "code_quality",
                      "code_coverage", "license_compliance_scanning"), "gate"),
-    # "Only allow users with bypass permission to update matching refs": who may merge is then decided by who
-    # may bypass that ruleset, not by the approvals alone. OBAAF-SET-005 names it as something it cannot weigh.
+    # "Only allow users with bypass permission to update matching refs": who may merge may then be decided by who
+    # may bypass that ruleset, not by the approvals alone (an inference: a merge updates the ref). OBAAF-SET-005
+    # names it as something it cannot weigh.
     "update": "merge",
     # "Request Copilot code review for new pull requests automatically": a review, not a required approval. By
     # GitHub's changelog of 2026-09-01 (read for slice 2b.5) Copilot's review can approve, and count toward the
@@ -561,7 +562,7 @@ def _requirements(run: _Run, branch: str) -> dict:
            # Rules of a known type that the rules do not read beyond their being there (see RULE_TYPES), as
            # (type, ruleset id, parameters); who may merge, as clauses; where Copilot is asked to review; and
            # the fields of a classic answer this version does not know, as clauses.
-           "gates": [], "merge_unread": [], "copilot_review": [], "classic_fields": []}
+           "gates": [], "merge_unread": [], "copilot_review": [], "classic_fields": [], "rules_missing": []}
     rules, whole = run.got("branch_rules")
     if rules is None or branch not in rules:
         out["checks_whole"] = out["approvals_whole"] = False
@@ -571,6 +572,7 @@ def _requirements(run: _Run, branch: str) -> dict:
             missing = "the rules in force on it, which the snapshot does not hold"
             out["checks_unread"].append(missing)
             out["approvals_unread"].append(missing)
+            out["rules_missing"].append(missing)
     else:
         for rule in rules[branch]:
             out["rulesets"].setdefault(rule["ruleset_id"], []).append(rule["type"])
@@ -588,7 +590,8 @@ def _requirements(run: _Run, branch: str) -> dict:
             elif kind == "merge":
                 out["merge_unread"].append(
                     f"a rule of type \"update\" ({where}), by which only those with bypass permission may push to "
-                    "the branch, so who may merge is not decided by the approvals alone")
+                    "the branch, which may decide who can merge into it as well (an inference: the reference speaks "
+                    "of updating the ref)")
             elif kind == "review":
                 out["copilot_review"].append(where)
             elif rule["type"] == "required_status_checks":
@@ -650,7 +653,8 @@ def _requirements(run: _Run, branch: str) -> dict:
             # Who may push to the branch, and so merge into it, beside the approvals.
             if rule["restrictions"]["restricted"]:
                 out["merge_unread"].append("the classic protection rule's restrictions on who may push to the branch "
-                                           "(restrictions), so who may merge is not decided by the approvals alone")
+                                           "(restrictions), which may decide who can merge into it as well (an "
+                                           "inference: the reference speaks of pushing)")
             if rule["lock_branch"] is True:
                 out["merge_unread"].append("the classic protection rule's lock_branch, by which, in GitHub's reference, "
                                            "\"users will not be able to push to the branch\"")
@@ -1178,8 +1182,10 @@ def rule_004(run: _Run) -> None:
     compared = 0
     for branch in branches:
         need = _branch_requirements(run, branch)
-        if "branch_rules" in need["gaps"] and run.settings["branch_rules"]["status"] != "read":
-            run.unread(f"branch {_q(branch)}", "which rulesets are in force on it is not known", "branch_rules")
+        if "branch_rules" in need["gaps"] and (run.settings["branch_rules"]["status"] != "read"
+                                               or need["rules_missing"]):
+            run.unread(f"branch {_q(branch)}", "which rulesets are in force on it is not known", "branch_rules",
+                       clauses=need["rules_missing"])
         for ruleset_id, types in sorted(need["rulesets"].items()):
             gates = sorted(set(types) & set(GATES))
             # A type this version does not know may be a gate: it is never read as one that is not.

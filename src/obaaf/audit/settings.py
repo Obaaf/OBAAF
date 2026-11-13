@@ -87,8 +87,8 @@ CLASSIC_FIELDS = {
 }
 # The name ``other_fields`` gives the object at the top of the answer; every other place is named by its path.
 CLASSIC_TOP = "branch_protection"
-# The fields of each entry of `required_status_checks.checks`, by the same reference. Fields outside them are
-# kept under the place ``required_status_checks.checks``, each with the values the entries gave it.
+# The fields of each entry of `required_status_checks.checks`, by the same reference. A field outside them is
+# kept under the place ``required_status_checks.checks``, with the context, app and value of each entry that has it.
 CLASSIC_CHECK_FIELDS = ("context", "app_id")
 CLASSIC_CHECKS = "required_status_checks.checks"
 # Every place ``other_fields`` may name.
@@ -860,8 +860,9 @@ def _other_fields(body: dict) -> dict:
 
     That is: a field :data:`CLASSIC_FIELDS` does not list; a known field that should be an object and is
     something else (``"lock_branch": true``), which the reader would otherwise record as not known and
-    pass over; a flag's ``enabled`` that is not true or false; and a field of an entry of
-    ``required_status_checks.checks`` other than its context and app, with every value the entries gave it."""
+    pass over; a flag's ``enabled`` that is not true or false (null included); and a field of an entry of
+    ``required_status_checks.checks`` other than its context and app, as a list of the context, app and value
+    of each entry that has it."""
     what = "the branch protection"
     out: dict = {}
 
@@ -878,7 +879,8 @@ def _other_fields(body: dict) -> dict:
                 keep(where or CLASSIC_TOP, name, value)
             elif path in CLASSIC_FIELDS and value is not None and not isinstance(value, dict):
                 keep(where or CLASSIC_TOP, name, value)
-            elif name == "enabled" and value is not None and not isinstance(value, bool):
+            elif name == "enabled" and not isinstance(value, bool):
+                # null included: the reader would record it as not known, and no rule reads that.
                 keep(where, name, value)
     checks = _at(body, CLASSIC_CHECKS)
     if isinstance(checks, list):
@@ -886,9 +888,12 @@ def _other_fields(body: dict) -> dict:
         for item in checks:
             for name, value in (item.items() if isinstance(item, dict) else ()):
                 if name not in CLASSIC_CHECK_FIELDS:
-                    extra.setdefault(name, []).append(_json_safe(value, what))
+                    # Kept with the check it is on, so that drift sees it move from one check to another.
+                    extra.setdefault(name, []).append({"context": item.get("context"), "app_id": item.get("app_id"),
+                                                       "value": value})
         for name, values in extra.items():
-            keep(CLASSIC_CHECKS, name, sorted(values, key=lambda v: json.dumps(v, sort_keys=True)))
+            out.setdefault(CLASSIC_CHECKS, {})[_clean(name, what)] = sorted(
+                _json_safe(values, what), key=lambda v: json.dumps(v, sort_keys=True))
     return {place: dict(sorted(fields.items())) for place, fields in sorted(out.items())}
 
 
