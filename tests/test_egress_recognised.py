@@ -360,7 +360,7 @@ class EgressActionTest(unittest.TestCase):
 
     def test_no_credential_and_no_agent_the_checker_knows_is_cannot_tell(self):
         """The checker tells where an agent runs by where its key goes. With no key anywhere and no
-        agent it recognises in the confined command, it cannot tell (decision D-049)."""
+        agent it recognises in the confined command, it cannot tell (decision D-050)."""
         f = self.check(CHECKOUT + "\n" + action(run="./scripts/home-grown.sh"))
         self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertIn("needs no key", detail(f))

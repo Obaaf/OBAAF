@@ -815,7 +815,7 @@ class WorkflowRules:
 
     def _egress_action(self, job: Job) -> egress_mod.Reading | None:
         """OBAAF's egress action confines one command: its `run` input. The control holds for the job
-        only when every condition below can be read and holds (decision D-049):
+        only when every condition below can be read and holds (decision D-050):
 
         - the action is used from a commit OBAAF lists as released, on the runner it was tested on;
         - its allow-list is written out, every entry a host name the action accepts and none a public

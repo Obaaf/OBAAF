@@ -9,11 +9,15 @@ audit knows. Everything that comes from GitHub or from a snapshot file passes th
 from __future__ import annotations
 
 from obaaf.audit.github import plain, quoted
+from obaaf.audit.rules import RULE_TYPES
 from obaaf.audit.settings import BY_KEY, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
 CHECKS_SHOWN = 30  # required checks named in one line before "and N more"; the snapshot always has them all
+# A rule's note says what it compared. The longest the rules can write, OBAAF-SET-005's with two branch names of
+# 40 characters in each of its clauses, is about 475 characters.
+NOTE_LIMIT = 600
 
 
 def counts(snapshot: dict) -> dict[str, int]:
@@ -57,7 +61,10 @@ def _rule_text(rule: dict) -> str:
     if kind == "required_status_checks" and isinstance(parameters.get("required_status_checks"), list):
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
         return f"required_status_checks ({_list(names, CHECKS_SHOWN) if names else 'none named'})"
-    return plain(kind, 60)
+    if kind in RULE_TYPES:
+        return kind
+    # A type this version does not know is printed quoted, so that its name cannot read as one of the above.
+    return f"{quoted(kind, 60)} (a type this audit does not know)"
 
 
 def _policy_rule_text(rule: dict) -> str:
@@ -305,7 +312,7 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
         if entry["cannot_tell"]:
             parts.append(f"cannot tell ({entry['cannot_tell']})")
         if not parts:
-            parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], 300)}")
+            parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], NOTE_LIMIT)}")
         lines.append(f"  {entry['id']}  {'; '.join(parts)}")
     return lines
 

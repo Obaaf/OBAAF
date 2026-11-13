@@ -195,7 +195,9 @@ class TheSixIncidentsTest(unittest.TestCase):
         # approval. The classic rule GitHub shows on the branch was refused and may ask for more.
         result, = of(found, "OBAAF-SET-005")
         self.assertEqual((result["state"], result["unread"]), ("cannot-tell", ["branch_protection"]))
-        self.assertIn("a classic protection rule may ask for more", result["message"])
+        # It says which requirement could not be read (slice 2b.6), not only that a classic rule may ask for more.
+        self.assertIn('whether it requires more is not known: "Classic branch protection" was not read (forbidden)',
+                      result["message"])
 
     def test_a_setting_that_was_not_read_never_turns_a_finding_into_no_finding(self):
         snap, _ = take(ADMIN, token=TOKEN)
