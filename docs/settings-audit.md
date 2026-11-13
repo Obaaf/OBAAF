@@ -220,7 +220,7 @@ DRIFT: 2 part(s) of 2 setting(s) differ from the expected snapshot. Each is a fi
       deployment_branches: was "selected", now "any"
   If the change was meant, take a new snapshot with the same access and commit it in a reviewed pull request (obaaf audit --snapshot-out FILE). If it was not, put the setting back.
 
-NOT COVERED: 10. Neither snapshot read these, so they were not compared:
+NOT COVERED: 10. Neither snapshot read these in full, so they were not compared, or only what both read was:
   Who may bypass each ruleset
   Classic branch protection
   ...
@@ -239,7 +239,7 @@ Each setting, and each part of one (a ruleset, an environment, a branch, a secre
 | **Matches** | Both snapshots read it and the values are the same | No |
 | **Differs** | Both read it and something is not the same. Each part that differs is one finding, `OBAAF-DRIFT-001`, with every change in it listed | Yes |
 | **Not compared** | One snapshot read it and the other did not. Whether it changed is not known | Yes |
-| **Not covered** | Neither snapshot read it, so there is nothing to compare | No; it is listed |
+| **Not covered** | Neither snapshot read it in full, so there is nothing to compare, or only what both read was compared | No; it is listed |
 
 "Not compared" works in both directions on purpose. A part the committed snapshot holds and this run could not read has not been checked. A part this run read and the committed snapshot did not is not checked either: GitHub may have left it out when the snapshot was taken (an error, or a bypass list it never shows as empty), or someone may have marked it as not read in the file; either way a change in it would otherwise go unreported. The cure is the same: take the snapshot again, with the token the check uses.
 
@@ -252,7 +252,7 @@ How values are compared:
 - **Values are compared as JSON**, so `true` is not `1`, `1` is not `1.0`, and `null` (not known) is not `false` or an empty list.
 - A setting that did not apply and now does (or the reverse) is a difference, as well as whatever parts it now has.
 - A branch only one side audited (one named with `--branch` that the committed file does not cover, or a new default branch) is not compared, never "new".
-- An environment both sides read only in part (its branch rules failed to load both times) has the rest of what was read compared, and a difference there counts; if the rest matches it is listed as not covered.
+- An environment both sides read only in part (its branch and tag patterns failed to load both times) has the rest of what was read compared, and a difference there counts; it is also listed as not covered, for the part neither read.
 
 When a part is "not compared", in practice:
 
@@ -262,9 +262,9 @@ When a part is "not compared", in practice:
 
 ### What it can watch
 
-Only what the token can read. With the workflow's own token, on a public repository, that is the repository, its rulesets and their rules, the rules in force on each audited branch, the public view of each branch (whether GitHub calls it protected, and the required checks a classic protection rule shows), the environments with their reviewers and branch rules, and how many accounts hold each role. **The bypass list of a ruleset, classic branch protection (its required reviews, whether administrators are held to it, force pushes and deletions), the names of secrets, the Actions permissions and policies, the default token permissions and the approval rule for fork pull requests are not readable with that token, so a scheduled job that uses it never watches them**: they stay "not covered".
+Only what the token can read. With the workflow's own token, on a public repository, that is the repository, its rulesets and their rules, the rules in force on each audited branch, the public view of each branch (whether GitHub calls it protected, and the required checks a classic protection rule shows), the environments with their reviewers and branch rules, and how many accounts hold each role. **The bypass list of a ruleset, classic branch protection (its required reviews, whether administrators are held to it, force pushes and deletions), the names of secrets, the Actions permissions and policies, the default token permissions and the approval rule for fork pull requests are not readable with that token, so a scheduled job that uses it never watches them**: they stay "not covered". To watch them the job needs a token that can read them (a fine-grained token or a GitHub App with the read permissions in [the table above](#what-it-reads), kept in an environment limited to the default branch), and the bypass list and Actions policies need more than read access, which OBAAF never asks for.
 
-The collaborator count is the number of accounts GitHub lists with access to the repository. Going by GitHub's reference (not tried), on an organisation's repository with a base permission that list includes every member of the organisation, so a member joining or leaving the organisation is a difference. To watch them the job needs a token that can read them (a fine-grained token or a GitHub App with the read permissions in [the table above](#what-it-reads), kept in an environment limited to the default branch), and the bypass list and Actions policies need more than read access, which OBAAF never asks for.
+The collaborator count is the number of accounts GitHub lists with access to the repository. Going by GitHub's reference (not tried), on an organisation's repository with a base permission that list includes every member of the organisation, so a member joining or leaving the organisation is a difference.
 
 ### The committed file
 

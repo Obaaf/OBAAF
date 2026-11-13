@@ -110,8 +110,12 @@ def _plain(text: object, limit: int = 140) -> str:
 
 
 def _same_file(one: str, other: str) -> bool:
+    """Whether two paths name one file: the same path, or (when both exist) the same file by any name,
+    a hard link or another letter case on a file system that ignores case included."""
     try:
-        return Path(one).resolve() == Path(other).resolve()
+        if Path(one).resolve() == Path(other).resolve():
+            return True
+        return os.path.exists(one) and os.path.exists(other) and os.path.samefile(one, other)
     except (OSError, RuntimeError, ValueError):
         return True  # cannot tell, so do not risk it
 

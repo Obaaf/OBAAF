@@ -304,6 +304,16 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
         theirs, ours = expected["settings"][key], live["settings"][key]
         e_status, l_status = _status(theirs), _status(ours)
         e_known, l_known = e_status in KNOWN, l_status in KNOWN
+        for snap, side, entry in ((expected, their_side, theirs), (live, our_side, ours)):
+            if SHAPES[key] == ("map", "branch") and _status(entry) in ("read", "partial"):
+                # The reader records every audited branch, read or not, and nothing else. A file whose list of
+                # branches says otherwise would have its branch data treated as never read. Checked whatever
+                # the other side read, so that whether a file is refused does not depend on the run.
+                value = entry.get("value")
+                held = (set(value) if isinstance(value, dict) else set()) | set(_problem_keys(entry))
+                if held != set(snap.get("branches") or []):
+                    raise DriftError(f"{side}: {setting.title}: the branches it holds are not the branches it "
+                                     "says were audited")
         if not e_known and not l_known:
             not_covered.append({"setting": key, "item": None, "what": setting.title,
                                 "reason_code": theirs.get("reason_code"),
@@ -313,7 +323,10 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
         if not l_known:
             not_compared.append({"setting": key, "item": None, "what": setting.title,
                                  "reason_code": ours.get("reason_code"),
-                                 "why": unknown(ours, "the expected snapshot holds it, and it was not read now: ")})
+                                 "why": unknown(ours, ("it did not apply in the expected snapshot" if
+                                                       e_status == "not_applicable" else
+                                                       "the expected snapshot holds it") + ", and it was not read "
+                                                                                           "now: ")})
             outcome[key] = "not compared"
             continue
         if not e_known:
@@ -330,14 +343,6 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                 "changes": [{"path": "", "change": "status", "expected": e_status, "live": l_status}]})
         e_parts = {} if e_status == "not_applicable" else parts(key, theirs.get("value"), their_side)
         l_parts = {} if l_status == "not_applicable" else parts(key, ours.get("value"), our_side)
-        for snap, side, found, entry in ((expected, their_side, e_parts, theirs), (live, our_side, l_parts, ours)):
-            if SHAPES[key] == ("map", "branch") and entry is not None and _status(entry) != "not_applicable":
-                # The reader records every audited branch, read or not, and nothing else. A file whose list of
-                # branches says otherwise would have its branch data compared as if it had never been read.
-                held = set(found) | set(_problem_keys(entry))
-                if held != set(snap.get("branches") or []):
-                    raise DriftError(f"{side}: {setting.title}: the branches it holds are not the branches it "
-                                     "says were audited")
         e_problems, l_problems = _problem_keys(theirs), _problem_keys(ours)
         names = set(e_parts) | set(l_parts) | set(e_problems) | set(l_problems)
         e_unknown = {**_branch_gaps(key, expected, names), **e_problems}
@@ -347,30 +352,33 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
             here = {"setting": key, "item": ident, "what": f"{setting.title}: {what}"}
             if ident in e_unknown and ident in l_unknown:
                 if isinstance(e_parts.get(ident), dict) and isinstance(l_parts.get(ident), dict):
-                    # Read in part on both sides (an environment whose branch rules failed to load): what was
-                    # read is compared, and a difference in it counts. What was not read is null on both.
+                    # Read in part on both sides (an environment whose branch and tag patterns failed to load):
+                    # what was read is compared, and a difference in it counts. What was not read is listed
+                    # as not covered whether or not the rest differs.
+                    parts_compared += 1
                     found = changes(e_parts[ident], l_parts[ident])
                     if found:
-                        parts_compared += 1
                         differences.append({"setting": key, "item": ident, "what": what, "changes": found})
-                        continue
                     not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
-                                        "why": unknown(e_unknown[ident], "read only in part by both; what both read "
-                                                                         "matches; the expected one: ")})
+                                        "why": unknown(e_unknown[ident], "both read it only in part, and the rest was "
+                                                                         "compared; not read by the expected one: ")})
                     continue
                 not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
                                     "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})
                 continue
             if ident in l_unknown:
-                held = ("the expected snapshot holds it, and it was not read now: " if ident in e_parts else
-                        "it is not in the expected snapshot (it may be new), and it could not be read now: ")
+                now = "it was read only in part now: " if ident in l_parts else "it could not be read now: "
+                held = ("the expected snapshot holds it, and " if ident in e_parts else
+                        "it is not in the expected snapshot (it may be new), and ") + now
                 not_compared.append({**here, "reason_code": l_unknown[ident].get("reason_code"),
                                      "why": unknown(l_unknown[ident], held)})
                 continue
             if ident in e_unknown:
+                held = ("it was read now, and the expected snapshot did not read it in full: " if ident in l_parts
+                        else "the expected snapshot did not read it in full, and it is not there now (it may have "
+                             "been removed): ")
                 not_compared.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
-                                     "why": unknown(e_unknown[ident], "it was read now, and the expected snapshot did "
-                                                                      "not read it: ") + ". " + RETAKE})
+                                     "why": unknown(e_unknown[ident], held) + ". " + RETAKE})
                 continue
             parts_compared += 1
             if ident not in l_parts:
@@ -508,10 +516,12 @@ def to_text(result: dict) -> str:
         lines.append(f"NO DRIFT in the {summary['compared']} setting(s) compared.")
         lines.append("")
     if result["not_covered"]:
-        lines.append(f"NOT COVERED: {summary['parts_not_covered']}. Neither snapshot read these, so they were not "
-                     "compared:")
+        lines.append(f"NOT COVERED: {summary['parts_not_covered']}. Neither snapshot read these in full, so they "
+                     "were not compared, or only what both read was:")
         for entry in result["not_covered"]:
             lines.append(f"  {plain(entry['what'], 160)}")
+            if entry["item"] is not None:
+                lines.append(f"      {plain(entry['why'], 300)}")
         lines.append("")
     in_part = f", {summary['compared_in_part']} only in part" if summary["compared_in_part"] else ""
     lines.append(f"{summary['settings']} settings: {summary['compared']} compared ({summary['matching']} match, "

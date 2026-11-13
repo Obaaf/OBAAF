@@ -444,6 +444,48 @@ class SecondReviewTest(unittest.TestCase):
                 self.assertIn("names the same file as --expected", err)
             self.assertEqual((tmp / "expected.json").read_text(encoding="utf-8"), before)
 
+    def test_a_hard_link_to_the_expected_file_is_the_same_file(self):
+        with TempDir() as tmp:
+            write(take(), tmp / "expected.json")
+            write(take(), tmp / "live.json")
+            os.link(tmp / "expected.json", tmp / "hard.json")
+            code, _, err = run_cli("audit", "--from-snapshot", tmp / "live.json", "--expected", tmp / "expected.json",
+                                   "-o", tmp / "hard.json")
+            self.assertEqual(code, 2)
+            self.assertIn("names the same file as --expected", err)
+
+    def test_the_list_of_branches_is_checked_whatever_this_run_could_read(self):
+        live = take(branches=("release",), entries=recording("admin-token") + [
+            {"path": f"/repos/{REPO}/rules/branches/release?per_page=100", "status": 200, "headers": {}, "body": []},
+            {"path": f"/repos/{REPO}/branches/release", "status": 200, "headers": {},
+             "body": {"name": "release", "protected": False}},
+            {"path": f"/repos/{REPO}/branches/release/protection", "status": 404, "headers": {},
+             "body": {"message": "Branch not protected"}}])
+        hidden = copy.deepcopy(live)
+        del hidden["settings"]["branch_protection"]["value"]["release"]
+        no_token = take("public-no-token", token=None)  # it cannot read classic protection at all
+        with self.assertRaises(drift.DriftError):
+            drift.compare(hidden, no_token)
+
+    def test_a_part_read_in_part_and_since_removed_is_not_said_to_be_read_now(self):
+        expected = take(entries=self.broken_policies(recording("admin-token")))
+        live = take()
+        live["settings"]["environments"]["value"] = [e for e in live["settings"]["environments"]["value"]
+                                                     if e["name"] != "release"]
+        live["settings"]["environment_secrets"]["value"].pop("release")
+        result = drift.compare(expected, live)
+        why = [e["why"] for e in result["not_compared"] if (e["setting"], e["item"]) == ("environments", "release")]
+        self.assertTrue(why and "it is not there now" in why[0], result["not_compared"])
+
+    def test_an_environment_read_in_part_on_both_sides_is_listed_even_when_the_rest_differs(self):
+        expected = take(entries=self.broken_policies(recording("admin-token")))
+        live = take(entries=self.broken_policies(recording("admin-token")), now=LATER)
+        env(live, "release")["wait_timer"] = 0
+        result = drift.compare(expected, live)
+        self.assertEqual(changed(result), [("environments", "release", "wait_timer", "changed")])
+        self.assertIn(("environments", "release"), [(e["setting"], e["item"]) for e in result["not_covered"]])
+        self.assertIn("both read it only in part", drift.to_text(result))
+
     def test_a_fault_in_the_from_snapshot_file_names_it(self):
         with TempDir() as tmp:
             write(take(), tmp / "good.json")

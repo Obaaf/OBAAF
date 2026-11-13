@@ -3,7 +3,9 @@
 # installed from this checkout instead of a pinned release. Any difference fails the run.
 # It is read-only: the audit sends GET requests only, and the job's token can read and nothing else.
 # It is not a required check. When a setting is changed on purpose, commit a new snapshot: the run's
-# artifact settings-drift holds the one it read.
+# artifact settings-drift holds the one it read. It also runs on a pull request that changes the audit,
+# so a change to what the reader records shows here; such a run fails whenever the live settings differ
+# from the snapshot, whatever the pull request changed.
 name: Settings drift
 
 on:
