@@ -232,19 +232,20 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          check() { if eval "$2"; then echo "ok: $1"; else echo "FAILED: $1"; fail=1; fi; }
-          check "the command's exit status 7 is the action's exit-code output" '[ "$FAILS_EXIT" = 7 ]'
-          check "the step failed with the command" '[ "$FAILS_OUTCOME" = failure ]'
-          check "the status is the command's own, not the action's" '[ "$FAILS_CONFINED" = true ]'
-          check "a named variable reached the command and nothing else did (else the status would not be 7)" '[ "$FAILS_EXIT" = 7 ]'
-          check "the file the command wrote is in the copy" '[ -f "$FAILS_WORKSPACE/written.txt" ]'
-          check "the real workspace is unchanged" '[ ! -e written.txt ]'
-          check "a wildcard is refused" '[ "$WILDCARD_OUTCOME" = failure ]'
-          check "an address is refused" '[ "$ADDRESS_OUTCOME" = failure ]'
-          check "a withheld variable is refused" '[ "$RESERVED_OUTCOME" = failure ]'
-          check "a model key name is refused" '[ "$MODELKEY_OUTCOME" = failure ]'
-          check "AWF's directories (work, work-chroot-home) are gone after the run" '! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null'
-          check "what the command wrote to its home is nowhere under RUNNER_TEMP or /tmp" '[ -z "$(sudo find "$RUNNER_TEMP" /tmp -name written-in-home 2>/dev/null)" ]'
-          check "what it wrote to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp" '[ -z "$(sudo find "$RUNNER_TEMP" /tmp -name planted-in-copilot 2>/dev/null)" ]'
-          check "only the proxy's log is left of the run's private directory" '[ -d "$FAILS_LOG_DIR" ] && [ "$(find "$(dirname "$FAILS_LOG_DIR")" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]'
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          run_dir="$(dirname "$FAILS_LOG_DIR")"
+          if [ "$FAILS_EXIT" = 7 ]; then ok "the command's exit status 7 is the action's exit-code output (so the named variable arrived and nothing else did)"; else bad "exit-code output is '$FAILS_EXIT', not 7"; fi
+          if [ "$FAILS_OUTCOME" = failure ]; then ok "the step failed with the command"; else bad "the step did not fail"; fi
+          if [ "$FAILS_CONFINED" = true ]; then ok "the status is the command's own, not the action's"; else bad "confined output is '$FAILS_CONFINED'"; fi
+          if [ -f "$FAILS_WORKSPACE/written.txt" ]; then ok "the file the command wrote is in the copy"; else bad "the file the command wrote is not in the copy"; fi
+          if [ ! -e written.txt ]; then ok "the real workspace is unchanged"; else bad "the command wrote into the real workspace"; fi
+          if [ "$WILDCARD_OUTCOME" = failure ]; then ok "a wildcard is refused"; else bad "a wildcard was accepted"; fi
+          if [ "$ADDRESS_OUTCOME" = failure ]; then ok "an address is refused"; else bad "an address was accepted"; fi
+          if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
+          if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
+          if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
+          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]; then ok "only the proxy's log is left of the run's private directory"; else bad "the run's private directory holds more than the proxy's log"; fi
+          found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"
+          if [ -z "$found" ]; then ok "what the command wrote to its home and to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp"; else bad "left behind: $found"; fi
           exit "$fail"
