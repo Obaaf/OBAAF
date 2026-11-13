@@ -63,6 +63,16 @@ ATTEMPTS: dict[str, dict] = {
     # success. Inside, it flushes the rules and connects to 9.9.9.10.
     "sudo-iptables": {"ips": ["9.9.9.10"], "control_by_result": True},
     "docker-socket": {"ips": ["208.67.222.222"]},
+    # Slice 2c.4: a name asked of the proxy (over HTTPS and HTTP, the proxy
+    # named explicitly) and a name the command looks up itself must not leave
+    # the runner in a DNS query. Outside, the same names are looked up by the
+    # runner's resolver and leave. The command's own lookups never reached the
+    # action's resolver (AWF gives the command's container Docker's resolver):
+    # they are regression tests, not tests of the resolver.
+    "dns-via-proxy": {"labels": ["viaproxy"]},
+    "dns-via-proxy-http": {"labels": ["plainproxy"]},
+    "dns-default-getent": {"labels": ["getent"]},
+    "dns-default-dig": {"labels": ["digdefault"]},
 }
 
 # Files a confined command must not be able to create or change.
@@ -224,9 +234,14 @@ def judge(args: argparse.Namespace) -> int:
     if args.inside_prefix in in_ascii:
         failures.append(f"the inside label {args.inside_prefix} appears in the capture of the external interface")
 
-    # Must still work.
+    # Must still work. curl checks the server's certificate against the
+    # runner's own trust store (AWF adds no authority of its own without
+    # --ssl-bump, which the action never passes), so status 0 with any HTTP
+    # code means the listed host's own server answered. Its code is not
+    # asserted: api.github.com answers 403 to an address that has used up
+    # GitHub's limit for requests without a token, outside the sandbox too.
     allowed = in_results.get("allowed-https", [])
-    if allowed[:2] != ["0", "200"]:
+    if len(allowed) < 2 or allowed[0] != "0" or not re.fullmatch(r"[1-5][0-9][0-9]", allowed[1]):
         failures.append(f"the listed host did not answer inside the sandbox (curl status and HTTP code: {' '.join(allowed) or 'none'})")
 
     # The action itself must have run the command and returned its status.
@@ -261,17 +276,27 @@ def judge(args: argparse.Namespace) -> int:
     if "/tmp/obaaf-planted-path" in os.environ.get("PATH", ""):
         failures.append("a PATH entry added from inside the sandbox reached a later step")
 
-    # Recorded, not asserted.
+    # No unlisted name the attempts or the action's probe used may leave the
+    # runner in a DNS query (slice 2c.4: before it, the proxy's resolver sent
+    # every name it was asked for).
     queried = sorted({m.group(1) for m in re.finditer(r"\? ([A-Za-z0-9.-]+)\. ", in_headers)
                       if any(m.group(1) == h or m.group(1).endswith("." + h)
                              for h in ("example.org", "example.net", "example.com", "cloudflare-dns.com"))})
+    if queried:
+        failures.append("unlisted names left the runner in DNS queries while the attempts ran inside: "
+                        + ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried))
+    # The names asked of the proxy must have reached the action's resolver and
+    # been refused there; otherwise the two attempts did not test it.
+    refused_names = set((args.dns_refused or "").split(","))
+    for label in ("viaproxy", "plainproxy"):
+        if f"{args.inside_prefix}-{label}.example.com" not in refused_names:
+            failures.append(f"the name {args.inside_prefix}-{label}.example.com is not among the names the action's "
+                            "resolver refused, so the proxy did not ask it and the attempt did not test the resolver")
+
+    # Recorded, not asserted.
     recorded = {
-        "the command's own resolver: a name it looked up left the runner in a DNS query":
-            f"{args.record_prefix}-getent" in in_ascii or f"{args.record_prefix}-dig" in in_ascii,
-        "the proxy: a name the command asked it for, and was refused, left the runner in a DNS query":
-            f"{args.record_prefix}-proxy" in in_ascii,
-        "unlisted names seen in DNS queries leaving the runner while the attempts ran inside":
-            ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried) or "none",
+        "names the action's resolver refused (its dns-refused output)":
+            (args.dns_refused or "none").replace(args.inside_prefix, "<label>"),
         "Host header that differs from the allowed name (curl status, HTTP code)":
             " ".join(in_results.get("host-mismatch", ["not run"])),
         "files the confined command reported writing outside the scratch directory (the judge checks the runner's copies above)":
@@ -291,7 +316,11 @@ def judge(args: argparse.Namespace) -> int:
              "| --- | --- | --- | --- |\n"]
     for attempt, control, verdict, status in rows:
         lines.append(f"| `{attempt}` | {control} | {verdict} | {status} |\n")
-    lines.append(f"\nMust still work, the listed host: curl status and HTTP code `{' '.join(allowed) or 'none'}`\n\n")
+    allowed_out = out_results.get("allowed-https", [])
+    lines.append(f"\nMust still work, the listed host: curl status and HTTP code `{' '.join(allowed) or 'none'}` "
+                 f"(outside the sandbox: `{' '.join(allowed_out) or 'none'}`)\n\n")
+    lines.append("No unlisted name left the runner in a DNS query.\n\n" if not queried else
+                 "**Unlisted names left the runner in DNS queries** (see Failed, below).\n\n")
     lines.append("Recorded, not asserted:\n\n")
     for key, value in recorded.items():
         lines.append(f"- {key}: `{value}`\n")
@@ -325,6 +354,7 @@ def main() -> int:
         j.add_argument(f"--{name}", required=True)
     j.add_argument("--summary")
     j.add_argument("--json-out")
+    j.add_argument("--dns-refused", default="")
     args = parser.parse_args()
     if args.mode == "snapshot":
         return snapshot(Path(args.out))
