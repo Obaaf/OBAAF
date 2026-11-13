@@ -2,13 +2,19 @@
 """Decide whether a live run of `obaaf audit` passed (used by settings-audit-live.yml).
 
     python scripts/check_live_audit.py SNAPSHOT --report REPORT.txt --exit-code N --repo OWNER/REPO
-                                       [--read KEY ...] [--rate-limit-ok] [--unreadable-ok]
+                                       [--path DIR] [--read KEY ...] [--rate-limit-ok] [--unreadable-ok]
                                        [--notice-if-no-ruleset]
 
-It fails when the snapshot is not valid, when it is a snapshot of another repository than the one asked for, when the command's exit code does not fit the snapshot, when the
-report is not exactly the report of that snapshot (a crash after the snapshot was written, or a report of
-something else), when any answer had a shape the reader did not expect, or when a setting named with
---read was not read. Finding an unexpected shape is what the live run is for, so nothing excuses one.
+It fails when the snapshot is not valid, when it is a snapshot of another repository than the one asked for,
+when the command's exit code does not fit the snapshot, when the report is not exactly the report of that
+snapshot (a crash after the snapshot was written, or a report of something else), when any answer had a
+shape the reader did not expect, when a rule failed while running, or when a setting named with --read was
+not read. Finding an unexpected shape is what the live run is for, so nothing excuses one.
+
+The command is expected to have been run with `--fail-on never`, so that its exit code says whether the
+repository was read and not whether the rules found something. The report is rebuilt here from the
+snapshot and from the same workflow files the command compared it with: those under --path (the current
+directory when it is not given), by the command's own rule for whose files they are.
 
 --rate-limit-ok lets a run that GitHub rate limited pass with a notice, as long as every setting named
 with --read was either read or was not read because of the rate limit itself. A setting that was refused
@@ -28,7 +34,9 @@ import sys
 from pathlib import Path
 
 from obaaf.audit import SETTINGS, SnapshotError, load
+from obaaf.audit.cli import usage_for
 from obaaf.audit.report import to_text
+from obaaf.audit.rules import evaluate
 
 # Reasons that mean the run could not judge the reader, as opposed to GitHub declining to show a setting.
 INCONCLUSIVE = ("network", "server_error", "unauthorized")
@@ -40,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", required=True, help="the text report the command printed")
     parser.add_argument("--exit-code", required=True, type=int, help="the command's exit code")
     parser.add_argument("--repo", required=True, metavar="OWNER/REPO", help="the repository the command was asked for")
+    parser.add_argument("--path", default=None, metavar="DIR",
+                        help="the directory the command was given, if it was given one")
     parser.add_argument("--read", nargs="*", default=[], metavar="KEY", help="settings that must have been read")
     parser.add_argument("--rate-limit-ok", action="store_true")
     parser.add_argument("--unreadable-ok", action="store_true")
@@ -74,7 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.exit_code != (0 if repository_read else 1):
         problems.append(f"the command exited {args.exit_code}, which does not fit a snapshot in which the "
                         f"repository was {'read' if repository_read else 'not read'}")
-    if report != to_text(snapshot):
+    usage = usage_for(args.path, snapshot["repository"], str(snapshot.get("requested_as", "")))
+    assessment = evaluate(snapshot, usage)
+    summary = assessment["summary"]
+    print(f"rules: {summary['findings']} finding(s), {summary['cannot_tell']} cannot tell, "
+          f"{summary['rules_failed']} failed")
+    if summary["rules_failed"]:
+        problems.append(f"{summary['rules_failed']} rule(s) failed while running")
+    if report != to_text(snapshot, assessment=assessment, usage=usage):
         # The command prints the report of the snapshot it wrote, so the two must agree to the character.
         problems.append("what the command printed is not the report of the snapshot it wrote")
     not_read = {key: [part["reason_code"] for k, part in found if k == key] or [settings[key]["status"]]

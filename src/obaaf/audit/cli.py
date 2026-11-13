@@ -21,13 +21,15 @@ class UsageError(ValueError):
 def add_parser(sub) -> None:
     x = sub.add_parser(
         "audit",
-        help="read a repository's GitHub settings (read-only) and record what was and was not read",
-        description="Read the GitHub settings that workflows depend on: rulesets, branch protection, "
-                    "environments, the names of secrets, Actions permissions and policies. Only GET requests "
-                    "are sent. Every setting that could not be read is listed by name with the reason. This "
-                    "version reads and records; it applies no rule yet. See docs/settings-audit.md.")
-    x.add_argument("path", nargs="?", default=".",
-                   help="a clone of the repository, used to find OWNER/REPO from its origin remote (default: .)")
+        help="read a repository's GitHub settings (read-only) and compare them with what its workflows use",
+        description="Read the GitHub settings that workflows depend on (rulesets, branch protection, "
+                    "environments, the names of secrets, Actions permissions and policies) and compare them "
+                    "with the workflow files in a clone. Only GET requests are sent. A rule reports a finding, "
+                    "or \"cannot tell\" when a setting it needs was not read; every setting that could not be "
+                    "read is listed by name with the reason. See docs/settings-audit.md.")
+    x.add_argument("path", nargs="?", default=None,
+                   help="a clone of the repository: its origin remote gives OWNER/REPO, and its workflow files "
+                        "are what the settings are compared with (default: .)")
     x.add_argument("--repo", metavar="OWNER/REPO", help="the repository to audit (default: from the clone's origin "
                                                         "remote, then $GITHUB_REPOSITORY)")
     x.add_argument("--branch", action="append", default=[], metavar="NAME",
@@ -44,23 +46,62 @@ def add_parser(sub) -> None:
                    help="read the token from this environment variable (default: GH_TOKEN, then GITHUB_TOKEN, "
                         "for api.github.com only). A token is never taken from the command line")
     x.add_argument("--api-url", metavar="URL", help="API address of a GitHub Enterprise Server (https; not tested)")
+    x.add_argument("--fail-on", choices=("high", "medium", "low", "never"), default="medium",
+                   help="exit 1 if a rule reports a finding at or above this severity (default: medium)")
+    x.add_argument("--fail-on-cannot-tell", action="store_true",
+                   help="exit 1 if any rule answered \"cannot tell\"")
     x.add_argument("--fail-on-unread", action="store_true",
                    help="exit 1 if any setting that applies was not read in full")
+    x.add_argument("--no-fixes", action="store_true", help="leave the fix out of each finding in the text report")
     x.add_argument("--record", metavar="DIR",
                    help="also save GitHub's answers as received (no request headers, so no token) to "
                         "DIR/responses.json, for a bug report or a test")
     x.set_defaults(func=cmd_audit)
 
 
-def _detect_repository(path: str) -> tuple[str, str]:
+def _origin(path: str) -> str | None:
+    """OWNER/REPO from the origin remote of the clone at ``path``, if it is on github.com."""
     try:
         done = subprocess.run(["git", "-C", path, "config", "--get", "remote.origin.url"], capture_output=True,
                               text=True, timeout=10, check=False)
         match = REMOTE.match(done.stdout.strip()) if done.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         match = None
-    if match:
-        return match.group(1), f"from the origin remote of {path}"
+    return match.group(1) if match else None
+
+
+def usage_for(path: str | None, repository: str, also: str = "") -> dict:
+    """What the workflow files use, for the rules to compare settings with.
+
+    The files are read from ``path`` when its origin remote names the repository that is audited (under
+    either name, if GitHub has renamed it), or when the directory was named on the command line: whoever
+    names a directory says whose files they are. Settings of one repository are never compared with the
+    workflows of whichever clone the command happened to be started in."""
+    from obaaf.audit import workflows
+
+    where = path if path is not None else "."
+    origin = _origin(where)
+    names = {repository.lower(), also.lower()} - {""}
+    if origin is None or origin.lower() not in names:
+        if path is None:
+            whose = (f"the clone in the current directory is of {_plain(origin)}, not of {_plain(repository)}"
+                     if origin else "the current directory is not a clone whose origin remote is on github.com")
+            return workflows.not_read(f"{whose}; to compare the settings with a repository's workflow files, "
+                                      "name the directory that holds them (obaaf audit DIR --repo OWNER/REPO)")
+    usage = workflows.read(where)
+    usage["shown"] = where
+    if usage["read"] and (origin is None or origin.lower() not in names):
+        usage["note"] = (f"That directory's origin remote names {_plain(origin)}, not {_plain(repository)}; its "
+                         "files are compared because the directory was named." if origin else
+                         "That directory has no github.com origin remote; its files are compared because the "
+                         "directory was named.")
+    return usage
+
+
+def _detect_repository(path: str) -> tuple[str, str]:
+    found = _origin(path)
+    if found:
+        return found, f"from the origin remote of {path}"
     env = os.environ.get("GITHUB_REPOSITORY", "").strip()
     if env:
         return env, "from $GITHUB_REPOSITORY"
@@ -136,9 +177,24 @@ def cmd_audit(args) -> int:
         return EXIT_FAIL
 
 
+def _json(snap: dict, usage: dict, assessment: dict) -> str:
+    """The JSON output: the rules' results, what was compared, and the snapshot they rest on."""
+    import json
+
+    document = {"format": "obaaf-settings-audit/v0.1", "repository": snap["repository"],
+                "summary": assessment["summary"], "rules": assessment["rules"], "results": assessment["results"],
+                "workflows": {"read": usage["read"], "reason": usage["reason"], "from": usage.get("shown", ""),
+                              "note": usage.get("note", ""), "config": usage["config"],
+                              "config_error": usage["config_error"],
+                              "files": [{"path": f["path"], "error": f["error"], "jobs": len(f["jobs"])}
+                                        for f in usage["files"]]},
+                "snapshot": snap}
+    return json.dumps(document, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
+
+
 def _run(args) -> int:
     from obaaf import audit
-    from obaaf.audit import report, snapshot as snapshot_mod
+    from obaaf.audit import report, rules, snapshot as snapshot_mod
     from obaaf.audit.settings import check_branches
 
     try:
@@ -158,7 +214,7 @@ def _run(args) -> int:
                       "was asked of GitHub now.")
         else:
             api = audit.github.check_api_url(args.api_url) if args.api_url else audit.DEFAULT_API
-            repository, found = (args.repo, "") if args.repo else _detect_repository(args.path)
+            repository, found = (args.repo, "") if args.repo else _detect_repository(args.path or ".")
             if not audit.OWNER_REPO.match(repository or ""):
                 raise UsageError(f"expected OWNER/REPO, got {_plain(repository)!r}")
             try:
@@ -181,16 +237,33 @@ def _run(args) -> int:
                 snapshot_mod.write(snap, args.snapshot_out)
     except (audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
         raise UsageError(str(exc)) from None
-    _emit(snapshot_mod.dumps(snap) if args.format == "json" else report.to_text(snap, origin=origin), args.output)
+    usage = usage_for(args.path, snap["repository"], str(snap.get("requested_as", "")))
+    assessment = rules.evaluate(snap, usage)
+    _emit(_json(snap, usage, assessment) if args.format == "json" else report.to_text(
+        snap, origin=origin, assessment=assessment, usage=usage, show_fixes=not args.no_fixes), args.output)
     if args.snapshot_out and args.from_snapshot is None:
         print(f"Snapshot written to {_plain(args.snapshot_out)}.", file=sys.stderr)
     if snap["settings"]["repository"]["status"] != "read":
         # Reading nothing must not look like a pass.
         print(f"error: {report.why_unread(snap)}. Nothing was audited.", file=sys.stderr)
         return EXIT_FAIL
+    code = EXIT_OK
+    summary = assessment["summary"]
+    if summary["rules_failed"]:
+        print(f"error: {summary['rules_failed']} rule(s) failed while running. This is a bug in obaaf; those "
+              "rules established nothing.", file=sys.stderr)
+        code = EXIT_FAIL
+    if rules.fails(assessment, args.fail_on):
+        print(f"error: {summary['findings']} finding(s): {summary['high']} high, {summary['medium']} medium, "
+              f"{summary['low']} low (--fail-on {args.fail_on}).", file=sys.stderr)
+        code = EXIT_FAIL
+    if args.fail_on_cannot_tell and summary["cannot_tell"]:
+        print(f"error: the rules could not tell in {summary['cannot_tell']} case(s) (--fail-on-cannot-tell).",
+              file=sys.stderr)
+        code = EXIT_FAIL
     unread = report.unread_keys(snap)
     if args.fail_on_unread and unread:
         print(f"error: {len(unread)} setting(s) were not read in full (--fail-on-unread): {', '.join(unread)}",
               file=sys.stderr)
-        return EXIT_FAIL
-    return EXIT_OK
+        code = EXIT_FAIL
+    return code

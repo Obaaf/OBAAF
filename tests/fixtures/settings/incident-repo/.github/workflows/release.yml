@@ -1,0 +1,11 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
+    secrets:
+      token: ${{ secrets.PACKAGE_INDEX_TOKEN }}
