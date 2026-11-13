@@ -47,6 +47,9 @@ PERMISSION_SCOPES = {
 }
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+
+# OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
+EGRESS_ACTION = "obaaf/obaaf/actions/egress"
 # Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
 HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
 # Step forms that hold no run or uses of their own (background steps, NGA features on GitHub.com).
@@ -444,6 +447,22 @@ class Step:
             parts.append(str(self.with_.get("script", "")))
         return "\n".join(p for p in parts if p)
 
+    @property
+    def confines(self) -> bool:
+        """Whether the step uses OBAAF's egress action, which runs its `run` input as a command with
+        the network limited: from OBAAF's repository, or the copy at `./actions/egress` in it."""
+        uses = (self.uses or "").strip()
+        return (self.action or "").lower() == EGRESS_ACTION or uses.rstrip("/") == "./actions/egress"
+
+    def agent_text(self) -> str:
+        """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,
+        which is an agent's command line like any other."""
+        parts = [self.text()]
+        if self.confines:
+            given = self.with_.get("run")
+            parts.append(given if isinstance(given, str) else "")
+        return "\n".join(p for p in parts if p)
+
 
 @dataclass
 class Job:
@@ -458,6 +477,8 @@ class Job:
     # is shown for the job.
     lanes: dict = field(default_factory=dict)
     lane_notes: list = field(default_factory=list)
+    # Indexes of the steps that run a repository script in which an agent CLI was found.
+    agent_script_steps: set = field(default_factory=set)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:
@@ -656,7 +677,7 @@ class Job:
             for prefix in actions:
                 if step.uses_action(prefix):
                     return f"uses {step.action}"
-            text = step.text()
+            text = step.agent_text()
             for rx in commands:
                 if text and rx.search(text):
                     return f"runs an agent CLI in '{step.name}'"

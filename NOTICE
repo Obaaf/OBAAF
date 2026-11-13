@@ -15,8 +15,14 @@ Licensing is split by material (see LICENSING.md for the full statement):
 
 The data files in src/obaaf/data/ are dual-covered: they are the specification
 (CC BY 4.0) and they ship inside the Python package the code uses (Apache-2.0).
+
+One file is not OBAAF's work: src/obaaf/data/public_suffix_list.dat is the
+Public Suffix List, from https://github.com/publicsuffix/list, shipped
+unchanged under the Mozilla Public License 2.0 (see the notice in its header,
+and https://mozilla.org/MPL/2.0/).
+
 The combined SPDX license expression for the package is
-"Apache-2.0 AND CC-BY-4.0".
+"Apache-2.0 AND CC-BY-4.0 AND MPL-2.0".
 
 Project contributors: Ofonna Nweze and Osita Sean Keluo-Udeke. The companion
 research papers are the independent work of Osita Sean Keluo-Udeke. The project

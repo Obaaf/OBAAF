@@ -145,7 +145,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **Root causes.** RC2. **Assumption secured** (Paper 1, Table 2): (i) complete mediation. **Illustrative cases.** Gemini CLI, GitLab Duo, Clinejection.
 
-**On GitHub Actions.** Native: A new virtual machine for each job on GitHub-hosted runners. Gap and compensating control: No native egress allow-list; use self-hosted ephemeral runners with network policy, or a runtime monitor.
+**On GitHub Actions.** Native: A new virtual machine for each job on GitHub-hosted runners. Gap and compensating control: GitHub's native egress firewall is a technical preview, on Linux runners only; elsewhere use OBAAF's egress action, self-hosted ephemeral runners behind a network policy, or a runtime monitor.
 
 **New relative to existing standards.** Default-deny egress for agents.
 

@@ -119,8 +119,9 @@ jobs:
       contents: read
     env:
       OBAAF_LANE: agent
-      # R7: GitHub-hosted runners have no native egress allow-list. Enforce this policy with
-      # ephemeral self-hosted runners behind a network policy, or turn on the egress monitor below.
+      # R7: enforce this policy with GitHub's native egress firewall (a technical preview:
+      # runs-on: ubuntu-24.04-firewall and .github/egress-firewall.yaml), OBAAF's egress action
+      # around the agent's command, ephemeral runners behind a network policy, or the monitor below.
       OBAAF_EGRESS: "inference proxy only (vars.OBAAF_MODEL_ENDPOINT)"
     steps:
       - name: Restrict egress with a runtime monitor (optional)
