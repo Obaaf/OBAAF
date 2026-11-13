@@ -245,7 +245,10 @@ def _usage_line(usage: dict) -> str:
         return (f"The workflow files were not read: {plain(usage['reason'], 300)}. Every rule compares a setting "
                 "with what the workflows use, so every rule answers \"cannot tell\".")
     files = usage["files"]
-    line = f"Compared with {_count(len(files), 'workflow file')} in the directory {quoted(usage.get('shown') or '.', 200)}"
+    unread = sum(1 for file in files if file["error"])
+    line = f"Compared with {_count(len(files) - unread, 'workflow file')} in the directory {quoted(usage.get('shown') or '.', 200)}"
+    if unread:
+        line += f" ({_count(unread, 'more')} could not be read)"
     config = usage.get("config")
     if config:
         line += f" and the configuration {plain(config['path'], 100)}"
@@ -292,7 +295,8 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
                 lines.append(f"    CANNOT TELL  {plain(result['subject'], 300)}")
                 lines.append(f"            {plain(result['message'], 1500)}")
     lines.append("")
-    lines.append(f"RULES: {len(assessment['rules'])}. Each compares a setting with what the workflow files use.")
+    lines.append(f"RULES: {len(assessment['rules'])}, one line each. A rule with no finding says what it compared, or "
+                 "why it had nothing to compare.")
     for entry in assessment["rules"]:
         parts = []
         if entry["findings"]:

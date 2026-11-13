@@ -310,13 +310,17 @@ class EnvironmentRulesTest(unittest.TestCase):
         ghost = {"x.yml": workflow("  workflow_dispatch:\n", job("deploy", "    environment: Staging\n"))}
         finding, = of(assess_files(ADMIN, ghost), "OBAAF-SET-001")
         self.assertEqual(finding["severity"], "medium")
-        self.assertIn("does not exist in the repository's settings", finding["message"])
+        self.assertIn("is not among the repository's environments", finding["message"])
 
     def test_environment_names_compare_without_regard_to_case_and_a_computed_name_is_not_guessed(self):
         files = {"x.yml": workflow("  workflow_dispatch:\n", job("a", "    environment: MAIN-ONLY\n") + job(
             "b", "    environment: ${{ inputs.target }}\n") + job("c", "    environment:\n      name: main-only\n"))}
-        finding, = of(assess_files(ADMIN, files), "OBAAF-SET-001")
+        found = assess_files(ADMIN, files)
+        finding, = of(found, "OBAAF-SET-001", "finding")
         self.assertIn("2 jobs name it", finding["message"])
+        unknown, = of(found, "OBAAF-SET-001", "cannot-tell")
+        self.assertEqual(unknown["subject"], "job .github/workflows/x.yml#b")
+        self.assertIn("names its environment with an expression", unknown["message"])
 
     def test_no_environment_named_does_not_apply(self):
         found = assess_files(ADMIN, {"x.yml": workflow("  push:\n", job("a"))})
@@ -337,7 +341,8 @@ class EnvironmentRulesTest(unittest.TestCase):
             found = assess_files(limited(ADMIN, ("main", "branch")), self.target(event))
             finding, = of(found, "OBAAF-SET-002")
             self.assertEqual((finding["state"], finding["severity"]), ("finding", "high"), event)
-            self.assertIn("a limit on which branches may deploy does not stop them", finding["message"])
+            self.assertIn("admits the default branch", finding["message"])
+            self.assertIn("so the limit does not stop them", finding["message"])
             self.assertEqual(status(found, "OBAAF-SET-001"), "no-finding")
 
     def test_required_reviewers_clear_it_and_a_push_never_raises_it(self):
@@ -470,9 +475,12 @@ class BranchRulesTest(unittest.TestCase):
         entries = replace(with_body(ADMIN, BRANCH_RULES, lambda body: body.clear()),
                           f"{R}/branches/main/protection", status=200, body=classic)
         found = assess_files(entries, self.CI)
-        finding, = of(found, "OBAAF-SET-004")
+        finding, = of(found, "OBAAF-SET-004", "finding")
         self.assertEqual((finding["severity"], finding["subject"]), ("high", 'branch "main": classic protection'))
         self.assertIn("All 1 account that can push are administrators", finding["message"])
+        # GitHub's answer did not say who may bypass the required reviews: that is not "nobody".
+        unknown, = of(found, "OBAAF-SET-004", "cannot-tell")
+        self.assertIn("did not say who may bypass them", unknown["message"])
         self.assertEqual(len(of(found, "OBAAF-SET-005", "finding")), 1)  # the classic rule's one approval
 
     def test_no_rules_in_force_does_not_apply(self):
@@ -527,13 +535,15 @@ class RequiredCheckRulesTest(unittest.TestCase):
         named = workflow("  pull_request:\n", "  build:\n    name: build ${{ matrix.os }}\n    runs-on: x\n    steps:\n      - run: a\n")
         for files in ({"ci.yml": named}, {"ci.yml": workflow("  pull_request:\n", job("other")), "bad.yml": "on: [push\n"}):
             found = assess_files(self.require(("build", 15368)), files)
-            self.assertEqual([r["state"] for r in of(found, "OBAAF-SET-006")], ["cannot-tell"])
+            self.assertEqual({r["state"] for r in of(found, "OBAAF-SET-006")}, {"cannot-tell"})
+            self.assertIn("whether anything reports it is not known", of(found, "OBAAF-SET-006")[0]["message"])
 
     def test_names_a_job_reports(self):
         files = {"ci.yml": workflow("  pull_request:\n", (
             "  a:\n    name: Unit tests\n    runs-on: x\n    steps:\n      - run: a\n"
             + job("m", "    strategy:\n      matrix:\n        os: [linux, mac]\n")
-            + "  c:\n    uses: ./.github/workflows/r.yml\n"))}
+            + "  c:\n    uses: ./.github/workflows/r.yml\n")),
+            "r.yml": workflow("  workflow_call:\n", job("inner"))}
         found = assess_files(self.require(("Unit tests", 15368), ("m (linux)", 15368), ("c / inner", 15368)), files)
         self.assertEqual(status(found, "OBAAF-SET-006"), "no-finding")
         self.assertEqual(status(found, "OBAAF-SET-008"), "no-finding")
@@ -544,7 +554,7 @@ class RequiredCheckRulesTest(unittest.TestCase):
     def test_a_required_check_behind_a_paths_filter(self):
         filtered = workflow("  pull_request:\n    paths:\n      - 'src/**'\n", job("build"))
         finding, = of(assess_files(self.require(("build", 15368)), {"ci.yml": filtered}), "OBAAF-SET-007")
-        self.assertIn("only when certain paths change", finding["message"])
+        self.assertIn("runs only when certain paths change", finding["message"])
         ignore = workflow("  pull_request:\n    paths-ignore:\n      - 'docs/**'\n", job("build"))
         self.assertEqual(len(of(assess_files(self.require(("build", 15368)), {"ci.yml": ignore}), "OBAAF-SET-007")), 1)
 
@@ -583,7 +593,8 @@ class RequiredCheckRulesTest(unittest.TestCase):
     def test_no_required_check_at_all(self):
         entries = with_body(ADMIN, BRANCH_RULES, lambda body: body.clear())
         finding, = of(assess_files(entries, {"ci.yml": workflow("  pull_request:\n", job("build"))}), "OBAAF-SET-008")
-        self.assertIn("no check is required there", finding["message"])
+        self.assertEqual(finding["subject"], 'branch "main": no required check')
+        self.assertIn('No check is required on "main", and 1 job runs on every pull request into it', finding["message"])
 
     def test_a_list_of_required_checks_that_is_not_whole_is_cannot_tell(self):
         def strip(body):
@@ -738,9 +749,13 @@ class NeverAPassTest(unittest.TestCase):
     def test_without_the_workflow_files_every_rule_is_cannot_tell(self):
         snap, _ = take(ADMIN, token=TOKEN)
         found = rules.evaluate(snap, workflows.not_read("no directory was given"))
-        self.assertEqual({r["status"] for r in found["rules"]}, {"cannot-tell"})
-        self.assertEqual(found["summary"]["findings"], 0)
-        self.assertIn("no directory was given", found["results"][0]["message"])
+        reads_files = {r.id for r in rules.RULES if r.files}
+        self.assertEqual(len(reads_files), 13)
+        self.assertEqual({r["status"] for r in found["rules"] if r["id"] in reads_files}, {"cannot-tell"})
+        self.assertIn("no directory was given", of(found, "OBAAF-SET-001")[0]["message"])
+        # The bypass and the approvals are settings and nothing else, so those two rules still answer.
+        self.assertEqual([r["rule"] for r in found["results"] if r["state"] == "finding"],
+                         ["OBAAF-SET-004", "OBAAF-SET-005"])
 
     def test_a_repository_that_was_not_read_is_cannot_tell_for_every_rule(self):
         snap, _ = take(replace(ADMIN, R, status=404, body={"message": "Not Found"}), token=TOKEN)
@@ -822,6 +837,360 @@ class NeverAPassTest(unittest.TestCase):
         self.assertFalse([line for line in text.splitlines() if line.startswith("  HIGH    forged")])
 
 
+class FirstReviewTest(unittest.TestCase):
+    """Faults an independent review found in the first version of the rules, each by running it. Most were
+    a "no finding" or a "does not apply" where the rule had not looked; each is pinned here."""
+
+    READS_KEY = "      - run: ./a\n        env:\n          K: ${{ secrets.MODEL_API_KEY }}\n"
+
+    def states(self, found, rule):
+        return sorted({r["state"] for r in of(found, rule)})
+
+    # -- environments
+    def test_an_environment_named_by_an_expression_is_cannot_tell_for_both_environment_rules(self):
+        for spelling in ("${{ 'main-only' }}", "\n      name: ${{ inputs.e }}", "${{ matrix.e }}"):
+            files = {"t.yml": workflow("  pull_request_target:\n", job("j", f"    environment: {spelling}\n",
+                                                                       self.READS_KEY))}
+            found = assess_files(ADMIN, files)
+            for rule in ("OBAAF-SET-001", "OBAAF-SET-002"):
+                self.assertEqual(status(found, rule), "cannot-tell", (rule, spelling))
+                self.assertEqual(of(found, rule)[0]["subject"], "job .github/workflows/t.yml#j")
+
+    def test_a_job_moved_into_a_reusable_workflow_is_still_reached_by_its_callers_events(self):
+        caller = workflow("  pull_request_target:\n  pull_request:\n", "  c:\n    uses: ./.github/workflows/b.yml\n")
+        called = workflow("  workflow_call:\n", "  inner:\n    runs-on: self-hosted\n    environment: main-only\n"
+                                                "    steps:\n" + self.READS_KEY)
+        found = assess_files(limited(ADMIN, ("main", "branch")), {"a.yml": caller, "b.yml": called})
+        finding, = of(found, "OBAAF-SET-002", "finding")
+        self.assertEqual(finding["subject"], "job .github/workflows/b.yml#inner")
+        self.assertIn("pull_request_target", finding["message"])
+        self.assertEqual(len(of(found, "OBAAF-SET-014", "finding")), 1)
+
+    def test_a_called_workflow_that_was_not_read_is_cannot_tell(self):
+        caller = workflow("  pull_request_target:\n  pull_request:\n",
+                          "  c:\n    uses: octo-org/shared/.github/workflows/b.yml@" + "a" * 40 + "\n")
+        found = assess_files(ADMIN, {"a.yml": caller})
+        self.assertEqual(status(found, "OBAAF-SET-002"), "cannot-tell")
+        self.assertEqual(status(found, "OBAAF-SET-014"), "cannot-tell")
+
+    def test_an_environment_limited_to_other_branches_shuts_default_branch_events_out(self):
+        target = {"t.yml": workflow("  issue_comment:\n", job("j", "    environment: main-only\n", self.READS_KEY))}
+        self.assertEqual(status(assess_files(limited(ADMIN, ("release", "branch")), target), "OBAAF-SET-002"),
+                         "no-finding")
+        finding, = of(assess_files(limited(ADMIN, ("rel*", "branch")), target), "OBAAF-SET-002")
+        self.assertIn("was not read or rests on a pattern", finding["message"])
+
+    def test_an_environment_that_holds_no_secret_is_low_and_says_what_it_does_not_know(self):
+        empty = with_body(ADMIN, f"{R}/environments/main-only/secrets?per_page=100",
+                          lambda body: body.update(total_count=0, secrets=[]))
+        files = {"x.yml": workflow("  push:\n", job("deploy", "    environment: main-only\n"))}
+        finding, = of(assess_files(empty, files), "OBAAF-SET-001")
+        self.assertEqual(finding["severity"], "low")
+        self.assertIn("It holds no secret", finding["message"])
+        self.assertNotIn("read whatever secrets", finding["message"])
+
+    def test_an_environment_limited_to_a_branch_that_was_not_audited_is_cannot_tell(self):
+        files = {"x.yml": workflow("  push:\n", job("deploy", "    environment: main-only\n"))}
+        result, = of(assess_files(limited(ADMIN, ("dev", "branch")), files), "OBAAF-SET-001")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("--branch", result["message"])
+        both = assess_files(limited(ADMIN, ("dev", "branch"), ("main", "branch"), protection_rules=REVIEWERS), files)
+        self.assertEqual(status(both, "OBAAF-SET-001"), "no-finding")
+
+    # -- secrets
+    def test_a_job_that_can_read_every_secret_reads_the_one_stored_twice(self):
+        for body in ("      - run: ./a\n        env:\n          K: ${{ toJSON(secrets) }}\n",
+                     "      - run: ./a\n        env:\n          K: ${{ secrets[format('{0}_KEY', 'MODEL_API')] }}\n"):
+            found = assess_files(ADMIN, {"x.yml": workflow("  push:\n", job("j", "", body))})
+            self.assertEqual([r["subject"] for r in of(found, "OBAAF-SET-003", "finding")], ['secret "MODEL_API_KEY"'])
+        inherit = workflow("  push:\n", "  c:\n    uses: octo-org/s/.github/workflows/w.yml@v1\n    secrets: inherit\n")
+        self.assertEqual(len(of(assess_files(ADMIN, {"x.yml": inherit}), "OBAAF-SET-003", "finding")), 1)
+
+    def test_a_configuration_that_cannot_be_read_is_cannot_tell_not_protects_nothing(self):
+        files = {"x.yml": workflow("  push:\n", job("j"))}
+        for config in ("protected_secrets:\n  '*_API_KEY': main-only\nlane: {}\n", "ignore: 5\n", "ignore: true\n"):
+            found = assess_files(ADMIN, files, config=config)
+            self.assertEqual(found["summary"]["rules_failed"], 0, config)
+            for rule in ("OBAAF-SET-001", "OBAAF-SET-003"):
+                self.assertEqual(self.states(found, rule), ["cannot-tell"], (rule, config))
+                self.assertIn("The configuration could not be read", of(found, rule)[0]["message"])
+        with TempDir() as tmp:
+            code, out, err = audit_command(ADMIN, tree(tmp, files, config="ignore: 5\n"), "--fail-on", "never",
+                                           token=True)
+        self.assertEqual(code, 0)
+        self.assertIn("The checker's configuration could not be read", out)
+        self.assertNotIn("failed unexpectedly", err)
+
+    def test_an_environment_the_configuration_names_when_the_environments_were_not_all_read(self):
+        files = {"x.yml": workflow("  push:\n", job("j"))}
+        config = "protected_secrets:\n  DEPLOY_KEY: production\n"
+        partly = refused(ADMIN, f"{R}/environments/release/deployment-branch-policies?per_page=100")
+        for entries in (partly, refused(ADMIN, ENVIRONMENTS)):
+            results = [r for r in of(assess_files(entries, files, config=config), "OBAAF-SET-003")
+                       if r["subject"] == 'environment "production"']
+            self.assertEqual([(r["state"], r["unread"]) for r in results], [("cannot-tell", ["environments"])])
+        self.assertEqual(len([r for r in of(assess_files(ADMIN, files, config=config), "OBAAF-SET-003", "finding")
+                              if r["subject"] == 'environment "production"']), 1)
+
+    # -- reusable workflows
+    def test_ways_of_passing_an_environment_only_secret(self):
+        callee = workflow("  workflow_call:\n", job("u", "", "      - run: ./u\n        env:\n          T: ${{ secrets.t }}\n"))
+        computed = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    secrets:\n"
+                                         "      t: ${{ secrets[format('{0}', 'PACKAGE_INDEX_TOKEN')] }}\n")
+        found = assess_files(ADMIN, {"r.yml": computed, "p.yml": callee})
+        self.assertEqual(self.states(found, "OBAAF-SET-011"), ["cannot-tell"])
+        as_input = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    with:\n"
+                                         "      token: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n")
+        finding, = of(assess_files(ADMIN, {"r.yml": as_input, "p.yml": callee}), "OBAAF-SET-011")
+        self.assertEqual(finding["state"], "finding")
+        every = workflow("  workflow_call:\n", job("u", "", "      - run: ./u\n        env:\n          T: ${{ toJSON(secrets) }}\n"))
+        inherit = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    secrets: inherit\n")
+        self.assertEqual(self.states(assess_files(ADMIN, {"r.yml": inherit, "p.yml": every}), "OBAAF-SET-011"),
+                         ["cannot-tell"])
+
+    def test_a_called_job_whose_environment_is_an_input_is_cannot_tell_not_a_finding(self):
+        caller = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    with:\n      environment: release\n"
+                                        "    secrets: inherit\n")
+        callee = workflow("  workflow_call:\n", job("u", "    environment: ${{ inputs.environment }}\n",
+                                                   "      - run: ./u\n        env:\n          T: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n"))
+        found = assess_files(ADMIN, {"r.yml": caller, "p.yml": callee})
+        self.assertEqual(self.states(found, "OBAAF-SET-011"), ["cannot-tell"])
+
+    def test_a_secret_passed_by_name_is_empty_whatever_the_called_job_declares(self):
+        caller = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    secrets:\n"
+                                        "      PACKAGE_INDEX_TOKEN: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n")
+        callee = workflow("  workflow_call:\n", job("u", "    environment: release\n",
+                                                   "      - run: ./u\n        env:\n          T: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n"))
+        finding, = of(assess_files(ADMIN, {"r.yml": caller, "p.yml": callee}), "OBAAF-SET-011")
+        self.assertIn("whatever the called workflow declares", finding["message"])
+        self.assertIn("stop passing it from the caller", rules.RULE_BY_ID["OBAAF-SET-011"].fix)
+
+    # -- bypass
+    def test_what_github_says_of_the_tokens_own_account_does_not_stand_for_the_list(self):
+        def hide(body):
+            body.pop("bypass_actors")
+            body["current_user_can_bypass"] = "pull_requests_only"
+        found = assess_files(with_body(ADMIN, RULESET_42, hide), BranchRulesTest.CI)
+        self.assertEqual([r["severity"] for r in of(found, "OBAAF-SET-004", "finding")], ["low"])
+        unknown, = of(found, "OBAAF-SET-004", "cannot-tell")
+        self.assertEqual(unknown["unread"], ["ruleset_bypass_actors"])
+
+    def test_who_may_skip_a_classic_rules_reviews(self):
+        classic = {"url": "x", "enforce_admins": {"enabled": True}, "required_pull_request_reviews": {
+            "required_approving_review_count": 1,
+            "bypass_pull_request_allowances": {"users": [{"login": "dev1"}], "teams": [], "apps": []}}}
+        entries = replace(with_body(ADMIN, BRANCH_RULES, lambda body: body.clear()),
+                          f"{R}/branches/main/protection", status=200, body=classic)
+        finding, = of(assess_files(entries, BranchRulesTest.CI), "OBAAF-SET-004")
+        self.assertEqual((finding["state"], finding["severity"]), ("finding", "medium"))
+        self.assertIn("lets 1 user, team or app bypass that", finding["message"])
+
+    def test_a_ruleset_that_asks_for_no_check_and_no_review_is_not_this_rules_subject(self):
+        def only_history(body):
+            body[:] = [r for r in body if r["type"] in ("deletion", "non_fast_forward")]
+        found = assess_files(with_body(ADMIN, BRANCH_RULES, only_history), BranchRulesTest.CI)
+        self.assertEqual(status(found, "OBAAF-SET-004"), "not-applicable")
+
+    def test_a_bypass_with_the_collaborators_unread_says_what_it_could_not_count(self):
+        found = assess_files(refused(ADMIN, COLLABORATORS), BranchRulesTest.CI)
+        self.assertEqual([r["severity"] for r in of(found, "OBAAF-SET-004", "finding")], ["medium"])
+        unknown, = of(found, "OBAAF-SET-004", "cannot-tell")
+        self.assertEqual(unknown["unread"], ["collaborators"])
+
+    def test_the_ruleset_is_named_as_it_is_written(self):
+        entries = with_body(ADMIN, RULESET_42, lambda body: body.update(name="Protect MAIN (Prod)"))
+        entry_for(entries, f"{R}/rulesets?includes_parents=true&per_page=100")["body"][0]["name"] = "Protect MAIN (Prod)"
+        finding, = of(assess_files(entries, BranchRulesTest.CI), "OBAAF-SET-004")
+        self.assertIn('The ruleset 42 "Protect MAIN (Prod)" is in force', finding["message"])
+
+    # -- required checks
+    def require(self, *checks):
+        return RequiredCheckRulesTest.require(None, *checks)
+
+    def test_a_required_check_whose_job_never_runs_for_a_pull_request_into_the_branch(self):
+        for on, expected in (("  schedule:\n    - cron: '0 0 * * *'\n", "finding"),
+                             ("  pull_request:\n    branches: [develop]\n", "finding"),
+                             ("  pull_request:\n    branches-ignore: [main]\n", "finding"),
+                             ("  merge_group:\n", "finding"),
+                             ("  pull_request:\n    types: [labeled]\n", "finding"),
+                             ("  pull_request:\n    branches: ['release/**']\n", "cannot-tell"),
+                             ("  workflow_dispatch:\n", "cannot-tell"),
+                             ("  pull_request:\n    types: [opened, synchronize, reopened]\n", None)):
+            found = assess_files(self.require(("test", 15368)), {"w.yml": workflow(on, job("test"))})
+            self.assertEqual(self.states(found, "OBAAF-SET-007"), [expected] if expected else [], on)
+            self.assertEqual(status(found, "OBAAF-SET-006"), "no-finding", on)
+
+    def test_a_token_that_may_write_checks_makes_a_missing_check_cannot_tell(self):
+        writer = workflow("  pull_request:\n", job("other"), permissions="permissions:\n  statuses: write\n")
+        found = assess_files(self.require(("build", 15368)), {"w.yml": writer})
+        result, = of(found, "OBAAF-SET-006")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("may write checks or statuses", result["message"])
+        bare = workflow("  pull_request:\n", job("other"), permissions="")
+        self.assertEqual(self.states(assess_files(self.require(("build", 15368)), {"w.yml": bare}), "OBAAF-SET-006"),
+                         ["finding"])  # the recording's default for the token is read
+        unknown = assess_files(refused(self.require(("build", 15368)), f"{R}/actions/permissions/workflow"),
+                               {"w.yml": bare})
+        self.assertEqual(self.states(unknown, "OBAAF-SET-006"), ["cannot-tell"])
+
+    def test_matrix_values_are_compared_when_the_matrix_is_written_out(self):
+        other = workflow("  pull_request:\n", job("test", "    strategy:\n      matrix:\n        python: ['3.11', '3.12']\n"))
+        found = assess_files(ADMIN, {"ci.yml": other})  # the recording requires "test (3.13)"
+        self.assertEqual(self.states(found, "OBAAF-SET-006"), ["finding"])
+        two = workflow("  pull_request:\n", job("t", "    strategy:\n      matrix:\n        os: [linux, mac]\n        py: [3, 4]\n"))
+        found = assess_files(self.require(("t (linux, 3)", 15368), ("t (mac, 4)", 15368), ("t (3, mac)", 15368)), {"ci.yml": two})
+        self.assertEqual([r["subject"] for r in of(found, "OBAAF-SET-006", "finding")],
+                         ['branch "main": required check "t (3, mac)"'])
+        for body in ("    strategy:\n      matrix:\n        python: ${{ fromJSON(inputs.v) }}\n",
+                     "    strategy:\n      matrix:\n        python: ['3.13']\n        include:\n          - python: '3.14'\n",
+                     "    strategy:\n      matrix:\n        python: [3.13]\n"):
+            found = assess_files(ADMIN, {"ci.yml": workflow("  pull_request:\n", job("test", body))})
+            self.assertEqual(self.states(found, "OBAAF-SET-006"), ["cannot-tell"], body)
+
+    def test_the_checks_of_a_called_workflow_are_the_called_jobs(self):
+        files = {"ci.yml": workflow("  pull_request:\n", "  build:\n    uses: ./.github/workflows/lib.yml\n"),
+                 "lib.yml": workflow("  workflow_call:\n", job("lint"))}
+        found = assess_files(self.require(("build / test", 15368)), files)
+        self.assertEqual(self.states(found, "OBAAF-SET-006"), ["finding"])
+        self.assertEqual(status(assess_files(self.require(("build / lint", 15368)), files), "OBAAF-SET-006"), "no-finding")
+        # A job in a workflow that is only called does not report under its own name.
+        self.assertEqual(self.states(assess_files(self.require(("lint", 15368)), files), "OBAAF-SET-006"), ["finding"])
+
+    def test_a_matrix_of_calls_reports_name_values_and_called_job(self):
+        files = {"ci.yml": workflow("  pull_request:\n", "  build:\n    strategy:\n      matrix:\n        os: [linux, mac]\n"
+                                                         "    uses: ./.github/workflows/lib.yml\n"),
+                 "lib.yml": workflow("  workflow_call:\n", job("test"))}
+        found = assess_files(self.require(("build (linux) / test", 15368), ("build (mac) / test", 15368)), files)
+        for rule in ("OBAAF-SET-006", "OBAAF-SET-008"):
+            self.assertEqual(status(found, rule), "no-finding", rule)
+
+    def test_a_job_that_runs_only_for_some_pull_request_activity_is_not_asked_to_be_required(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("build")),
+                 "cleanup.yml": workflow("  pull_request:\n    types: [closed]\n", job("cleanup")),
+                 "label.yml": workflow("  pull_request_target:\n    types: [labeled]\n", job("label"))}
+        self.assertEqual(status(assess_files(self.require(("build", 15368)), files), "OBAAF-SET-008"), "no-finding")
+
+    def test_a_requirement_tied_to_another_app_is_cannot_tell_even_when_a_job_has_the_name(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("build"))}
+        result, = of(assess_files(self.require(("build", 999)), files), "OBAAF-SET-006")
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("the app with id 999, which is not GitHub Actions", result["message"])
+
+    # -- Actions settings
+    def test_a_policy_rule_in_a_form_the_rule_does_not_know_is_cannot_tell_for_both_policy_rules(self):
+        for parameters in (None, {"events": ["pull_request_target", "workflow_run"]}, {"allowed_actors": "all"}):
+            entries = with_body(ADMIN, POLICY_7, lambda body: body.update(
+                rules=[{"type": "restrict_action_events", **({"parameters": parameters} if parameters else {})}]))
+            found = assess_files(entries, ActionsSettingsRulesTest.SCAN)
+            for rule in ("OBAAF-SET-009", "OBAAF-SET-010"):
+                self.assertEqual(self.states(found, rule), ["cannot-tell"], (rule, parameters))
+
+    def test_a_default_for_the_token_that_is_a_word_the_rule_does_not_know(self):
+        entries = with_body(ADMIN, f"{R}/actions/permissions/workflow",
+                            lambda body: body.update(default_workflow_permissions="permissive"))
+        self.assertEqual(status(assess_files(entries, ActionsSettingsRulesTest.BARE), "OBAAF-SET-012"), "cannot-tell")
+
+    def test_a_workflows_approval_and_what_clears_it(self):
+        approve = ActionsSettingsRulesTest.token_default(None, "read", True)
+        writer = ActionsSettingsRulesTest.WRITER
+
+        def owners(body):
+            next(r for r in body if r["type"] == "pull_request")["parameters"]["require_code_owner_review"] = True
+        self.assertEqual(status(assess_files(with_body(approve, BRANCH_RULES, owners), writer), "OBAAF-SET-013"),
+                         "no-finding")
+
+        def none(body):
+            next(r for r in body if r["type"] == "pull_request")["parameters"]["required_approving_review_count"] = 0
+        self.assertEqual(status(assess_files(with_body(approve, BRANCH_RULES, none), writer), "OBAAF-SET-013"),
+                         "no-finding")
+        unknown = assess_files(refused(approve, BRANCH_RULES), writer)
+        self.assertEqual(self.states(unknown, "OBAAF-SET-013"), ["cannot-tell"])
+
+    def test_a_runner_the_audit_cannot_classify_is_cannot_tell(self):
+        for runs_on in ("${{ matrix.r }}\n    strategy:\n      matrix:\n        r: [gpu-box]", "${{ vars.RUNNER }}",
+                        "[gpu-box]"):
+            files = {"ci.yml": workflow("  pull_request:\n", f"  b:\n    runs-on: {runs_on}\n    steps:\n      - run: make\n")}
+            self.assertEqual(self.states(assess_files(ADMIN, files), "OBAAF-SET-014"), ["cannot-tell"], runs_on)
+        literal = workflow("  pull_request:\n", "  b:\n    runs-on: ${{ matrix.r }}\n    strategy:\n      matrix:\n"
+                                                "        r: [self-hosted]\n    steps:\n      - run: make\n")
+        self.assertEqual(self.states(assess_files(ADMIN, {"ci.yml": literal}), "OBAAF-SET-014"), ["finding"])
+        hosted = workflow("  pull_request:\n", job("b"))
+        self.assertEqual(status(assess_files(ADMIN, {"ci.yml": hosted}), "OBAAF-SET-014"), "not-applicable")
+
+    def test_a_private_repository_that_sends_fork_pull_requests_secrets(self):
+        private = with_body(ADMIN, R, lambda body: body.update(private=True, visibility="private"))
+        private.append({"path": f"{R}/actions/permissions/fork-pr-workflows-private-repos", "status": 200,
+                        "headers": {}, "body": {"run_workflows_from_fork_pull_requests": True,
+                                                "send_write_tokens_to_workflows": False,
+                                                "send_secrets_and_variables": True,
+                                                "require_approval_for_fork_pr_workflows": False}})
+        caller = workflow("  pull_request:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    secrets: inherit\n")
+        callee = workflow("  workflow_call:\n", job("u", "", "      - run: ./u\n        env:\n          T: ${{ secrets.K }}\n"))
+        finding, = of(assess_files(private, {"ci.yml": caller, "p.yml": callee}), "OBAAF-SET-014")
+        self.assertEqual((finding["state"], finding["severity"]), ("finding", "high"))
+        quiet = workflow("  pull_request:\n", job("b"))
+        self.assertEqual(status(assess_files(private, {"ci.yml": quiet}), "OBAAF-SET-014"), "no-finding")
+
+    def test_pinning_is_about_jobs_that_use_an_action(self):
+        entries = ActionsSettingsRulesTest.pinning(None, False)
+        only_run = {"ci.yml": workflow("  push:\n", job("b"))}
+        self.assertEqual(status(assess_files(entries, only_run), "OBAAF-SET-015"), "not-applicable")
+
+    # -- whose files, and what a name can do
+    def test_a_directory_inside_a_clone_is_not_the_clone(self):
+        with TempDir() as tmp:
+            root = tree(tmp, {"ci.yml": workflow("  push:\n", job("a"))})
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://github.com/example-studio/game"],
+                           check=True)
+            nested = tree(root / "examples", {"t.yml": workflow("  push:\n", job("t"))})
+            self.assertIsNone(audit_cli.usage_for(str(root), REPO).get("note"))
+            self.assertIn("is not the top level of a clone", audit_cli.usage_for(str(nested), REPO)["note"])
+            with mock.patch.dict("os.environ", {"GIT_DIR": str(root / ".git")}):
+                self.assertIn("is not the top level", audit_cli.usage_for(str(tmp), REPO).get("note", "is not the top level"))
+                self.assertEqual(audit_cli._origin(str(nested)), None)
+            snap, _ = take(ADMIN, token=TOKEN)
+            snapshot_mod.write(snap, tmp / "s.json")
+            done = subprocess.run([__import__("sys").executable, "-m", "obaaf", "audit", "--from-snapshot",
+                                   str(tmp / "s.json"), "--fail-on", "never"], cwd=nested, capture_output=True,
+                                  text=True, timeout=60, check=False,
+                                  env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")})
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("The workflow files were not read: the current directory is not the top level of a clone",
+                          done.stdout)
+
+    def test_a_remote_on_github_com_says_nothing_about_another_server(self):
+        usage = audit_cli.usage_for(None, "Obaaf/OBAAF", github_com=False)
+        self.assertFalse(usage["read"])
+        self.assertIn("a server other than github.com", usage["reason"])
+
+    def test_characters_that_print_as_blanks_cannot_push_text_to_the_start_of_a_line(self):
+        for blank in "\u2800\u3164\u115f\u1160\uffa0":
+            self.assertEqual(github.plain("x" + blank * 40 + "OBAAF-SET-001  no finding"), "x" + "?" * 40
+                             + "OBAAF-SET-001 no finding")
+        step = f'      - uses: "x@1{chr(0x2800) * 60}  OBAAF-SET-001  no finding: 1 environment"\n'
+        with TempDir() as tmp:
+            snap, _ = take(ActionsSettingsRulesTest.pinning(None, True), token=TOKEN)
+            usage = workflows.read(tree(tmp, {"ci.yml": workflow("  push:\n", job("b", "", step))}))
+            text = report.to_text(snap, assessment=rules.evaluate(snap, usage), usage=usage)
+        self.assertNotIn("\u2800", text)
+        self.assertIn("OBAAF-SET-015", text)
+
+    def test_the_report_counts_the_files_that_could_not_be_read_and_every_file_rule_says_so(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("build", "    environment: main-only\n")),
+                 "broken.yml": "on: [push\njobs: {"}
+        with TempDir() as tmp:
+            snap, _ = take(refused(ADMIN, ENVIRONMENTS), token=TOKEN)
+            usage = workflows.read(tree(tmp, files))
+            found = rules.evaluate(snap, usage)
+            text = report.to_text(snap, assessment=found, usage=usage)
+        self.assertIn("Compared with 1 workflow file in the directory", text)
+        self.assertIn("(1 more could not be read)", text)
+        for rule in rules.RULES:
+            mentions = [r for r in of(found, rule.id) if "broken.yml" in r["message"]]
+            self.assertEqual(len(mentions), 1 if rule.files else 0, rule.id)
+
+
 def audit_command(entries, directory, *args, token: bool = False, repository: str = REPO):
     """Run `obaaf audit DIRECTORY --repo REPOSITORY` in-process against a recording."""
     transport = audit.ReplayTransport(copy.deepcopy(entries))
@@ -891,17 +1260,20 @@ class CommandTest(unittest.TestCase):
 
     def test_settings_are_not_compared_with_the_workflows_of_whichever_clone_one_is_in(self):
         # This test runs in a clone of OBAAF, and the recording is of another repository.
-        code, out, _ = audit_command(ADMIN, None, token=True)
+        code, out, _ = audit_command(ADMIN, None, "--fail-on", "never", token=True)
         self.assertEqual(code, 0)
         self.assertIn("The workflow files were not read:", out)
         self.assertIn("name the directory that holds them", out)
-        self.assertIn("CANNOT TELL: 15, from 15 of 15 rules", out)
+        # The two rules that read settings only still answer; the thirteen that compare cannot.
+        self.assertIn("FINDINGS: 2 (1 high, 1 medium, 0 low). CANNOT TELL: 13, from 13 of 15 rules", out)
+        self.assertEqual(audit_command(ADMIN, None, token=True)[0], 1)
 
     def test_a_directory_that_is_named_is_compared_and_the_report_says_whose_it_looks_like(self):
         with TempDir() as tmp:
             root = tree(tmp, {"ci.yml": workflow("  pull_request:\n", job("build"))})
             _, out, _ = audit_command(ADMIN, root, "--fail-on", "never", token=True)
-            self.assertIn("has no github.com origin remote; its files are compared because the directory was named", out)
+            self.assertIn("is not the top level of a clone of this repository on github.com; its files are "
+                          "compared because the directory was named", out)
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://github.com/Example-Studio/Game.git"],
                            check=True)
@@ -937,7 +1309,10 @@ class WorkflowUsageTest(unittest.TestCase):
         jobs = {f"{f['path'].rsplit('/', 1)[1]}#{j['id']}": j for f in usage["files"] for j in f["jobs"]}
         self.assertEqual(jobs["agent.yml#agent"]["environment"], {"name": "main-only"})
         self.assertEqual(jobs["agent.yml#agent"]["secrets"], ["MODEL_API_KEY"])
-        self.assertEqual(jobs["ci.yml#test"]["check"], {"kind": "matrix", "name": "test"})
+        self.assertEqual(jobs["ci.yml#test"]["check"], {"kind": "matrix", "name": "test", "matrix": True,
+                                                        "names": ["test (3.13)"]})
+        self.assertEqual(jobs["release.yml#publish"]["check"]["names"], ["publish / upload"])
+        self.assertEqual(jobs["publish.yml#upload"]["called_from"], ["push"])
         self.assertEqual(jobs["release.yml#publish"]["passes"], {"inherit": False, "names": ["PACKAGE_INDEX_TOKEN"],
                                                                  "all": False})
         self.assertEqual(jobs["scan.yml#scan"]["triggers"], ["pull_request_target", "workflow_run"])

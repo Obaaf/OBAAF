@@ -57,7 +57,7 @@ jobs:
             > audit-live/with-token.txt || code=$?
           cat audit-live/with-token.txt
           python scripts/check_live_audit.py audit-live/with-token.json --report audit-live/with-token.txt \
-            --exit-code "$code" --repo "$GITHUB_REPOSITORY" \
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" --workflows-read \
             --read repository rulesets branch_rules branches environments
 
       # With no token GitHub allows 60 requests an hour for each IP address, and hosted runners share
@@ -70,7 +70,7 @@ jobs:
             --record audit-live/no-token > audit-live/no-token.txt || code=$?
           cat audit-live/no-token.txt
           python scripts/check_live_audit.py audit-live/no-token.json --report audit-live/no-token.txt \
-            --exit-code "$code" --repo "$GITHUB_REPOSITORY" --rate-limit-ok \
+            --exit-code "$code" --repo "$GITHUB_REPOSITORY" --rate-limit-ok --workflows-read \
             --read repository rulesets branch_rules branches environments
 
       # This repository has no rulesets, so the part of the reader that reads them would never meet

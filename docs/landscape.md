@@ -469,7 +469,7 @@ The aim is that a team can run OBAAF as its default check and lose nothing. A te
 | Writing a new agent workflow | GitHub Agentic Workflows (not run here) | OBAAF's agent lane templates stay as a worked example of its controls. They are not the recommended place to start |
 | Signing and verifying what was built | GitHub artifact attestations and `gh attestation verify` | Keeps its own records (an agent's run, an approval, a build) as in-toto statements signed the same way, and its two rules about releases without provenance |
 | Scanning what steers an agent: skills, MCP servers, instruction files | Snyk's agent-scan, Agent Threat Rules, agent-audit, promptwarden (none run here) | Keeps its two small rules about instruction files. Adds none |
-| Checking a whole organisation's settings against a standard | Legitify, OpenSSF Scorecard, or one of the enterprise products | Built since slice 2b.2, not in a release: `obaaf audit` reads only the settings the repository's own workflows depend on and compares the two with fifteen rules ([the settings audit](settings-audit.md)). It has not been run with an administrator's token |
+| Checking a whole organisation's settings against a standard | Legitify, OpenSSF Scorecard, or one of the enterprise products | Built since slice 2b.2, not in a release: `obaaf audit` reads only the settings the repository's own workflows depend on and applies fifteen rules, thirteen of which compare a setting with the workflow files ([the settings audit](settings-audit.md)). It has not been run with an administrator's token |
 | Other CI systems | poutine reads GitLab, Azure DevOps and Tekton | GitHub Actions only. Jenkins support stays advisory, as it is |
 
 ### Where OBAAF must be at least as good

@@ -38,7 +38,7 @@ def add_parser(sub) -> None:
                    help="report from a saved snapshot instead of asking GitHub; no request is sent")
     x.add_argument("--snapshot-out", metavar="FILE", help="write the snapshot (JSON) to FILE")
     x.add_argument("--format", choices=("text", "json"), default="text",
-                   help="text for people (default), or json: the snapshot itself")
+                   help="text for people (default), or json: the rules' results and the snapshot in one document")
     x.add_argument("--output", "-o", help="write the report to a file instead of standard output")
     x.add_argument("--no-token", action="store_true",
                    help="send no token even if one is set; reads what GitHub shows anyone about a public repository")
@@ -59,42 +59,61 @@ def add_parser(sub) -> None:
     x.set_defaults(func=cmd_audit)
 
 
-def _origin(path: str) -> str | None:
-    """OWNER/REPO from the origin remote of the clone at ``path``, if it is on github.com."""
+def _git(path: str, *args: str) -> str | None:
+    """One line from git about the directory, or None. Variables that point git at another repository
+    (GIT_DIR and the like) are not passed on: the question is about this directory."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        done = subprocess.run(["git", "-C", path, "config", "--get", "remote.origin.url"], capture_output=True,
-                              text=True, timeout=10, check=False)
-        match = REMOTE.match(done.stdout.strip()) if done.returncode == 0 else None
+        done = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=10, check=False,
+                              env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
-        match = None
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _origin(path: str) -> str | None:
+    """OWNER/REPO from the origin remote of the clone whose top level is ``path``, if it is on github.com.
+    A directory inside a clone is not the clone: its workflow files are not that repository's."""
+    top = _git(path, "rev-parse", "--show-toplevel")
+    try:
+        if top is None or Path(top).resolve() != Path(path).resolve():
+            return None
+    except OSError:
+        return None
+    match = REMOTE.match(_git(path, "config", "--get", "remote.origin.url") or "")
     return match.group(1) if match else None
 
 
-def usage_for(path: str | None, repository: str, also: str = "") -> dict:
+def usage_for(path: str | None, repository: str, also: str = "", github_com: bool = True) -> dict:
     """What the workflow files use, for the rules to compare settings with.
 
-    The files are read from ``path`` when its origin remote names the repository that is audited (under
-    either name, if GitHub has renamed it), or when the directory was named on the command line: whoever
-    names a directory says whose files they are. Settings of one repository are never compared with the
-    workflows of whichever clone the command happened to be started in."""
+    The files are read from ``path`` when it is the top level of a clone whose origin remote names the
+    repository that is audited (under either name, if GitHub has renamed it), or when the directory was
+    named on the command line: whoever names a directory says whose files they are. Settings of one
+    repository are never compared with the workflows of whichever clone the command happened to be
+    started in. A remote on github.com says nothing about a repository on another server (``github_com``
+    false), so there a directory has to be named."""
     from obaaf.audit import workflows
 
     where = path if path is not None else "."
-    origin = _origin(where)
+    origin = _origin(where) if github_com else None
     names = {repository.lower(), also.lower()} - {""}
-    if origin is None or origin.lower() not in names:
-        if path is None:
-            whose = (f"the clone in the current directory is of {_plain(origin)}, not of {_plain(repository)}"
-                     if origin else "the current directory is not a clone whose origin remote is on github.com")
-            return workflows.not_read(f"{whose}; to compare the settings with a repository's workflow files, "
-                                      "name the directory that holds them (obaaf audit DIR --repo OWNER/REPO)")
+    matches = origin is not None and origin.lower() in names
+    if not matches and path is None:
+        whose = ("the settings were read from a server other than github.com, and the current directory's remote "
+                 "cannot say whose files these are" if not github_com else
+                 f"the clone in the current directory is of {_plain(origin)}, not of {_plain(repository)}"
+                 if origin else "the current directory is not the top level of a clone whose origin remote is "
+                                "on github.com")
+        return workflows.not_read(f"{whose}; to compare the settings with a repository's workflow files, "
+                                  "name the directory that holds them (obaaf audit DIR --repo OWNER/REPO)")
     usage = workflows.read(where)
     usage["shown"] = where
-    if usage["read"] and (origin is None or origin.lower() not in names):
+    if usage["read"] and not matches:
         usage["note"] = (f"That directory's origin remote names {_plain(origin)}, not {_plain(repository)}; its "
                          "files are compared because the directory was named." if origin else
-                         "That directory has no github.com origin remote; its files are compared because the "
-                         "directory was named.")
+                         "That directory is not the top level of a clone of this repository on github.com; its "
+                         "files are compared because the directory was named.")
     return usage
 
 
@@ -237,7 +256,8 @@ def _run(args) -> int:
                 snapshot_mod.write(snap, args.snapshot_out)
     except (audit.ApiUrlError, snapshot_mod.SnapshotError) as exc:
         raise UsageError(str(exc)) from None
-    usage = usage_for(args.path, snap["repository"], str(snap.get("requested_as", "")))
+    usage = usage_for(args.path, snap["repository"], str(snap.get("requested_as", "")),
+                      github_com=snap["api"] == audit.DEFAULT_API)
     assessment = rules.evaluate(snap, usage)
     _emit(_json(snap, usage, assessment) if args.format == "json" else report.to_text(
         snap, origin=origin, assessment=assessment, usage=usage, show_fixes=not args.no_fixes), args.output)

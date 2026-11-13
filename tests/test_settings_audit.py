@@ -111,6 +111,10 @@ class clean_env:
 def cli(entries: list[dict], *args: str, env: dict | None = None):
     """Run `obaaf audit` in-process against a recording. Returns (code, out, err, transport)."""
     transport = audit.ReplayTransport(copy.deepcopy(entries))
+    if "--fail-on" not in args:
+        # These tests are about the reader. What the rules make of a recording is tested in
+        # test_settings_rules.py, and must not decide the exit status here.
+        args = (*args, "--fail-on", "never")
     with clean_env(**(env or {})), mock.patch.object(github, "UrllibTransport", return_value=transport):
         code, out, err = run_cli("audit", *args)
     return code, out, err, transport
