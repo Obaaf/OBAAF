@@ -199,11 +199,17 @@ class Answer:
         return not self.code
 
 
+# Characters that are letters or symbols to Unicode and print as nothing: the braille blank, the Hangul
+# fillers and the two hieroglyphs that stand for an empty space. A run of them can push the rest of a
+# value to the start of a terminal's next line, as a run of spaces could.
+BLANKS = frozenset("\u2800\u115f\u1160\u3164\uffa0\U00013441\U00013442")
+
+
 def plain(text: object, limit: int = 200) -> str:
     """Text from outside made safe to print on one line: nothing that moves the cursor, changes direction,
-    hides, or cannot be encoded, and a bounded length. Every such character becomes a question mark, and
-    every kind of space, or run of spaces, becomes one space."""
-    cleaned = "".join("?" if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+    hides, prints as a blank without being a space, or cannot be encoded, and a bounded length. Every such
+    character becomes a question mark, and every kind of space, or run of spaces, becomes one space."""
+    cleaned = "".join("?" if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") or ch in BLANKS
                       else " " if unicodedata.category(ch) == "Zs" else ch for ch in str(text))
     # Runs of spaces become one: a long run could push the rest of a value to the start of the next
     # line of a terminal, where it would read as a line of the report.

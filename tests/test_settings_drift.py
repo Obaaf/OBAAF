@@ -525,13 +525,19 @@ class CommittedFileTest(unittest.TestCase):
 
     def test_exit_codes(self):
         snap = take()
-        code, out, err = self.run_files(snap, snap)
+        code, out, err = self.run_files(snap, snap, "--fail-on", "never")
         self.assertEqual(code, 0, err)
         self.assertIn("NO DRIFT in the 15 setting(s) compared", out)
         self.assertIn("Settings audit of example-studio/game", out)  # the audit's own report follows
+        # The settings rules run in the same command and gate on their own: no drift, and still exit 1.
+        code, out, err = self.run_files(snap, snap)
+        self.assertEqual(code, 1)
+        self.assertIn("NO DRIFT in the 15 setting(s) compared", out)
+        self.assertIn("(--fail-on medium)", err)
+        self.assertNotIn("drifted", err)
         changed_snap = copy.deepcopy(snap)
         env(changed_snap, "release")["wait_timer"] = 0
-        code, out, err = self.run_files(snap, changed_snap)
+        code, out, err = self.run_files(snap, changed_snap, "--fail-on", "never")
         self.assertEqual(code, 1)
         self.assertIn("DRIFT: 1 part(s) of 1 setting(s)", out)
         self.assertIn("wait_timer: was 30, now 0", out)
@@ -541,14 +547,26 @@ class CommittedFileTest(unittest.TestCase):
         snap = take()
         changed_snap = copy.deepcopy(snap)
         changed_snap["settings"]["repository_secrets"]["value"] = []
-        code, out, _ = self.run_files(snap, changed_snap, "--format", "json")
+        code, out, _ = self.run_files(snap, changed_snap, "--format", "json", "--fail-on", "never")
         self.assertEqual(code, 1)
         document = json.loads(out)
-        self.assertEqual(document["format"], "obaaf-settings-drift/v0.1")
-        self.assertEqual(document["rule"], "OBAAF-DRIFT-001")
-        self.assertEqual(document["summary"]["findings"], 1)
-        self.assertEqual(document["differences"][0]["changes"][0], {"path": "", "change": "removed", "expected": True})
+        # One document: the audit's report, with the comparison under `drift`.
+        self.assertEqual(document["format"], "obaaf-settings-audit/v0.1")
+        self.assertIn("results", document)
+        drift_part = document["drift"]
+        self.assertEqual(drift_part["format"], "obaaf-settings-drift/v0.1")
+        self.assertEqual(drift_part["rule"], "OBAAF-DRIFT-001")
+        self.assertEqual(drift_part["summary"]["findings"], 1)
+        self.assertEqual(drift_part["differences"][0]["changes"][0], {"path": "", "change": "removed", "expected": True})
+        self.assertNotIn("snapshot", drift_part)
         self.assertEqual(document["snapshot"]["settings"], changed_snap["settings"])
+        # Without --expected there is no `drift` key at all.
+        with TempDir() as tmp:
+            write(changed_snap, tmp / "live.json")
+            code, out, _ = run_cli("audit", "--from-snapshot", tmp / "live.json", "--format", "json",
+                                   "--fail-on", "never")
+        self.assertEqual(code, 0)
+        self.assertNotIn("drift", json.loads(out))
 
     def test_another_repository_or_another_server_is_refused(self):
         snap = take()
@@ -677,7 +695,7 @@ class LiveReadTest(unittest.TestCase):
 
     def test_a_live_read_that_matches(self):
         expected = take()
-        code, out, err, _ = self.run_live(recording("admin-token"), expected, token=TOKEN)
+        code, out, err, _ = self.run_live(recording("admin-token"), expected, "--fail-on", "never", token=TOKEN)
         self.assertEqual(code, 0, err + out)
         self.assertIn("NO DRIFT", out)
 
@@ -688,7 +706,7 @@ class LiveReadTest(unittest.TestCase):
                 mock.patch.object(github, "UrllibTransport", return_value=transport):
             write(expected, tmp / "expected.json")
             code, _, err = run_cli("audit", "--repo", REPO, "--expected", tmp / "expected.json",
-                                   "--snapshot-out", tmp / "live.json")
+                                   "--snapshot-out", tmp / "live.json", "--fail-on", "never")
             self.assertEqual(code, 0, err)
             self.assertEqual(snapshot_mod.load(tmp / "live.json")["settings"], expected["settings"])
 
@@ -714,6 +732,16 @@ class TemplateTest(unittest.TestCase):
             installed = text.replace("OBAAF_OWNER/obaaf", "example-studio/obaaf").replace("0" * 40, TEST_SHA)
             (wf / "obaaf-settings-drift.yml").write_text(installed, encoding="utf-8")
             self.assertEqual(workflow_findings(tmp), [])
+
+    def test_every_audit_in_the_drift_jobs_gates_on_drift_only(self):
+        # The settings rules run in the same command; a drift job must fail on drift, not on a rule's
+        # finding, and its first run must still print and keep the snapshot.
+        for path in (self.TEMPLATE, ROOT / ".github" / "workflows" / "settings-drift.yml"):
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines()
+                     if "obaaf audit " in line and not line.lstrip().startswith("#")]
+            self.assertEqual(len(lines), 2, path)
+            for line in lines:
+                self.assertIn("--fail-on never", line, path)
 
     def test_the_uninstalled_template_is_flagged_so_it_cannot_run_by_accident(self):
         with TempDir() as tmp:

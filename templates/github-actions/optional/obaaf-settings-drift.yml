@@ -70,11 +70,11 @@ jobs:
           set -euo pipefail
           mkdir -p obaaf-settings-live
           if [ ! -f .github/obaaf-settings.json ]; then
-            obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out obaaf-settings-live/obaaf-settings.json
+            obaaf audit --repo "$GITHUB_REPOSITORY" --fail-on never --snapshot-out obaaf-settings-live/obaaf-settings.json
             echo "::error::No snapshot is committed at .github/obaaf-settings.json. Download obaaf-settings.json from this run's artifact obaaf-settings-live, read it, and commit it there in a pull request."
             exit 1
           fi
-          obaaf audit --repo "$GITHUB_REPOSITORY" --expected .github/obaaf-settings.json \
+          obaaf audit --repo "$GITHUB_REPOSITORY" --fail-on never --expected .github/obaaf-settings.json \
             --snapshot-out obaaf-settings-live/obaaf-settings.json
 
       - name: Keep what was read

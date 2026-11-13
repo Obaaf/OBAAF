@@ -50,13 +50,13 @@ jobs:
           set -euo pipefail
           mkdir -p settings-drift
           if [ ! -f .github/obaaf-settings.json ]; then
-            obaaf audit --repo "$GITHUB_REPOSITORY" --snapshot-out settings-drift/obaaf-settings.json
+            obaaf audit --repo "$GITHUB_REPOSITORY" --fail-on never --snapshot-out settings-drift/obaaf-settings.json
             python -c 'import json, sys; print("SNAPSHOT " + json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' \
               settings-drift/obaaf-settings.json
             echo "::error::No snapshot is committed at .github/obaaf-settings.json; the one this run read is in the artifact settings-drift."
             exit 1
           fi
-          obaaf audit --repo "$GITHUB_REPOSITORY" --expected .github/obaaf-settings.json \
+          obaaf audit --repo "$GITHUB_REPOSITORY" --fail-on never --expected .github/obaaf-settings.json \
             --snapshot-out settings-drift/obaaf-settings.json
 
       - name: Keep what was read
