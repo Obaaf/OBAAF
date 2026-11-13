@@ -168,8 +168,10 @@ class TheSixIncidentsTest(unittest.TestCase):
         self.assertIn('stored only in the environment "release"', finding["message"])
 
     def test_the_summary_counts_them_and_nothing_failed(self):
-        self.assertEqual(self.found["summary"], {"findings": 8, "high": 3, "medium": 5, "low": 0, "cannot_tell": 0,
-                                                 "rules_cannot_tell": 0, "rules_failed": 0})
+        # The one "cannot tell": whether this public repository has self-hosted runners, which a fork's pull
+        # request could name in its own copy of a workflow (OBAAF-SET-014).
+        self.assertEqual(self.found["summary"], {"findings": 8, "high": 3, "medium": 5, "low": 0, "cannot_tell": 1,
+                                                 "rules_cannot_tell": 1, "rules_failed": 0})
         self.assertTrue(rules.fails(self.found, "high"))
 
     def test_with_no_token_the_rules_that_need_more_say_cannot_tell(self):
@@ -544,9 +546,17 @@ class RequiredCheckRulesTest(unittest.TestCase):
             + job("m", "    strategy:\n      matrix:\n        os: [linux, mac]\n")
             + "  c:\n    uses: ./.github/workflows/r.yml\n")),
             "r.yml": workflow("  workflow_call:\n", job("inner"))}
-        found = assess_files(self.require(("Unit tests", 15368), ("m (linux)", 15368), ("c / inner", 15368)), files)
+        found = assess_files(self.require(("Unit tests", 15368), ("m (linux)", 15368), ("m (mac)", 15368),
+                                          ("c / inner", 15368)), files)
         self.assertEqual(status(found, "OBAAF-SET-006"), "no-finding")
         self.assertEqual(status(found, "OBAAF-SET-008"), "no-finding")
+        # One of a matrix's checks required is not enough: the other can fail and the pull request merges
+        # (the first adopter required one check of eleven).
+        found = assess_files(self.require(("Unit tests", 15368), ("m (linux)", 15368), ("c / inner", 15368)), files)
+        self.assertEqual(status(found, "OBAAF-SET-006"), "no-finding")
+        finding, = of(found, "OBAAF-SET-008", "finding")
+        self.assertIn("reports 2 checks, of which 1 is not", finding["message"])
+        self.assertIn("m (mac)", finding["message"])
         found = assess_files(self.require(("a", 15368), ("m", 15368), ("c", 15368)), files)
         self.assertEqual(len(of(found, "OBAAF-SET-006", "finding")), 3)
         self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 3)
@@ -692,8 +702,8 @@ class ActionsSettingsRulesTest(unittest.TestCase):
         self.assertEqual(status(assess_files(ADMIN, self.WRITER), "OBAAF-SET-013"), "no-finding")
         # With a default of write, a job with no permissions block holds such a token as well.
         self.assertEqual(len(of(assess_files(self.token_default("write", True), self.BARE), "OBAAF-SET-013")), 1)
-        self.assertEqual(status(assess_files(self.token_default("read", True), self.BARE), "OBAAF-SET-013"),
-                         "not-applicable")
+        # With a default of read too: a workflow on any branch can ask for the token, whatever the files here say.
+        self.assertEqual(len(of(assess_files(self.token_default("read", True), self.BARE), "OBAAF-SET-013")), 1)
         unknown = assess_files(recording("public-no-token"), self.WRITER, token=None)
         self.assertEqual(status(unknown, "OBAAF-SET-013"), "cannot-tell")
 
@@ -707,8 +717,12 @@ class ActionsSettingsRulesTest(unittest.TestCase):
         everyone = with_body(ADMIN, f"{R}/actions/permissions/fork-pr-contributor-approval",
                              lambda body: body.update(approval_policy="all_external_contributors"))
         self.assertEqual(status(assess_files(everyone, self.HOSTED), "OBAAF-SET-014"), "no-finding")
+        # No job here names a self-hosted runner, but a fork's pull request runs its own copy of the workflow
+        # and can name one; whether the repository has any is not read.
         self.assertEqual(status(assess_files(ADMIN, {"ci.yml": workflow("  pull_request:\n", job("b"))}),
-                                "OBAAF-SET-014"), "not-applicable")
+                                "OBAAF-SET-014"), "cannot-tell")
+        self.assertEqual(status(assess_files(ADMIN, {"ci.yml": workflow("  push:\n", job("b"))}),
+                                "OBAAF-SET-014"), "cannot-tell")
         unknown = assess_files(recording("public-no-token"), self.HOSTED, token=None)
         self.assertEqual(status(unknown, "OBAAF-SET-014"), "cannot-tell")
 
@@ -879,6 +893,18 @@ class FirstReviewTest(unittest.TestCase):
                          "no-finding")
         finding, = of(assess_files(limited(ADMIN, ("rel*", "branch")), target), "OBAAF-SET-002")
         self.assertIn("was not read or rests on a pattern", finding["message"])
+
+    def test_pull_request_target_runs_as_the_pull_requests_base_branch(self):
+        # Review of 2026-11-13: the environment admits `release`, not the default branch, and a pull
+        # request into `release` runs this job with `release` as its branch.
+        target = {"t.yml": workflow("  pull_request_target:\n    branches: [release]\n",
+                                    job("j", "    environment: main-only\n", self.READS_KEY))}
+        finding, = of(assess_files(limited(ADMIN, ("release", "branch")), target), "OBAAF-SET-002")
+        self.assertEqual((finding["state"], finding["severity"]), ("finding", "high"))
+        self.assertIn("runs as the pull request's base branch", finding["message"])
+        # An environment that admits tags alone shuts every branch out, the base branch included.
+        tags_only = assess_files(limited(ADMIN, ("v*", "tag")), target)
+        self.assertEqual(status(tags_only, "OBAAF-SET-002"), "no-finding")
 
     def test_an_environment_that_holds_no_secret_is_low_and_says_what_it_does_not_know(self):
         empty = with_body(ADMIN, f"{R}/environments/main-only/secrets?per_page=100",
@@ -1096,8 +1122,17 @@ class FirstReviewTest(unittest.TestCase):
 
         def owners(body):
             next(r for r in body if r["type"] == "pull_request")["parameters"]["require_code_owner_review"] = True
+        # One approval that must be a code owner's: cleared where every file has an owner, which is the
+        # CODEOWNERS file, not read.
         self.assertEqual(status(assess_files(with_body(approve, BRANCH_RULES, owners), writer), "OBAAF-SET-013"),
-                         "no-finding")
+                         "cannot-tell")
+
+        def owners_and_two(body):
+            rule = next(r for r in body if r["type"] == "pull_request")["parameters"]
+            rule.update(require_code_owner_review=True, required_approving_review_count=2)
+        # Two approvals and a code owner's: the workflow's approval is one of the two.
+        finding, = of(assess_files(with_body(approve, BRANCH_RULES, owners_and_two), writer), "OBAAF-SET-013")
+        self.assertIn("still counts towards the number", finding["message"])
 
         def none(body):
             next(r for r in body if r["type"] == "pull_request")["parameters"]["required_approving_review_count"] = 0
@@ -1115,7 +1150,7 @@ class FirstReviewTest(unittest.TestCase):
                                                 "        r: [self-hosted]\n    steps:\n      - run: make\n")
         self.assertEqual(self.states(assess_files(ADMIN, {"ci.yml": literal}), "OBAAF-SET-014"), ["finding"])
         hosted = workflow("  pull_request:\n", job("b"))
-        self.assertEqual(status(assess_files(ADMIN, {"ci.yml": hosted}), "OBAAF-SET-014"), "not-applicable")
+        self.assertEqual(status(assess_files(ADMIN, {"ci.yml": hosted}), "OBAAF-SET-014"), "cannot-tell")
 
     def test_a_private_repository_that_sends_fork_pull_requests_secrets(self):
         private = with_body(ADMIN, R, lambda body: body.update(private=True, visibility="private"))
@@ -1128,8 +1163,14 @@ class FirstReviewTest(unittest.TestCase):
         callee = workflow("  workflow_call:\n", job("u", "", "      - run: ./u\n        env:\n          T: ${{ secrets.K }}\n"))
         finding, = of(assess_files(private, {"ci.yml": caller, "p.yml": callee}), "OBAAF-SET-014")
         self.assertEqual((finding["state"], finding["severity"]), ("finding", "high"))
+        # A job that reads no secret does not clear it: a fork's pull request runs its own copy of the workflow.
         quiet = workflow("  pull_request:\n", job("b"))
-        self.assertEqual(status(assess_files(private, {"ci.yml": quiet}), "OBAAF-SET-014"), "no-finding")
+        self.assertEqual(status(assess_files(private, {"ci.yml": quiet}), "OBAAF-SET-014"), "findings")
+        self.assertEqual(status(assess_files(private, {"ci.yml": workflow("  push:\n", job("b"))}), "OBAAF-SET-014"),
+                         "findings")
+        closed = with_body(private, f"{R}/actions/permissions/fork-pr-workflows-private-repos",
+                           lambda body: body.update(send_secrets_and_variables=False))
+        self.assertEqual(status(assess_files(closed, {"ci.yml": quiet}), "OBAAF-SET-014"), "no-finding")
 
     def test_pinning_is_about_jobs_that_use_an_action(self):
         entries = ActionsSettingsRulesTest.pinning(None, False)
@@ -1204,7 +1245,7 @@ class CommandTest(unittest.TestCase):
         code, out, err = audit_command(ADMIN, INCIDENT_REPO, token=True)
         self.assertEqual(code, 1)
         self.assertIn("8 finding(s): 3 high, 5 medium, 0 low (--fail-on medium)", err)
-        self.assertIn("FINDINGS: 8 (3 high, 5 medium, 0 low). CANNOT TELL: 0, from 0 of 15 rules.", out)
+        self.assertIn("FINDINGS: 8 (3 high, 5 medium, 0 low). CANNOT TELL: 1, from 1 of 15 rules.", out)
         self.assertLess(out.index("FINDINGS: 8"), out.index("WHAT WAS READ"))
         self.assertEqual(audit_command(ADMIN, INCIDENT_REPO, "--fail-on", "never", token=True)[0], 0)
         self.assertEqual(audit_command(ADMIN, INCIDENT_REPO, "--fail-on", "high", token=True)[0], 1)
@@ -1230,12 +1271,12 @@ class CommandTest(unittest.TestCase):
         code, out, err = audit_command(recording("public-no-token"), INCIDENT_REPO, "--fail-on", "never")
         self.assertEqual(code, 0)
         self.assertIn('"Cannot tell" is never a pass', out)
-        self.assertIn("CANNOT TELL: 8, from 7 of 15 rules.", out)
-        self.assertIn("CANNOT TELL: 8. A setting or a file the rule needs was not read", out)
+        self.assertIn("CANNOT TELL: 10, from 9 of 15 rules.", out)
+        self.assertIn("CANNOT TELL: 10. A setting or a file the rule needs was not read", out)
         code, _, err = audit_command(recording("public-no-token"), INCIDENT_REPO, "--fail-on", "never",
                                      "--fail-on-cannot-tell")
         self.assertEqual(code, 1)
-        self.assertIn("could not tell in 8 case(s)", err)
+        self.assertIn("could not tell in 10 case(s)", err)
 
     def test_every_rule_has_a_line_and_fixes_can_be_left_out(self):
         _, out, _ = audit_command(ADMIN, INCIDENT_REPO, token=True)
@@ -1252,7 +1293,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(document["format"], "obaaf-settings-audit/v0.1")
         self.assertEqual(document["summary"]["findings"], 8)
         self.assertEqual(len(document["rules"]), len(rules.RULES))
-        self.assertEqual({r["state"] for r in document["results"]}, {"finding"})
+        self.assertEqual({r["state"] for r in document["results"]}, {"finding", "cannot-tell"})
         self.assertEqual(snapshot_mod.problems(document["snapshot"]), [])
         self.assertEqual(document["workflows"]["read"], True)
         self.assertEqual(len(document["workflows"]["files"]), 5)
@@ -1338,6 +1379,64 @@ class DocumentedTest(unittest.TestCase):
         guide = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8")
         for rule in rules.RULES:
             self.assertIn(f"| `{rule.id}` | {rule.title} | {rule.severity} |", guide, rule.id)
+
+
+class SecondReviewTest(unittest.TestCase):
+    """What the second review (2026-11-13, run redshank) found: each case gave "no finding" or "does not
+    apply" where the truth was a finding or "cannot tell"."""
+
+    def require(self, *checks):
+        return RequiredCheckRulesTest.require(self, *checks)
+
+    def test_a_branch_filter_that_names_the_branch_beside_a_pattern(self):
+        for branches in ("[main, 'releases/**']", "[main, 'mai+n']"):
+            files = {"ci.yml": workflow(f"  pull_request:\n    branches: {branches}\n", job("lint"))}
+            finding, = of(assess_files(self.require(("test (3.13)", 15368)), files), "OBAAF-SET-008", "finding")
+            self.assertIn("ci.yml#lint", finding["subject"], branches)
+
+    def test_a_branch_filter_decided_by_a_pattern_is_cannot_tell(self):
+        for trigger in ("    branches: ['**']\n", "    branches-ignore: ['dependabot/**']\n",
+                        "    branches: ['mai+n']\n", "    branches: [main, '!main']\n"):
+            files = {"ci.yml": workflow("  pull_request:\n" + trigger, job("lint"))}
+            found = assess_files(self.require(("test (3.13)", 15368)), files)
+            self.assertEqual(status(found, "OBAAF-SET-008"), "cannot-tell", trigger)
+
+    def test_a_branch_named_plainly_in_branches_ignore_shuts_it_out(self):
+        files = {"ci.yml": workflow("  pull_request:\n    branches-ignore: [main, 'wip/**']\n", job("lint"))}
+        found = assess_files(self.require(("test (3.13)", 15368)), files)
+        self.assertEqual(status(found, "OBAAF-SET-008"), "not-applicable")
+
+    def test_one_of_a_called_workflows_checks_required_is_not_enough(self):
+        files = {"ci.yml": workflow("  pull_request:\n", "  test:\n    uses: ./.github/workflows/r.yml\n"),
+                 "r.yml": workflow("  workflow_call:\n", job("unit") + job("lint"))}
+        found = assess_files(self.require(("test / unit", 15368)), files)
+        finding, = of(found, "OBAAF-SET-008", "finding")
+        self.assertIn("reports 2 checks, of which 1 is not", finding["message"])
+        self.assertIn("test / lint", finding["message"])
+        found = assess_files(self.require(("test / unit", 15368), ("test / lint", 15368)), files)
+        self.assertEqual(status(found, "OBAAF-SET-008"), "no-finding")
+
+    def test_a_long_chain_of_reusable_workflows_still_carries_the_event(self):
+        depth = 8
+        files = {"a.yml": workflow("  pull_request_target:\n", "  c:\n    uses: ./.github/workflows/w7.yml\n")}
+        for n in range(depth - 1, 0, -1):  # named so that each callee sorts before its caller
+            files[f"w{n}.yml"] = workflow("  workflow_call:\n", f"  c:\n    uses: ./.github/workflows/w{n - 1}.yml\n")
+        files["w0.yml"] = workflow("  workflow_call:\n", job("inner", "    environment: main-only\n",
+                                                               FirstReviewTest.READS_KEY))
+        finding, = of(assess_files(ADMIN, files), "OBAAF-SET-002", "finding")
+        self.assertEqual(finding["subject"], "job .github/workflows/w0.yml#inner")
+
+    def test_a_cycle_of_reusable_workflows_ends_and_leaves_the_names_unknown(self):
+        files = {"a.yml": workflow("  pull_request:\n  workflow_call:\n", "  c:\n    uses: ./.github/workflows/b.yml\n"),
+                 "b.yml": workflow("  workflow_call:\n", "  c:\n    uses: ./.github/workflows/a.yml\n")}
+        found = assess_files(self.require(("c / c", 15368)), files)
+        self.assertEqual(status(found, "OBAAF-SET-008"), "cannot-tell")
+
+    def test_a_job_that_is_not_a_mapping_makes_github_refuse_the_file(self):
+        files = {"ci.yml": workflow("  pull_request:\n", job("test") + "  broken: oops\n")}
+        found = assess_files(self.require(("test", 15368)), files)
+        for rule in ("OBAAF-SET-006", "OBAAF-SET-007", "OBAAF-SET-008"):
+            self.assertEqual(status(found, rule), "cannot-tell", rule)
 
 
 if __name__ == "__main__":

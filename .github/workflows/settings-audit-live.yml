@@ -79,7 +79,8 @@ jobs:
       # That repository may be renamed or made private without this project knowing, so not being able
       # to read it at all is not a failure. Once it has been read, what GitHub shows anyone must be read
       # too; and if it no longer has a ruleset, a notice says that this step met none. Its workflow files
-      # are not in this checkout, so here every rule answers "cannot tell", and the report must say so.
+      # are not in this checkout, so here the thirteen rules that compare with them answer "cannot tell",
+      # and the report must say so.
       - name: A public repository that has rulesets, with no token
         run: |
           code=0

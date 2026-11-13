@@ -42,6 +42,9 @@ ROLE_BY_ID = {2: "maintain", 4: "write", 5: "admin"}
 PUSH_ROLES = ("admin", "maintain", "write")
 DEFAULT_POLICY_DATE = "2026-12-02"
 WILDCARDS = "*?["
+# The characters that make an entry of a workflow's branch filter a pattern (GitHub's filter patterns also
+# know `+`, and `!` negates an entry of `branches`).
+FILTER_CHARS = "*?[]+!"
 # Rules of a ruleset whose results come from workflows or from reviewers.
 GATES = ("pull_request", "required_status_checks", "workflows", "code_scanning", "merge_queue")
 
@@ -74,9 +77,10 @@ RULES: tuple[Rule, ...] = (
          "jobs started by pull_request_target, issue and comment events",
          "A job that runs on an event people without write access can cause (pull_request_target, "
          "issue_comment, issues, workflow_run and the like) names an environment that has no required "
-         "reviewers. Those events run as the default branch, so a limit on which branches may deploy lets "
-         "them through whenever it admits the default branch: nothing stands between the event and the "
-         "environment's secrets.",
+         "reviewers. Those events run as the default branch, and pull_request_target as the pull request's "
+         "base branch, which can be any branch the workflow lets a pull request target. So a limit on which "
+         "branches may deploy lets them through whenever it admits such a branch: nothing stands between the "
+         "event and the environment's secrets.",
          "Add required reviewers to the environment, or move the step that needs the secret to a workflow "
          "that only people with write access can start."),
     Rule("OBAAF-SET-003", "A secret kept behind an environment is also stored where every job can read it", "high",
@@ -162,18 +166,23 @@ RULES: tuple[Rule, ...] = (
          "needs."),
     Rule("OBAAF-SET-013", "A workflow can give a required approval", "medium",
          ("workflow_permissions", "branch_rules", "branch_protection", "branches"),
-         "jobs whose token can write to pull requests",
-         "Workflows are allowed to approve pull requests, a job holds a token that can write to them, and a "
-         "branch requires approvals without asking for a code owner's. A run of that job can approve a pull "
-         "request, which is not the review by a person that a required approval is meant to be.",
+         "the approvals each audited branch requires (a workflow on any branch can ask for the token)",
+         "Workflows are allowed to approve pull requests and a branch requires approvals. A workflow can ask "
+         "for a token that writes to pull requests whatever the repository's default, and anyone who can push "
+         "a branch can add such a workflow there, so a run of it can approve their own pull request, which is "
+         "not the review by a person that a required approval is meant to be.",
          "Turn off \"Allow GitHub Actions to create and approve pull requests\" in the repository's Actions "
          "settings. Where a workflow has to open pull requests, which needs the same switch (OBAAF's effect "
-         "lane does), require a code owner's review on the branch instead: the rule then reports nothing."),
+         "lane does), require a code owner's review, keep the required approvals at one, and give every file "
+         "a code owner: the rule then answers \"cannot tell\", because it does not read the CODEOWNERS file."),
     Rule("OBAAF-SET-014", "Fork pull requests run on the repository's runners or with its secrets", "high",
-         ("fork_pull_requests", "repository"), "pull_request jobs on self-hosted runners, or that read secrets",
-         "In a public repository a pull_request job runs on a self-hosted runner, and approval is not "
-         "required for every outside contributor: a stranger's code runs on a machine that keeps state. Or, "
-         "in a private repository, fork pull requests are sent secrets or a write token.",
+         ("fork_pull_requests", "repository"),
+         "the runners pull_request jobs name (a fork's pull request runs its own copy of the workflows)",
+         "In a public repository approval is not required for every outside contributor and the repository "
+         "has a self-hosted runner: a stranger's code runs on a machine that keeps state, because a fork's "
+         "pull request runs its own copy of the workflow files and can name any runner. Or, in a private "
+         "repository, fork pull requests are sent secrets or a write token, which a fork's own workflow can "
+         "read whatever the jobs here do.",
          "Require approval for all external contributors, or move the job to a GitHub-hosted runner. In a "
          "private repository, do not send secrets or write tokens to fork pull requests."),
     Rule("OBAAF-SET-015", "Pinning actions to a commit: the setting and the workflows disagree", "medium",
@@ -378,16 +387,26 @@ def _stands_alone(file: dict) -> bool:
     return bool(set(file["triggers"]) - {"workflow_call"})
 
 
+def _pattern(name: str) -> bool:
+    return any(ch in name for ch in FILTER_CHARS)
+
+
 def _admits(filters: dict, branch: str):
     """Whether an event's branch filters let the branch through: True, False, or None when a pattern
-    decides it (patterns are not evaluated here)."""
+    decides it (patterns are not evaluated here). An entry that is the branch's name, written plainly,
+    decides it whatever patterns stand beside it, except that a negated entry in `branches` can take it
+    out again, so any `!` there leaves it to the patterns."""
     listed, ignored = filters["branches"], filters["branches_ignore"]
-    for names, hit in ((listed, True), (ignored, False)):
-        if names is None:
-            continue
-        if any(ch in name for name in names for ch in WILDCARDS + "!"):
+    if listed is not None:
+        if any(name.startswith("!") for name in listed):
             return None
-        return hit if branch in names else not hit
+        if any(name == branch and not _pattern(name) for name in listed):
+            return True
+        return None if any(_pattern(name) for name in listed) else False
+    if ignored is not None:
+        if any(name == branch and not _pattern(name) for name in ignored):
+            return False
+        return None if any(_pattern(name) for name in ignored) else True
     return True
 
 
@@ -431,8 +450,8 @@ def _report_run(file: dict, job: dict, branch: str, pushes: bool = True) -> str:
         if push["branches"] is None and push["branches_ignore"] is None:
             if not push["tags"]:
                 found = better("paths" if push["paths"] else "always")
-        elif any(ch in name for name in (push["branches"] or []) + (push["branches_ignore"] or [])
-                 for ch in WILDCARDS + "!") or push["branches_ignore"] is not None:
+        elif any(_pattern(name) for name in (push["branches"] or []) + (push["branches_ignore"] or [])) \
+                or push["branches_ignore"] is not None:
             found = better("maybe")
     if "workflow_dispatch" in file["triggers"] and "workflow_dispatch" in job["triggers"]:
         found = better("manual")
@@ -591,6 +610,18 @@ def _admits_default(env: dict, default: str):
     return None if any(ch in name for name in branches for ch in WILDCARDS) else False
 
 
+def _admits_a_base(env: dict, default: str):
+    """For pull_request_target, which runs as the pull request's base branch: whether the limit lets some
+    branch through. False only when it admits tags alone; a branch it names is one a pull request can
+    target unless the workflow's filter says otherwise, which is not evaluated against the limit."""
+    if _admits_default(env, default) is True:
+        return True
+    if env["deployment_branches"] == "selected" and env.get("branch_policies") is not None \
+            and not [p for p in env["branch_policies"] if p["type"] != "tag"]:
+        return False
+    return None
+
+
 def rule_002(run: _Run) -> None:
     exposed, unknown = [], []
     for file, job in run.jobs():
@@ -632,9 +663,12 @@ def rule_002(run: _Run) -> None:
             continue  # an environment that does not exist is OBAAF-SET-001's finding
         if env["reviewers"]:
             continue
-        admitted = _admits_default(env, repository["default_branch"])
+        base = "pull_request_target" in events
+        admitted = (_admits_a_base if base else _admits_default)(env, repository["default_branch"])
         if admitted is False:
-            continue  # the limit shuts the default branch out, and these events run as the default branch
+            # The limit shuts the default branch out (or, for pull_request_target, admits tags alone), and
+            # these events run as the default branch (pull_request_target as a branch, the pull request's base).
+            continue
         stored = held.get(name.lower())
         reads = job["secrets"] or (["every secret"] if job["all_secrets"] else [])
         if stored is None and not reads:
@@ -645,10 +679,18 @@ def rule_002(run: _Run) -> None:
             continue
         what = (f"which holds {_n(len(stored), 'secret')}" if stored else
                 f"and reads {_names(plain(r, 60) for r in reads)}")
-        limit = ("Its limit on which branches may deploy admits the default branch, and these events run as "
-                 "the default branch, so the limit does not stop them." if admitted else
-                 "These events run as the default branch; whether its limit on which branches may deploy "
-                 "admits the default branch was not read or rests on a pattern.")
+        if base:
+            limit = ("pull_request_target runs as the pull request's base branch, which can be any branch the "
+                     "workflow lets a pull request target, and the other events as the default branch. "
+                     + ("Its limit on which branches may deploy admits the default branch, so the limit does not stop "
+                        "them." if admitted else
+                        "Its limit on which branches may deploy admits branches, and whether a pull request can "
+                        "target one of them is not established, so it is not counted as stopping them."))
+        else:
+            limit = ("Its limit on which branches may deploy admits the default branch, and these events run as "
+                     "the default branch, so the limit does not stop them." if admitted else
+                     "These events run as the default branch; whether its limit on which branches may deploy "
+                     "admits the default branch was not read or rests on a pattern.")
         run.finding(subject, "high",
                     f"The job can be started by {_names(events)}, which people without write access can cause, "
                     f"and it names the environment {_q(name)}, {what}. The environment has no required "
@@ -1081,38 +1123,62 @@ def _check_rules(run: _Run, kind: str) -> None:
                 continue
             unrequired, unsure = [], 0
             for file, job in reporting:
-                if _report_run(file, job, branch, pushes=False) != "always" or job["advisory"]:
+                if job["advisory"]:
                     continue
-                verdicts = [_reports(job, context) for context in required]
-                if job["check"]["kind"] == "computed" or (not any(v is True for v in verdicts)
-                                                          and any(v is None for v in verdicts)):
+                how = _report_run(file, job, branch, pushes=False)
+                if how == "maybe":
+                    # A branch pattern decides whether it runs for pull requests into this branch.
                     unsure += 1
                     continue
-                compared += 1
-                if not any(v is True for v in verdicts):
-                    unrequired.append((file, job))
+                if how != "always":
+                    continue
+                names = job["check"]["names"]
+                if job["check"]["kind"] != "computed" and names is not None:
+                    # Every check the job reports must be required: one of a matrix's checks, or one of a
+                    # called workflow's, being required leaves the others free to fail.
+                    compared += 1
+                    loose = [name for name in names if name not in required]
+                    if loose:
+                        unrequired.append((file, job, loose, len(names)))
+                    continue
+                verdicts = [_reports(job, context) for context in required]
+                if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
+                    compared += 1
+                    unrequired.append((file, job, None, None))
+                    continue
+                # Its names could not be written out, so whether every one of them is required is not known.
+                unsure += 1
             if unrequired and not required:
                 run.finding(f"{subject}: no required check", "medium",
                             f"No check is required on {_q(branch)}, and "
                             f"{_do(len(unrequired), 'job', 'runs', 'run')} on every pull request into it "
-                            f"({_names(_job_label(f, j) for f, j in unrequired)}). A pull request can merge "
+                            f"({_names(_job_label(f, j) for f, j, *_ in unrequired)}). A pull request can merge "
                             f"while any of them is failing.{source}")
                 unrequired = []
-            for file, job in unrequired:
+            for file, job, loose, total in unrequired:
                 name = job["check"]["name"]
-                shape = {"matrix": f"reports its checks as {_q(name + ' (...)')}, none of which is",
-                         "calls": f"reports the checks of the workflow it calls as {_q(name + ' / ...')}, none "
-                                  "of which is"}.get(job["check"]["kind"], f"reports the check {_q(name)}, which is not")
+                if loose is not None and total > 1 and len(loose) < total:
+                    shape = (f"reports {total} checks, of which {len(loose)} {'is' if len(loose) == 1 else 'are'} "
+                             f"not ({_names(_q(n) for n in loose)})")
+                elif loose is not None and total > 1:
+                    shape = f"reports {total} checks ({_names(_q(n) for n in loose)}), none of which is"
+                else:
+                    shape = {"matrix": f"reports its checks as {_q(name + ' (...)')}, none of which is",
+                             "calls": f"reports the checks of the workflow it calls as {_q(name + ' / ...')}, "
+                                      "none of which is"}.get(job["check"]["kind"],
+                                                              f"reports the check {_q(name)}, which is not")
                 run.finding(f"{subject}: job {_job_label(file, job)}", "medium",
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
                             f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
                             f"request can merge while the job is failing.{source}")
             if unsure:
                 run.cannot_tell(f"{subject}: jobs whose check names could not be written out",
-                                f"{_do(unsure, 'job', 'that runs on pull requests reports', 'that run on pull requests report')} "
-                                "under names that could not be written out (a computed name, a matrix or a "
-                                "called workflow that was not read), so whether "
-                                f"{'it is' if unsure == 1 else 'they are'} required was not compared.")
+                                f"{_n(unsure, 'job')} that may run on pull requests into {_q(branch)}: "
+                                f"{'its' if unsure == 1 else 'their'} check names could not all be written out "
+                                "(a computed name, a matrix or a called workflow that was not read), or a branch "
+                                "pattern in the triggers decides whether it runs there (patterns are not "
+                                f"evaluated), so whether {'it' if unsure == 1 else 'each'} can fail without "
+                                "blocking a merge was not compared.")
     if compared:
         run.compared = {"missing": f"{_n(compared, 'required check')} and the names the jobs report",
                         "filtered": f"{_n(compared, 'required check')} that a job reports, and its triggers",
@@ -1311,96 +1377,92 @@ def rule_012(run: _Run) -> None:
 
 
 def rule_013(run: _Run) -> None:
+    # Not limited to the jobs in these files: anyone who can push a branch can add a workflow there that
+    # asks for `pull-requests: write`, which a job may do whatever the repository's default, and run it.
     value, _ = run.got("workflow_permissions")
-    default = value["default_workflow_permissions"] if value is not None else None
-    holders = [(f, j) for f, j in run.jobs()
-               if j["permissions"]["pull_requests_write"] or (not j["permissions"]["declared"] and default != "read")]
-    if not holders:
-        run.idle = "no job's token can write to pull requests"
-        return
     if value is None:
         run.unread("whether workflows may approve pull requests",
-                   f"{_n(len(holders), 'job')} may hold a token that can write to pull requests, and whether "
+                   "a workflow on any branch can ask for a token that writes to pull requests, and whether "
                    "workflows are allowed to approve them is not known", "workflow_permissions")
         return
-    run.compared = (f"{_n(len(holders), 'job')} whose token can write to pull requests, and the approvals each "
-                    "audited branch requires")
+    branches = _branches(run)
+    run.compared = (f"whether workflows may approve pull requests, and the approvals {_n(len(branches), 'audited branch')} "
+                    "require")
     if not value["can_approve_pull_request_reviews"]:
         return
-    file, job = holders[0]
-    lead = (f"The repository lets workflows approve pull requests, and {_n(len(holders), 'job')} "
-            f"{'holds' if len(holders) == 1 else 'hold'} a token that can write to them (the first: "
-            f"{_job_label(file, job)}).")
-    for branch in _branches(run):
+    lead = ("The repository lets workflows approve pull requests. A workflow can ask for a token that writes to "
+            "pull requests whatever the default, and anyone who can push a branch can add one there and run it.")
+    for branch in branches:
         need = _branch_requirements(run, branch)
         subject = f"branch {_q(branch)}"
-        if need["code_owner"]:
-            continue  # an approval has to be a code owner's, which a workflow's is not
-        if need["approvals"]:
-            run.finding(subject, "medium",
-                        f"{lead} {_q(branch)} requires {_n(need['approvals'], 'approval')} and does not ask for a "
-                        "code owner's, so a run of such a job can give one.")
-        elif not need["approvals_whole"]:
-            run.unread(subject, f"{lead[:-1]}, and how many approvals {_q(branch)} requires is not known",
-                       *sorted(set(need["gaps"])))
+        count = need["approvals"]
+        if not count:
+            if not need["approvals_whole"]:
+                run.unread(subject, f"{lead[:-1]}, and how many approvals {_q(branch)} requires is not known",
+                           *sorted(set(need["gaps"])))
+            continue
+        if need["code_owner"] and count == 1:
+            # The one approval must then come from a code owner where a file has one; a workflow is no code
+            # owner. Whether every file has one (the CODEOWNERS file) is not read.
+            run.cannot_tell(subject, f"{lead} {_q(branch)} requires 1 approval and a code owner's review. Where "
+                                     "every changed file has a code owner, the workflow's approval cannot be the "
+                                     "one that counts; where one has none, it can. The CODEOWNERS file is not "
+                                     "read.")
+            continue
+        extra = (" A code owner's review is required as well, and a workflow's approval still counts towards the "
+                 "number." if need["code_owner"] else "")
+        run.finding(subject, "medium",
+                    f"{lead} {_q(branch)} requires {_n(count, 'approval')}, so a run of such a workflow can give "
+                    f"one.{extra}")
 
 
 def rule_014(run: _Run) -> None:
-    jobs = [(f, j) for f, j in run.jobs() if "pull_request" in _events(j)]
+    # A fork's pull request runs the workflow files of its own commit, not the ones here: it can add a job,
+    # name any runner label and read any secret it is sent. So what the jobs in these files do decides
+    # nothing on its own; it can only show that the repository has self-hosted runners.
     repository, _ = run.got("repository")
-    if not jobs or repository is None:
-        run.idle = "no job runs on pull_request"
+    if repository is None:
+        run.unread("fork pull requests", "whether the repository is public is not known", "repository")
         return
     public = repository["visibility"] == "public"
-    hosted_here = [(f, j) for f, j in jobs if j["runner"] == "self-hosted"]
-    unknown = [(f, j) for f, j in jobs if j["runner"] == "unknown" or (
-        j["calls"] and _called(run, j) is None)]
-    readers = [(f, j) for f, j in jobs if j["secrets"] or j["all_secrets"] or (
-        j["passes"] and (j["passes"]["inherit"] or j["passes"]["names"] or j["passes"]["all"]))]
-    relevant = hosted_here + unknown if public else jobs
-    if not relevant:
-        run.idle = "every pull_request job runs on a GitHub-hosted runner"
-        return
     value, _ = run.got("fork_pull_requests")
     if value is None or (not public and value.get("private_repository") is None):
         run.unread("fork pull requests",
-                   f"{_n(len(relevant), 'pull_request job')} "
-                   + (f"{'runs' if len(relevant) == 1 else 'run'} on a self-hosted runner, or on one the audit "
-                      "could not classify, and whose fork pull requests need approval first is not known"
-                      if public else "may run for fork pull requests, and what those are sent is not known"),
+                   "what a fork's pull request may run here "
+                   + ("(whose need approval first)" if public else "(and what it is sent)") + " is not known",
                    "fork_pull_requests")
         return
-    run.compared = f"{_n(len(relevant), 'pull_request job')} and the settings for fork pull requests"
     if public:
-        if value["approval_policy"] == "all_external_contributors":
+        run.compared = "the approval rule for fork pull requests, and the runners the pull_request jobs name"
+        policy = value["approval_policy"]
+        if policy == "all_external_contributors":
             return
+        hosted_here = [(f, j) for f, j in run.jobs() if "pull_request" in _events(j) and j["runner"] == "self-hosted"]
         if hosted_here:
             file, job = hosted_here[0]
             run.finding("fork pull requests on self-hosted runners", "high",
                         f"{_do(len(hosted_here), 'pull_request job', 'runs', 'run')} on a self-hosted runner (the "
                         f"first: {_job_label(file, job)}), and approval before a fork's workflows run is required "
-                        f"only for {_q(value['approval_policy'])}. Anyone else can run their code on that "
-                        "machine by opening a pull request.")
-        for file, job in unknown:
-            run.cannot_tell(f"job {_job_label(file, job)}",
-                            "The job runs on pull_request, and what it runs on could not be classified (a label "
-                            "of the repository's own, an expression, or a called workflow that was not read). "
-                            "Approval before a fork's workflows run is required only for "
-                            f"{_q(value['approval_policy'])}, so if it is a self-hosted runner, strangers' code "
-                            "runs there.")
+                        f"only for {_q(policy)}. Anyone else can run their code on that machine by opening a pull "
+                        "request, and a fork's copy of the workflow can name the runner whatever this one says.")
+            return
+        run.cannot_tell("fork pull requests and self-hosted runners",
+                        f"Approval before a fork's workflows run is required only for {_q(policy)}. A fork's pull "
+                        "request runs its own copy of the workflow files, so it can ask for any runner label. No "
+                        "pull_request job here names a self-hosted runner, and whether the repository has any is "
+                        "not something the audit reads; if it has, strangers' code can run there.")
         return
     private = value["private_repository"]
+    run.compared = "what fork pull requests are sent in this private repository"
     if not private["run_workflows_from_fork_pull_requests"]:
         return
     sent = [what for key, what in (("send_secrets_and_variables", "secrets and variables"),
                                    ("send_write_tokens_to_workflows", "a write token")) if private[key]]
-    if sent and (readers or private["send_write_tokens_to_workflows"]):
-        file, job = (readers or jobs)[0]
+    if sent:
         run.finding("fork pull requests in a private repository", "high",
-                    f"Fork pull requests run workflows here and are sent {' and '.join(sent)}. "
-                    f"{_do(len(jobs), 'job', 'runs', 'run')} on pull_request"
-                    + (f", {len(readers)} of them reading or passing on secrets (the first: "
-                       f"{_job_label(file, job)})." if readers else "."))
+                    f"Fork pull requests run workflows here and are sent {' and '.join(sent)}. A fork's pull "
+                    "request runs its own copy of the workflow files, so it can read every secret it is sent, "
+                    "whatever the jobs here do.")
 
 
 def rule_015(run: _Run) -> None:

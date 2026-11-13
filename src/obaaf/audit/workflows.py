@@ -165,6 +165,15 @@ def _file(path: str, text: str) -> dict:
     if workflow.error:
         return {"path": path, "error": wf_mod.one_line(workflow.error, 200), "problems": [], "triggers": {},
                 "jobs": []}
+    raw_jobs = workflow.raw.get("jobs")
+    odd = [str(job_id) for job_id, value in raw_jobs.items() if not isinstance(value, dict)] \
+        if isinstance(raw_jobs, dict) else []
+    if odd:
+        # GitHub refuses the whole file, so none of its jobs runs: reading the others as if they did would
+        # count checks that never report.
+        return {"path": path, "error": wf_mod.one_line(f"job {odd[0]!r} is not a mapping, and GitHub refuses a "
+                                                       "file with such a job", 200),
+                "problems": [], "triggers": {}, "jobs": []}
     triggers = {event: _filters(config) for event, config in workflow.triggers.items()}
     return {"path": path, "error": None,
             "problems": [wf_mod.one_line(p, 200) for p in workflow.problems],
@@ -182,26 +191,54 @@ def _resolve_calls(files: list[dict]) -> None:
 
     The called jobs learn which events reach them (a job in a reusable workflow runs for whatever started
     its caller), and the caller learns the names its checks are reported under. Calls can nest, so this is
-    repeated a few times; a chain longer than that leaves the names unknown, which is the safe reading."""
+    repeated until nothing changes. The events only grow, so they always settle, however long the chain.
+    Names in a cycle of calls can keep changing: once the events have settled and MAX_PASSES have run,
+    every caller's names are left unknown, which is the safe reading for names."""
     by_path = {file["path"]: file for file in files if not file["error"]}
-    for _ in range(5):
-        for file in by_path.values():
-            for job in file["jobs"]:
-                called = by_path.get(called_path(job) or "")
-                if called is None:
-                    continue
-                reach = sorted((set(job["triggers"]) | set(job["called_from"])) - {"workflow_call"})
-                names: list[str] | None = []
-                for inner in called["jobs"]:
-                    inner["called_from"] = sorted(set(inner["called_from"]) | set(reach))
-                    inner_names = inner["check"]["names"]
-                    prefixes = job["check"].get("prefixes")
-                    if names is None or inner_names is None or prefixes is None:
-                        names = None
-                    else:
-                        names += [f"{prefix} / {inner_name}" for prefix in prefixes for inner_name in inner_names]
-                if job["check"]["kind"] == "calls":
-                    job["check"]["names"] = names if names is None or len(names) <= MAX_MATRIX_NAMES else None
+
+    def events():
+        return [[job["called_from"] for job in file["jobs"]] for file in by_path.values()]
+
+    def names():
+        return [[job["check"]["names"] for job in file["jobs"]] for file in by_path.values()]
+
+    passes = 0
+    while True:
+        before = (events(), names())
+        _resolve_once(by_path)
+        passes += 1
+        if (events(), names()) == before:
+            return
+        if passes >= MAX_PASSES and events() == before[0]:
+            for file in by_path.values():
+                for job in file["jobs"]:
+                    if job["check"]["kind"] == "calls":
+                        job["check"]["names"] = None
+            return
+
+
+MAX_PASSES = 200
+
+
+def _resolve_once(by_path: dict) -> None:
+    """One pass of _resolve_calls."""
+    for file in by_path.values():
+        for job in file["jobs"]:
+            called = by_path.get(called_path(job) or "")
+            if called is None:
+                continue
+            reach = sorted((set(job["triggers"]) | set(job["called_from"])) - {"workflow_call"})
+            names: list[str] | None = []
+            for inner in called["jobs"]:
+                inner["called_from"] = sorted(set(inner["called_from"]) | set(reach))
+                inner_names = inner["check"]["names"]
+                prefixes = job["check"].get("prefixes")
+                if names is None or inner_names is None or prefixes is None:
+                    names = None
+                else:
+                    names += [f"{prefix} / {inner_name}" for prefix in prefixes for inner_name in inner_names]
+            if job["check"]["kind"] == "calls":
+                job["check"]["names"] = names if names is None or len(names) <= MAX_MATRIX_NAMES else None
 
 
 def read(root: str | Path) -> dict:
