@@ -444,6 +444,23 @@ class SecondReviewTest(unittest.TestCase):
                 self.assertIn("names the same file as --expected", err)
             self.assertEqual((tmp / "expected.json").read_text(encoding="utf-8"), before)
 
+    def test_an_environment_read_in_part_on_both_sides_that_matches_counts_as_compared(self):
+        expected = take(entries=self.broken_policies(recording("admin-token")))
+        result = drift.compare(expected, take(entries=self.broken_policies(recording("admin-token")), now=LATER))
+        self.assertEqual(result["outcomes"]["environments"], "matches")
+        whole = drift.compare(take(), take(now=LATER))
+        self.assertEqual(result["summary"]["parts_compared"], whole["summary"]["parts_compared"])
+
+    def test_the_messages_for_a_setting_that_did_not_apply_and_a_part_read_in_part_now(self):
+        expected = take()
+        expected["settings"]["organization_secrets"] = {"status": "not_applicable", "reason": "a user's"}
+        live = take(entries=self.broken_policies(recording("admin-token")))
+        live["settings"]["organization_secrets"] = {"status": "unread", "reason_code": "network", "reason": "x",
+                                                    "needs": "y"}
+        why = {(e["setting"], e["item"]): e["why"] for e in drift.compare(expected, live)["not_compared"]}
+        self.assertTrue(why[("organization_secrets", None)].startswith("it did not apply in the expected snapshot"))
+        self.assertIn("it was read only in part now", why[("environments", "release")])
+
     def test_a_hard_link_to_the_expected_file_is_the_same_file(self):
         with TempDir() as tmp:
             write(take(), tmp / "expected.json")

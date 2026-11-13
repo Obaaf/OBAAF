@@ -14,7 +14,8 @@ Four outcomes for each setting and each part of one:
 - **not compared**: one side read it (or a part of it) and the other did not. Whether it changed is not known,
   and that is never reported as "no drift". This includes a part the committed snapshot marks as not read
   and this run could read, so a hole in the committed file never hides a change.
-- **not covered**: neither side read it, so there is nothing to compare.
+- **not covered**: neither side read it in full, so there is nothing to compare (of an environment both read
+  in part, what both read is compared, and the rest is not covered).
 
 The committed file can be edited by anyone who can open a pull request, so it is read through
 ``snapshot.load``, which checks its whole shape, and then checked again here for what the schema does not
@@ -424,8 +425,9 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
 
 
 def failed(result: dict) -> bool:
-    """A drift check passes only when everything the expected snapshot holds was compared and matched, and
-    at least one setting was compared: a check that compared nothing has not shown that nothing changed."""
+    """A drift check passes only when everything both sides read matches, nothing was read by one side and
+    not the other, and at least one setting was compared: a check that compared nothing has not shown that
+    nothing changed."""
     return bool(result["differences"] or result["not_compared"] or not result["summary"]["compared"])
 
 
