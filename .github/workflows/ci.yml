@@ -125,6 +125,9 @@ jobs:
     # constraints.txt (D-011).
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Advisory: a maintainer chose on 2026-11-13 not to make this a required check of
+    # main, so its failure is reported and does not fail the run (OBAAF-SET-008).
+    continue-on-error: true
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

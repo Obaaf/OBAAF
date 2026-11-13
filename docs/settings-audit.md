@@ -72,7 +72,7 @@ DOES NOT APPLY: 1 of 15
 15 settings: 5 read, 0 partly read, 9 not read, 1 that do not apply. ...
 ```
 
-That one finding is real: this repository's own job `dependency-lock` runs on every pull request and is not among its eight required checks. It is a setting, and only a maintainer can change it.
+That one finding was real: this repository's own job `dependency-lock` runs on every pull request and is not among its eight required checks. A maintainer chose on 2026-11-13 to keep the job advisory rather than require it, so the job now has `continue-on-error: true`, as the fix says, and the audit no longer reports it.
 
 With a token it tries everything in [the table below](#what-it-reads). The token is taken from the environment, never from the command line:
 
