@@ -10,7 +10,7 @@
 | [Templates](../templates/github-actions/README.md) | Build engineers | Installing and adapting the GitHub Actions workflows |
 | [Settings audit](settings-audit.md) | Build engineers | `obaaf audit`: what it reads of a repository's GitHub settings, the fifteen rules it applies to them and to the workflow files, what it needs to read each setting, and how it says what it could not tell |
 | [The settings audit on the first adopter](expectrail-settings-audit.md) | Everyone | One read-only run of `obaaf audit` against Expectrail, the author's own project, on 2026-11-13: each finding judged, what could not be read, and the six incidents then and now |
-| [The first adopter: Expectrail](expectrail-case-study.md) | Everyone | A case study of Expectrail, the author's own project: what OBAAF caught there, what it could not, every number recomputed from public facts, and what has changed since |
+| [The first adopter: Expectrail](expectrail-case-study.md) | Everyone | A case study of Expectrail, a project of one of OBAAF's authors: what OBAAF caught there, what it could not, every number recomputed from public facts, and what has changed since |
 | [Inference proxy](inference-proxy.md) | Build engineers | The contract for keeping model credentials out of agent jobs |
 | [Architecture](architecture.md) | Reviewers | Components, lanes, trust levels, what enforces what, limits |
 | [Records and attestations](attestations.md) | Reviewers, platforms | The snapshot, agent-run, approval and build-record formats |
