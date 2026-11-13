@@ -9,6 +9,7 @@ audit knows. Everything that comes from GitHub or from a snapshot file passes th
 from __future__ import annotations
 
 from obaaf.audit.github import plain, quoted
+from obaaf.audit.rules import RULE_TYPES
 from obaaf.audit.settings import BY_KEY, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
@@ -60,7 +61,10 @@ def _rule_text(rule: dict) -> str:
     if kind == "required_status_checks" and isinstance(parameters.get("required_status_checks"), list):
         names = [c.get("context", "?") for c in parameters["required_status_checks"] if isinstance(c, dict)]
         return f"required_status_checks ({_list(names, CHECKS_SHOWN) if names else 'none named'})"
-    return plain(kind, 60)
+    if kind in RULE_TYPES:
+        return kind
+    # A type this version does not know is printed quoted, so that its name cannot read as one of the above.
+    return f"{quoted(kind, 60)} (a type this audit does not know)"
 
 
 def _policy_rule_text(rule: dict) -> str:
