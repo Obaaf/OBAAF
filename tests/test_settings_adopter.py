@@ -108,7 +108,7 @@ class WhatThePageSaysTest(unittest.TestCase):
         self.assertEqual(status(assessment, "OBAAF-SET-005"), "not-applicable")
         self.assertEqual(status(assessment, "OBAAF-SET-013"), "cannot-tell")
         self.assertIn('ruleset "Protect main"', self.page)
-        self.assertIn('"Protect main" now requires 0 approvals', self.page)
+        self.assertIn('"Protect main" requires 0 approvals by count, in this reading and in the first', self.page)
 
     def test_the_environment_unity_is_as_the_page_describes_it(self):
         environments = {e["name"]: e for e in self.snap["settings"]["environments"]["value"]}
