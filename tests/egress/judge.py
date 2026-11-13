@@ -63,6 +63,13 @@ ATTEMPTS: dict[str, dict] = {
     # success. Inside, it flushes the rules and connects to 9.9.9.10.
     "sudo-iptables": {"ips": ["9.9.9.10"], "control_by_result": True},
     "docker-socket": {"ips": ["208.67.222.222"]},
+    # Slice 2c.4: a name asked of the proxy (over HTTPS and HTTP) and a name the
+    # command looks up itself must not leave the runner in a DNS query. Outside,
+    # the same names are looked up by the runner's resolver and leave.
+    "dns-via-proxy": {"labels": ["viaproxy"]},
+    "dns-via-proxy-http": {"labels": ["plainproxy"]},
+    "dns-default-getent": {"labels": ["getent"]},
+    "dns-default-dig": {"labels": ["digdefault"]},
 }
 
 # Files a confined command must not be able to create or change.
@@ -261,17 +268,20 @@ def judge(args: argparse.Namespace) -> int:
     if "/tmp/obaaf-planted-path" in os.environ.get("PATH", ""):
         failures.append("a PATH entry added from inside the sandbox reached a later step")
 
-    # Recorded, not asserted.
+    # No unlisted name the attempts or the action's probe used may leave the
+    # runner in a DNS query (slice 2c.4: before it, the proxy's resolver sent
+    # every name it was asked for).
     queried = sorted({m.group(1) for m in re.finditer(r"\? ([A-Za-z0-9.-]+)\. ", in_headers)
                       if any(m.group(1) == h or m.group(1).endswith("." + h)
                              for h in ("example.org", "example.net", "example.com", "cloudflare-dns.com"))})
+    if queried:
+        failures.append("unlisted names left the runner in DNS queries while the attempts ran inside: "
+                        + ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried))
+
+    # Recorded, not asserted.
     recorded = {
-        "the command's own resolver: a name it looked up left the runner in a DNS query":
-            f"{args.record_prefix}-getent" in in_ascii or f"{args.record_prefix}-dig" in in_ascii,
-        "the proxy: a name the command asked it for, and was refused, left the runner in a DNS query":
-            f"{args.record_prefix}-proxy" in in_ascii,
-        "unlisted names seen in DNS queries leaving the runner while the attempts ran inside":
-            ", ".join(q.replace(args.record_prefix, "<label>").replace(args.inside_prefix, "<label>") for q in queried) or "none",
+        "names the action's resolver refused (its dns-refused output)":
+            (args.dns_refused or "none").replace(args.inside_prefix, "<label>"),
         "Host header that differs from the allowed name (curl status, HTTP code)":
             " ".join(in_results.get("host-mismatch", ["not run"])),
         "files the confined command reported writing outside the scratch directory (the judge checks the runner's copies above)":
@@ -292,6 +302,8 @@ def judge(args: argparse.Namespace) -> int:
     for attempt, control, verdict, status in rows:
         lines.append(f"| `{attempt}` | {control} | {verdict} | {status} |\n")
     lines.append(f"\nMust still work, the listed host: curl status and HTTP code `{' '.join(allowed) or 'none'}`\n\n")
+    lines.append("No unlisted name left the runner in a DNS query.\n\n" if not queried else
+                 "**Unlisted names left the runner in DNS queries** (see Failed, below).\n\n")
     lines.append("Recorded, not asserted:\n\n")
     for key, value in recorded.items():
         lines.append(f"- {key}: `{value}`\n")
@@ -325,6 +337,7 @@ def main() -> int:
         j.add_argument(f"--{name}", required=True)
     j.add_argument("--summary")
     j.add_argument("--json-out")
+    j.add_argument("--dns-refused", default="")
     args = parser.parse_args()
     if args.mode == "snapshot":
         return snapshot(Path(args.out))

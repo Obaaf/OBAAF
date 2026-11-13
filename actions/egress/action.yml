@@ -4,8 +4,10 @@ description: >-
   GitHub-hosted Linux runner. The command runs under the Agent Workflow
   Firewall (github/gh-aw-firewall) at a version OBAAF's CI has tried to escape;
   everything else is refused and logged. The command can write only to a
-  scratch copy of the workspace, and cannot change the runner's files. Read
-  docs/egress-control.md for what this blocks and what it does not.
+  scratch copy of the workspace, and cannot change the runner's files. The
+  proxy's resolver answers only the listed names, so a refused name does not
+  leave the runner in a DNS query either. Read docs/egress-control.md for what
+  this blocks and what it does not.
 author: Osita Sean Keluo-Udeke
 branding:
   icon: shield
@@ -28,6 +30,14 @@ inputs:
       by commas, spaces or new lines. Values are not printed.
     required: false
     default: ""
+  model-keys:
+    description: >-
+      Names of model-key variables from the step's env to give to AWF's API
+      proxy, not to the command: ANTHROPIC_API_KEY, OPENAI_API_KEY. The command
+      gets a base URL pointing at the proxy and a placeholder key; the proxy adds
+      the real key and reaches the provider's API host whatever allow says.
+    required: false
+    default: ""
 outputs:
   workspace:
     description: >-
@@ -43,6 +53,15 @@ outputs:
   denied:
     description: Hosts the proxy refused, separated by commas.
     value: ${{ steps.run.outputs.denied }}
+  dns-refused:
+    description: >-
+      Names the proxy's resolver refused, separated by commas. The action's
+      resolver answers only names the allow-list covers; these went no further
+      than the runner.
+    value: ${{ steps.run.outputs.dns-refused }}
+  dns-log:
+    description: The log of the proxy's resolver, outside the scratch directory.
+    value: ${{ steps.run.outputs.dns-log }}
   exit-code:
     description: The command's exit status.
     value: ${{ steps.run.outputs.exit-code }}
@@ -60,6 +79,7 @@ runs:
       env:
         INPUT_ALLOW: ${{ inputs.allow }}
         INPUT_ENV: ${{ inputs.env }}
+        INPUT_MODEL_KEYS: ${{ inputs.model-keys }}
         OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
       run: |
         set -euo pipefail
@@ -81,6 +101,7 @@ runs:
       env:
         INPUT_ALLOW: ${{ inputs.allow }}
         INPUT_ENV: ${{ inputs.env }}
+        INPUT_MODEL_KEYS: ${{ inputs.model-keys }}
         INPUT_RUN: ${{ inputs.run }}
         OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
       run: /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" run

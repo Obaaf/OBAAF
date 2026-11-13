@@ -115,6 +115,8 @@ jobs:
           ACTION_CONFINED: ${{ steps.inside.outputs.confined }}
           INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
           LOG_DIR: ${{ steps.inside.outputs.log-dir }}
+          DNS_LOG: ${{ steps.inside.outputs.dns-log }}
+          DNS_REFUSED: ${{ steps.inside.outputs.dns-refused }}
         run: |
           set -euo pipefail
           # The background attempt fires 20 seconds after it starts; keep listening past that.
@@ -125,6 +127,7 @@ jobs:
           cp "$RUNNER_TEMP/outside-results.txt" "$RUNNER_TEMP/egress-results/" || true
           cp "$INSIDE_WORKSPACE/egress-results-inside.txt" "$RUNNER_TEMP/egress-results/" || true
           if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then sudo cp -r "$LOG_DIR" "$RUNNER_TEMP/egress-results/proxy-logs" && sudo chown -R "$(id -u)" "$RUNNER_TEMP/egress-results"; fi
+          if [ -n "$DNS_LOG" ] && [ -f "$DNS_LOG" ]; then cp "$DNS_LOG" "$RUNNER_TEMP/egress-results/dns.log"; fi
           python3 -I tests/egress/judge.py judge \
             --outside-pcap "$RUNNER_TEMP/outside.pcap" \
             --inside-pcap "$RUNNER_TEMP/inside.pcap" \
@@ -136,6 +139,7 @@ jobs:
             --action-exit "$ACTION_EXIT" \
             --action-confined "$ACTION_CONFINED" \
             --summary "$GITHUB_STEP_SUMMARY" \
+            --dns-refused "$DNS_REFUSED" \
             --json-out "$RUNNER_TEMP/egress-results/verdict.json"
 
       - name: Keep the results
@@ -217,6 +221,81 @@ jobs:
           allow: api.anthropic.com
           env: ANTHROPIC_API_KEY
           run: "true"
+
+      - name: A model key the action has not tested is refused in model-keys
+        id: untestedkey
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          GEMINI_API_KEY: not-a-key
+        with:
+          allow: api.github.com
+          model-keys: GEMINI_API_KEY
+          run: "true"
+
+      - name: Made-up model keys (not secrets; each provider refuses them)
+        id: dummy
+        run: |
+          set -euo pipefail
+          mark="obaafdummy$(openssl rand -hex 8)"
+          {
+            echo "mark=$mark"
+            echo "anthropic=sk-ant-api03-$mark-$(openssl rand -hex 16)"
+            echo "openai=sk-proj-$mark-$(openssl rand -hex 16)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Model keys reach AWF's API proxy, never the command, and each provider answers
+        id: keys
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.dummy.outputs.anthropic }}
+          OPENAI_API_KEY: ${{ steps.dummy.outputs.openai }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+        with:
+          # Neither provider is listed: the API proxy reaches them whatever allow says.
+          allow: api.github.com
+          model-keys: ANTHROPIC_API_KEY OPENAI_API_KEY
+          env: KEY_MARK
+          run: bash tests/egress/model-keys.sh model-keys-results.txt
+
+      - name: Check the model keys
+        env:
+          KEYS_OUTCOME: ${{ steps.keys.outcome }}
+          KEYS_CONFINED: ${{ steps.keys.outputs.confined }}
+          KEYS_WORKSPACE: ${{ steps.keys.outputs.workspace }}
+          KEYS_LOG_DIR: ${{ steps.keys.outputs.log-dir }}
+          KEYS_DNS_LOG: ${{ steps.keys.outputs.dns-log }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+          UNTESTED_OUTCOME: ${{ steps.untestedkey.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          results="$KEYS_WORKSPACE/model-keys-results.txt"
+          cat "$results" || true
+          line() { grep -m1 "^$1 " "$results" | sed "s/^$1 //" || true; }
+          if [ "$UNTESTED_OUTCOME" = failure ]; then ok "an untested model key is refused"; else bad "an untested model key was accepted"; fi
+          if [ "$KEYS_OUTCOME" = success ] && [ "$KEYS_CONFINED" = true ]; then ok "the step ran the command in a sandbox that held"; else bad "outcome $KEYS_OUTCOME, confined '$KEYS_CONFINED'"; fi
+          if grep -q "holds-the-key" "$results"; then bad "a variable the command sees holds a key: $(grep holds-the-key "$results")"; else ok "no variable the command sees holds either key"; fi
+          if [ "$(line MARK_IN_ENV)" = 0 ]; then ok "neither key is in the command's environment"; else bad "a key is in the command's environment ($(line MARK_IN_ENV))"; fi
+          if [ "$(line MARK_IN_FILES)" = none ]; then ok "neither key is in a file the command could read (home, TMPDIR, the copy, /tmp, /home, /run, /etc, /var)"; else bad "a key is in: $(line MARK_IN_FILES)"; fi
+          case "$(line 'VAR ANTHROPIC_BASE_URL')" in "= http://"*) ok "the command was given ANTHROPIC_BASE_URL, the API proxy";; *) bad "ANTHROPIC_BASE_URL: $(line 'VAR ANTHROPIC_BASE_URL')";; esac
+          case "$(line 'VAR OPENAI_BASE_URL')" in "= http://"*) ok "the command was given OPENAI_BASE_URL, the API proxy";; *) bad "OPENAI_BASE_URL: $(line 'VAR OPENAI_BASE_URL')";; esac
+          anthropic="$(line ANTHROPIC)"
+          case "$anthropic" in "0 401 "*authentication_error*) ok "Anthropic refused the made-up key itself: $anthropic";; *) bad "Anthropic through the API proxy: $anthropic";; esac
+          openai="$(line OPENAI)"
+          case "$openai" in "0 401 "*invalid_api_key*) ok "OpenAI refused the made-up key itself: $openai";; *) bad "OpenAI through the API proxy: $openai";; esac
+          hosted="$(line ANTHROPIC_HOSTED_WEB)"
+          case "$hosted" in "0 40"[03]" "*hosted_web*) ok "the API proxy refused a hosted web tool before the provider: $hosted";; *) bad "a hosted web tool: $hosted";; esac
+          direct="$(line DIRECT_ANTHROPIC)"
+          if [ -n "$direct" ] && [ "$direct" != 0 ]; then ok "the command could not reach api.anthropic.com itself (curl status $direct)"; else bad "the command reached api.anthropic.com directly (curl status '$direct')"; fi
+          tunnels="$(sudo grep -rh -e 'api.anthropic.com' -e 'api.openai.com' "$KEYS_LOG_DIR" 2>/dev/null | grep -c CONNECT || true)"
+          if [ "$tunnels" -ge 2 ]; then ok "the proxy's log shows the API proxy's CONNECT to both providers ($tunnels lines)"; else bad "the proxy's log shows $tunnels CONNECT lines to the providers"; fi
+          if sudo grep -rq -- "$KEY_MARK" "$KEYS_LOG_DIR" "$KEYS_DNS_LOG" 2>/dev/null; then bad "a key is in the proxy's or the resolver's log"; else ok "neither key is in the proxy's or the resolver's log"; fi
+          if grep -q "^allowed 1 api.anthropic.com" "$KEYS_DNS_LOG" && grep -q "^allowed 1 api.openai.com" "$KEYS_DNS_LOG"; then ok "the action's resolver answered both providers' hosts"; else bad "the resolver did not answer both providers: $(grep -c . "$KEYS_DNS_LOG") lines"; fi
+          exit "$fail"
 
       - name: Check what happened
         env:

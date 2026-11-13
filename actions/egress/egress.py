@@ -115,8 +115,9 @@ RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_", "OTEL_", "FO
 RESERVED_SUFFIXES = ("_API_TARGET", "_API_BASE_PATH", "_BASE_URL", "_ENDPOINT_OVERRIDE")
 # Model keys and GitHub tokens: AWF v0.29.13 withholds these from the command
 # and hands model keys to its API proxy (src/services/agent-environment/
-# excluded-vars.ts). This action does not set up the API proxy (OBAAF has not
-# tested it), so passing one would silently give the command nothing.
+# excluded-vars.ts). Passed in env, one would silently give the command
+# nothing, so env refuses them all. The two in MODEL_KEYS can be given to AWF's
+# API proxy instead, through the model-keys input; the rest are untested.
 WITHHELD_BY_AWF = frozenset(
     {
         "AGENT_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
@@ -127,7 +128,42 @@ WITHHELD_BY_AWF = frozenset(
     }
 )
 
+# Model keys the model-keys input accepts, each with the host AWF's API proxy
+# sends it to (AWF v0.29.13: src/domain-utils.ts, DEFAULT_ANTHROPIC_API_TARGET
+# and DEFAULT_OPENAI_API_TARGET; the action refuses the *_API_TARGET names that
+# would change them). AWF reads them from its own environment
+# (src/commands/resolve-credentials.ts), gives them to the API proxy sidecar,
+# and gives the command a base URL pointing at the sidecar and a placeholder
+# key. These two are the ones the escape tests send a request through.
+MODEL_KEYS = {
+    "ANTHROPIC_API_KEY": "api.anthropic.com",
+    "OPENAI_API_KEY": "api.openai.com",
+}
+
 RUNNER_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY")
+
+# The resolver the action gives AWF's proxy (slice 2c.4). Squid resolves every
+# name it is asked for before it refuses an unlisted one (AWF v0.29.13 puts an
+# access rule of type dst, for the API proxy's address, ahead of the rule that
+# refuses unlisted names: src/squid/config-sections.ts and config-generator.ts),
+# so with an ordinary resolver a refused name still left the runner in a DNS
+# query. The action runs its own resolver on the runner, answering only names
+# the allow-list covers (and the hosts of the model keys given), and gives AWF
+# its address with --dns-servers. Every other name is answered REFUSED on the
+# runner and goes no further.
+DNS_PORT = 53
+DNS_RCODE_FORMERR = 1
+DNS_RCODE_REFUSED = 5
+DNS_LOG_LIMIT = 2000
+# The bridge Docker creates on every hosted runner. Its address is the
+# runner's own, so a container on any bridge network reaches it.
+DNS_BRIDGE = "docker0"
+# What a label may hold for the resolver to pass the name on. A label of any
+# other byte (a dot inside a label, for one) would let a name that looks
+# covered be a different name under another domain, so it is refused.
+_DNS_LABEL_RE = re.compile(rb"^[A-Za-z0-9_-]{1,63}$")
+NOBODY_UID = 65534
+NOBODY_GID = 65534
 
 # Probe targets used before the command starts. The direct addresses are
 # public resolvers; nothing on the list can make them reachable, because AWF
@@ -189,8 +225,10 @@ def parse_env_names(text: str, environ: dict[str, str]) -> dict[str, str]:
     for name in names:
         if not _NAME_RE.match(name):
             raise UsageError(f"env: {name!r} is not a variable name")
+        if name in MODEL_KEYS:
+            raise UsageError(f"env: {name} is a model key, which AWF withholds from the command; name it under model-keys instead, and AWF's API proxy will use it for the command (see docs/egress-control.md)")
         if name in WITHHELD_BY_AWF:
-            raise UsageError(f"env: {name} is a model key or GitHub token name, which AWF withholds from the command and this action does not route to AWF's API proxy (untested); see docs/egress-control.md")
+            raise UsageError(f"env: {name} is a model key or GitHub token name, which AWF withholds from the command; the action gives only {', '.join(sorted(MODEL_KEYS))} to AWF's API proxy (the others are untested); see docs/egress-control.md")
         if name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES):
             raise UsageError(f"env: {name} cannot be passed to the command; the action sets or withholds it on purpose, or AWF reads it as its own configuration")
         if name not in environ:
@@ -202,6 +240,323 @@ def parse_env_names(text: str, environ: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def parse_model_keys(text: str, environ: dict[str, str]) -> dict[str, str]:
+    """Return the model keys named in the model-keys input with their values, or raise UsageError.
+
+    A model key goes to AWF's own environment, from which AWF gives it to its
+    API proxy sidecar; the command never sees it.
+    """
+    names = [item for item in re.split(r"[\s,]+", text or "") if item]
+    result: dict[str, str] = {}
+    for name in names:
+        if not _NAME_RE.match(name):
+            raise UsageError(f"model-keys: {name!r} is not a variable name")
+        if name not in MODEL_KEYS:
+            raise UsageError(f"model-keys: {name} is not one of {', '.join(sorted(MODEL_KEYS))}, the model keys this action has tested through AWF's API proxy")
+        if name not in environ:
+            raise UsageError(f"model-keys: {name} is not set in the step's environment; set it under the step's env: key")
+        value = environ[name]
+        if not value.strip():
+            raise UsageError(f"model-keys: {name} is empty (a secret that is not available to this job is empty)")
+        if "\n" in value or "\r" in value or "\0" in value:
+            raise UsageError(f"model-keys: the value of {name} holds a line break or NUL")
+        result[name] = value
+    return result
+
+
+def resolver_names(allow: list[str], model_keys: dict[str, str]) -> list[str]:
+    """The names the action's resolver answers: the allow-list and the host of each model key."""
+    names = list(allow)
+    for key in model_keys:
+        host = MODEL_KEYS[key]
+        if host not in names:
+            names.append(host)
+    return names
+
+
+# ---------------------------------------------------------------------------
+# The resolver given to AWF's proxy
+# ---------------------------------------------------------------------------
+
+def dns_question(message: bytes) -> tuple[str | None, int, int] | None:
+    """Read the one question of a DNS query.
+
+    Returns ``(name, qtype, end)``, where ``end`` is the offset just after the
+    question and ``name`` is None when a label holds a byte other than a
+    letter, digit, hyphen or underscore. Returns None when the message is not
+    a standard query with exactly one question in class IN, or cannot be read.
+    """
+    if len(message) < 12:
+        return None
+    flags = int.from_bytes(message[2:4], "big")
+    if flags & 0x8000 or (flags >> 11) & 0xF != 0:
+        return None
+    if int.from_bytes(message[4:6], "big") != 1:
+        return None
+    labels: list[bytes] = []
+    offset = 12
+    size = 0
+    while True:
+        if offset >= len(message):
+            return None
+        length = message[offset]
+        offset += 1
+        if length == 0:
+            break
+        if length > 63:
+            # A compression pointer, or the reserved label types: never in a query's question.
+            return None
+        label = message[offset:offset + length]
+        if len(label) != length:
+            return None
+        size += length + 1
+        if size > 254:
+            return None
+        labels.append(label)
+        offset += length
+    if offset + 4 > len(message):
+        return None
+    qtype = int.from_bytes(message[offset:offset + 2], "big")
+    qclass = int.from_bytes(message[offset + 2:offset + 4], "big")
+    if qclass != 1:
+        return None
+    end = offset + 4
+    if not labels or not all(_DNS_LABEL_RE.match(label) for label in labels):
+        return (None, qtype, end)
+    return (b".".join(labels).decode("ascii").lower(), qtype, end)
+
+
+def dns_refusal(query: bytes, end: int, rcode: int = DNS_RCODE_REFUSED) -> bytes | None:
+    """A response to ``query`` with ``rcode`` and no answer, echoing the
+    question when ``end`` marks one (0 for none). None if the query is too
+    short to carry an ID."""
+    if len(query) < 12:
+        return None
+    flags = int.from_bytes(query[2:4], "big")
+    reply = 0x8000 | (flags & 0x7800) | (flags & 0x0100) | 0x0080 | (rcode & 0xF)
+    question = query[12:end] if end else b""
+    counts = (1 if end else 0, 0, 0, 0)
+    return query[0:2] + reply.to_bytes(2, "big") + b"".join(c.to_bytes(2, "big") for c in counts) + question
+
+
+def dns_printable(message: bytes) -> str:
+    """The question's name as text for the log, every byte outside a plain label escaped."""
+    labels = []
+    offset = 12
+    while offset < len(message):
+        length = message[offset]
+        if length == 0 or length > 63:
+            break
+        label = message[offset + 1:offset + 1 + length]
+        labels.append("".join(chr(b) if 0x21 <= b < 0x7F and b not in (0x2E, 0x5C) else f"\\{b:03d}" for b in label))
+        offset += 1 + length
+    return ".".join(labels)[:300] or "(unreadable)"
+
+
+def dns_query(name: str, ident: int, qtype: int = 1) -> bytes:
+    """A standard recursive query for ``name`` (used by the action's own check of the resolver)."""
+    header = ident.to_bytes(2, "big") + (0x0100).to_bytes(2, "big") + (1).to_bytes(2, "big") + bytes(6)
+    body = b"".join(bytes([len(p)]) + p.encode("ascii") for p in name.split(".")) + b"\x00"
+    return header + body + qtype.to_bytes(2, "big") + (1).to_bytes(2, "big")
+
+
+class DnsFilter:
+    """Answers a query by forwarding it to the runner's resolver when the name
+    is covered, and with REFUSED otherwise. Shared by the UDP and TCP servers."""
+
+    def __init__(self, names: list[str], upstream: str, log, upstream_port: int = DNS_PORT) -> None:
+        self.names = names
+        self.upstream = upstream
+        self.upstream_port = upstream_port
+        self.log = log
+        self.logged = 0
+        import threading
+        self.lock = threading.Lock()
+
+    def note(self, line: str) -> None:
+        with self.lock:
+            if self.logged < DNS_LOG_LIMIT:
+                self.log.write(line + "\n")
+                self.log.flush()
+            elif self.logged == DNS_LOG_LIMIT:
+                self.log.write("... (log limit reached)\n")
+                self.log.flush()
+            self.logged += 1
+
+    def decide(self, query: bytes) -> tuple[bool, bytes | None]:
+        """(forward?, reply if not forwarded)."""
+        question = dns_question(query)
+        if question is None:
+            self.note(f"refused unreadable {dns_printable(query)}")
+            return False, dns_refusal(query, 0, DNS_RCODE_FORMERR)
+        name, qtype, end = question
+        if name is not None and covered(name, self.names):
+            self.note(f"allowed {qtype} {name}")
+            return True, None
+        self.note(f"refused {qtype} {name if name is not None else dns_printable(query)}")
+        return False, dns_refusal(query, end)
+
+    def forward_udp(self, query: bytes) -> bytes | None:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(5)
+            sock.connect((self.upstream, self.upstream_port))
+            sock.send(query)
+            try:
+                for _ in range(5):
+                    reply = sock.recv(65535)
+                    if reply[:2] == query[:2]:
+                        return reply
+            except OSError:
+                return None
+        return None
+
+    def forward_tcp(self, query: bytes) -> bytes | None:
+        import socket
+        try:
+            with socket.create_connection((self.upstream, self.upstream_port), timeout=5) as sock:
+                sock.sendall(len(query).to_bytes(2, "big") + query)
+                head = _recv_exact(sock, 2)
+                if head is None:
+                    return None
+                return _recv_exact(sock, int.from_bytes(head, "big"))
+        except OSError:
+            return None
+
+
+def _recv_exact(sock, size: int) -> bytes | None:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def dns_filter(argv: list[str]) -> int:
+    """The resolver itself: ``egress.py dns-filter LISTEN UPSTREAM NAMES-FILE LOG-FILE UID:GID``.
+
+    Started by the run step with sudo, because it listens on port 53; it binds
+    both sockets, opens its log, hands the log to the runner user, gives up
+    root for nobody, prints "ready" and serves until its standard input closes.
+    """
+    import socketserver
+    import threading
+
+    if len(argv) != 5:
+        print("usage: egress.py dns-filter LISTEN UPSTREAM NAMES-FILE LOG-FILE UID:GID", file=sys.stderr)
+        return 2
+    listen, upstream, names_file, log_file, owner = argv
+    names = parse_allow_list(Path(names_file).read_text())
+    uid, gid = (int(part) for part in owner.split(":", 1))
+
+    fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchown(fd, uid, gid)
+    log = os.fdopen(fd, "a", encoding="utf-8")
+    log.write(f"listening on {listen}:{DNS_PORT}, forwarding to {upstream}: {', '.join(names)}\n")
+    log.flush()
+    deciding = DnsFilter(names, upstream, log)
+
+    class Udp(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            data, sock = self.request
+            forward, reply = deciding.decide(data)
+            if forward:
+                reply = deciding.forward_udp(data)
+            if reply:
+                sock.sendto(reply, self.client_address)
+
+    class Tcp(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            conn = self.request
+            conn.settimeout(10)
+            while True:
+                try:
+                    head = _recv_exact(conn, 2)
+                    data = _recv_exact(conn, int.from_bytes(head, "big")) if head else None
+                except OSError:
+                    return
+                if not data:
+                    return
+                forward, reply = deciding.decide(data)
+                if forward:
+                    reply = deciding.forward_tcp(data)
+                if not reply:
+                    return
+                try:
+                    conn.sendall(len(reply).to_bytes(2, "big") + reply)
+                except OSError:
+                    return
+
+    class UdpServer(socketserver.ThreadingUDPServer):
+        daemon_threads = True
+
+    class TcpServer(socketserver.ThreadingTCPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    udp = UdpServer((listen, DNS_PORT), Udp)
+    tcp = TcpServer((listen, DNS_PORT), Tcp)
+    os.setgroups([])
+    os.setgid(NOBODY_GID)
+    os.setuid(NOBODY_UID)
+    if os.getuid() == 0 or os.geteuid() == 0:
+        print("could not give up root", file=sys.stderr)
+        return 1
+    for server in (udp, tcp):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    print("ready", flush=True)
+    try:
+        sys.stdin.read()
+    except (OSError, KeyboardInterrupt):
+        pass
+    udp.shutdown()
+    tcp.shutdown()
+    log.write("stopped\n")
+    log.close()
+    return 0
+
+
+def dns_ask(server: str, name: str, timeout: float = 3.0) -> int | None:
+    """The response code the resolver at ``server`` gives for ``name``, or None for no answer."""
+    import socket
+    ident = secrets.randbelow(0x10000)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(dns_query(name, ident), (server, DNS_PORT))
+            while True:
+                reply, _ = sock.recvfrom(65535)
+                if len(reply) >= 4 and int.from_bytes(reply[:2], "big") == ident:
+                    return reply[3] & 0xF
+        except OSError:
+            return None
+
+
+def bridge_address(ip_tool: str | None) -> str | None:
+    """The IPv4 address of Docker's docker0 bridge on this runner, or None."""
+    if not ip_tool:
+        return None
+    done = subprocess.run([ip_tool, "-4", "-o", "addr", "show", "dev", DNS_BRIDGE], capture_output=True,
+                          text=True, check=False, env={"PATH": FIXED_PATH})
+    match = re.search(r"\binet (\d{1,3}(?:\.\d{1,3}){3})/\d+", done.stdout)
+    return match.group(1) if match else None
+
+
+def runner_resolver(resolv_conf: str = "/etc/resolv.conf") -> str | None:
+    """The first IPv4 nameserver of the runner's own resolver configuration."""
+    try:
+        text = Path(resolv_conf).read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = re.match(r"^\s*nameserver\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$", line)
+        if match:
+            return match.group(1)
+    return None
+
+
 def image_tag() -> str:
     """The value of AWF's --image-tag: the version and a digest for each image."""
     version = AWF_VERSION.lstrip("v")
@@ -210,12 +565,14 @@ def image_tag() -> str:
 
 
 def awf_argv(awf: str, allow: list[str], config: str, env_file: str, workdir: str,
-             awf_work: str, logs: str, inner: str) -> list[str]:
+             awf_work: str, logs: str, inner: str, dns_server: str) -> list[str]:
     """The whole AWF command line. Nothing here comes from the workflow but
-    the allow-list, which parse_allow_list has reduced to host names."""
+    the allow-list, which parse_allow_list has reduced to host names; the DNS
+    server is the action's own resolver on the runner."""
     return [
         awf,
         "--allow-domains", ",".join(allow),
+        "--dns-servers", dns_server,
         "--config", config,
         "--env-file", env_file,
         "--container-workdir", workdir,
@@ -226,6 +583,23 @@ def awf_argv(awf: str, allow: list[str], config: str, env_file: str, workdir: st
         "--",
         "/bin/bash", inner,
     ]
+
+
+def awf_config(scratch: str) -> dict:
+    """AWF's configuration file: writes only under the scratch directory, and
+    the providers' hosted web tools refused by AWF's API proxy.
+
+    With a model key, an agent could ask the provider to fetch or search the
+    web for it (Anthropic's web_fetch and web_search tools, OpenAI's hosted
+    web search), and the provider's servers, not the runner, would make the
+    request, out of the proxy's sight. AWF's API proxy refuses a request that
+    carries such a tool when its policy says enabled: false (AWF v0.29.13,
+    src/hosted-web-policy.ts and containers/api-proxy/claude-hosted-web.js).
+    """
+    return {
+        "filesystem": {"allowWrite": [scratch]},
+        "apiProxy": {"hostedWeb": {"claude": {"enabled": False}, "codex": {"enabled": False}}},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +724,79 @@ def _denied_hosts(log_dir: Path) -> list[str]:
     return hosts
 
 
+def _dns_refused(log: Path) -> list[str]:
+    """Names the action's resolver refused, from its log, as plain text."""
+    names: list[str] = []
+    try:
+        text = log.read_text(errors="replace")
+    except OSError:
+        return names
+    for line in text.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3 and parts[0] == "refused":
+            name = re.sub(r"[^A-Za-z0-9._\\-]", "?", parts[2])[:120]
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def start_resolver(environ: dict[str, str], names: list[str], private: Path, log: Path,
+                   blocked: str) -> tuple[subprocess.Popen | None, str, str | None]:
+    """Start the resolver AWF's proxy will use, and check it.
+
+    Returns (process, address, problem); problem is None when the resolver
+    is listening on Docker's bridge, refuses ``blocked`` and answers the
+    first listed name. The check's queries go to the resolver only: a refused
+    name goes no further.
+    """
+    ip_tool = shutil.which("ip", path=FIXED_PATH)
+    address = bridge_address(ip_tool)
+    if address is None:
+        return None, "", f"the runner has no {DNS_BRIDGE} bridge with an IPv4 address for the proxy's resolver"
+    upstream = runner_resolver()
+    if upstream is None:
+        return None, address, "the runner's /etc/resolv.conf names no IPv4 nameserver to forward listed names to"
+    names_file = private / "dns-names.txt"
+    names_file.write_text("\n".join(names) + "\n")
+    script = os.path.abspath(__file__)
+    argv = ["sudo", "-n", "/usr/bin/python3", "-I", script, "dns-filter", address, upstream,
+            str(names_file), str(log), f"{os.getuid()}:{os.getgid()}"]
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                                   env={"PATH": FIXED_PATH}, text=True)
+    except OSError as error:
+        return None, address, f"the proxy's resolver could not start ({error})"
+    import select
+    ready, _, _ = select.select([process.stdout], [], [], 20)
+    line = process.stdout.readline().strip() if ready else ""
+    if line != "ready":
+        return process, address, "the proxy's resolver did not start"
+    refused = dns_ask(address, blocked)
+    if refused != DNS_RCODE_REFUSED:
+        return process, address, f"the proxy's resolver did not refuse the unlisted {blocked} (answer {refused})"
+    answered = dns_ask(address, names[0], timeout=6.0)
+    if answered is None or answered == DNS_RCODE_REFUSED:
+        return process, address, f"the proxy's resolver did not answer the listed {names[0]} (answer {answered})"
+    return process, address, None
+
+
+def stop_resolver(process: subprocess.Popen | None) -> None:
+    """Stop the resolver: it serves until its standard input closes."""
+    if process is None:
+        return
+    try:
+        if process.stdin:
+            process.stdin.close()
+        process.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        subprocess.run(["sudo", "-n", "kill", "-TERM", str(process.pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env={"PATH": FIXED_PATH})
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _remove(path: Path) -> None:
     """Delete a file or directory tree that AWF or the action made.
 
@@ -390,10 +837,12 @@ def run(environ: dict[str, str]) -> int:
     """Run the workflow's command under AWF. Returns the step's exit status."""
     allow = parse_allow_list(environ.get("INPUT_ALLOW", ""))
     passed = parse_env_names(environ.get("INPUT_ENV", ""), environ)
+    model_keys = parse_model_keys(environ.get("INPUT_MODEL_KEYS", ""), environ)
     command = environ.get("INPUT_RUN", "")
     if not command.strip():
         raise UsageError("run: give the command to run")
     blocked = probe_host(allow)
+    dns_names = resolver_names(allow, model_keys)
 
     state = _state_dir()
     awf = state / "bin" / "awf"
@@ -436,7 +885,7 @@ def run(environ: dict[str, str]) -> int:
         path.chmod(0o700)
 
     config = private / "awf-config.json"
-    config.write_text(json.dumps({"filesystem": {"allowWrite": [str(scratch)]}}) + "\n")
+    config.write_text(json.dumps(awf_config(str(scratch))) + "\n")
     env_file = private / "command.env"
     fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -458,11 +907,33 @@ def run(environ: dict[str, str]) -> int:
         "TMPDIR": str(awf_tmp),
         "LANG": "C.UTF-8",
     }
-    argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner))
+    # Model keys go to AWF's own environment, never to the command's file:
+    # AWF gives them to its API proxy sidecar.
+    child_env.update(model_keys)
+
+    # The resolver AWF's proxy is given. It must be running, refuse a name the
+    # list does not cover and answer one it does, or nothing runs.
+    dns_log = logs.parent / "dns.log"
+    resolver, dns_server, problem = start_resolver(environ, dns_names, private, dns_log, blocked)
+    if problem:
+        print(f"::error::obaaf-egress: {problem}; the command was not run")
+        stop_resolver(resolver)
+        for path in sorted(private.iterdir()):
+            if path not in (logs, dns_log):
+                _remove(path)
+        _set_output(environ, "dns-log", str(dns_log))
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
+    argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner),
+                    dns_server)
 
     before = _runner_file_hashes(environ)
     token = secrets.token_hex(16)
     print(f"obaaf-egress: AWF {AWF_VERSION}; allowed: {', '.join(allow)}")
+    if model_keys:
+        print(f"obaaf-egress: model keys given to AWF's API proxy, not to the command: {', '.join(model_keys)}"
+              f" (it reaches {', '.join(MODEL_KEYS[k] for k in model_keys)} whatever allow says)")
+    print(f"obaaf-egress: the proxy's resolver is the action's own, at {dns_server}; it answers only: {', '.join(dns_names)}")
     print(f"obaaf-egress: the command can write only under {scratch}")
     sys.stdout.flush()
     print(f"::stop-commands::{token}", flush=True)
@@ -475,6 +946,9 @@ def run(environ: dict[str, str]) -> int:
         sys.stderr.flush()
         print(f"\n::{token}::", flush=True)
     elapsed = time.monotonic() - started
+    resolver_died = resolver is not None and resolver.poll() is not None
+    stop_resolver(resolver)
+    dns_refused = _dns_refused(dns_log)
     try:
         env_file.unlink()
     except OSError:
@@ -486,7 +960,7 @@ def run(environ: dict[str, str]) -> int:
     # log, which the command cannot write, is kept.
     left = []
     for path in sorted(private.iterdir()):
-        if path == logs:
+        if path in (logs, dns_log):
             continue
         _remove(path)
         if path.exists() or path.is_symlink():
@@ -509,21 +983,35 @@ def run(environ: dict[str, str]) -> int:
     _set_output(environ, "workspace", str(copy))
     _set_output(environ, "scratch", str(scratch))
     _set_output(environ, "log-dir", str(logs))
+    _set_output(environ, "dns-log", str(dns_log))
     _set_output(environ, "exit-code", str(status))
     _set_output(environ, "denied", ",".join(denied))
+    _set_output(environ, "dns-refused", ",".join(dns_refused))
 
     lines = ["### OBAAF egress control\n\n",
              f"- AWF {AWF_VERSION}, allowed: {', '.join('`' + h + '`' for h in allow)}\n",
              f"- command exit status: {status}, {elapsed:.0f} s\n"]
+    if model_keys:
+        lines.append(f"- model keys given to AWF's API proxy: {', '.join('`' + k + '`' for k in model_keys)}"
+                     f" (it reaches {', '.join('`' + MODEL_KEYS[k] + '`' for k in model_keys)} whatever `allow` says)\n")
     if denied:
         lines.append(f"- refused by the proxy: {', '.join('`' + h + '`' for h in denied)}\n")
     else:
         lines.append("- refused by the proxy: none logged\n")
+    if dns_refused:
+        lines.append(f"- names the proxy's resolver refused (they did not leave the runner): {', '.join('`' + h + '`' for h in dns_refused[:50])}\n")
+    if resolver_died:
+        lines.append("- **the action's resolver stopped before the command ended**\n")
     if not probe_ok:
         lines.append("- **the sandbox did not start or did not hold: the command did not run**\n")
     _summary(environ, "".join(lines) + "\n")
     print(f"obaaf-egress: refused by the proxy: {', '.join(denied) if denied else 'none logged'}")
+    print(f"obaaf-egress: refused by the proxy's resolver: {', '.join(dns_refused[:50]) if dns_refused else 'none'}")
 
+    if resolver_died:
+        print("::error::obaaf-egress: the action's resolver stopped before the command ended, so the run is not the one the escape tests cover; the step fails")
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
     if changed:
         print(f"::error::The runner's {', '.join(changed)} changed while the command ran; the step fails")
         _set_output(environ, "confined", "false")
@@ -542,6 +1030,8 @@ def run(environ: dict[str, str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "dns-filter":
+        return dns_filter(argv[2:])
     if len(argv) != 2 or argv[1] not in ("install", "run", "check-allow"):
         print("usage: egress.py install|run|check-allow", file=sys.stderr)
         return 2
@@ -551,6 +1041,7 @@ def main(argv: list[str]) -> int:
         if argv[1] == "check-allow":
             parse_allow_list(os.environ.get("INPUT_ALLOW", ""))
             parse_env_names(os.environ.get("INPUT_ENV", ""), dict(os.environ))
+            parse_model_keys(os.environ.get("INPUT_MODEL_KEYS", ""), dict(os.environ))
             return 0
         return run(dict(os.environ))
     except UsageError as error:

