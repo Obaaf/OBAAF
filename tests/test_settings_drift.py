@@ -386,6 +386,75 @@ class HolesInTheExpectedSnapshotTest(unittest.TestCase):
 
 
 
+class SecondReviewTest(unittest.TestCase):
+    """What the second review of the slice found."""
+
+    @staticmethod
+    def broken_policies(entries: list[dict]) -> list[dict]:
+        for entry in entries:
+            if entry["path"].endswith("/environments/release/deployment-branch-policies?per_page=100"):
+                entry.update(status=500, body={"message": "Server Error"})
+        return entries
+
+    def test_what_was_read_of_an_environment_read_in_part_on_both_sides_is_compared(self):
+        expected = take(entries=self.broken_policies(recording("admin-token")))
+        live = take(entries=self.broken_policies(recording("admin-token")), now=LATER)
+        self.assertFalse(drift.failed(drift.compare(expected, live)))  # unchanged: passes, release not covered
+        env(live, "release")["reviewers"] = []
+        env(live, "release")["can_admins_bypass"] = True
+        result = drift.compare(expected, live)
+        self.assertEqual({(s, i, c) for s, i, _, c in changed(result)},
+                         {("environments", "release", "removed"), ("environments", "release", "changed")})
+        self.assertTrue(drift.failed(result))
+
+    def test_a_new_part_that_could_not_be_read_is_not_said_to_be_in_the_expected_snapshot(self):
+        expected = take()
+        entries = recording("admin-token")
+        for entry in entries:
+            if entry["path"] == f"/repos/{REPO}/environments?per_page=100":
+                entry["body"]["environments"].append({"name": "newprod", "deployment_branch_policy": {
+                    "protected_branches": False, "custom_branch_policies": True}, "protection_rules": []})
+                entry["body"]["total_count"] = len(entry["body"]["environments"])
+        result = drift.compare(expected, take(entries=entries))
+        why = [e["why"] for e in result["not_compared"] if e["item"] == "newprod"]
+        self.assertTrue(why and why[0].startswith("it is not in the expected snapshot"), result["not_compared"])
+        self.assertTrue(drift.failed(result))
+
+    def test_a_list_of_branches_that_disagrees_with_the_branch_data_is_refused(self):
+        live = take(branches=("release",), entries=recording("admin-token") + [
+            {"path": f"/repos/{REPO}/rules/branches/release?per_page=100", "status": 200, "headers": {}, "body": []},
+            {"path": f"/repos/{REPO}/branches/release", "status": 200, "headers": {},
+             "body": {"name": "release", "protected": False}},
+            {"path": f"/repos/{REPO}/branches/release/protection", "status": 404, "headers": {},
+             "body": {"message": "Branch not protected"}}])
+        hidden = copy.deepcopy(live)
+        hidden["branches"] = ["main"]
+        with self.assertRaises(drift.DriftError) as raised:
+            drift.compare(hidden, live)
+        self.assertIn("not the branches it says were audited", str(raised.exception))
+
+    def test_an_output_file_may_not_be_the_expected_file(self):
+        with TempDir() as tmp:
+            write(take(), tmp / "expected.json")
+            before = (tmp / "expected.json").read_text(encoding="utf-8")
+            for flag in ("--snapshot-out", "--output"):
+                code, _, err = run_cli("audit", "--repo", REPO, "--expected", tmp / "expected.json", flag,
+                                       tmp / "." / "expected.json")
+                self.assertEqual(code, 2)
+                self.assertIn("names the same file as --expected", err)
+            self.assertEqual((tmp / "expected.json").read_text(encoding="utf-8"), before)
+
+    def test_a_fault_in_the_from_snapshot_file_names_it(self):
+        with TempDir() as tmp:
+            write(take(), tmp / "good.json")
+            (tmp / "bad.json").write_text("{}", encoding="utf-8")
+            code, _, err = run_cli("audit", "--from-snapshot", tmp / "bad.json", "--expected", tmp / "good.json")
+            self.assertEqual(code, 2)
+            self.assertIn("--from-snapshot", err)
+            self.assertIn("bad.json", err)
+
+
+
 class CommittedFileTest(unittest.TestCase):
     """The expected snapshot is a committed file anyone can change in a pull request."""
 

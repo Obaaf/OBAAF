@@ -92,7 +92,7 @@ def branches_to_read(expected: dict) -> list[str]:
 
 def check_comparable(expected: dict, live: dict) -> None:
     """Refuse to compare snapshots of two different repositories, or of two different servers."""
-    if str(expected.get("api", "")).rstrip("/") != str(live.get("api", "")).rstrip("/"):
+    if str(expected.get("api", "")).rstrip("/").lower() != str(live.get("api", "")).rstrip("/").lower():
         raise DriftError(f"the expected snapshot was read from {plain(expected.get('api'), 100)}, and these "
                          f"settings from {plain(live.get('api'), 100)}")
     names = {str(live.get("repository", "")).lower(), str(live.get("requested_as", "")).lower()} - {""}
@@ -330,6 +330,14 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                 "changes": [{"path": "", "change": "status", "expected": e_status, "live": l_status}]})
         e_parts = {} if e_status == "not_applicable" else parts(key, theirs.get("value"), their_side)
         l_parts = {} if l_status == "not_applicable" else parts(key, ours.get("value"), our_side)
+        for snap, side, found, entry in ((expected, their_side, e_parts, theirs), (live, our_side, l_parts, ours)):
+            if SHAPES[key] == ("map", "branch") and entry is not None and _status(entry) != "not_applicable":
+                # The reader records every audited branch, read or not, and nothing else. A file whose list of
+                # branches says otherwise would have its branch data compared as if it had never been read.
+                held = set(found) | set(_problem_keys(entry))
+                if held != set(snap.get("branches") or []):
+                    raise DriftError(f"{side}: {setting.title}: the branches it holds are not the branches it "
+                                     "says were audited")
         e_problems, l_problems = _problem_keys(theirs), _problem_keys(ours)
         names = set(e_parts) | set(l_parts) | set(e_problems) | set(l_problems)
         e_unknown = {**_branch_gaps(key, expected, names), **e_problems}
@@ -338,13 +346,26 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
             what = label(key, ident, e_parts.get(ident), l_parts.get(ident))
             here = {"setting": key, "item": ident, "what": f"{setting.title}: {what}"}
             if ident in e_unknown and ident in l_unknown:
+                if isinstance(e_parts.get(ident), dict) and isinstance(l_parts.get(ident), dict):
+                    # Read in part on both sides (an environment whose branch rules failed to load): what was
+                    # read is compared, and a difference in it counts. What was not read is null on both.
+                    found = changes(e_parts[ident], l_parts[ident])
+                    if found:
+                        parts_compared += 1
+                        differences.append({"setting": key, "item": ident, "what": what, "changes": found})
+                        continue
+                    not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
+                                        "why": unknown(e_unknown[ident], "read only in part by both; what both read "
+                                                                         "matches; the expected one: ")})
+                    continue
                 not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
                                     "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})
                 continue
             if ident in l_unknown:
+                held = ("the expected snapshot holds it, and it was not read now: " if ident in e_parts else
+                        "it is not in the expected snapshot (it may be new), and it could not be read now: ")
                 not_compared.append({**here, "reason_code": l_unknown[ident].get("reason_code"),
-                                     "why": unknown(l_unknown[ident], "the expected snapshot holds it, and it was not "
-                                                                      "read now: ")})
+                                     "why": unknown(l_unknown[ident], held)})
                 continue
             if ident in e_unknown:
                 not_compared.append({**here, "reason_code": e_unknown[ident].get("reason_code"),

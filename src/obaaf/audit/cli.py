@@ -50,8 +50,9 @@ def add_parser(sub) -> None:
                    help="exit 1 if any setting that applies was not read in full")
     x.add_argument("--expected", metavar="FILE",
                    help="a committed snapshot of the settings as they should be (written by --snapshot-out). "
-                        "Every difference from it is a finding, and the command exits 1 if there is one, or if "
-                        "something the file holds could not be read now. Its branches are audited too")
+                        "Every difference from it is a finding. The command exits 1 if there is one, if something "
+                        "was read by one of the two and not by the other, or if nothing could be compared. Its "
+                        "branches are audited too")
     x.add_argument("--record", metavar="DIR",
                    help="also save GitHub's answers as received (no request headers, so no token) to "
                         "DIR/responses.json, for a bug report or a test")
@@ -108,6 +109,13 @@ def _plain(text: object, limit: int = 140) -> str:
     return plain(text, limit)
 
 
+def _same_file(one: str, other: str) -> bool:
+    try:
+        return Path(one).resolve() == Path(other).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return True  # cannot tell, so do not risk it
+
+
 def _emit(text: str, output: str | None) -> None:
     if output:
         Path(output).parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +158,10 @@ def _run(args) -> int:
     expected = None
     try:
         if args.expected is not None:
+            for flag, value in (("--snapshot-out", args.snapshot_out), ("--output", args.output)):
+                if value and _same_file(value, args.expected):
+                    # Writing there would replace the committed record with what it is being checked against.
+                    raise UsageError(f"{flag} names the same file as --expected")
             # Read before anything is asked of GitHub: a file that cannot be used stops the command here,
             # and its branches are audited along with any named on the command line.
             try:
@@ -171,7 +183,10 @@ def _run(args) -> int:
                                 ("--snapshot-out", args.snapshot_out)):
                 if value:
                     raise UsageError(f"{flag} has no meaning with --from-snapshot, which sends no request")
-            snap = snapshot_mod.load(args.from_snapshot)
+            try:
+                snap = snapshot_mod.load(args.from_snapshot)
+            except snapshot_mod.SnapshotError as exc:
+                raise UsageError(f"--from-snapshot {_plain(args.from_snapshot)}: {exc}") from None
             if args.repo and args.repo.lower() not in (snap["repository"].lower(),
                                                        str(snap.get("requested_as", "")).lower()):
                 raise UsageError(f"{_plain(args.from_snapshot)} is a snapshot of {_plain(snap['repository'])}, "

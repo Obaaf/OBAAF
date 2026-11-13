@@ -14,7 +14,8 @@ on:
     paths:
       - ".github/obaaf-settings.json"
       - ".github/workflows/settings-drift.yml"
-      - "src/obaaf/audit/drift.py"
+      - "src/obaaf/audit/**"
+      - "src/obaaf/data/schemas/settings-snapshot.schema.json"
 
 permissions:
   contents: read

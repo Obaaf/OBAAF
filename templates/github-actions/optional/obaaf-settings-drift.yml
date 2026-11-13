@@ -8,12 +8,13 @@
 #
 # It watches only what its token can read. The workflow's own token reads the rulesets and their rules,
 # the environments, the public view of each branch and how many accounts hold each role. It cannot read
-# who may bypass a ruleset, the names of secrets, or the Actions settings, so this job never watches
-# those (docs/settings-audit.md, "What it can watch").
+# who may bypass a ruleset, classic branch protection, the names of secrets, or the Actions settings, so
+# this job never watches those (docs/settings-audit.md, "What it can watch").
 #
 # Getting started, with no file written by hand:
 #   1. Copy this file to .github/workflows/ and pin setup-obaaf to an OBAAF release (obaaf check
-#      reports the placeholder until you do).
+#      reports the placeholder until you do). It needs `obaaf audit --expected`, which no release has
+#      yet (0.3.0 does not); until one does, pin a commit of OBAAF that has it.
 #   2. Run it once from the Actions tab (workflow_dispatch). With no snapshot committed yet it fails on
 #      purpose and keeps what it read as the artifact obaaf-settings-live.
 #   3. Download obaaf-settings.json from that artifact, read it, and commit it as
