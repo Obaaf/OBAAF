@@ -37,6 +37,8 @@ Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit 
 | An input written in another case under `with:` (`REF:` for `ref:`) | It is read as the input it is, so a rule that looks at it now sees it | Fix the finding |
 | A step that gives one input twice under two spellings (`ref:` and `REF:`) | An error for the file, and exit status 1 whatever `--fail-on` says: the checker cannot tell which value GitHub uses | Keep one of the two |
 
+`obaaf audit` is in no release, so nothing about it can change for someone on 0.3.0. If you run it from a commit after 0.3.0: it now applies rules and ends with status 1 on a finding at medium or above (`--fail-on never` gives the old status), and `--format json` prints a report with the snapshot under `snapshot`, where it printed the snapshot ([the settings audit](settings-audit.md)).
+
 The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycle of a finding", "A lane declaration that does nothing is a finding", "Controls", "Which events can start a job" and "Inputs in any case".
 
 ### What a script that reads the output will notice

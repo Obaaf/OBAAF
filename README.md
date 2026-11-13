@@ -78,9 +78,10 @@ agent declarations, category gates, and how to pilot unreleased changes that
 are not yet in the PyPI package.
 
 Some of what decides whether a workflow is safe is in repository settings, which no workflow file shows:
-rulesets, environments, Actions settings. `obaaf audit` reads them through GitHub's API, read-only, and lists
-by name whatever it could not read. It records settings and applies no rule yet, and it is not in a release
-yet: see [the settings audit](docs/settings-audit.md).
+rulesets, environments, Actions settings. `obaaf audit` reads them through GitHub's API, read-only, and compares
+them with what the workflow files use: fifteen rules, each of which reports a finding or says "cannot tell" when
+a setting it needs was not read. Most of them need an administrator's token to say more than "cannot tell", and
+the audit has not been run with one. It is not in a release yet: see [the settings audit](docs/settings-audit.md).
 
 **Reviewers.** Read [the architecture](docs/architecture.md), [the decisions log](DECISIONS.md), and [how each requirement is tested](docs/traceability.md).
 
