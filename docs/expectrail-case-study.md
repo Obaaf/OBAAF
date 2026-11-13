@@ -18,7 +18,7 @@
 ## In short
 
 - **What worked.**
-  - **Agent jobs were declared.** Expectrail named its agent jobs, and OBAAF then asked what each could reach. That idea held up.
+  - **Agent jobs were declared.** Expectrail named its agent jobs, and OBAAF then asked what each could reach. It is the part of OBAAF that no other tool read for the landscape was found to offer.
   - **Keys stay in one environment.** Every job that uses a model key names one environment limited to `main`, and the checker reports a job that does not.
   - **The gate caught a new agent job.** It reached `main` without baseline entries, and `main` went red about three hours after the gate itself reached `main`.
 - **What did not.**
@@ -54,7 +54,7 @@ The dates are commit dates in UTC, from Expectrail's history.
 ## What worked
 
 - **Declaring agent jobs, then asking what each can reach.** Among the tools read for [the landscape](landscape.md), no other was found that lets a repository declare a job an agent job outright. In Expectrail that covers 17 agent jobs OBAAF would otherwise miss.
-- **Keys in one environment.** Expectrail moved its model keys into `main-only`. That began with `afc4e7c3` (2026-11-10 03:21). The last keys kept elsewhere, in a `provider-keys` environment, moved with `f287932f` (04:18).
+- **Keys in one environment.** Expectrail's commits moved its model keys into `main-only`. That began with `afc4e7c3` (2026-11-10 03:21). The last keys kept elsewhere, in a `provider-keys` environment, moved with `f287932f` (04:18).
   - Every job that uses such a key now names `main-only`.
   - `OBAAF-GHA-024` reports a job that reads one without naming it. It reads only the workflow files.
   - Whether copies of the keys are stored elsewhere cannot be read without a token.
@@ -75,7 +75,7 @@ Every entry in Expectrail's baseline is one of two findings on one of its 19 age
 **OBAAF itself provided a fix for neither.**
 
 - **`OBAAF-GHA-005`.** At `d014b63` its fix text says "Keep the model credential in an inference proxy outside the job". OBAAF had not built such a proxy. Expectrail's own page says clearing it "needs the gateway hosted outside the job".
-- **`OBAAF-GHA-020`.** Its fix asks for "self-hosted runners behind a network policy or a blocking runtime egress monitor that always runs".
+- **`OBAAF-GHA-020`.** Its fix asks to "Limit the agent job's egress to the inference proxy, with ephemeral self-hosted runners behind a network policy or a blocking runtime egress monitor that always runs", so it too leans on the proxy OBAAF had not built.
   - The pinned checker clears it for a blocking Harden-Runner step, a third-party tool. Expectrail has not adopted one.
   - Since slice 2a.2, OBAAF no longer credits that step alone ([the upgrade note](upgrading.md)).
 
@@ -90,7 +90,7 @@ So each new agent job added two findings, and the answer was to accept them:
 
 The last three changes came within four and a half hours, each adding the same two findings for one new job. None of the 38 entries names an owner or a reason, and none expires.
 
-With Expectrail's pinned OBAAF, the gate passes at its head today: 38 findings accepted, "0 new", exit 0. For findings like these, "0 new" told nobody how much risk had been accepted, or by whom.
+With Expectrail's pinned OBAAF, the gate passes at its head today: 38 findings accepted, "0 new", exit 0. The report counts the accepted findings, but no acceptance names an owner or an expiry date.
 
 ### The incidents, as reported, were in the settings
 
@@ -117,7 +117,7 @@ Expectrail's `docs/obaaf.md` says it plainly: "No agent job has an enforced netw
 
 ### The checker was young
 
-Two independent reviews found ways past rules OBAAF had just written:
+Two independent reviews found ways past checks OBAAF had just written:
 
 - **GHA-024.** A review of the new rule `OBAAF-GHA-024` found two ways around it: reading a secret by a computed name, and spelling `secrets` in another case. It found more gaps besides. All were fixed in [#50](https://github.com/Obaaf/OBAAF/pull/50).
 - **Baselines.** A review of the new baselines found that a forged entry could accept a new high finding. This was fixed in #48 before it merged (`1df61fb`).
@@ -158,7 +158,7 @@ All of this is on the `flagship` branch at `7fb8cac`, after release 0.3.0, and i
 
 ## What this page does not show
 
-- **That OBAAF helps anyone else.** The only adopter on record is a project of OBAAF's author.
+- **That OBAAF helps anyone else.** The only adopter on record is a project of one of OBAAF's authors.
 - **Anything a token would show.** The settings were read with no token.
   - GitHub withheld the one thing the audit asked for and could not get: the bypass list.
   - The Actions policies and the names of secrets were not asked for, because GitHub does not show them without a token.
