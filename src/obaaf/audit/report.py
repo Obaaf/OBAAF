@@ -14,6 +14,8 @@ from obaaf.audit.settings import BY_KEY, SETTINGS
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
 CHECKS_SHOWN = 30  # required checks named in one line before "and N more"; the snapshot always has them all
+# A rule's note says what it compared; the longest the rules write, with two long branch names, is under this.
+NOTE_LIMIT = 600
 
 
 def counts(snapshot: dict) -> dict[str, int]:
@@ -305,7 +307,7 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
         if entry["cannot_tell"]:
             parts.append(f"cannot tell ({entry['cannot_tell']})")
         if not parts:
-            parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], 300)}")
+            parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], NOTE_LIMIT)}")
         lines.append(f"  {entry['id']}  {'; '.join(parts)}")
     return lines
 

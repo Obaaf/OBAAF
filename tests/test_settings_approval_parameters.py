@@ -19,7 +19,7 @@ from test_settings_audit import R, recording, replace
 from test_settings_rules import (ADMIN, BRANCH_RULES, COLLABORATORS, assess_files, job, of, status, with_body,
                                  workflow)
 
-from obaaf.audit import rules
+from obaaf.audit import report, rules
 
 CI = {"ci.yml": workflow("  pull_request:\n", job("test"))}
 WORKFLOW_SETTINGS = f"{R}/actions/permissions/workflow"
@@ -99,6 +99,16 @@ class GitHubsOwnAnswersTest(unittest.TestCase):
         result, = of(found, "OBAAF-SET-005")
         self.assertEqual(result["state"], "cannot-tell")
         self.assertIn('"require_human_approval" = true', result["message"])
+
+
+    def test_with_no_token_the_workflow_rule_names_it_too(self):
+        entries = with_body(recording("live-expectrail-2026-11-13"), BRANCH_RULES.replace(
+            "example-studio/game", "Expectrail/Expectrail"), lambda body: next(
+                r for r in body if r["type"] == "pull_request")["parameters"].update(require_human_approval=True))
+        result, = of(assess_files(entries, CI, token=None, repository="Expectrail/Expectrail"), "OBAAF-SET-013")
+        self.assertEqual((result["state"], result["unread"]), ("cannot-tell", ["workflow_permissions"]))
+        self.assertIn('The audited branches\' rules also ask for what this audit cannot weigh: on "main", '
+                      '"require_human_approval" = true', result["message"])
 
 
 class TheParameterListTest(unittest.TestCase):
@@ -215,7 +225,10 @@ class KnownParametersTest(unittest.TestCase):
                             ("allowed_merge_methods", "squash"), ("dismissal_restriction", "odd"),
                             ("dismissal_restriction", {"enabled": True, "allowed_actors": [],
                                                        "require_two_approvals_after_dismissal": 2}),
-                            ("dismissal_restriction", {"enabled": True, "allowed_actors": [{"id": 1}]})):
+                            ("dismissal_restriction", {"enabled": True, "allowed_actors": [{"id": 1}]}),
+                            ("dismissal_restriction", {"allowed_actors": []}),
+                            ("dismissal_restriction", {"enabled": True, "allowed_actors": [
+                                {"id": 1, "type": "Team", "name": "x"}]})):
             entries = approving(pull_request(ADMIN, required_approving_review_count=0, **{name: value}))
             found = assess_files(entries, CI)
             for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
@@ -275,6 +288,11 @@ class KnownParametersTest(unittest.TestCase):
         self.assertIn("CODEOWNERS file", result["message"])
         self.assertEqual(status(found, "OBAAF-SET-013"), "no-finding")
 
+    def test_a_finding_by_count_names_a_code_owners_review_it_could_not_weigh(self):
+        finding, = of(assess_files(pull_request(ADMIN, require_code_owner_review=True), CI), "OBAAF-SET-005")
+        self.assertEqual(finding["state"], "finding")
+        self.assertIn("Its rules also ask for what this audit cannot weigh: a code owner's review", finding["message"])
+
     def test_a_code_owners_review_with_approvals_the_accounts_can_give(self):
         entries = people(pull_request(ADMIN, require_code_owner_review=True), 3)
         result, = of(assess_files(entries, CI), "OBAAF-SET-005")
@@ -301,7 +319,7 @@ class TheExtraApprovalTest(unittest.TestCase):
         note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-005")
         self.assertIn('on "main" a pull request Copilot opens without a person needs one more, which they can give, '
                       'none being its author', note)
-        self.assertLessEqual(len(note), 300)  # the report prints notes up to 300 characters
+        self.assertLessEqual(len(note), report.NOTE_LIMIT)
 
     def test_a_finding_by_count_says_the_copilot_pull_request_cannot_get_its_approvals_either(self):
         finding, = of(assess_files(pull_request(ADMIN, **{EXTRA: True}), CI), "OBAAF-SET-005")

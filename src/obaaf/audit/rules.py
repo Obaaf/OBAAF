@@ -352,7 +352,7 @@ def _branch_requirements(run: _Run, branch: str) -> dict:
     return out
 
 
-def _shown(value, limit: int = 60) -> str:
+def _shown(value, limit: int = 100) -> str:
     """A parameter's value as JSON on one line, short and safe to print."""
     try:
         text = json.dumps(value, sort_keys=True, ensure_ascii=True)
@@ -1139,10 +1139,10 @@ def _parameters_text(need: dict) -> str:
     return "; ".join(need["parameters_unread"])
 
 
-def _also(run: _Run, clause: str) -> None:
+def _also(run: _Run, clause: str, who: str = "Its rules") -> None:
     """Name what was not weighed in the result just given, when that result was given for another reason."""
     if clause and run.results:
-        run.results[-1]["message"] += f" Its rules also ask for what this audit cannot weigh: {clause}."
+        run.results[-1]["message"] += f" {who} also ask for what this audit cannot weigh: {clause}."
 
 
 OWNER_CLAUSE = ("a code owner's review where a changed file has a code owner (require_code_owner_review), and the "
@@ -1609,6 +1609,8 @@ def rule_013(run: _Run) -> None:
         run.unread("whether workflows may approve pull requests",
                    "a workflow on any branch can ask for a token that writes to pull requests, and whether "
                    "workflows are allowed to approve them is not known", "workflow_permissions")
+        odd = [f"on {_q(b)}, {t}" for b in _branches(run) if (t := _parameters_text(_branch_requirements(run, b)))]
+        _also(run, "; ".join(odd), "The audited branches' rules")
         return
     branches = _branches(run)
     run.compared = (f"whether workflows may approve pull requests, and the approvals {_n(len(branches), 'audited branch')} "
