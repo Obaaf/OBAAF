@@ -1085,12 +1085,12 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
-                if not _held_by_actions(need["apps"][context]):
-                    foreign_only += 1
-                    continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
+                if not _held_by_actions(need["apps"][context]):
+                    foreign_only += 1
+                    continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 compared += 1
                 runs = sorted(((_report_run(f, j, branch), f, j) for f, j in matches),
                               key=lambda item: ORDER.index(item[0]))
@@ -1194,8 +1194,9 @@ def _check_rules(run: _Run, kind: str) -> None:
                                 f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and reports "
                                 f"{_names(_q(n) for n in names)}, which {'is' if len(names) == 1 else 'are'} "
                                 "required there from another app (and not from GitHub Actions). How GitHub weighs a "
-                                "check of that name from GitHub Actions against such a requirement is not "
-                                "established, so whether a failing run holds the merge up is not known.")
+                                f"check of {'that name' if len(names) == 1 else 'those names'} from GitHub Actions "
+                                "against such a requirement is not established, so whether a failing run holds the "
+                                "merge up is not known.")
             if unsure:
                 run.cannot_tell(f"{subject}: jobs whose check names could not be written out",
                                 f"{_n(unsure, 'job')} that may run on pull requests into {_q(branch)}: "
@@ -1434,8 +1435,8 @@ def rule_013(run: _Run) -> None:
                                    "whether it requires more approvals is not known; two or more would let the "
                                    "workflow's approval count" if need["code_owner"] else
                                    ". A rule about its reviews was not read in full, so whether it also requires a "
-                                   "code owner's review is not known; that would decide whether the workflow's "
-                                   "approval can be the one that counts"),
+                                   "code owner's review is not known; that could stop the workflow's approval being "
+                                   "the one that counts"),
                        *sorted(set(need["gaps"])))
             continue
         if need["code_owner"] and count == 1:
