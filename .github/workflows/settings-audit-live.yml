@@ -78,22 +78,38 @@ jobs:
       # no token: the workflow's token is for this repository and is never sent for another one.
       # That repository may be renamed or made private without this project knowing, so not being able
       # to read it at all is not a failure. Once it has been read, what GitHub shows anyone must be read
-      # too; and if it no longer has a ruleset, a notice says that this step met none. Its workflow files
-      # are not in this checkout, so here the twelve rules that compare with them answer "cannot tell",
+      # too; and if it no longer has a ruleset, a notice says that this step met none.
+      # Its workflow files are cloned first, with no credentials (a public repository needs none, and
+      # nothing in this job holds one for it), so that the twelve rules that compare settings with
+      # workflow files run on its own files, all of which must then be read. The commit is printed: the
+      # report is of the settings as they were at this run and of the files at that commit (plan slice
+      # 2b.4; docs/expectrail-settings-audit.md). If the clone fails (the repository was renamed or made
+      # private), the settings are audited without the files, those twelve rules answer "cannot tell",
       # and the report must say so.
       - name: A public repository that has rulesets, with no token
         run: |
           code=0
-          obaaf audit --repo Expectrail/Expectrail --no-token --fail-on never \
+          clone="$RUNNER_TEMP/expectrail"
+          files=()
+          if GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone --quiet --depth 1 --no-tags \
+              https://github.com/Expectrail/Expectrail.git "$clone"; then
+            echo "Workflow files: Expectrail/Expectrail at commit $(git -C "$clone" rev-parse HEAD)"
+            files=(--path "$clone" --workflows-read)
+          else
+            echo "::notice::Expectrail/Expectrail could not be cloned, so its settings are audited without its workflow files."
+            clone=""
+          fi
+          obaaf audit ${clone:+"$clone"} --repo Expectrail/Expectrail --no-token --fail-on never \
             --snapshot-out audit-live/rulesets.json \
             --record audit-live/rulesets > audit-live/rulesets.txt || code=$?
           cat audit-live/rulesets.txt
           python scripts/check_live_audit.py audit-live/rulesets.json --report audit-live/rulesets.txt \
             --exit-code "$code" --repo Expectrail/Expectrail --rate-limit-ok --unreadable-ok \
-            --notice-if-no-ruleset --read repository rulesets branch_rules branches environments
+            --notice-if-no-ruleset "${files[@]}" --read repository rulesets branch_rules branches environments
 
       # What GitHub answered to the two runs with no token is public data. It is printed on one line
-      # each so that it can be kept as a test recording.
+      # each so that it can be kept as a test recording, and so is the snapshot of the first adopter's
+      # settings, which a report can be made from again with no network (obaaf audit DIR --from-snapshot).
       - name: Print GitHub's answers to the runs with no token
         if: always()
         run: |
@@ -103,6 +119,10 @@ jobs:
                 "$name" "audit-live/$name/responses.json"
             fi
           done
+          if [ -f audit-live/rulesets.json ]; then
+            python -c 'import json, sys; print("SNAPSHOT rulesets " + json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' \
+              audit-live/rulesets.json
+          fi
 
       - name: Keep the snapshots, the reports and the answers to the runs with no token
         if: always()
