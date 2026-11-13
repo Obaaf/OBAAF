@@ -231,9 +231,14 @@ def judge(args: argparse.Namespace) -> int:
     if args.inside_prefix in in_ascii:
         failures.append(f"the inside label {args.inside_prefix} appears in the capture of the external interface")
 
-    # Must still work.
+    # Must still work. curl checks the server's certificate against the
+    # runner's own trust store (AWF adds no authority of its own without
+    # --ssl-bump, which the action never passes), so status 0 with any HTTP
+    # code means the listed host's own server answered. Its code is not
+    # asserted: api.github.com answers 403 to an address that has used up
+    # GitHub's limit for requests without a token, outside the sandbox too.
     allowed = in_results.get("allowed-https", [])
-    if allowed[:2] != ["0", "200"]:
+    if len(allowed) < 2 or allowed[0] != "0" or not re.fullmatch(r"[1-5][0-9][0-9]", allowed[1]):
         failures.append(f"the listed host did not answer inside the sandbox (curl status and HTTP code: {' '.join(allowed) or 'none'})")
 
     # The action itself must have run the command and returned its status.
@@ -301,7 +306,9 @@ def judge(args: argparse.Namespace) -> int:
              "| --- | --- | --- | --- |\n"]
     for attempt, control, verdict, status in rows:
         lines.append(f"| `{attempt}` | {control} | {verdict} | {status} |\n")
-    lines.append(f"\nMust still work, the listed host: curl status and HTTP code `{' '.join(allowed) or 'none'}`\n\n")
+    allowed_out = out_results.get("allowed-https", [])
+    lines.append(f"\nMust still work, the listed host: curl status and HTTP code `{' '.join(allowed) or 'none'}` "
+                 f"(outside the sandbox: `{' '.join(allowed_out) or 'none'}`)\n\n")
     lines.append("No unlisted name left the runner in a DNS query.\n\n" if not queried else
                  "**Unlisted names left the runner in DNS queries** (see Failed, below).\n\n")
     lines.append("Recorded, not asserted:\n\n")

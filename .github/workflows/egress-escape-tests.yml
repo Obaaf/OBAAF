@@ -324,7 +324,7 @@ jobs:
           if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
           if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
           if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
-          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]; then ok "only the proxy's log is left of the run's private directory"; else bad "the run's private directory holds more than the proxy's log"; fi
+          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"
           if [ -z "$found" ]; then ok "what the command wrote to its home and to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp"; else bad "left behind: $found"; fi
           exit "$fail"
