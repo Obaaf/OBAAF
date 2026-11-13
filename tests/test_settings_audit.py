@@ -3,9 +3,9 @@ and above all how it records what it could not read.
 
 Three of the recordings under tests/fixtures/settings/ (public-no-token, workflow-token, admin-token) were
 written by hand from the example responses in GitHub's REST reference (read 2026-11-12). They were not
-recorded from a live repository. The two whose names begin with "live-" are GitHub's own answers to a run
+recorded from a live repository. The three whose names begin with "live-" are GitHub's own answers to a run
 with no token, as the workflow .github/workflows/settings-audit-live.yml printed them (RecordedFromGitHubTest
-says which run). That workflow runs the same reader against GitHub itself whenever the reader changes.
+says which run for the two of 2026-11-12; test_settings_adopter.py is about the one of 2026-11-13). That workflow runs the same reader against GitHub itself whenever the reader changes.
 """
 
 import contextlib
