@@ -296,6 +296,14 @@ class _Run:
 ACTIONS_OR_ANY = frozenset((None, ACTIONS_APP))
 
 
+def _held_by_actions(apps: set) -> bool:
+    """Whether a check of this name from GitHub Actions is one the requirements wait for: required from
+    GitHub Actions, or from any app and no other. Where another app is named, how GitHub weighs a check
+    of the same name from Actions is not established, so this is False and the rules say "cannot tell"
+    or leave it to OBAAF-SET-006."""
+    return ACTIONS_APP in apps or apps == {None}
+
+
 def _branch_requirements(run: _Run, branch: str) -> dict:
     """The checks and approvals required on a branch, from rulesets and from classic protection, with
     whether each list is known to be whole.
@@ -1076,8 +1084,8 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
-                if not (need["apps"][context] & ACTIONS_OR_ANY):
-                    continue  # required from another app only: what that app reports is not read (OBAAF-SET-006)
+                if not _held_by_actions(need["apps"][context]):
+                    continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
@@ -1138,14 +1146,18 @@ def _check_rules(run: _Run, kind: str) -> None:
                 if job["check"]["kind"] != "computed" and names is not None:
                     # Every check the job reports must be required: one of a matrix's checks, or one of a
                     # called workflow's, being required leaves the others free to fail.
-                    compared += 1
-                    # A requirement tied to another app alone is not one a failing Actions check holds up.
-                    loose = [name for name in names if not (need["apps"].get(name, set()) & ACTIONS_OR_ANY)]
+                    loose = [name for name in names if name not in need["apps"]]
                     if loose:
+                        compared += 1
                         unrequired.append((file, job, loose, len(names)))
+                    elif all(_held_by_actions(need["apps"][name]) for name in names):
+                        compared += 1
+                    else:
+                        # A name required from another app: whether a failing Actions check of that name
+                        # holds the merge up is not established.
+                        unsure += 1
                     continue
-                verdicts = [_reports(job, context) for context, apps in need["apps"].items()
-                            if apps & ACTIONS_OR_ANY]
+                verdicts = [_reports(job, context) for context in need["apps"]]
                 if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
                     compared += 1
                     unrequired.append((file, job, None, None))
@@ -1171,12 +1183,9 @@ def _check_rules(run: _Run, kind: str) -> None:
                              "calls": f"reports the checks of the workflow it calls as {_q(name + ' / ...')}, "
                                       "none of which is"}.get(job["check"]["kind"],
                                                               f"reports the check {_q(name)}, which is not")
-                elsewhere = [n for n in (loose or []) if n in need["apps"]]
-                also = (f" {_names(_q(n) for n in elsewhere)} {'is' if len(elsewhere) == 1 else 'are'} required only "
-                        "from another app, which a failing GitHub Actions check does not hold up." if elsewhere else "")
                 run.finding(f"{subject}: job {_job_label(file, job)}", "medium",
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
-                            f"required ({_do(len(required), 'check', 'is', 'are')} required there).{also} A pull "
+                            f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
                             f"request can merge while the job is failing.{source}")
             if unsure:
                 run.cannot_tell(f"{subject}: jobs whose check names could not be written out",
@@ -1408,10 +1417,12 @@ def rule_013(run: _Run) -> None:
                 run.unread(subject, f"{lead[:-1]}, and how many approvals {_q(branch)} requires is not known",
                            *sorted(set(need["gaps"])))
             continue
-        if need["code_owner"] and count == 1 and not need["approvals_whole"]:
-            run.unread(subject, f"{lead[:-1]}, and {_q(branch)} requires at least 1 approval and a code owner's "
-                                "review; how many approvals its classic protection rule requires is not known, "
-                                "and two or more would let the workflow's approval count",
+        if count == 1 and not need["approvals_whole"]:
+            run.unread(subject, f"{lead[:-1]}, and {_q(branch)} requires at least 1 approval"
+                                + (" and a code owner's review" if need["code_owner"] else "")
+                                + "; a rule about its reviews was not read in full, so whether it requires more "
+                                  "approvals or a code owner's review is not known, and that decides whether the "
+                                  "workflow's approval can count",
                        *sorted(set(need["gaps"])))
             continue
         if need["code_owner"] and count == 1:

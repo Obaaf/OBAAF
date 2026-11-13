@@ -1468,15 +1468,21 @@ class SecondReviewTest(unittest.TestCase):
         found = assess_files(self.require(("test (3.13)", 15368)), files)
         self.assertEqual(status(found, "OBAAF-SET-008"), "cannot-tell")
 
-    def test_a_requirement_tied_to_another_app_is_not_met_by_the_actions_job(self):
+    def test_a_requirement_tied_to_another_app_is_cannot_tell(self):
+        # How GitHub weighs a check of the same name from Actions against a requirement tied to another app
+        # is not established (its pages say a status from a different app prevents merging, and that the
+        # most restrictive version of a rule applies), so neither "no finding" nor a finding is claimed.
         files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
-        finding, = of(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008", "finding")
-        self.assertIn("ci.yml#test", finding["subject"])
+        self.assertEqual(status(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008"), "cannot-tell")
         self.assertEqual(status(assess_files(self.require(("test", 15368)), files), "OBAAF-SET-008"), "no-finding")
         self.assertEqual(status(assess_files(self.require(("test", None)), files), "OBAAF-SET-008"), "no-finding")
         matrix = {"ci.yml": workflow("  pull_request:\n", job("t", "    strategy:\n      matrix:\n        v: [a, b]\n"))}
         found = assess_files(self.require(("t (a)", 99), ("t (b)", 99)), matrix)
-        self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 1)
+        self.assertEqual(status(found, "OBAAF-SET-008"), "cannot-tell")
+        # A name nobody requires is still a finding beside one required from another app.
+        found = assess_files(self.require(("t (a)", 99)), matrix)
+        finding, = of(found, "OBAAF-SET-008", "finding")
+        self.assertIn('"t (b)"', finding["message"])
 
     # -- the fourth pass
     def test_one_check_required_from_two_apps(self):
@@ -1495,11 +1501,20 @@ class SecondReviewTest(unittest.TestCase):
             # ...and the Actions one holds the job up, so its failure blocks a merge.
             self.assertEqual(status(found, "OBAAF-SET-008"), "no-finding", (first, then))
 
-    def test_a_check_required_only_from_another_app_is_said_so(self):
+    def test_a_check_required_from_any_app_and_from_another_app(self):
+        def add(app):
+            def change(body):
+                body.append({"type": "required_status_checks", "ruleset_source_type": "Repository",
+                             "ruleset_source": "example-studio/game", "ruleset_id": 73,
+                             "parameters": {"required_status_checks": [{"context": "test", "integration_id": app}]}})
+            return change
         files = {"ci.yml": workflow("  pull_request:\n", job("test"))}
-        finding, = of(assess_files(self.require(("test", 99)), files), "OBAAF-SET-008", "finding")
-        self.assertIn("required only from another app", finding["message"])
+        entries = with_body(self.require(("test", None)), BRANCH_RULES, add(99))
+        self.assertEqual(status(assess_files(entries, files), "OBAAF-SET-008"), "cannot-tell")
+        # SET-007 leaves such a check to SET-006, which cannot tell what the other app reports.
         filtered = {"ci.yml": workflow("  pull_request:\n    paths: ['src/**']\n", job("test"))}
+        found = assess_files(entries, filtered)
+        self.assertEqual(of(found, "OBAAF-SET-007"), [])
         self.assertEqual(of(assess_files(self.require(("test", 99)), filtered), "OBAAF-SET-007"), [])
 
     def test_one_approval_and_a_code_owner_with_classic_protection_unread(self):
@@ -1511,7 +1526,7 @@ class SecondReviewTest(unittest.TestCase):
         result, = of(assess_files(entries, {}), "OBAAF-SET-013")
         self.assertEqual(result["state"], "cannot-tell")
         self.assertIn("branch_protection", result["unread"])
-        self.assertIn("two or more would let the workflow's approval count", result["message"])
+        self.assertIn("whether it requires more approvals or a code owner's review is not known", result["message"])
 
     def test_a_runner_group_alone_does_not_show_a_self_hosted_runner(self):
         files = {"ci.yml": workflow("  push:\n", "  build:\n    runs-on:\n      group: big-runners\n"
