@@ -382,7 +382,7 @@ def _other_form(name: str, value) -> bool:
     return False
 
 
-def _pull_request_parameters(out: dict, parameters: dict, count: int, ruleset) -> None:
+def _pull_request_parameters(out: dict, parameters: dict, count: int | None, ruleset) -> None:
     """Read the parameters of one `pull_request` rule beyond its count, into ``out``: whether it asks for a
     code owner's review, its parameters about approvals that the rules cannot judge (``parameters_unread``,
     each a clause naming the parameter), and what the rules make of the two whose effect depends on the
@@ -415,8 +415,8 @@ def _pull_request_parameters(out: dict, parameters: dict, count: int, ruleset) -
             out["code_owner"] = True
         elif value and name == "require_last_push_approval":
             out["last_push"].append(where)
-        elif value and name == "require_extra_approval_for_unattributed_changes":
-            out["extra"].append((where, count))
+        elif value and name == "require_extra_approval_for_unattributed_changes" and count is not None:
+            out["extra"].append((where, count))  # with no count known, the rule is "cannot tell" anyway
 
 
 def _required_reviewers(value):
@@ -489,6 +489,8 @@ def _requirements(run: _Run, branch: str) -> dict:
                 if not _is_int(count) or count < 0:
                     out["approvals_whole"] = False
                     out["gaps"].append("branch_rules")
+                    if isinstance(parameters, dict):  # its other parameters are still named
+                        _pull_request_parameters(out, parameters, None, rule["ruleset_id"])
                     continue
                 out["approvals"] = max(out["approvals"] or 0, count)
                 _pull_request_parameters(out, parameters, count, rule["ruleset_id"])

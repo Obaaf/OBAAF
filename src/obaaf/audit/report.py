@@ -14,7 +14,8 @@ from obaaf.audit.settings import BY_KEY, SETTINGS
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
 CHECKS_SHOWN = 30  # required checks named in one line before "and N more"; the snapshot always has them all
-# A rule's note says what it compared; the longest the rules write, with two long branch names, is under this.
+# A rule's note says what it compared. The longest the rules can write, OBAAF-SET-005's with two branch names of
+# 40 characters in each of its clauses, is about 475 characters.
 NOTE_LIMIT = 600
 
 

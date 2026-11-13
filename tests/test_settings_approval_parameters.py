@@ -182,6 +182,17 @@ class AParameterTheRulesDoNotKnowTest(unittest.TestCase):
             result, = of(assess_files(entries, CI), rule)
             self.assertEqual((result["state"], result["unread"]), ("cannot-tell", ["branch_protection"]), rule)
             self.assertIn('"future" = true (ruleset 42)', result["message"], rule)
+        # The count of the very rule that carries it not being a number does not hide it either.
+        for count in ("1", None, -1):
+            bad = approving(people(pull_request(ADMIN, future=True), 3))
+            bad = with_body(bad, BRANCH_RULES, lambda body, c=count: next(
+                r for r in body if r["type"] == "pull_request")["parameters"].__setitem__(
+                    "required_approving_review_count", c))
+            found = assess_files(bad, CI)
+            for rule in ("OBAAF-SET-005", "OBAAF-SET-013"):
+                result, = of(found, rule)
+                self.assertEqual(result["state"], "cannot-tell", (count, rule))
+                self.assertIn('"future" = true (ruleset 42)', result["message"], (count, rule))
         owner = approving(pull_request(ADMIN, require_code_owner_review=True, future=True))
         result, = of(assess_files(owner, CI), "OBAAF-SET-013")
         self.assertEqual(result["state"], "cannot-tell")
