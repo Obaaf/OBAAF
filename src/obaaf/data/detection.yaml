@@ -94,6 +94,11 @@ upload_actions:
   - manleydev/butler-publish-itchio-action
   - yeslayla/butler-publish-itchio-action
   - Apple-Actions/upload-testflight-build
+  # Added by flagship slice 2d.2d: actions whose only job is to publish a package.
+  - pypa/gh-action-pypi-publish
+  - js-devtools/npm-publish
+  - goreleaser/goreleaser-action
+  - rubygems/release-gem
 upload_commands:
   - '(^|[\s;&|(])steamcmd\b.*\+run_app_build'
   - '(^|[\s;&|(])butler\s+push\b'
@@ -109,7 +114,22 @@ upload_commands:
   - '(^|[\s;&|(])cargo\s+publish\b'
   - '(^|[\s;&|(])dotnet\s+nuget\s+push\b'
   - '(^|[\s;&|(])docker\s+push\b'
-  - '(^|[\s;&|(]|\./)scripts?/publish'
+  - '(^|[\s;&|(]|\./)scripts?/(publish|release|deploy)'
+  # Added by flagship slice 2d.2d, from a reviewer's attempts on OBAAF-GHA-015. Each is matched in the
+  # script as written, with continued lines joined, and with quotes taken out.
+  - '(^|[\s;&|(])gh\s+release\s+edit\b'
+  - '(^|[\s;&|(])gh\s+api\b[^\n]*/releases\b'
+  - '(^|[\s;&|(])git\s+push\b[^\n]*\s--(tags|follow-tags)\b'
+  - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3\s+(cp|sync|mv)\b'
+  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]*\s--push\b'
+  - '(^|[\s;&|(])docker\s+(image|manifest)\s+push\b'
+  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+(-\S+\s+)*(npm\s+)?publish\b'
+  - '(^|[\s;&|(])cargo\s+(\+\S+\s+)?publish\b'
+  - '(^|[\s;&|(])(uv|poetry|hatch|flit)\s+publish\b'
+  - '(^|[\s;&|(])gem\s+push\b'
+  - '(^|[\s;&|(])(firebase\s+deploy|wrangler\s+(deploy|publish)|netlify\s+deploy\b[^\n]*--prod|vercel\b[^\n]*--prod)\b'
+  - '(^|[\s;&|(])curl\b[^\n]*\s(-T|--upload-file)\s'
+  - '\b(createRelease|uploadReleaseAsset|updateRelease)\s*\('
 
 # Jenkins only (advisory): Pipeline steps and commands that publish outside Jenkins. The
 # commands extend upload_commands for Jenkinsfiles; they are kept separate so adding them
@@ -210,6 +230,61 @@ signing_commands:
 signing_actions:
   - crazy-max/ghaction-import-gpg
   - apple-actions/import-codesign-certs
+
+# Inputs that an action runs as a shell command or a script (OBAAF-GHA-010, flagship slice 2d.2d). An
+# expression written in one is expanded before the action runs it, as in a step's `run`. Matched by the
+# action's name in any letter case; an action not listed here is not read.
+script_inputs:
+  actions/github-script: [script]
+  azure/cli: [inlineScript]
+  azure/powershell: [inlineScript]
+  appleboy/ssh-action: [script]
+  garygrossgarten/github-action-ssh: [command]
+  google-github-actions/ssh-compute: [command, script]
+  nick-fields/retry: [command, on_retry_command]
+  nick-invision/retry: [command, on_retry_command]
+  wandalen/wretry.action: [command]
+  addnab/docker-run-action: [run]
+  uraimo/run-on-arch-action: [run, install]
+  cypress-io/github-action: [build, start, command]
+
+# Secret names that hold a credential for publishing a release: a package registry, an app store, a
+# game store, a container registry (OBAAF-GHA-015, flagship slice 2d.2d). Matched without regard to
+# letter case. A job that holds one and that untrusted input can start is reported even when nothing
+# else marks it a release job.
+publishing_secret_patterns:
+  - '(^|_)NPM_?(TOKEN|AUTH|PUBLISH)'
+  - 'PYPI'
+  - 'TWINE_(PASSWORD|TOKEN)'
+  - 'CARGO_REGISTRY_TOKEN|CRATES_IO'
+  - 'RUBYGEMS|GEM_HOST_API_KEY'
+  - 'NUGET_?(API_?)?KEY'
+  - 'OSSRH|SONATYPE|MAVEN_(CENTRAL_)?(PASSWORD|TOKEN)'
+  - 'DOCKER_?(HUB)?_?(ACCESS_)?(TOKEN|PASSWORD|PAT)'
+  - '(^|_)(GHCR|REGISTRY|QUAY)_?(TOKEN|PASSWORD|PAT)'
+  - 'HEX_API_KEY|COCOAPODS_TRUNK_TOKEN|PUB_DEV|VSCE_PAT|OVSX_PAT'
+  - 'APP_?STORE_?CONNECT|ASC_(KEY|API)|APPLE_(API|ID)_?(KEY|PASSWORD)'
+  - 'GOOGLE_PLAY|PLAY_STORE|PLAY_SERVICE_ACCOUNT'
+  - 'STEAM_?(USERNAME|PASSWORD|CONFIG|TOTP)|STEAMWORKS'
+  - 'BUTLER_API_KEY|ITCH_?IO'
+  - 'CHROME_WEBSTORE|AMO_(JWT|API)|FIREFOX_ADDONS'
+  - '(^|_)(RELEASE|PUBLISH)_?(TOKEN|KEY|PAT)'
+
+# Actions that publish or deploy and are not among upload_actions (OBAAF-GHA-015, flagship slice 2d.2d).
+# They do not put a job in the release lane, which would bring the other release rules; a job that uses
+# one and that untrusted input can start is reported by OBAAF-GHA-015 as one that may release.
+publishing_actions:
+  - docker/build-push-action
+  - actions/deploy-pages
+  - peaceiris/actions-gh-pages
+  - jamesives/github-pages-deploy-action
+  - cloudflare/wrangler-action
+  - cloudflare/pages-action
+  - amondnet/vercel-action
+  - aws-actions/amazon-ecs-deploy-task-definition
+  - azure/webapps-deploy
+  - google-github-actions/deploy-cloudrun
+  - changesets/action
 
 # Evidence of an egress restriction for agent jobs (R7, FR7).
 egress_actions:

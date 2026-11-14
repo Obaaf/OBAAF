@@ -52,9 +52,40 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
-# Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
+# The shape of a GitHub-hosted runner label. Only used to find a hosted label written inside a
+# runtime selector; whether a label IS GitHub-hosted is decided by HOSTED_LABELS (flagship slice 2d.2d).
 # `\Z`, not `$`, which also matches before a line break at the end (found by the review of 2d.7).
 HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+\Z")
+# The labels of GitHub's standard hosted runners and of its macOS larger runners, which GitHub names
+# itself. Any other label, `ubuntu-gpu` or `windows-builder` included, may be a self-hosted runner's
+# custom label or a larger runner's name (which the organization picks), so the checker cannot tell
+# what runs the job (flagship slice 2d.2d; before, any `ubuntu-*`, `windows-*` or `macos-*` label was
+# taken for GitHub-hosted). Written from GitHub's runner reference as the author knew it on
+# 2026-11-14; the page could not be read from the session that wrote this. A label missing here
+# gives a medium "cannot tell", never a missed self-hosted runner. Retired labels (ubuntu-20.04,
+# windows-2019, macos-12, macos-13) are left out: no hosted runner takes them any more.
+HOSTED_LABELS = frozenset({
+    "ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-slim", "ubuntu-24.04-arm", "ubuntu-22.04-arm",
+    "windows-latest", "windows-2025", "windows-2022", "windows-11-arm",
+    "macos-latest", "macos-26", "macos-15", "macos-14", "macos-15-intel",
+    "macos-latest-large", "macos-15-large", "macos-14-large",
+    "macos-latest-xlarge", "macos-26-xlarge", "macos-15-xlarge", "macos-14-xlarge",
+})
+# Events whose payload has `pull_request.head.repo`, which a fork-safe runner selector tests.
+PULL_REQUEST_PAYLOAD_EVENTS = frozenset({"pull_request", "pull_request_target", "pull_request_review",
+                                         "pull_request_review_comment"})
+
+
+def is_self_hosted_label(label) -> bool:
+    """Whether a runner label names a self-hosted runner: `self-hosted` in any letter case, with any
+    space around it, also as one word of a label written with spaces or commas in it, or a runner
+    group. Fails closed: a label GitHub might read differently is taken for the self-hosted one."""
+    text = str(label).strip().lower()
+    return text.startswith("group:") or "self-hosted" in re.split(r"[\s,]+", text)
+
+
+def is_hosted_label(label) -> bool:
+    return str(label).lower() in HOSTED_LABELS
 # A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
 # reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
 _YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
@@ -128,7 +159,7 @@ UNTRUSTED_FIELDS = [
     r"github\.event\.(head_commit|commits(\[[^\]]*\]|\.\*)?)\.(message|author\.(name|email)|committer\.(name|email))\b",
     r"github\.event\.workflow_run\.(head_branch|display_title)\b",
     r"github\.event\.workflow_run\.head_commit\.(message|author\.(name|email))\b",
-    r"github\.event\.pages(\[[^\]]*\]|\.\*)?\.page_name\b",
+    r"github\.event\.pages(\[[^\]]*\]|\.\*)?\.(page_name|title|summary)\b",
     r"github\.head_ref\b",
 ]
 UNTRUSTED_FIELDS_RE = re.compile("|".join(f"(?:{p})" for p in UNTRUSTED_FIELDS))
@@ -150,8 +181,43 @@ UNTRUSTED_PATHS = [
     ({"github"}, {"event"}, {"workflow_run"}, {"head_branch", "display_title"}),
     ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"message"}),
     ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"author"}, _IDENTITY),
-    ({"github"}, {"event"}, {"pages"}, None, {"page_name"}),
+    ({"github"}, {"event"}, {"pages"}, None, {"page_name", "title", "summary"}),
     ({"github"}, {"head_ref"}),
+    # Added by flagship slice 2d.2d, from a reviewer's attempts on OBAAF-GHA-010:
+    # what an `edited` event says the title, body or base branch was before (`changes.title.from`);
+    ({"github"}, {"event"}, {"changes"}, _TEXT, {"from"}),
+    # a review comment's file path and diff hunk, which the pull request's files decide;
+    ({"github"}, {"event"}, {"comment"}, {"path", "diff_hunk"}),
+    # the committer of a commit, which its author writes like the author's own name and e-mail;
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"committer"}, _IDENTITY),
+    # the files a pushed commit adds, removes or changes, whose names its author picks;
+    ({"github"}, {"event"}, {"head_commit"}, {"added", "removed", "modified"}),
+    ({"github"}, {"event"}, {"head_commit"}, {"added", "removed", "modified"}, None),
+    ({"github"}, {"event"}, {"commits"}, None, {"added", "removed", "modified"}),
+    ({"github"}, {"event"}, {"commits"}, None, {"added", "removed", "modified"}, None),
+    # the answer that marked a discussion answered;
+    ({"github"}, {"event"}, {"answer"}, {"body"}),
+    # the fork a run came from (`workflow_run.head_repository`), and the branches of its pull requests.
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_repository"},
+     {"name", "full_name", "description", "homepage", "default_branch"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"pull_requests"}, None, {"head"}, {"ref"}),
+    # From the second reviewer of 2d.2d: a merge group's commit (its message holds the queued pull
+    # requests' titles), an issue or discussion transferred here (`changes.new_issue`), the fork made
+    # by a `fork` event, the path of the workflow a run came from (a fork's pull request can add one),
+    # and the commits and branches `check_suite`, `check_run` and `status` events carry.
+    ({"github"}, {"event"}, {"merge_group"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"merge_group"}, {"head_commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"merge_group"}, {"head_ref"}),
+    ({"github"}, {"event"}, {"changes"}, {"new_issue", "new_discussion"}, _TEXT),
+    ({"github"}, {"event"}, {"forkee"}, {"name", "full_name", "description", "homepage", "default_branch"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"path"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_branch"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"check_run"}, {"check_suite"}, {"head_branch"}),
+    ({"github"}, {"event"}, {"commit"}, {"commit"}, {"message"}),          # a `status` event's commit
+    ({"github"}, {"event"}, {"commit"}, {"commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"branches"}, None, {"name"}),
 ]
 
 # A pull request's code (OBAAF-GHA-002, OBAAF-GHA-012), as context references (flagship slice 2d.2c).
@@ -1334,6 +1400,77 @@ class Job:
             return as_text(env.get("name") or "") or None
         return as_text(env) if env else None
 
+    def environment_candidates(self) -> tuple[list[str], bool]:
+        """The names the job's environment can have, and whether that is all of them (flagship slice
+        2d.2d). A name written as text is itself. A name written as one expression gives the text values
+        written in it (`github.ref == 'refs/heads/main' && 'production' || 'staging'`) and, for each
+        `matrix.<key>` it reads, the values the matrix written out in the file gives that key; it is all
+        of them only when the expression reads nothing but the matrix and every such value is plain
+        text. Anything else (an input, a variable, the event, a computed matrix) leaves the list open."""
+        kind, written = self.environment_reading
+        if kind == "none":
+            return [], True
+        if kind != "expression":
+            return [as_text(written)], kind == "literal"
+        names: list[str] = []
+        complete = True
+        text = str(written)
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or text.strip() != expr_mod.OPEN + found[0] + "}}":
+            complete = False        # text around the expression, or several expressions
+        for body in found:
+            try:
+                toks = expr_mod.tokens(body)
+                refs = expr_mod.refs(body)
+            except expr_mod.TooComplex:
+                return names, False
+            names += [value for kind_, value in toks if kind_ == "str"]
+            # A function can build a name from pieces (`format('{0}{1}', 'pr', 'oduction')`), so a name
+            # given by one is never all of them.
+            if any(a[0] == "id" and b == ("op", "(") for a, b in zip(toks, toks[1:])):
+                complete = False
+            for ref in refs:
+                root = ref.path[0].value.lower() if ref.path and ref.path[0].kind == expr_mod.NAME else ""
+                if root != "matrix" or len(ref.path) != 2 or ref.path[1].kind != expr_mod.NAME:
+                    complete = False
+                    continue
+                values = self._matrix_values(ref.path[1].value)
+                if values is None:
+                    complete = False
+                else:
+                    names += values
+        return list(dict.fromkeys(names)), complete
+
+    def _matrix_values(self, name: str) -> list[str] | None:
+        """The text values a matrix written out in the file gives `name`, from its list and its
+        `include` entries; None when they cannot all be read as text (the same limits as for runner
+        labels: a merge key in the file, a computed matrix or entry, a key in another case or not plain
+        ASCII text, a value that is not text or that YAML 1.2 could read as other than text)."""
+        if self.workflow.has_merge_key:
+            return None
+        strategy = self.raw.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            return None
+        include = matrix.get("include", [])
+        if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
+            return None
+        keys = list(matrix) + [key for entry in include for key in entry]
+        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
+                                     for key in keys):
+            return None
+        if any(key != name and key.lower() == name.lower() for key in keys):
+            return None
+        listed = matrix.get(name, [])
+        if not isinstance(listed, list):
+            return None
+        out = []
+        for value in list(listed) + [entry[name] for entry in include if name in entry]:
+            if not isinstance(value, str) or "${{" in value or _YAML12_SCALAR_RE.fullmatch(value):
+                return None
+            out.append(value)
+        return out
+
     @property
     def cache_mode(self) -> str | None:
         value = self.raw.get("cache-mode", self.workflow.raw.get("cache-mode"))
@@ -1358,8 +1495,7 @@ class Job:
 
     @property
     def self_hosted(self) -> bool:
-        labels = [label.lower() for label in self.runs_on]
-        return any(label == "self-hosted" or label.startswith("group:") for label in labels)
+        return any(is_self_hosted_label(label) for label in self.runs_on)
 
     def runner_label_sets(self) -> list[list[str]] | None:
         """Each set of labels the job can run on, with `${{ matrix.x }}` and `${{ matrix.x || 'label' }}`
@@ -1455,10 +1591,9 @@ class Job:
             return "unknown"
         kinds = set()
         for labels in sets:
-            lower = [label.lower() for label in labels]
-            if any(label == "self-hosted" or label.startswith("group:") for label in lower):
+            if any(is_self_hosted_label(label) for label in labels):
                 kinds.add("self-hosted")
-            elif len(lower) == 1 and HOSTED_LABEL_RE.match(lower[0]):
+            elif len(labels) == 1 and is_hosted_label(labels[0]):
                 kinds.add("github-hosted")
             else:
                 kinds.add("unknown")
@@ -1469,16 +1604,42 @@ class Job:
 
     @property
     def mixed_runner_expression(self) -> bool:
-        """A runtime selector mentioning both hosted and self-hosted alternatives.
+        """A runtime selector that sends a fork's pull request to a standard GitHub-hosted runner, in
+        the form the checker recognises (flagship slice 2d.2d):
+        `github.event.pull_request.head.repo.full_name == github.repository && <anything> || '<hosted>'`
+        (or `!=` with the two values the other way round, or the two sides of the test swapped).
 
-        This is uncertainty, not proof that a fork-safe selector is correct. Literal
-        matrices are handled by runner_kind and retain findings for known pools.
-        """
-        if self.runner_label_sets() is not None or self.self_hosted:
+        Before 2d.2d any selector that mentioned a hosted label and `self-hosted` counted, so
+        `false && 'ubuntu-latest' || 'self-hosted'` did. `head.repo.fork && '<hosted>' || '<self-hosted>'`
+        no longer counts: for a pull request whose fork was deleted, `head.repo` is null and the selector
+        picks the second value (whether GitHub starts a run then is not verified), where the form above
+        picks the hosted one. The rule still decides whether the job's events carry
+        `pull_request.head.repo`; on any other event the form picks the second value."""
+        if self.runner_label_sets() is not None or self.self_hosted or len(self.runs_on) != 1:
             return False
-        labels = ' '.join(self.runs_on).lower()
-        return ('${{' in labels and 'self-hosted' in labels
-                and re.search(r"['\"](?:ubuntu|windows|macos)-[a-z0-9.-]+['\"]", labels) is not None)
+        text = self.runs_on[0].strip()
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or text != expr_mod.OPEN + found[0] + "}}":
+            return False
+        body = re.sub(r"\s+", "", found[0].replace('"', "'"))
+        head = r"github\.event\.pull_request\.head\.repo"
+        hosted = r"'([a-z0-9.-]+)'"
+        value = r"(?:'[^']*'|[a-z0-9_.()\[\]',-]+)"
+        forms = [
+            rf"(?:{head}\.full_name==github\.repository|github\.repository=={head}\.full_name)&&{value}\|\|{hosted}",
+            rf"(?:{head}\.full_name!=github\.repository|github\.repository!={head}\.full_name)&&{hosted}\|\|{value}",
+        ]
+        lowered = body.lower()
+        for form in forms:
+            match = re.fullmatch(form, lowered)
+            if match and is_hosted_label(match.group(1)) and "'" not in body.split("&&")[0]:
+                return True
+        return False
+
+    @property
+    def selector(self) -> str:
+        """The runtime selector as written, without the spaces, for a finding's facts."""
+        return re.sub(r"\s+", "", " ".join(self.runs_on))
 
     @property
     def reusable(self) -> str | None:
@@ -1559,8 +1720,11 @@ class Job:
             if any(step.uses_action(a) for a in actions):
                 out.append(step)
                 continue
-            text = step.text()
-            if text and any(rx.search(text) for rx in commands):
+            # Everything the step runs as a command line, also with each command continued on the next
+            # line joined to it and with quotes taken out (`"npm" publish`), so that neither hides a
+            # command a list names (flagship slice 2d.2d). Both readings are matched.
+            text = step.scripts()
+            if text and any(rx.search(variant) for variant in upload_readings(text) for rx in commands):
                 out.append(step)
         return out
 
@@ -1573,6 +1737,14 @@ class Job:
             elif step.text() and any(rx.search(step.text()) for rx in rxs):
                 out.append(step)
         return out
+
+
+def upload_readings(text: str) -> list[str]:
+    """A script as written, with lines continued by a backslash, a backtick or a caret joined, and the
+    same with quote characters taken out: the readings release commands are looked for in."""
+    joined = re.sub(r"[\\`^]\r?\n[ \t]*", " ", text)
+    unquoted = re.sub(r"[\"']", "", joined)
+    return [text, joined, unquoted]
 
 
 @dataclass
@@ -2054,14 +2226,28 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     return list(dict.fromkeys(out))
 
 
-# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod,
-# app-store). A name that says it is not production, or comes before it, is taken at its word.
+# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod, app-store,
+# euproduction), as before slice 2d.2d, with two changes from its reviewers: words that only hold those
+# letters (`kitchen`, `restore`, `keystore`, `reproducible`, `product`) are taken out first, and a few
+# short names are added as whole words (`live`, `prd`, `cd`, `pypi`, `testpypi`, `npm`, `crates`,
+# `rubygems`, `nuget`, `pages`, `testflight`). `switch` still counts: it is a game console a studio
+# releases to.
+# A name that says it is not production, or comes before it, is taken at its word.
 RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
+NOT_RELEASE_RE = re.compile(r"restor|datastore|keystore|firestore|filestore|objectstore|kitchen|stitch|pitch|"
+                            r"glitch|twitch|(?<!s)witch|hitch|reproduc|product(?!ion)|prodigy")
+RELEASE_WORD_RE = re.compile(r"(?<![a-z0-9])(live|prd|cd|pypi|testpypi|npm|crates|rubygems|nuget|pages|testflight)"
+                             r"(?![a-z0-9])")
 NOT_PRODUCTION_RE = re.compile(r"(?<![a-z])(non|pre)[-_. ]?prod")     # not the end of `canon-prod`
 
 
 def release_environment(name) -> bool:
-    return bool(RELEASE_ENVIRONMENT_RE.search(NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())))
+    text = NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())
+    if RELEASE_ENVIRONMENT_RE.search(NOT_RELEASE_RE.sub(" ", text)):
+        return True
+    # Whole words, with a capital after a lower-case letter starting one (`AppLive`).
+    words = NOT_PRODUCTION_RE.sub(" ", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(name or "")).lower())
+    return bool(RELEASE_WORD_RE.search(words))
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
@@ -2080,6 +2266,12 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
         # Whatever starts the job: a job that a pull request or a comment can start and that uses
         # the production environment is the case OBAAF-GHA-015 exists for.
         lanes["release"] = f"uses the '{job.environment}' environment"
+    else:
+        # An environment named by an expression is a release environment when one of the names it can
+        # have is (`${{ matrix.env }}` over staging and production), flagship slice 2d.2d.
+        named = next((name for name in job.environment_candidates()[0] if release_environment(name)), None)
+        if named is not None:
+            lanes["release"] = f"uses the '{job.environment}' environment, which can be '{named}'"
     if triggers and triggers <= PR_TRIGGERS | {"merge_group"} | ({"push"} if "pull_request" in triggers else set()):
         lanes["untrusted"] = "builds pull requests"
     return lanes
