@@ -218,6 +218,11 @@ def parse_protected_secrets(value, path) -> dict:
         if env is not None and (not isinstance(env, str) or not env.strip() or "${{" in env):
             raise ConfigError(f"{path}: protected_secrets environment for {name!r} must be a literal "
                               "environment name")
+        if name.upper() in out:
+            # Secret names are one name to GitHub whatever their case, so two entries for one name
+            # would be one entry here, and which environment applied would depend on their order.
+            raise ConfigError(f"{path}: protected_secrets names {name!r} twice (secret names do not differ by "
+                              "case); write it once, with the environment it needs")
         out[name.upper()] = env.strip() if isinstance(env, str) else None
     return out
 

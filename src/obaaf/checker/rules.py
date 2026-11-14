@@ -14,8 +14,8 @@ from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, input_name, one_line,
-    runs_after_failure,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, environment_match, expressions, input_name,
+    one_line, runs_after_failure, shown_value, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -231,7 +231,8 @@ class WorkflowRules:
         if job.permissions is None:
             self.add("OBAAF-GHA-009", job.line,
                      "Job '{job}' does not declare permissions, and neither does the workflow, so its token "
-                     "gets the repository default.", job)
+                     "gets the repository default (or, when another workflow calls this one, what the calling "
+                     "job grants).", job)
 
     # -------------------------------------------------------------- GHA-001
     def secrets_untrusted(self, job: Job) -> None:
@@ -243,7 +244,11 @@ class WorkflowRules:
                                  for n in names))
         secrets = Fact(sorted(names), shown)
         privileged = triggers & PRIVILEGED_UNTRUSTED_TRIGGERS
-        if privileged and job.environment:
+        # Only an environment named in plain text lowers the finding: it may require a reviewer. A
+        # name with an expression in it can be one GitHub creates on first use, with no protection
+        # rules, or one the event's author picks; a name that is not text cannot be checked at all.
+        reviewed = job.environment_reading[0] == "literal"
+        if privileged and reviewed:
             self.add("OBAAF-GHA-001", job.line,
                      "Job '{job}' receives {secrets} and can be started by {triggers}. It references environment "
                      "'{environment}'; confirm that environment requires reviewers.",
@@ -265,11 +270,10 @@ class WorkflowRules:
             return
         names = job.secret_names()
         caller = bool(job.reusable)
-        # A reusable-workflow call with `secrets: inherit` passes repository and organization secrets
-        # only, never an environment's, and the caller cannot declare an environment. Whether a
-        # protected secret still has such a copy is a settings question, not a workflow one.
-        if caller:
-            names = names - {"*inherit"}
+        # A reusable-workflow call passes repository and organization secrets only, never an
+        # environment's, and the caller cannot declare an environment. `secrets: inherit` passes all
+        # of them, so it passes a protected secret's repository or organization copy wherever one
+        # exists, as naming the secret does; whether one exists is a setting `obaaf audit` reads.
         takes_all = "*" in names or "*inherit" in names
         # Every protected entry a secret matches applies, so an overlapping, looser pattern can never
         # relax a stricter one.
@@ -283,13 +287,13 @@ class WorkflowRules:
                     hits.append((name.upper(), pattern, env))
         if not hits:
             return
-        declared = job.environment
-        dynamic = bool(declared and "${{" in declared)
-        via = " (it can take every secret)" if takes_all else ""
+        state, declared = job.environment_reading
+        via = (" (it passes every secret: secrets: inherit)" if "*inherit" in names
+               else " (it can take every secret)" if takes_all else "")
         reported: set[tuple] = set()
         for name, pattern, wanted in hits:
-            ok = declared and not dynamic and (wanted is None or declared.casefold() == wanted.casefold())
-            if ok:
+            match = environment_match(declared, wanted) if state == "literal" else None
+            if not caller and match == "same":
                 continue
             # One finding for each secret and the environment it needs, however many entries ask for it.
             if (name, wanted) in reported:
@@ -303,12 +307,21 @@ class WorkflowRules:
                          "{workflow}. A calling job cannot declare an environment, so the secret can only "
                          "come from the repository or organization; pass none, and declare {need} in the called "
                          "workflow's job instead.", job, kind="caller", workflow=job.reusable, **values)
-            elif dynamic:
+            elif state == "expression":
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} with environment '{declared}', an "
                          "expression the checker cannot confirm is {need}.", job, severity="medium",
                          kind="environment-expression", declared=declared, **values)
-            elif declared:
+            elif state == "unreadable" or match == "unsure":
+                written = job.raw.get("environment")
+                written = written.get("name") if isinstance(written, dict) else written
+                self.add("OBAAF-GHA-024", job.line,
+                         "Job '{job}' uses protected secret {secret}{via} with environment {declared}, which the "
+                         "checker cannot tell GitHub reads as {need}: it is not plain text, it is blank, or it "
+                         "differs from that name only in the case of letters outside ASCII.", job,
+                         severity="medium", kind="environment-unsure",
+                         declared=Fact(value_identity(written), shown_value(written)), **values)
+            elif state == "literal":
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} in environment '{declared}', not {need}.",
                          job, kind="other-environment", declared=declared, **values)
@@ -501,7 +514,14 @@ class WorkflowRules:
         # of the same name, any agent in a declared job), and rewording it changes the finding;
         # both end when agents are named data.
         why = job.reason_for('agent')
-        if perms is None:
+        if perms is None and self.wf.callable:
+            # A called workflow's job holds what the calling job grants (it can only be narrowed), so
+            # what it holds is not read from this file at all.
+            self.add("OBAAF-GHA-003", job.line,
+                     "Agent job '{job}' ({why}) does not declare permissions, and its workflow can be called "
+                     "by another (workflow_call), so it holds whatever the calling job grants, write access "
+                     "included.", job, kind="inherited", why=why)
+        elif perms is None:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, so it may inherit "
                      "write access.", job, kind="undeclared", why=why)
@@ -512,6 +532,11 @@ class WorkflowRules:
         if perms is not None and perms.oidc:
             self.add("OBAAF-GHA-004", job.line,
                      "Agent job '{job}' can request OIDC tokens (id-token: write).", job)
+        elif perms is None and self.wf.callable:
+            self.add("OBAAF-GHA-004", job.line,
+                     "Agent job '{job}' does not declare permissions, and its workflow can be called by another "
+                     "(workflow_call), so it can request OIDC tokens whenever the calling job grants "
+                     "id-token: write.", job, kind="inherited")
         names = job.secret_names()
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
@@ -519,8 +544,8 @@ class WorkflowRules:
             # Where each key given to OBAAF's egress action goes is the fifth control's detail (2c.7): a model
             # key under model-keys is out of the command's reach, one passed in env is not.
             egress = self._egress(job)[0]
-            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}.", job, kind="secrets",
-                     secrets=Fact(sorted(names), shown),
+            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{environment}.", job,
+                     kind="secrets", secrets=Fact(sorted(names), shown), environment=self._environment_fact(job),
                      controls=[*self._secret_controls(job, names), self._input_control(job), egress,
                                self._key_control(job)])
         elif job.environment:
@@ -2036,18 +2061,48 @@ class WorkflowRules:
     def signing_keys(self, job: Job) -> None:
         severity = "high" if job.in_lane("release") else "medium"
         patterns = [re.compile(p, re.I) for p in self.detection.get("signing_secret_patterns", [])]
-        keys = sorted(n for n in job.secret_names() if not n.startswith("*") and any(p.search(n) for p in patterns))
+        names = job.secret_names()
+        keys = sorted(n for n in names if not n.startswith("*") and any(p.search(n) for p in patterns))
+        environment = self._environment_fact(job)
         if keys:
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' loads signing material from secret(s): {secrets}.", job,
-                     severity=severity, kind="secrets", secrets=keys)
+                     "Job '{job}' loads signing material from secret(s): {secrets}{environment}.", job,
+                     severity=severity, kind="secrets", secrets=keys, environment=environment)
+        # A job that can read every secret (a computed name, toJSON(secrets), secrets: inherit) can read
+        # any signing key the repository or the job's environment holds; which secrets those are is
+        # not in the workflow, so the checker cannot tell that none is one.
+        every = sorted(n for n in names if n.startswith("*"))
+        if every:
+            shown = " and ".join("secrets: inherit" if n == "*inherit" else "a reference that is not one literal name"
+                                 for n in every)
+            self.add("OBAAF-GHA-018", job.line,
+                     "Job '{job}' can read every secret ({how}){environment}, so any signing key stored for it "
+                     "is available to its steps.", job, severity=severity, kind="any-secret",
+                     how=Fact(every, shown), environment=environment)
         commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
+        actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
-            text = step.text()
-            if text and any(rx.search(text) for rx in commands):
+            # A command continued on the next line with a backslash is one command to the shell.
+            text = re.sub(r"\\[ \t]*\r?\n", " ", step.text())
+            if any(step.uses_action(a) for a in actions):
+                self.add("OBAAF-GHA-018", step.line,
+                         "Step '{step}' loads a signing key into the build environment.", job, step,
+                         severity=severity, kind="action")
+            elif text and any(rx.search(text) for rx in commands):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")
+
+    @staticmethod
+    def _environment_fact(job: Job) -> Fact | Note:
+        """The job's environment as part of a finding about its secrets: a secret of the same name is
+        another secret in another environment (an environment's secret takes precedence over the
+        repository's), so an acceptance written for one environment does not cover another."""
+        written = job.raw.get("environment")
+        written = written.get("name") if isinstance(written, dict) else written
+        if written is None:
+            return Note("")         # nothing shown and no fact, so a job with no environment is as before
+        return Fact(value_identity(written), f" in environment {shown_value(written)}")
 
     # -------------------------------------------------------------- GHA-021/022
     def effect_rules(self, job: Job) -> None:

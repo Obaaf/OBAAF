@@ -192,14 +192,24 @@ signing_secret_patterns:
   - 'CERTIFICATE_?(P12|PFX|BASE64)'
   - 'DEVELOPER_?ID_?CERT'
   - 'MATCH_?PASSWORD'
-# Commands that load a key file into the build environment.
+  - 'KEY_?STORE'
+  - '(^|_)CSC_(LINK|KEY_PASSWORD)($|_)'
+  - '(^|_)(MACOS|APPLE|WINDOWS|WIN|MAC)_?(CODESIGN_?)?CERT(IFICATE)?($|_)'
+# Commands that load a key file into the build environment. A command continued on the next line
+# with a backslash is joined before these are matched.
 signing_commands:
   - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key\s+(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
   - 'signtool(\.exe)?\s+sign\b.*\s/f\s'
-  - '(^|[\s;&|(])gpg\s+(--batch\s+)?--import\b'
-  - '(^|[\s;&|(])security\s+import\b.*\.p12'
+  - '(^|[\s;&|(/])gpg2?(\s+--?\w[\w-]*(=\S+|\s+(?!-)[^\s;&|]+)?)*\s+--import\b'
+  - '(^|[\s;&|(])security\s+import\b.*\.(?i:p12|pfx)\b'
   - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
   - '(^|[\s;&|(])apksigner\s+sign\b.*--ks\b'
+  - '(?i:\bImport-PfxCertificate\b)'
+# Actions that load a signing key or certificate into the runner. Matched as a prefix of the
+# `uses:` value, before the `@`.
+signing_actions:
+  - crazy-max/ghaction-import-gpg
+  - apple-actions/import-codesign-certs
 
 # Evidence of an egress restriction for agent jobs (R7, FR7).
 egress_actions:

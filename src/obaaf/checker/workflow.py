@@ -361,32 +361,91 @@ class Permissions:
 
     @classmethod
     def parse(cls, raw: Any) -> "Permissions | None":
+        """The permissions written in a workflow, read the widest way where the text is not one of the
+        forms GitHub documents: a string other than `read-all` or `write-all`, or a value of the
+        wrong kind, counts as `write-all`, and a scope at any level other than `read` or `none`
+        counts as `write`. Such text is also a problem of the file (`permissions_problem`), which
+        fails the check; reading it widely keeps any rule that runs from passing it. `None` (the key
+        written with no value) is handled by the caller as not declared."""
         if raw is None:
             return None
         if isinstance(raw, str):
-            raw = raw.strip()
-            if raw in ("read-all", "write-all"):
-                return cls(declared=True, mode=raw)
-            return cls(declared=True, mode="map")
+            if raw.strip() in ("read-all", "write-all"):
+                return cls(declared=True, mode=raw.strip())
+            return cls(declared=True, mode="write-all")
         if isinstance(raw, dict):
-            return cls(declared=True, mode="map", scopes={str(k): str(v) for k, v in raw.items()})
-        return cls(declared=True)
+            scopes: dict = {}
+            for key, value in raw.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    return cls(declared=True, mode="write-all")
+                scopes[key] = value if value in ("read", "none") else "write"
+            return cls(declared=True, mode="map", scopes=scopes)
+        return cls(declared=True, mode="write-all")
 
     def level(self, scope: str) -> str:
+        """The level of one scope. A scope written in another case, or with spaces round it, counts
+        as that scope, so `ID-TOKEN: write` is `id-token` to OBAAF-GHA-004 as it is a write scope to
+        OBAAF-GHA-003 (and a problem of the file either way)."""
         if self.mode == "write-all":
             return "write"
         if self.mode == "read-all":
             return "none" if scope == "id-token" else "read"
-        return self.scopes.get(scope, "none")
+        levels = [v for k, v in self.scopes.items() if k.strip().translate(_ASCII_LOWER) == scope]
+        return max(levels, key=_LEVEL_RANK.__getitem__, default="none")
 
     def write_scopes(self) -> list[str]:
         if self.mode == "write-all":
             return ["write-all"]
-        return sorted(s for s, v in self.scopes.items() if v == "write" and s != "id-token")
+        return sorted(s for s, v in self.scopes.items() if v == "write"
+                      and s.strip().translate(_ASCII_LOWER) != "id-token")
 
     @property
     def oidc(self) -> bool:
         return self.level("id-token") == "write"
+
+
+def environment_match(declared: str, wanted: str | None) -> str:
+    """Whether an environment named as text is the one a protected_secrets entry names: "same" for
+    the same name, or the same name in another case where both are ASCII (GitHub's environment
+    names do not differ by case); "unsure" where they differ only in the case of other letters,
+    which Python folds and GitHub may not; "differs" otherwise. A `wanted` of None is any
+    environment."""
+    if wanted is None or declared == wanted:
+        return "same"
+    if declared.isascii() and wanted.isascii():
+        return "same" if declared.lower() == wanted.lower() else "differs"
+    return "unsure" if declared.casefold() == wanted.casefold() else "differs"
+
+
+_LEVEL_RANK = {"none": 0, "read": 1, "write": 2}
+_EVENT_SPELLING = re.compile(r"[a-z][a-z_]*\Z")
+_SCOPE_NAME = re.compile(r"[a-z][a-z-]*\Z")
+
+
+def permissions_problem(raw: Any, where: str) -> str | None:
+    """What makes a `permissions` value one the checker cannot tell the meaning of, if anything.
+    GitHub documents `read-all`, `write-all`, `{}`, and a mapping of scope names (lower-case letters
+    and hyphens) to `read`, `write` or `none`. Anything else (another case, spaces inside a quoted
+    level, an expression, a number) is not read as GitHub would read it, whatever that is; it is
+    a problem of the file, so the check fails rather than pass a token it may have misread."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.strip() in ("read-all", "write-all"):
+            return None
+        return (f"{where} has permissions written as {shown_value(raw)}, which is not read-all, write-all or a "
+                "mapping of scopes, so the checker cannot tell what the token may do")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if not isinstance(key, str) or not _SCOPE_NAME.match(key):
+                return (f"{where} names a permission scope as {shown_value(key)}; GitHub's scopes are written in "
+                        "lower-case letters and hyphens, so the checker cannot tell which scope it is")
+            if not isinstance(value, str) or value not in ("read", "write", "none"):
+                return (f"{where} gives permission scope '{key}' the level {shown_value(value)}, which is not read, "
+                        "write or none, so the checker cannot tell what the token may do")
+        return None
+    return (f"{where} has permissions that are neither text nor a mapping ({shown_value(raw)}), so the checker "
+            "cannot tell what the token may do")
 
 
 @dataclass
@@ -524,9 +583,32 @@ class Job:
 
     @property
     def permissions(self) -> Permissions | None:
-        if "permissions" in self.raw:
-            return Permissions.parse(self.raw.get("permissions") if self.raw.get("permissions") is not None else {})
+        """The job's token permissions: its own `permissions`, else the workflow's, else None (the
+        default, or a calling workflow's). `permissions:` written with no value is taken as not
+        written, the wider of the two readings: what GitHub makes of it is not established, and
+        reading it as `{}` would hide a workflow-level `write-all`."""
+        if self.raw.get("permissions") is not None:
+            return Permissions.parse(self.raw.get("permissions"))
         return self.workflow.permissions
+
+    @property
+    def environment_reading(self) -> tuple[str, str | None]:
+        """How the job's environment is written: ("none", None) when it declares none;
+        ("literal", name) for a name written as text; ("expression", text) for a name with an
+        expression in it; ("unreadable", None) for a name that is not text (a number, true or
+        false, a list) or is blank, which the checker cannot tell how GitHub reads."""
+        written = self.raw.get("environment")
+        if isinstance(written, dict):
+            if "name" not in written or written.get("name") is None:
+                return ("none", None) if not written else ("unreadable", None)
+            written = written.get("name")
+        if written is None:
+            return ("none", None)
+        if not isinstance(written, str) or not written.strip():
+            return ("unreadable", None)
+        if "${{" in written:
+            return ("expression", written)
+        return ("literal", written)
 
     @property
     def environment(self) -> str | None:
@@ -808,17 +890,22 @@ class Workflow:
         if isinstance(on, str):
             return {on: None}
         if isinstance(on, list):
-            return {str(e): None for e in on}
+            return {as_text(e): None for e in on}
         if isinstance(on, dict):
-            return {str(k): v for k, v in on.items()}
+            return {as_text(k): v for k, v in on.items()}
         return {}
 
     @property
     def permissions(self) -> Permissions | None:
-        if "permissions" not in self.raw:
-            return None
-        raw = self.raw.get("permissions")
-        return Permissions.parse(raw if raw is not None else {})
+        """The workflow's own `permissions`, or None. Written with no value it is taken as not
+        written (see Job.permissions)."""
+        return Permissions.parse(self.raw.get("permissions"))
+
+    @property
+    def callable(self) -> bool:
+        """Whether another workflow can call this one (`workflow_call`). A called workflow's jobs get
+        the token the calling job grants, narrowed by what the called workflow declares."""
+        return "workflow_call" in self.triggers
 
     @property
     def env(self) -> dict:
@@ -882,10 +969,26 @@ def parse(path: str, text: str) -> Workflow:
     if not isinstance(jobs, dict):
         workflow.error = "no jobs"
         return workflow
+    on = raw.get("on")
+    events = [on] if isinstance(on, str) else list(on) if isinstance(on, (list, dict)) else []
+    odd = next((event for event in events if not isinstance(event, str) or not _EVENT_SPELLING.match(event)), None)
+    if odd is not None:
+        # GitHub's event names are lower-case letters and underscores. One written otherwise (another
+        # case, a mapping inside the list) is not an event the rules know, and treating it as none
+        # would drop an untrusted trigger without a word.
+        workflow.problems.append(f"lists a trigger under 'on' written as {shown_value(odd)}, which is not an event "
+                                 "name as GitHub writes them (lower-case letters and underscores), so the checker "
+                                 "cannot tell which events start the workflow")
+    problem = permissions_problem(raw.get("permissions"), "the workflow")
+    if problem:
+        workflow.problems.append(problem)
     for job_id, job_raw in jobs.items():
         if not isinstance(job_raw, dict):
             workflow.problems.append(f"job '{job_id}' is not a mapping, so the checker cannot check what it does")
             continue
+        problem = permissions_problem(job_raw.get("permissions"), f"job '{job_id}'")
+        if problem:
+            workflow.problems.append(problem)
         job = Job(id=str(job_id), raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")
         if isinstance(steps, list):

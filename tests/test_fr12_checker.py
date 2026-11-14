@@ -477,10 +477,12 @@ jobs:
             config = checker.Config.from_data({"protected_secrets": {"PRIVATE_SET_TOKEN": "private-set"}}, "test")
             head = ("name: wf\non: [push]\npermissions:\n  contents: read\njobs:\n  call:\n"
                     "    uses: example/repo/.github/workflows/x.yml@" + SHA + "\n")
-            # inherit passes repository and organization secrets only, never an environment's.
+            # inherit passes repository and organization secrets only, never an environment's: so does
+            # naming the secret, which was always reported. Until slice 2d.2b inherit was not.
             inherit = head + "    secrets: inherit\n"
-            self.assertEqual([f for f in findings_for(tmp, inherit, name="c.yml", config=config)
-                              if f.rule == "OBAAF-GHA-024"], [])
+            found = [f for f in findings_for(tmp, inherit, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
+            self.assertEqual([(f.severity, f.kind, f.facts["via"]) for f in found], [("high", "caller", True)])
+            self.assertIn("secrets: inherit", found[0].message)
             mapped = head + "    secrets:\n      token: ${{ secrets.PRIVATE_SET_TOKEN }}\n"
             found = [f for f in findings_for(tmp, mapped, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
             self.assertEqual([f.severity for f in found], ["high"])
