@@ -124,18 +124,19 @@ The settings audit (2b) is new code in its own module, so it is not marked core;
 
 | Slice | Needs | Issue |
 | --- | --- | --- |
-| 3.4 CI integration | 2a.3 (done) | #85 |
+| 3.4 CI integration | 2a.3 (done) | #85, handed over (#149) |
 | 3.1 Measure the adoption path that exists | nothing | #82, done (#140) |
 | 4.1 Website: content and truth table | 1.4 | #90, done (#129) |
 | H1 Dependency lock for the three Dependabot pull requests | nothing | done (#113); the Dependabot pull requests and #97 are closed (F-91) |
 | H2 The comparison tools no session could install | nothing | done (#122); #98 stays open for its other items |
 
-**Reserved for the Grok sessions** (decision F-112; the rules are [above](#work-handed-to-the-chatgpt-and-grok-sessions)). The scheduled runs do not take these, and a ChatGPT session does not either. Sean reserved 4.2 and 4.3 on 2026-11-14; he gives each Grok session one of them.
+**Reserved for the Grok sessions** (decision F-112; the rules are [above](#work-handed-to-the-chatgpt-and-grok-sessions)). The scheduled runs do not take these, and a ChatGPT session does not either. Sean reserved 4.2 and 4.3 on 2026-11-14, and 4.4 later that day (F-119); he gives each Grok session one of them.
 
 | Slice | Needs | Issue |
 | --- | --- | --- |
-| 4.2 Website: home page | 4.1 (done) | #91 |
-| 4.3 Website: pages | 4.1, 3.7 (done) | #92 |
+| 4.2 Website: home page | 4.1 (done) | #91, handed over (#146) |
+| 4.3 Website: pages | 4.1, 3.7 (done) | #92, handed over (#150) |
+| 4.4 Website: checked in a browser | 4.2, 4.3 | #93 |
 
 ## Where OBAAF stood on 2026-11-11
 
@@ -297,7 +298,7 @@ The site lives in [`site/`](../site/README.md), is built by `site/build.py`, and
 - ☑ **4.1 Content and truth table.** Merged as [#129](https://github.com/Obaaf/OBAAF/pull/129), the work of a ChatGPT session published by a Claude session in Sean's session, reviewed and merged as `review-gpt` by run `dotterel` on 2026-11-13 (decision F-95). *What was built:* [site-truth-table.md](site-truth-table.md): 132 current claims, 36 planned claims and 26 numbers on the website, each with a verdict and a publication decision, audited against `e87d376`; a recommendation (not a decision) that the site keep deploying from `main` and that the public assessment be built from a pinned stable release; nothing under `site/` changed. *Review:* the repository's checks on the branch merged with `flagship` (1336 tests, catalogue, docs, `obaaf check`, the site build) and CI on the head `eee0ac6` ([run 43519516974](https://github.com/Obaaf/OBAAF/actions/runs/43519516974)) passed; an Opus 5.5 sub-agent re-checked every link, extract and number with its own scripts and every Backed security row and number entry, and found nothing blocking; the run added a dated section of rows made out of date by later merges (2c.3, 2c.4, H2, 3.7, the licence) and narrowed C064 and C108; the corrections are in [a comment on #129](https://github.com/Obaaf/OBAAF/pull/129#issuecomment-6866537386). *Not checked by the reviewing run:* the released-package and `verify`/`attest`/`proposal` fixture runs (PyPI unreachable), which rest on the handover. 4.2 and 4.3 now have what they need. The original specification follows. *Done when* every claim planned for the site is listed beside the code, test or document that backs it, and anything unbacked is cut. *Positioning (1.4):* the site leads with the narrow position in landscape.md (agent and release jobs: what each can reach, whether its controls are real, with evidence). It says what is built and what is planned, never says OBAAF is the only tool that asks what an agent can reach, and names the tools OBAAF recommends for everything else. *Reserved for a ChatGPT session (decision F-62):* the table is a page of its own, `docs/site-truth-table.md`. Each row is one claim, where it would stand on the site, the file and line or the test that backs it, and "cut" where nothing does. The session changes nothing under `site/`.
 - ☐ **4.2 Home page.** Leads with what OBAAF does and the fastest way to try it: a real terminal session and a real finding with its fix. Original inline SVG for the three ideas and for how check, audit and enforcement fit together; animation only where it explains, honouring `prefers-reduced-motion`.
 - ☐ **4.3 Pages.** Quickstart, rule catalogue, landscape comparison with its date and sources, case study, papers.
-- ☐ **4.4 Checked in a browser.** *Done when* it has been checked at desktop and phone widths, in light and dark, with JavaScript off, with no third-party fonts, scripts or trackers, and the screenshots are in the pull request.
+- ☐ **4.4 Checked in a browser.** *Done when* it has been checked at desktop and phone widths, in light and dark, with JavaScript off, with no third-party fonts, scripts or trackers, and the screenshots are in the pull request. *Reserved for a Grok session (decision F-119).* It may change `site/index.html`, `site/quickstart.html`, `site/rules.html`, `site/comparison.html`, `site/case-study.html`, `site/papers.html`, `site/styles.css` and `site/main.js` to fix what the check finds (among them the home page's links to the five pages, which 4.3 noted), and it adds its screenshots as PNG files under `docs/screenshots/4.4/`; it changes nothing else.
 
 ### Handed over: two pieces the scheduled runs cannot do
 
@@ -430,6 +431,7 @@ Both need PyPI, which the scheduled runs' sessions cannot reach. They are reserv
 | F-116 | 2026-11-14 | 2c.7 was reviewed by one Opus 5.5 sub-agent, three passes, resumed with its context; the commit after its last pass is a code comment only. | The rule allows a change after the last pass if it is limited to wording. The comment records why one place (the env of another use of the action) is not read for `ACTIONS_ALLOW_UNSECURE_COMMANDS`, which the reviewer could not exploit. |
 | F-117 | 2026-11-14 | Run `sandpiper` adds slice 2d.7 (the runner-label part of 2d.2's starting points, from #141) and takes it under F-31 ahead of 2d.2, with about 1 h 35 min left. | 2d.2 asks for an attempt on every rule and would not fit. The runner-label fault fails the default gate on a common workflow shape (`pallets/flask`'s), which slice 3.1's review found on a stranger's path, and it can be fixed and reviewed on its own. 2d.2's entry is left as it is; its starting point is met when 2d.7 is merged. |
 | F-118 | 2026-11-14 | In 2d.7 a YAML merge key anywhere in the workflow file leaves matrix-resolved runner labels unresolved, and the `$` anchor of the hosted-label pattern (older than the slice) is fixed in the same slice; the `strip()` in three egress runner checks is issue #148, not fixed here. | The merge key came from the second review and is read two ways by YAML 1.1 and 1.2 readers, as `egress.py` already says of a policy file; refusing file-wide is blunt and fails closed. The anchor fix is one character in the same class and was reviewed in a fourth pass. The `strip()` sits in egress code outside the slice's change and needs its own tests. |
+| F-119 | 2026-11-14 | Slice 4.4 (checked in a browser, #93) is reserved for the Grok sessions, at Sean's request in his session, and its entry now names the files it may change: the six pages, `site/styles.css` and `site/main.js` to fix what the check finds, and PNG screenshots under `docs/screenshots/4.4/`. Its needs stay 4.2 and 4.3, so a Grok session starts it only after #146 and #150 are merged. 3.4, 4.2 and 4.3 are marked handed over (#149, #146, #150). | Sean asked what a Grok session could take next; 4.2 and 4.3, the whole of its table, were handed over. 4.4 checks the pages those two built. The 4.2 and 4.3 entries named no files, which `review-grok` must treat as blocking; naming 4.4's files now avoids the same stall. The screenshots are committed because a handover carries them only in its patch and the publishing session cannot attach images to a pull request; `docs/` is outside what `site/build.py` publishes. |
 
 ## Waiting on Sean
 
