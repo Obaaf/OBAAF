@@ -16,7 +16,7 @@ from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
-    environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
+    digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
     scalar_environment_match, shown_value, value_identity,
 )
 
@@ -405,26 +405,30 @@ class WorkflowRules:
                 shown.append(f"the {where}'s if: {shown_value(raw)}")
         return Fact(values, f" (it runs only where {' and '.join(shown)} holds)" if shown else "")
 
-    def _sources(self, job: Job, reads: list) -> Fact:
-        """For a value the checker cannot read, what produces it, as part of what the finding is: the
-        step a `steps.ID` output comes from, the job a `needs.ID` output comes from, each as the digest
-        of how it is written. An acceptance of a "cannot tell" finding is then of that producer, and
-        a step changed to produce the head instead of the base makes the finding new."""
-        out = []
-        for read in reads:
-            parts = read.split(".")
-            if len(parts) < 2 or parts[0] not in ("steps", "needs"):
-                continue
-            if parts[0] == "steps":
-                raw = next((step.raw for step in job.steps if as_text(step.raw.get("id") or "").lower() == parts[1]), None)
-            else:
-                other = next((j for name, j in self.wf.jobs.items() if str(name).lower() == parts[1]), None)
-                raw = other.raw if other is not None else None
-            written = json.dumps(raw, sort_keys=True, default=as_text, ensure_ascii=False) if raw is not None else ""
-            digest = hashlib.sha256(written.encode("utf-8", "surrogatepass")).hexdigest()[:16] if raw is not None \
-                else "not in the file"
-            out.append(f"{parts[0]}.{parts[1]}: {digest}")
-        return Fact(sorted(set(out)), "")
+    def _sources(self, job: Job, step: Step, reads: list) -> Fact:
+        """For a value the checker cannot read, everything in the file it can depend on, as part of
+        what the finding is: the workflow's and the job's env, the job's strategy, the job's steps
+        before this one (which can write GITHUB_ENV or outputs), and each job a `needs` output comes
+        from; as one digest of how they are written. An acceptance of a "cannot tell" finding is an
+        acceptance of all of that, so changing any of it (a producing step that now gives the head
+        instead of the base, a matrix, an env value) makes the finding new."""
+        if not reads:
+            return Fact([], "")
+        needed = sorted({read.split(".")[1] for read in reads if read.startswith("needs.") and "." in read[6:]})
+        upstream = {
+            "workflow-env": self.wf.raw.get("env"), "job-env": job.raw.get("env"),
+            "strategy": job.raw.get("strategy"), "steps": [s.raw for s in job.steps[:step.index]],
+            "needs": {name: other.raw for name, other in self.wf.jobs.items() if str(name).lower() in needed},
+        }
+        return Fact([f"upstream: {digest_of(upstream)}"], "")
+
+    def _shell(self, job: Job, step: Step) -> str:
+        """The shell a step's `run` is given to: its own, else the job's or the workflow's default."""
+        for raw in (step.raw, (job.raw.get("defaults") or {}).get("run") if isinstance(job.raw.get("defaults"), dict) else None,
+                    (self.wf.raw.get("defaults") or {}).get("run") if isinstance(self.wf.raw.get("defaults"), dict) else None):
+            if isinstance(raw, dict) and raw.get("shell"):
+                return as_text(raw.get("shell"))
+        return ""
 
     @staticmethod
     def _unsafe_checkout_allowed(step: Step) -> bool:
@@ -461,9 +465,9 @@ class WorkflowRules:
                              "by {triggers}{condition}. The checker cannot tell whether that is a pull request's "
                              "code; if it is not, accept this finding and say why.", job, step, severity="medium",
                              kind="checkout-unresolved", triggers=sorted(privileged), reads=reading.reads,
-                             condition=self._condition(job, step), sources=self._sources(job, reading.reads))
+                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads))
             elif privileged:
-                reading = pr_fetch(step, self._env_for(job, step))
+                reading = pr_fetch(step, self._env_for(job, step), self._shell(job, step))
                 if reading.state == "head":
                     self.add("OBAAF-GHA-002", step.line,
                              "Step '{step}' fetches pull-request code ({reads}) in a workflow started by "
@@ -477,7 +481,7 @@ class WorkflowRules:
                              "whether that is a pull request's code; if it is not, accept this finding and say why.",
                              job, step, severity="medium", kind="fetch-unresolved", triggers=sorted(privileged),
                              reads=reading.reads, condition=self._condition(job, step),
-                             sources=self._sources(job, reading.reads))
+                             sources=self._sources(job, step, reading.reads))
 
     # -------------------------------------------------------------- GHA-010
     def script_injection(self, job: Job) -> None:
@@ -702,7 +706,7 @@ class WorkflowRules:
                              "repository taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code, whose instruction files the agent would then read.", job, step,
                              severity="medium", kind="unresolved", reads=reading.reads, triggers=outside,
-                             condition=self._condition(job, step), sources=self._sources(job, reading.reads))
+                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads))
                 elif merge_events and self._merge_commit(step, ref, repository):
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' runs on {triggers} and step '{step}' checks out the "
@@ -712,7 +716,7 @@ class WorkflowRules:
                                     "commit, which includes the pull request's instruction files."
                              if "pull_request" in merge_events else "")
             else:
-                reading = pr_fetch(step, self._env_for(job, step))
+                reading = pr_fetch(step, self._env_for(job, step), self._shell(job, step))
                 if reading.state == "head":
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' fetches the pull request's code ({reads}) in step '{step}'.", job, step,
@@ -724,7 +728,7 @@ class WorkflowRules:
                              "code with a value taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code.", job, step, severity="medium", kind="fetch-unresolved",
                              reads=reading.reads, triggers=outside, condition=self._condition(job, step),
-                             sources=self._sources(job, reading.reads))
+                             sources=self._sources(job, step, reading.reads))
 
         # GHA-020: egress restriction. The finding is always there for an agent job; what was
         # established about the one control that clears it decides where the finding stands.
@@ -1722,7 +1726,7 @@ class WorkflowRules:
                     fixed += 1
                 else:
                     default += 1
-            elif pr_fetch(step, self._env_for(job, step)).state == "head" \
+            elif pr_fetch(step, self._env_for(job, step), self._shell(job, step)).state == "head" \
                     or self._PR_CODE_IN_SCRIPT_RE.search(step.text()):
                 return Control(name, NOT_MET, f"{where} fetches a pull request's code", ident)
         # An `if:` is an expression with or without `${{ }}`, so a condition written without them

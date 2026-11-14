@@ -520,6 +520,129 @@ class FirstReviewTest(unittest.TestCase):
             self.assertEqual(of(check(tmp, text), "OBAAF-GHA-012"), [])
 
 
+class SecondReviewTest(unittest.TestCase):
+    """What the second review pass found in the word-based reader, each now a test."""
+
+    def run_step(self, step, on="pull_request_target", top=""):
+        return (f"on: {on}\npermissions: {{contents: read}}\n{top}jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n{step}")
+
+    def test_commands_written_as_strings_in_a_script_language(self):
+        steps = {
+            "github-script exec string": (f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                                          "            const sha = context.payload.pull_request.head.sha;\n"
+                                          "            await exec.exec(`git fetch origin ${sha}`);\n"),
+            "python f-string": ("      - shell: python\n        run: |\n          import json, os\n"
+                                "          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))\n"
+                                "          sha = event['pull_request']['head']['sha']\n"
+                                "          os.system(f'git fetch origin {sha} && git checkout FETCH_HEAD')\n"),
+            "python variable from env": ("      - shell: python\n        env:\n          N: ${{ github.event.number }}\n"
+                                         "        run: |\n          import os, subprocess\n          n = os.environ['N']\n"
+                                         "          subprocess.run(['git', 'fetch', 'origin', 'pu' + 'll/' + n + '/head'])\n"),
+            "node": ("      - shell: node {0}\n        run: |\n          const ev = require(process.env.GITHUB_EVENT_PATH);\n"
+                     "          const sha = ev.pull_request.head.sha;\n"
+                     "          require('child_process').execFileSync('git', ['fetch', 'origin', sha]);\n"),
+        }
+        with TempDir() as tmp:
+            for name, step in steps.items():
+                with self.subTest(name=name):
+                    found = of(check(tmp, self.run_step(step)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+
+    def test_a_quoted_hash_is_not_a_comment(self):
+        steps = ["      - env:\n          N: ${{ github.event.issue.number }}\n        run: |\n"
+                 "          echo \"## Testing PR #$N\" >> \"$GITHUB_STEP_SUMMARY\" && gh pr checkout \"$N\"\n",
+                 "      - env:\n          H: ${{ github.event.pull_request.head.sha }}\n        run: |\n"
+                 "          echo \"# fetching\"; git fetch origin \"$H\"; git checkout FETCH_HEAD\n"]
+        with TempDir() as tmp:
+            for step in steps:
+                with self.subTest(step=step[-60:]):
+                    self.assertEqual(len(of(check(tmp, self.run_step(step, on="issue_comment")), "OBAAF-GHA-002")), 1)
+            comment = "      - run: |\n          git fetch --depth=1 origin main  # don't fetch ${{ github.head_ref }} here\n"
+            self.assertEqual(of(check(tmp, self.run_step(comment)), "OBAAF-GHA-002"), [])
+
+    def test_what_is_not_fetching_code(self):
+        steps = {
+            "PATCH method": ("      - run: |\n          gh api --method PATCH \"repos/${{ github.repository }}/pulls/"
+                             "${{ github.event.number }}\" -f title=x\n          curl -X PATCH \"$API/pulls/${{ github.event.number }}\"\n"),
+            "contents of the default branch, then a status on the head": (
+                f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                "            const { data } = await github.rest.repos.getContent({\n"
+                "              owner: context.repo.owner, repo: context.repo.repo, path: '.github/size-limits.json',\n"
+                "            });\n"
+                "            await github.rest.repos.createCommitStatus({\n"
+                "              owner: context.repo.owner, repo: context.repo.repo,\n"
+                "              sha: context.payload.pull_request.head.sha, state: 'success', context: 'size',\n"
+                "            });\n"),
+            "the diff counted, not applied": (
+                f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                "            const { data: diff } = await github.rest.pulls.get({\n"
+                "              owner: context.repo.owner, repo: context.repo.repo,\n"
+                "              pull_number: context.issue.number, mediaType: { format: 'diff' },\n"
+                "            });\n            const lines = diff.split('\\n').length;\n"),
+            "a NUL character": "      - run: \"echo \\x000\\x00 && git fetch origin main\"\n",
+        }
+        with TempDir() as tmp:
+            for name, step in steps.items():
+                with self.subTest(name=name):
+                    self.assertEqual(of(check(tmp, self.run_step(step)), "OBAAF-GHA-002"), [])
+
+    def test_more_ways_to_bring_the_head_in(self):
+        steps = {
+            "archive address": ("      - run: |\n          curl -sSL \"https://github.com/${{ github.event.pull_request.head.repo.full_name }}"
+                                "/archive/${{ github.event.pull_request.head.sha }}.tar.gz\" | tar xz\n"),
+            "remote added": ("      - run: |\n          git remote add fork \"${{ github.event.pull_request.head.repo.clone_url }}\"\n"
+                             "          git fetch fork\n          git checkout -B pr \"fork/main\"\n"),
+        }
+        with TempDir() as tmp:
+            for name, step in steps.items():
+                with self.subTest(name=name):
+                    found = of(check(tmp, self.run_step(step)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+            pwsh = ("      - env:\n          N: ${{ github.event.number }}\n        run: |\n          git fetch origin `\n"
+                    "            \"pull/$env:N/head\"\n")
+            found = of(check(tmp, self.run_step(pwsh, top="defaults:\n  run:\n    shell: pwsh\n")), "OBAAF-GHA-002")
+            self.assertEqual([f.kind for f in found], ["fetch"])
+
+    def test_a_producing_step_with_keys_of_mixed_types_is_not_a_traceback(self):
+        step = ("      - id: pr\n        env:\n          1: a\n          B: b\n        run: echo \"sha=x\" >> \"$GITHUB_OUTPUT\"\n"
+                f"      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n"
+                "          ref: ${{ steps.pr.outputs.sha }}\n")
+        with TempDir() as tmp:
+            found = of(check(tmp, self.run_step(step, on="issue_comment")), "OBAAF-GHA-002")
+        self.assertEqual([f.kind for f in found], ["checkout-unresolved"])
+
+    def test_cannot_tell_covers_everything_the_value_can_depend_on(self):
+        """An acceptance of a "cannot tell" checkout is of everything upstream of it in the file: a
+        value passed through GITHUB_ENV by an earlier step, a matrix, the job's env."""
+        def via_env(field):
+            return self.run_step("      - run: echo \"PR_SHA=$(gh pr view 1 --json " + field + " -q ." + field +
+                                 ")\" >> \"$GITHUB_ENV\"\n" f"      - uses: {CHECKOUT}\n        with:\n"
+                                 "          persist-credentials: false\n          ref: ${{ env.PR_SHA }}\n", on="issue_comment")
+
+        def via_matrix(value):
+            return (f"on: pull_request_target\npermissions: {{}}\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                    f"    strategy:\n      matrix:\n        ref: ['${{{{ {value} }}}}']\n    steps:\n"
+                    f"      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n"
+                    "          ref: ${{ matrix.ref }}\n")
+        with TempDir() as tmp:
+            for a, b in ((via_env("baseRefOid"), via_env("headRefOid")),
+                         (via_matrix("github.event.pull_request.base.sha"), via_matrix("github.event.pull_request.head.sha"))):
+                first = of(check(tmp, a), "OBAAF-GHA-002")[0]
+                second = of(check(tmp, b), "OBAAF-GHA-002")[0]
+                self.assertEqual(first.kind, "checkout-unresolved")
+                self.assertNotEqual(baseline.key(first), baseline.key(second))
+
+    def test_many_written_files_are_read_in_linear_time(self):
+        lines = "".join(f"          curl -sL \"$U\" -o f{i}.patch\n" for i in range(1500))
+        step = f"      - env:\n          U: ${{{{ github.event.pull_request.diff_url }}}}\n        run: |\n{lines}"
+        with TempDir() as tmp:
+            started = time.monotonic()
+            found = of(check(tmp, self.run_step(step)), "OBAAF-GHA-002")
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual([f.kind for f in found], ["fetch"])
+
+
 class ReaderUnitTest(unittest.TestCase):
     def test_pr_code_states(self):
         self.assertEqual(pr_code("${{ github.event.pull_request.head.sha }}").state, "head")
