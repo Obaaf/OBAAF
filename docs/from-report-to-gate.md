@@ -80,10 +80,10 @@ Status 0 today. This is the gate. From now on:
 obaaf check . --format sarif --output obaaf.sarif --fail-on never
 ```
 
-Status 0. Upload the file to GitHub code scanning if you want the findings beside the code. Keep the step from step 5 as well. Going by GitHub's own page on its SARIF support (read on 2026-11-12; nobody here has uploaded a report to check it), code scanning shows an accepted finding as an open alert, and shows none of the accepted-risk total, the expiry warning or a file that could not be read.
+Status 0. Upload the file to GitHub code scanning if you want the findings beside the code. Keep the step from step 5 as well. [CI integration](ci-integration.md) has a workflow that does both, and a hook that runs the gate before each commit. Going by GitHub's own page on its SARIF support (read on 2026-11-12; nobody here has uploaded a report to check it), code scanning shows an accepted finding as an open alert, and shows none of the accepted-risk total, the expiry warning or a file that could not be read.
 
 ## What this path does not do yet
 
-- There is no `obaaf init`: the configuration and the workflow that runs the check are written by hand, or installed with `obaaf templates install` ([templates](../templates/github-actions/README.md)).
-- Two findings on an agent job, a secret in the job (`OBAAF-GHA-005`) and no egress restriction (`OBAAF-GHA-020`), cannot be cleared by anything the checker verifies today. They list the controls that would clear them and which of those are not met. Until the settings rules and the egress control exist, they are accepted or they fail.
+- There is no `obaaf init`: the configuration is written by hand, and the workflow that runs the check is copied from [CI integration](ci-integration.md) or installed with `obaaf templates install` ([templates](../templates/github-actions/README.md)).
+- Of the two findings every agent job has, a secret in the job (`OBAAF-GHA-005`) cannot be cleared by anything the checker verifies today, and no egress restriction (`OBAAF-GHA-020`) can be cleared only by GitHub's native egress firewall in enforce mode, or by OBAAF's egress action once a commit of it is listed as released (none is yet). Each lists the controls that would clear it and which of those are not met ([controls](checker-configuration.md#controls-that-clear-a-finding)). Until it is cleared, it is accepted or it fails.
 - The times this path takes have not been measured.
