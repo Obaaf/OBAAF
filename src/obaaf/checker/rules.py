@@ -18,7 +18,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    scalar_environment_match, shown_value, value_identity,
+    scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -2329,6 +2329,27 @@ class WorkflowRules:
             detail = f"{egress_mod.joined(problems or unsure, 3)}.{said}".rstrip(".")
         return Control(name, verdict, detail, ident)
 
+    def _release_step(self, step: Step) -> str:
+        """A release step as one of OBAAF-GHA-015's facts: its written name or id, if any, and what makes
+        it publish: `OBAAF_STEP: publish`, the action it uses without the ref, or the command matched, with
+        its runs of space made one."""
+        name = as_text(step.raw.get("name") or step.raw.get("id") or "")
+        if str(step.env.get("OBAAF_STEP", "")).lower() == "publish":
+            what = "OBAAF_STEP: publish"
+        elif any(step.uses_action(a) for a in self.detection.get("upload_actions", [])):
+            what = step.action or ""
+        else:
+            what = ""
+            for variant in upload_readings(step.scripts()):
+                for pattern in self.detection.get("upload_commands", []):
+                    match = re.search(pattern, variant, re.M)
+                    if match:
+                        what = " ".join(match.group(0).split())
+                        break
+                if what:
+                    break
+        return f"{name} ({what})" if name else what
+
     @staticmethod
     def _environment_written(job: Job):
         written = job.raw.get("environment")
@@ -2390,9 +2411,9 @@ class WorkflowRules:
             # The steps that make it a release job are facts too, so an acceptance written for a job that
             # pushes to a registry inside the job does not cover one that later publishes to npm.
             # A step is named here by the name or id written for it, not by the default name (its `uses`
-            # with the ref), so a new pin of the same action is the same finding.
-            releasing = [f"{as_text(s.raw.get('name') or s.raw.get('id') or '')} ({s.action or s.uses or 'run'})"
-                         for s in job.upload_steps(self.detection)]
+            # with the ref), and by what makes it publish (the action without its ref, or the command
+            # matched), so a new pin of the same action is the same finding and another command is not.
+            releasing = [self._release_step(s) for s in job.upload_steps(self.detection)]
             values = {"triggers": sorted(bad), "reason": job.reason_for("release"),
                       "environment": Fact(value_identity(self._environment_written(job)), ""),
                       "steps": Fact(releasing, ""),

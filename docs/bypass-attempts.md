@@ -369,7 +369,7 @@ GitHub's documentation could not be read from the session (the fetch was not app
 | 172 | issues + if contains(labels, 'release') | held | high |
 | 174 | merge_group | held | nothing |
 | 190 | permissions: write-all, no publish step | held | medium (capability) |
-| 180 | harmless test job with environment 'kitchen' (also restore-drill 181, reproducibility 182, product-docs-preview 183, switch-matrix 143): substring itch/store/prod | false positive | nothing |
+| 180 | harmless test job with environment 'kitchen' (also restore-drill 181, reproducibility 182, product-docs-preview 183, switch-matrix 143, which is reported again because `switch` is a console): substring itch/store/prod | false positive | nothing |
 | 185 | harmless job on issue_comment whose script says echo "skip docker push in CI" (144: echo text with 'npm publish' on pull_request) | false positive | high |
 | 146 | docker push to a localhost:5000 service-container registry in a PR test | false positive | medium (pull-request) |
 | 145 | checkout with secrets.SUBMODULE_DEPLOY_KEY (read-only SSH deploy key for submodules); 186 NODE_AUTH_TOKEN for npm ci | false positive | nothing |

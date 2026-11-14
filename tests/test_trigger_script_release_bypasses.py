@@ -477,6 +477,14 @@ class ReviewOfTheSliceTest(unittest.TestCase):
                 return baseline.key(of(check(tmp, release_job(step)), "OBAAF-GHA-015")[0])
         self.assertEqual(key(SHA), key("2" * 40))
 
+    def test_two_unnamed_steps_that_publish_differently_are_different_findings(self):
+        def key(steps):
+            with TempDir() as tmp:
+                return baseline.key(of(check(tmp, release_job(steps, on="pull_request")), "OBAAF-GHA-015")[0])
+        local = key("      - run: docker push localhost:5000/t\n")
+        npm = key("      - run: make test\n      - run: npm publish\n")
+        self.assertNotEqual(local, npm)
+
     def test_a_new_pin_of_an_unnamed_publishing_step_is_the_same_finding(self):
         def key(ref):
             with TempDir() as tmp:
