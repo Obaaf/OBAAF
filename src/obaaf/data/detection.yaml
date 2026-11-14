@@ -279,4 +279,12 @@ harden_runner_releases:
 # Commits of OBAAF's egress action (actions/egress, slice 2c.2) that OBAAF lists as released: each
 # one a commit the escape tests passed on, listed by a maintainer. OBAAF-GHA-020 credits the action
 # only at one of these. None is listed yet, so the action is "cannot tell" at best.
+#
+# Only a commit at or after `egress_action_floor`, the merge of slice 2c.4 (#128), may be listed: the
+# checker reads the action's `model-keys` and `env` inputs as the action reads them from there, and
+# the text beside a cleared finding describes the action's own resolver, which exists from there
+# (slice 2c.5, decision D-052). A test refuses a listed commit that does not have the floor as an
+# ancestor in this repository's history. A later commit that reads its inputs another way must not be
+# listed until the checker reads it that way too.
+egress_action_floor: f0bfbd79398a5950bb3c72860e98dfdaa66c929f
 egress_action_releases: []

