@@ -516,17 +516,13 @@ class WorkflowRules:
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
                                      for n in names))
+            # Where each key given to OBAAF's egress action goes is the fifth control's detail (2c.7): a model
+            # key under model-keys is out of the command's reach, one passed in env is not.
             egress = self._egress(job)[0]
-            routes = self._key_routes(job)
-            if routes:
-                # Where a key given to OBAAF's egress action goes, whatever the egress control's verdict:
-                # a model key under model-keys is out of the command's reach, one passed in env is not.
-                egress = Control(egress.name, egress.verdict,
-                                 f"{egress.detail.rstrip('.')}. Where the confined step's credentials go: {routes}",
-                                 egress.id)
             self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}.", job, kind="secrets",
                      secrets=Fact(sorted(names), shown),
-                     controls=[*self._secret_controls(job, names), self._input_control(job), egress])
+                     controls=[*self._secret_controls(job, names), self._input_control(job), egress,
+                               self._key_control(job)])
         elif job.environment:
             self.add("OBAAF-GHA-005", job.line,
                      "Agent job '{job}' uses environment '{environment}', whose secrets it receives "
@@ -1566,6 +1562,155 @@ class WorkflowRules:
             (default, f"{default} checkout step(s) take the ref the event names"),
             (fixed, f"{fixed} checkout step(s) take a ref written in the workflow")) if count) or "no checkout step"
         return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
+
+    KEY_NAME = ("the agent's command cannot read any of the job's secrets: each goes only to a proxy that holds it "
+                "for the command, or to nothing the command runs")
+    KEY_ID = "key-out-of-reach"
+
+    @staticmethod
+    def _secret_refs(found: list) -> list:
+        """The credentials `_credentials` found that are secrets OBAAF-GHA-005 is about: every named
+        secret but GITHUB_TOKEN, and every secret where the name is computed. The job's own token is
+        OBAAF-GHA-003's, as it is for `secret_names`."""
+        return [cred for cred in found if cred == "all secrets"
+                or (cred.startswith("secrets.") and cred[len("secrets."):].upper() != "GITHUB_TOKEN")]
+
+    def _key_control(self, job: Job) -> Control:
+        """Whether the agent's command can read the job's secrets (flagship slice 2c.7). A key the
+        agent can read can leave in the job's log or an artifact whatever the network allows, so a
+        limit on the network protects it less than it protects data, and only a key the command cannot
+        read is out of that reach. The one way the checker can establish that today is OBAAF's egress
+        action with the key named in `model-keys`: the action gives it to AWF's API proxy, which the
+        command can use and cannot read (2c.4, tested with made-up keys). So the control is verified
+        only when every secret the job receives is set in the `env` of steps that use the action, at a
+        commit OBAAF lists as released, on the runner it was tested on, and each goes to the proxy or
+        to nothing the command runs (`_placement`). A secret anywhere else in the job (another step, the
+        job's or the workflow's `env`) is where an agent outside the sandbox could read it, and the
+        checker tells where the agent runs by where its key goes, so that is "not met"; so is a secret
+        passed to the command. GitHub's native firewall holds no key. The step that uses the action
+        still holds the key in its own process, outside the sandbox: a `BASH_ENV` anywhere in the job
+        (issue #139) or a process an earlier step leaves running could reach it there, and either is
+        "cannot tell"."""
+        name, ident = self.KEY_NAME, self.KEY_ID
+        reach = "a key the agent can read can leave in the job's log or an artifact whatever the network allows"
+        if job.reusable:
+            return Control(name, CANNOT_TELL, "its steps are in the reusable workflow it calls, which the checker "
+                                              "does not read", ident)
+        confined = [step for step in job.steps if step.confines]
+        if not confined:
+            if self._awf(job) is not None:
+                return Control(name, CANNOT_TELL, "a step runs the Agent Workflow Firewall from a script, whose API "
+                                                  "proxy can hold a model key, and the checker does not read a shell "
+                                                  "command line well enough to tell which key it holds", ident)
+            native = self._native_firewall(job)
+            how = (" GitHub's native egress firewall limits the network and holds no key." if native is not None
+                   else "")
+            return Control(name, NOT_MET, "no step of the job runs the agent's command behind a proxy that holds its "
+                                          "keys, so the agent runs where the job's secrets are and can read them, or "
+                                          f"reach them through what it leaves for later steps.{how} "
+                                          f"{reach[0].upper()}{reach[1:]}",
+                           ident)
+        problems: list[str] = []
+        unsure: list[str] = []
+        # Where else in the job the secrets are: each place is one an agent outside the sandbox could
+        # read (registry credentials go to GitHub to pull images and to no step).
+        outside: list[str] = []
+        found = self._secret_refs(self._credentials(self.wf.raw.get("env")))
+        if found:
+            outside.append(f"the workflow's env holds {self._names(found)}, which every step is given")
+        rest = self._without_registry_credentials({key: value for key, value in job.raw.items() if key != "steps"})
+        found = self._secret_refs(self._credentials(rest))
+        if found:
+            outside.append(f"the job gives {self._names(found)} outside its steps")
+        for step in job.steps:
+            if step.confines:
+                continue
+            found = self._secret_refs(self._credentials(step.raw))
+            if found:
+                outside.append(f"step '{one_line(step.name, 80)}' is given {self._names(found)}")
+        if outside:
+            problems.append(f"{egress_mod.joined(outside, 3)}, outside the command the egress action confines, "
+                            "where an agent outside the sandbox could read it (the checker tells where an agent runs "
+                            f"by where its key goes); {reach}")
+        released = {str(sha).lower() for sha in self.detection.get("egress_action_releases", []) or []}
+        held: list[str] = []         # what goes to the proxy or to nothing the command runs, for the report
+        for step in confined:
+            place = self._placement(job, step)
+            where = place.step
+            given = self._secret_refs(self._credentials(step.raw))
+            if not given:
+                continue
+            problems.extend(place.problems)
+            unsure.extend(place.unsure)
+            passed = [(how, self._secret_refs(creds)) for how, creds in place.command]
+            passed = [(how, creds) for how, creds in passed if creds]
+            for how, creds in passed:
+                problems.append(f"{self._names(creds)} is passed to the command {how}, so the agent can read it; "
+                                f"{reach}")
+            placed: set = set()
+            for _how, creds in place.command:
+                placed.update(creds)
+            for variable, creds in place.proxy:
+                placed.update(creds)
+                held.append(f"{variable} ({self._names(creds)}) goes to AWF's API proxy in {where}")
+            for variable, creds in place.neither:
+                placed.update(creds)
+                held.append(f"{variable} ({self._names(creds)}) is set in {where}'s env and passed to neither the "
+                            "command nor the proxy")
+            unplaced = [cred for cred in given if cred not in placed]
+            if unplaced and not place.unsure and not place.problems:
+                unsure.append(f"{where} is given {self._names(unplaced)} where the checker does not place it")
+            uses = (step.uses or "").strip()
+            ref = uses.split("@", 1)[1] if "@" in uses else ""
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                unsure.append(f"{where} uses the action at '{one_line(ref, 60)}', not a commit, so what that version "
+                              "does with the key is not established")
+            elif ref not in released:
+                unsure.append(f"{where} uses the action at {ref[:12]}, which is not a commit OBAAF lists as released "
+                              f"({len(released) or 'none'} listed), so what that version does with the key is not "
+                              "established")
+        # The proxy and the sandbox that keeps the command from the key were tested on one runner.
+        sets = job.runner_label_sets()
+        if job.raw.get("container") is not None:
+            unsure.append("the job runs in a container, where the action and its API proxy have not been tried")
+        if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
+            unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
+                          "the action and its API proxy were tested only on GitHub-hosted ubuntu-24.04 runners")
+        # The step that uses the action holds the key in its own process, outside the sandbox.
+        envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in confined)]
+        set_here = any(isinstance(env, dict) and any(str(key).upper() == "BASH_ENV" for key in env) for env in envs)
+        written = [step for step in job.steps if "BASH_ENV" in step.text().upper()]
+        if set_here or written or any(isinstance(env, str) for env in envs):
+            unsure.append("the job may set BASH_ENV (in an env, computed when the job runs, or in a step's script), "
+                          "which the action's own bash steps would load outside the sandbox, where the key is held "
+                          "(issue #139)")
+        first = min(step.index for step in confined)
+        for step in job.steps:
+            if step.confines or step.index > first:
+                continue
+            what = "runs beside it" if step.background else egress_mod.leaves_process(step.run)
+            if what:
+                unsure.append(f"step '{one_line(step.name, 80)}', before it, may leave a process running "
+                              f"({what}) as the same user as the action's own steps, which hold the key, and such a "
+                              "process could read it")
+        if not held and not problems and not unsure:
+            # Every secret of the job is in a confined step and none was placed: nothing to show.
+            unsure.append("no secret of the job is placed by the checker in a step that uses the action")
+        verdict = egress_mod.worst(problems, unsure)
+        # Where each credential given to a confined step goes, whatever the verdict (it was the egress
+        # control's detail from 2c.5 until this control existed).
+        routes = self._key_routes(job)
+        said = f" Where the confined step's credentials go: {routes}." if routes else ""
+        if verdict == VERIFIED:
+            detail = ("every secret of the job goes to AWF's API proxy, or to nothing the command runs, in steps that "
+                      "use OBAAF's egress action at a commit OBAAF lists as released, on the runner it was tested on: "
+                      f"the command can use a key the proxy holds and cannot read it.{said} The step's own process "
+                      "holds each key outside the sandbox, where only the action's own steps run. Not stopped: the "
+                      "command can use the key through the proxy, so it can make the provider act for it (calls "
+                      "charged to the key, remote MCP servers, URLs the provider fetches)")
+        else:
+            detail = f"{egress_mod.joined(problems or unsure, 3)}.{said}".rstrip(".")
+        return Control(name, verdict, detail, ident)
 
     # -------------------------------------------------------------- GHA-006/014/015/016
     def release_rules(self, job: Job) -> None:
