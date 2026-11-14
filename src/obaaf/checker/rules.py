@@ -2224,7 +2224,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
                                                            unlisted)
     if notes is not None and unlisted:
         shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
-        notes.append(f"{len(unlisted)} director(ies) could not be listed ({shown}), so agent instruction files in "
+        notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
                      "them were not looked for.")
 
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
