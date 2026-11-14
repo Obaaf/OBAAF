@@ -778,8 +778,11 @@ class IdentityTest(unittest.TestCase):
             f = next(f for f in checker.check(tmp).findings if f.rule == "OBAAF-GHA-010")
             self.assertEqual(f.message, "Step 'say' expands env.title, which holds github.event.issue.title, inside "
                                         "its script.")
+            # Slice 2d.2d: every field the step reaches, the triggers and the expressions are facts.
             self.assertEqual((f.kind, f.facts), ("through-env", {"reference": "env.title",
-                                                                "field": "github.event.issue.title"}))
+                                                                "fields": ["github.event.issue.title"],
+                                                                "triggers": ["issues"],
+                                                                "expressions": ["env.TITLE"]}))
 
     def test_a_hidden_character_that_moves_is_the_same_finding_and_another_one_is_not(self):
         def key_for(text):
