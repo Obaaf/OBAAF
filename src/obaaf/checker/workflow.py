@@ -777,7 +777,8 @@ _SHELL_VARIABLE_RE = re.compile(r"(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUN
 # variable an interpreter reads at start (`PYTHONPATH=`, `LD_PRELOAD=`), an arithmetic expansion, or a
 # `${NAME=...}` or `${NAME:=...}`, which assigns in the current shell even inside quotes.
 _SHELL_STATE_ANYWHERE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH|BASH_CMDS|BASH_ALIASES)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH|BASH_CMDS|BASH_ALIASES|EXECIGNORE)"
+    r"(?![A-Za-z0-9_])"
     r"|(?<![A-Za-z0-9_])(PS4|PROMPT_COMMAND|PYTHON\w*|LD_\w*|NODE_OPTIONS|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS)\+?="
     r"|\$\(\(|\(\(|\$\[|\$\{[#!]?[A-Za-z_]\w*(\[[^\]]*\])?:?="
     # Arithmetic a variable's value can carry (fourth review): an array subscript other than `@` or `*`, a

@@ -167,6 +167,7 @@ class BindingReaderTest(unittest.TestCase):
         "read into a subscript": f'a=PA; b=TH; x="$a$b=5"\nread -r "y[x]" <<< 1\n{VERIFY}',
         "test -v of a subscript": f'a=PA; b=TH; x="$a$b=5"\n[ -v "y[x]" ]\n{VERIFY}',
         "an offset in the check's own words": 'a=PA; b=TH; x="$a$b=5"\n' + VERIFY + ' "${s:x}"',
+        "EXECIGNORE": f"EXECIGNORE='*/bin/obaaf'\n{VERIFY}",
     }
 
     BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",
