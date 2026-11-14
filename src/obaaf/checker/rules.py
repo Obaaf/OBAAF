@@ -797,8 +797,8 @@ class WorkflowRules:
         @anthropic-ai/claude-code` and then `claude --version`, for one. Each line, and each command
         on it separated by `&&` or `;`, must be one of those two and nothing else; comment lines are
         skipped. Anything else makes it False, as does a script in another shell, an action, or a
-        key of the step beyond the plain ones, so a step that runs an agent the patterns would miss
-        is never read as an install. Each install must be global and name a listed package, with only
+        key of the step beyond the plain ones, so that a step running an agent in a form the patterns
+        miss is not read as an install from its words alone (the limits are below). Each install must be global and name a listed package, with only
         options that take no value, and `sudo` only with `-E`, `-H` or `-n`. The step may have no `env`
         or `working-directory`, and neither the job nor the workflow may set any `env` or
         `defaults.run`: each can make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`,
