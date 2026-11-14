@@ -35,7 +35,12 @@ def read_codeowners(root: Path) -> tuple[str | None, list[OwnerRule]]:
     Raises UnreadableFile for one that is there and cannot be read."""
     for rel in CODEOWNERS_LOCATIONS:
         path = root / rel
-        if path.is_file():
+        try:
+            # A folder that cannot be entered hides whether the file is there at all.
+            present = path.is_file()
+        except OSError as exc:
+            raise UnreadableFile(rel, exc) from exc
+        if present:
             rules = []
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -144,12 +149,20 @@ def _walk(root: Path, unlisted: list | None = None, base: Path | None = None):
                 unlisted.append(current.relative_to(base or root).as_posix())
             continue
         for entry in entries:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                if entry.name not in SKIP_DIRS:
-                    stack.append(entry)
-            elif entry.is_file():
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    if entry.name not in SKIP_DIRS:
+                        stack.append(entry)
+                    continue
+                regular = entry.is_file()
+            except OSError:
+                # A folder that can be listed and not entered: its entries cannot be looked at.
+                if unlisted is not None:
+                    unlisted.append(current.relative_to(base or root).as_posix())
+                break
+            if regular:
                 yield entry
 
 

@@ -82,7 +82,53 @@ class UnreadableInstructionFileTest(unittest.TestCase):
                             result.notes)
 
 
+class FoldersThatCannotBeEnteredTest(unittest.TestCase):
+    """Found by the review: a folder that can be listed but not entered ended both commands in a
+    traceback, from `is_file` on a CODEOWNERS place and from `is_symlink` in the walk."""
+
+    def test_a_codeowners_place_that_cannot_be_looked_in_is_an_error(self):
+        with TempDir() as tmp:
+            root = repository(tmp)
+            real = Path.is_file
+
+            def is_file(self):
+                if self.parent.name == "docs":
+                    raise PermissionError(13, "Permission denied")
+                return real(self)
+
+            with mock.patch.object(Path, "is_file", is_file):
+                result = checker.check(root)
+            self.assertIn("docs/CODEOWNERS: cannot be read: Permission denied", result.errors)
+
+    def test_entries_that_cannot_be_looked_at_make_a_note(self):
+        with TempDir() as tmp:
+            root = repository(tmp)
+            (root / ".github" / "CODEOWNERS").write_text("* @owner\n", encoding="utf-8")
+            (root / "sub").mkdir()
+            (root / "sub" / "AGENTS.md").write_text("x\n", encoding="utf-8")
+            real = Path.is_symlink
+
+            def is_symlink(self):
+                if self.parent.name == "sub":
+                    raise PermissionError(13, "Permission denied")
+                return real(self)
+
+            with mock.patch.object(Path, "is_symlink", is_symlink):
+                result = checker.check(root)
+            self.assertEqual(result.errors, [])
+            self.assertTrue(any("sub/" in note for note in result.notes), result.notes)
+
+
 class LanesRefusesWhatCheckRefusesTest(unittest.TestCase):
+    def test_lanes_takes_no_option_that_writes(self):
+        with TempDir() as tmp:
+            root = repository(tmp)
+            for options in (["--write-baseline", str(tmp / "b.json")], ["--output", str(tmp / "out.txt")]):
+                with self.subTest(options=options):
+                    code, _, err = run_cli("check", str(root), "--lanes", *options)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("writes nothing", err)
+
     def test_options_check_refuses_end_lanes_with_2(self):
         with TempDir() as tmp:
             root = repository(tmp)

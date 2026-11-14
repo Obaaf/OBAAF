@@ -128,6 +128,10 @@ def cmd_check(args) -> int:
     except baseline_mod.BaselineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.lanes and (args.write_baseline or args.output):
+        print("error: --lanes prints the jobs and writes nothing; leave out "
+              f"{'--write-baseline' if args.write_baseline else '--output'}", file=sys.stderr)
+        return EXIT_USAGE
     if args.lanes:
         # The command a team runs to confirm every agent job is seen: a file it could not read, or a
         # path with nothing to list, must not end 0 in silence (slice 3.2a). The gate's options are
@@ -196,7 +200,8 @@ def cmd_check(args) -> int:
         return EXIT_USAGE
     if args.write_baseline:
         if result.errors:
-            print("error: not writing a baseline while some CI definitions could not be read", file=sys.stderr)
+            print("error: not writing a baseline while some CI definitions or repository files could not be read",
+                  file=sys.stderr)
             return EXIT_FAIL
         from datetime import date
         from obaaf.checker import acceptance as acceptance_mod

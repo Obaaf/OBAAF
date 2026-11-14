@@ -2223,7 +2223,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []),
                                                            unlisted)
     if notes is not None and unlisted:
-        shown = ", ".join(f"{d}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
+        shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
         notes.append(f"{len(unlisted)} director(ies) could not be listed ({shown}), so agent instruction files in "
                      "them were not looked for.")
 

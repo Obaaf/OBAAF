@@ -10,10 +10,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 Slice 2d.8, from #155; decision D-059.
 
-- **A `CODEOWNERS` file that is there and cannot be read is an error for that file** (status 1), in `obaaf check` and `obaaf check --lanes`. Before, `obaaf check` ended in a traceback and `--lanes` ended 0. OBAAF-REPO-001 and 002 are not reported while it cannot be read.
-- **An agent instruction file that cannot be read is an error for that file.** Before, it was skipped in silence, so OBAAF-INS-001 passed a file nobody had read.
-- **A directory that cannot be listed is a note** naming it, because agent instruction files in it were not looked for. It is a note, not an error: git cannot check out a directory its owner cannot list, so only a local run meets one.
-- **`obaaf check --lanes` refuses the options `obaaf check` refuses** (`--fail-on` with a value it does not know, a `--baseline` that cannot be read, `--owner`, `--reason` or `--expires` without `--write-baseline`, `--baseline` with `--write-baseline`), with status 2. Before, it listed the jobs and ended 0.
+- **A `CODEOWNERS` file that is there and cannot be read is an error for that file** (status 1), in `obaaf check` and `obaaf check --lanes`, and so is a place GitHub looks for one (`.github/`, the root, `docs/`) that cannot be looked in. Before, `obaaf check` ended in a traceback and `--lanes` ended 0. OBAAF-REPO-001 and 002 are not reported while it cannot be read. A link that leads to no file (dangling, to a directory, a loop) is still taken for no file, as before.
+- **An agent instruction file that cannot be read is an error for that file.** Before, it was skipped in silence, so OBAAF-INS-001 passed a file nobody had read. Instruction files that are links are still not looked at (older than this change).
+- **A directory that cannot be listed or entered is a note** naming it, because agent instruction files in it were not looked for. It is a note, not an error: git cannot check out a directory its owner cannot list, so only a local run meets one. Before, `obaaf check` ended in a traceback on a directory it could list and not enter.
+- **`obaaf check --lanes` refuses the options `obaaf check` refuses before it reads anything** (`--fail-on` with a value it does not know, a `--baseline` that cannot be read, `--owner`, `--reason` or `--expires` without `--write-baseline`, `--baseline` with `--write-baseline`), and refuses `--write-baseline` and `--output`, which it never used: status 2. Before, it listed the jobs and ended 0. `--lanes` now runs the repository rules to find unreadable files, so it walks the repository as `obaaf check` does and takes longer on a large one (on 100,000 files, about 3.6 s where it took 0.3 s with `--platform github`).
 
 ### What a job can reach: six rules attacked
 
