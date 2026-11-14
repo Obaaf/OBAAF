@@ -517,6 +517,13 @@ class WorkflowRules:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
                                      for n in names))
             egress = self._egress(job)[0]
+            routes = self._key_routes(job)
+            if routes:
+                # Where a key given to OBAAF's egress action goes, whatever the egress control's verdict:
+                # a model key under model-keys is out of the command's reach, one passed in env is not.
+                egress = Control(egress.name, egress.verdict,
+                                 f"{egress.detail.rstrip('.')}. Where the confined step's credentials go: {routes}",
+                                 egress.id)
             self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}.", job, kind="secrets",
                      secrets=Fact(sorted(names), shown),
                      controls=[*self._secret_controls(job, names), self._input_control(job), egress])
@@ -573,9 +580,6 @@ class WorkflowRules:
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
-    # After a cleared GHA-020: what the control does not stop, so the report never reads as more.
-    _LEAKS = ("Not blocked: anything the confined command sends to a listed host, and data in a name under "
-              "a listed name, which leaves the runner in a DNS query to that name's DNS servers")
 
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
@@ -686,8 +690,8 @@ class WorkflowRules:
             listed = ", ".join(policy.allow) or "nothing"
             listed += " and nothing else" if policy.no_defaults else " and GitHub's default endpoints"
             detail = (f"the job runs on {firewall} and {egress_mod.FIREWALL_POLICY} sets mode: enforce, allowing "
-                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host "
-                      "is not blocked")
+                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host, "
+                      "printed to the job's log or saved as an artifact is not blocked")
         else:
             detail = egress_mod.joined(problems or unsure)
         return egress_mod.Reading(verdict, detail, "firewall-runner",
@@ -812,6 +816,165 @@ class WorkflowRules:
         walk("", step.raw)
         return where
 
+    @staticmethod
+    def _env_keys(value) -> set | None:
+        """The variable names an `env` mapping sets, or None when it is computed when the job runs."""
+        if value is None:
+            return set()
+        return {str(key) for key in value} if isinstance(value, dict) else None
+
+    def _placement(self, job: Job, step: Step) -> egress_mod.Placement:
+        """Where each credential given to a step that uses OBAAF's egress action goes (slice 2c.5),
+        read as the action reads its inputs: `model-keys` names variables of the step's environment for
+        AWF's API proxy, `env` names variables for the command, and the `run` input is the command's
+        text. A credential anywhere else in the step, or inputs or an `env` computed when the job runs,
+        cannot be placed. A name the action refuses makes it refuse to run."""
+        cache = self.__dict__.setdefault("_placement_cache", {})
+        key = (job.id, step.index)
+        if key in cache:
+            return cache[key]
+        where = f"step '{one_line(step.name, 80)}'"
+        place = egress_mod.Placement(where)
+        cache[key] = place
+        given = step.raw.get("with")
+        names: dict = {"env": None, "model-keys": None}     # None: not readable (the caller says why for `with`)
+        if isinstance(given, dict):
+            for label in names:
+                value = step.with_.get(label)
+                if value is None:
+                    names[label] = []
+                elif not isinstance(value, str):
+                    kind = ("a list" if isinstance(value, list) else "a mapping" if isinstance(value, dict)
+                            else "true or false" if isinstance(value, bool) else "a number")
+                    place.unsure.append(f"{where} gives its {label} input as {kind}, not as text, and how GitHub "
+                                        "turns that into the text the action reads is not established")
+                elif expr_mod.OPEN in value:
+                    place.unsure.append(f"{where} computes its {label} input when the job runs ({one_line(value, 80)})")
+                else:
+                    names[label] = egress_mod.split_list(value)
+        env_names, key_names = names["env"], names["model-keys"]
+        for name in env_names or []:
+            if not egress_mod.NAME_RE.match(name):
+                place.problems.append(f"{where} names {one_line(name, 60)!r} under env, which is not a variable name, "
+                                      "so the action refuses to run")
+            elif name in egress_mod.WITHHELD_BY_AWF:
+                place.problems.append(f"{where} names {name} under env, a name AWF withholds from the command, so "
+                                      "the action refuses to run (a model key goes under model-keys)")
+        step_env = step.raw.get("env")
+        here = self._env_keys(step_env)
+        beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
+        for name in key_names or []:
+            if name not in egress_mod.MODEL_KEYS:
+                place.problems.append(f"{where} names {one_line(name, 60)!r} under model-keys, which takes only "
+                                      f"{', '.join(sorted(egress_mod.MODEL_KEYS))}, so the action refuses to run")
+                continue
+            host = egress_mod.MODEL_KEYS[name]
+            if host not in place.hosts:
+                place.hosts.append(host)
+            unset = all(keys is not None and name not in keys for keys in [here, *beyond])
+            if unset:
+                place.problems.append(f"{where} names {name} under model-keys and no env of the step, the job or "
+                                      "the workflow sets it, so the action refuses to run")
+        # The inputs. Only `run` reaches the command, as its text; a credential in any other input is
+        # not placed (an allow-list or a list of names computed from one is reported above).
+        if isinstance(given, dict):
+            for name, value in given.items():
+                found = self._credentials(value)
+                if not found:
+                    continue
+                if input_name(name) == "run":
+                    place.command.append(("in its run input", found))
+                else:
+                    place.unsure.append(f"{where} gives {', '.join(found[:3])} in its {one_line(name, 40)} input, "
+                                        "which the action does not pass on as a variable")
+        elif given is not None:
+            found = self._credentials(given)
+            if found:
+                place.unsure.append(f"{where} computes its inputs when the job runs, with {', '.join(found[:3])}")
+        # The step's environment, which the action reads names from.
+        if isinstance(step_env, dict):
+            folded: dict = {}
+            for name in step_env:
+                folded.setdefault(str(name).upper(), []).append(str(name))
+            said: set = set()
+            for name, value in step_env.items():
+                found = self._credentials(value)
+                if not found:
+                    continue
+                name = str(name)
+                same = folded[name.upper()]
+                if len(same) > 1:
+                    if name.upper() not in said:
+                        said.add(name.upper())
+                        place.unsure.append(f"{where} sets {' and '.join(one_line(n, 60) for n in same)} in its env, "
+                                            "which differ only in case, and which of them the action reads is not "
+                                            "established")
+                elif env_names is None or key_names is None:
+                    continue        # said above: an input is not readable
+                elif name in key_names and name in egress_mod.MODEL_KEYS and name not in env_names:
+                    place.proxy.append((name, found))
+                elif name in env_names:
+                    if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name):
+                        continue    # the action refuses to run, which `problems` says
+                    place.command.append((f"as {name}", found))
+                else:
+                    place.neither.append((name, found))
+        elif step_env is not None:
+            found = self._credentials(step_env)
+            if found:
+                place.unsure.append(f"{where} computes its env when the job runs, with {', '.join(found[:3])}, so the "
+                                    "checker cannot tell which variables hold them")
+        rest = {name: value for name, value in step.raw.items() if name not in ("with", "env")}
+        found = self._credentials(rest)
+        if found:
+            place.unsure.append(f"{where} is given {', '.join(found[:3])} outside its env and its inputs, where the "
+                                "checker does not place it")
+        return place
+
+    def _key_routes(self, job: Job) -> str:
+        """Where the credentials given to the job's steps that use OBAAF's egress action go, in words,
+        for OBAAF-GHA-005's controls; empty when no such step is given one the checker can place."""
+        if job.reusable:
+            return ""
+        parts: list[str] = []
+        for step in job.steps:
+            if not step.confines:
+                continue
+            place = self._placement(job, step)
+            bits: list[str] = []
+            for name, found in place.proxy:
+                bits.append(f"{name} ({', '.join(found[:3])}) goes to AWF's API proxy, which the command can use and "
+                            f"cannot read, and which reaches {egress_mod.MODEL_KEYS[name]} whatever the allow-list says")
+            for how, found in place.command:
+                bits.append(f"{', '.join(found[:3])} is passed to the command {how}, which can send it to a listed host "
+                            "or print it to the job's log")
+            for name, found in place.neither:
+                bits.append(f"{name} ({', '.join(found[:3])}) is named under neither env nor model-keys, so the action "
+                            "passes it to neither")
+            if bits:
+                parts.append(f"in {place.step}, " + "; ".join(bits))
+        return "; ".join(parts)
+
+    def _leaks(self, placements: list) -> str:
+        """What a cleared OBAAF-GHA-020 under OBAAF's egress action does not stop, so the report never
+        reads as more: the listed hosts, names under them, the provider behind each model key, and the
+        job's log and artifacts."""
+        passed = sorted({cred for place in placements for _how, found in place.command for cred in found})
+        keys = sorted({name for place in placements for name, _found in place.proxy})
+        hosts = sorted({host for place in placements for host in place.hosts})
+        parts = ["anything the confined command sends to a listed host"
+                 + (f", the credentials passed to it included ({', '.join(passed[:3])})" if passed else ""),
+                 "data in a name under a listed name, which leaves the runner in a DNS query to that name's DNS servers"]
+        if hosts:
+            given = f"with {', '.join(keys)} given to AWF's API proxy" if keys else "through AWF's API proxy"
+            parts.append(f"{given}: anything the command sends {' or '.join(hosts)} through the proxy, and whatever "
+                         "the provider is asked to fetch or connect to for it (remote MCP servers, URLs); the proxy "
+                         "refuses the providers' hosted web search and fetch tools, in the requests it can read, and "
+                         "nothing else of that kind")
+        parts.append("and anything the command prints to the job's log or leaves for a later actions/upload-artifact "
+                     "step to save")
+        return "Not blocked: " + "; ".join(parts)
+
     def _egress_action(self, job: Job) -> egress_mod.Reading | None:
         """OBAAF's egress action confines one command: its `run` input. The control holds for the job
         only when every condition below can be read and holds (decision D-050):
@@ -820,12 +983,16 @@ class WorkflowRules:
         - its allow-list is written out, every entry a host name the action accepts and none a public
           suffix (a listed name covers the names under it);
         - the agent is the confined command: no other step, and no `env` of the job or workflow, is
-          given a credential, and no other step runs an agent the checker recognises. A job whose
-          steps get no credential at all is "cannot tell" unless the checker recognises the agent in
-          the confined command itself, because an agent that needs no key could run in any step;
-        - no credential is given to the confined step either: one passed to the command could leave
-          through a listed host, and one passed in `model-keys` goes to AWF's API proxy, which reaches
-          the provider whatever the allow-list says; the two are not told apart yet (slice 2c.5);
+          given a credential, and no other step runs an agent the checker recognises. A job in which
+          no credential reaches the confined command or AWF's API proxy is "cannot tell" unless the
+          checker recognises the agent in the confined command itself, because an agent that needs no
+          key could run in any step;
+        - every credential given to the confined step is placed (`_placement`, slice 2c.5, decision
+          D-052): a model key named in `model-keys` goes to AWF's API proxy, which the command can use
+          and cannot read, and which reaches the provider's API host whatever the allow-list says, so
+          that host is shown with the allow-list; one passed to the command can be sent to a listed
+          host. Both limit the network as the allow-list says, and both are said beside a cleared
+          finding. A credential the checker cannot place is "cannot tell";
         - no step that can run after or beside it reads its `workspace` or `scratch` output or the
           scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
           any other use is "cannot tell", because the checker cannot tell reading from running."""
@@ -914,26 +1081,29 @@ class WorkflowRules:
             why = self._agent_step(step, step.agent_text())
             if why or step.index in job.agent_script_steps:
                 agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
-        inside = []
-        for step in confined:
-            inside.extend(self._credentials(step.raw))
+        # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
+        # makes it refuse to run; a credential that reaches the command or AWF's API proxy is the
+        # evidence that the agent is the confined command.
+        placements = [self._placement(job, step) for step in confined]
+        for place in placements:
+            problems.extend(place.problems)
+            unsure.extend(place.unsure)
+            for host in place.hosts:
+                shown = f"{host} (through AWF's API proxy)"
+                if shown not in allow_shown:
+                    allow_shown.append(shown)
         if agents_outside:
             problems.append(f"{egress_mod.joined(agents_outside, 3)}, outside the confined command")
         if outside:
             problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
                             "(the checker tells where an agent runs by where its key goes)")
-        elif inside:
-            unsure.append(f"the confined step is given {', '.join(sorted(set(inside))[:3])}; a key passed to the "
-                          "command could leave through a listed host, and one passed in model-keys goes to AWF's "
-                          "API proxy, which reaches the provider whatever the allow-list says; the checker does "
-                          "not tell the two apart yet (slice 2c.5)")
-        elif not agents_outside:
+        elif not agents_outside and not any(place.reaches for place in placements):
             recognised = [step for step in confined if self._agent_step(step, step.agent_text())
                           or step.index in job.agent_script_steps]
             if not recognised:
-                unsure.append("no step of the job is given a credential and the checker recognises no agent in the "
-                              "confined command, so it cannot tell where the agent runs: an agent that needs no key "
-                              "could run in any step")
+                unsure.append("no credential reaches the confined command or AWF's API proxy, no other step is given "
+                              "one, and the checker recognises no agent in the confined command, so it cannot tell "
+                              "where the agent runs: an agent that needs no key could run in any step")
         if unread_token and not outside:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
@@ -982,8 +1152,8 @@ class WorkflowRules:
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 160)}, and nothing but actions/upload-artifact "
-                      f"runs after it. {self._LEAKS}")
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and nothing but actions/upload-artifact "
+                      f"runs after it. {self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))

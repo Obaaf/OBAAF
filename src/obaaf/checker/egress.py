@@ -36,6 +36,27 @@ FIREWALL_LABEL = "ubuntu-24.04-firewall"
 FIREWALL_POLICY = ".github/egress-firewall.yaml"
 LIMIT = 1_000_000       # bytes of the policy file the checker reads; a larger file is "cannot tell"
 
+# How OBAAF's egress action reads its `env` and `model-keys` inputs (actions/egress/egress.py, from the
+# merge of slice 2c.4 on; a test keeps these the same as the action's). The checker reads a step that
+# uses the action as the action would, which holds only for the commits OBAAF lists as released, and
+# those may only be commits at or after that merge (`egress_action_floor` in detection.yaml).
+#
+# MODEL_KEYS: the names `model-keys` accepts, each with the API host AWF's API proxy sends that key to
+# whatever `allow` says. WITHHELD_BY_AWF: names the action refuses under `env`, because AWF withholds
+# them from the command. NAME_RE: what the action takes for a variable name.
+MODEL_KEYS = {
+    "ANTHROPIC_API_KEY": "api.anthropic.com",
+    "OPENAI_API_KEY": "api.openai.com",
+}
+WITHHELD_BY_AWF = frozenset({
+    "AGENT_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_API_KEY",
+    "COPILOT_GITHUB_TOKEN", "COPILOT_PROVIDER_API_KEY", "GEMINI_API_KEY",
+    "GOOGLE_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_API_TOKEN", "GITHUB_PAT", "GH_ACCESS_TOKEN",
+})
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def split_list(text: str) -> list[str]:
     """Entries separated by commas, spaces or new lines, as OBAAF's action splits `allow`."""
@@ -218,6 +239,37 @@ class Reading:
     detail: str
     kind: str
     values: dict
+
+
+@dataclass
+class Placement:
+    """Where the credentials given to one step that uses OBAAF's egress action go, read as the action
+    reads its inputs (flagship slice 2c.5). Each credential is in one of three places, or the step
+    has a reason in `unsure` or `problems`:
+
+    - `proxy`: (variable, credentials) set in the step's `env` under a name its `model-keys` input
+      names; the action gives it to AWF's API proxy, which the command can use and cannot read;
+    - `command`: (how, credentials) the command can read: set in the step's `env` under a name its
+      `env` input names, or written in its `run` input;
+    - `neither`: (variable, credentials) set in the step's `env` under a name neither input names;
+      the action passes it to neither.
+
+    `hosts` are the API hosts AWF's API proxy reaches for the model keys the step names, whatever
+    `allow` says. `unsure` holds what the checker cannot place ("cannot tell"); `problems` what makes
+    the action refuse to run ("not met")."""
+    step: str
+    proxy: list = field(default_factory=list)
+    command: list = field(default_factory=list)
+    neither: list = field(default_factory=list)
+    hosts: list = field(default_factory=list)
+    unsure: list = field(default_factory=list)
+    problems: list = field(default_factory=list)
+
+    @property
+    def reaches(self) -> bool:
+        """Whether a credential reaches the confined command or AWF's API proxy: the evidence that the
+        agent is the confined command (decision D-050)."""
+        return bool(self.proxy or self.command)
 
 
 def worst(problems: list, unsure: list) -> str:
