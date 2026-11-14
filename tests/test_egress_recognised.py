@@ -949,8 +949,10 @@ def lists_differ(sha):
 
 
 def reading(spec):
-    """What decides how the action reads `env` and `model-keys` in one file at one commit: the two
-    parsing functions of egress.py, as syntax trees, or the input names of action.yml."""
+    """Part of what decides how the action reads `env` and `model-keys`, in one file at one commit:
+    the two parsing functions of egress.py, as syntax trees (a docstring counts), or the input names
+    of action.yml. Not compared: what `run()` does with what they return, or how action.yml wires the
+    inputs to the script; the escape tests a commit must pass before it is listed cover those."""
     import ast
     import subprocess
     import yaml
