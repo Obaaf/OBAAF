@@ -40,6 +40,17 @@ agent_commands:
   - '(^|[\s;&|(])copilot\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '(^|[\s;&|(])cline\s'
 
+# Packages that install an agent's CLI, with the command each installs (flagship slice 2c.8). The
+# patterns above match their names, so a step that installs one is taken for running an agent. Before
+# OBAAF's egress action, a step whose script does nothing but install these packages globally (and
+# print the CLI's version) is not taken for running the agent outside the confined command; one that
+# names them in any other way is "cannot tell", unless it also runs an agent. The exact forms are in
+# docs/checker-configuration.md. (`agent_packages`, below, is the Jenkins analyser's list.)
+agent_installs:
+  "@anthropic-ai/claude-code": claude
+  "@openai/codex": codex
+  "@google/gemini-cli": gemini
+
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.
 instruction_files:
