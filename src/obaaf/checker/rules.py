@@ -1563,6 +1563,13 @@ class WorkflowRules:
             (fixed, f"{fixed} checkout step(s) take a ref written in the workflow")) if count) or "no checkout step"
         return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
 
+    # Variables bash or the dynamic loader act on, which the action's own bash steps would obey outside
+    # the sandbox, where the key is held (issue #139, and the review of 2c.7).
+    _LOADED_BY_BASH = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD",
+                                 "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
+    # A step that sets variables or the PATH for the steps after it, the action's own included.
+    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|GITHUB_PATH|BASH_ENV|exportVariable|addPath", re.I)
+
     KEY_NAME = ("the agent's command cannot read any of the job's secrets: each goes only to a proxy that holds it "
                 "for the command, or to nothing the command runs")
     KEY_ID = "key-out-of-reach"
@@ -1634,12 +1641,16 @@ class WorkflowRules:
                             f"by where its key goes); {reach}")
         released = {str(sha).lower() for sha in self.detection.get("egress_action_releases", []) or []}
         held: list[str] = []         # what goes to the proxy or to nothing the command runs, for the report
+        keyed: list = []             # the confined steps that hold a secret of the job
+        placements: list = []
         for step in confined:
             place = self._placement(job, step)
+            placements.append(place)
             where = place.step
             given = self._secret_refs(self._credentials(step.raw))
             if not given:
                 continue
+            keyed.append(step)
             problems.extend(place.problems)
             unsure.extend(place.unsure)
             passed = [(how, self._secret_refs(creds)) for how, creds in place.command]
@@ -1676,23 +1687,97 @@ class WorkflowRules:
         if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
             unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
                           "the action and its API proxy were tested only on GitHub-hosted ubuntu-24.04 runners")
-        # The step that uses the action holds the key in its own process, outside the sandbox.
-        envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in confined)]
-        set_here = any(isinstance(env, dict) and any(str(key).upper() == "BASH_ENV" for key in env) for env in envs)
-        written = [step for step in job.steps if "BASH_ENV" in step.text().upper()]
-        if set_here or written or any(isinstance(env, str) for env in envs):
-            unsure.append("the job may set BASH_ENV (in an env, computed when the job runs, or in a step's script), "
-                          "which the action's own bash steps would load outside the sandbox, where the key is held "
-                          "(issue #139)")
-        first = min(step.index for step in confined)
-        for step in job.steps:
-            if step.confines or step.index > first:
+        # The step that uses the action holds the key in its own process, outside the sandbox, and its
+        # own bash steps run there with the key in their environment. What the job's env and the
+        # step's env set reaches them; so does anything a step before or beside it writes to
+        # GITHUB_ENV or GITHUB_PATH, leaves running, or is: an agent outside the sandbox can reach the
+        # key through any of those. Found by the review of 2c.7: an agent CLI in the step before, a
+        # decoy use of the action first, parallel steps and service containers all passed.
+        envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in keyed)]
+        loaded = [str(key) for env in envs if isinstance(env, dict) for key in env
+                  if str(key).upper() in self._LOADED_BY_BASH or str(key).upper().startswith("BASH_FUNC_")]
+        if loaded or any(env is not None and not isinstance(env, dict) for env in envs):
+            unsure.append(f"the job sets {self._names(sorted(set(loaded))) if loaded else 'an env computed when the job runs'}"
+                          ", which the action's own bash steps would load or obey outside the sandbox, where the key "
+                          "is held (issue #139)")
+        services = job.raw.get("services")
+        if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
+                                              for svc in services.values()):
+            unsure.append("the job's service containers are given volumes or options, and run beside the step that "
+                          "holds the key for the whole job")
+        perms = job.permissions
+        if perms is not None and perms.oidc:
+            problems.append("the job can request OIDC tokens (id-token: write), which any step can turn into a "
+                            "credential, so the agent may run outside the sandbox, before the step that holds the key")
+        if perms is not None and perms.level("models") in ("read", "write"):
+            problems.append("the job's token can call GitHub Models (models permission), and every action is given "
+                            "that token, so the agent may run outside the sandbox, before the step that holds the key")
+        if perms is None:
+            unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
+                          "which the checker does not read, and every action is given that token")
+        nearby: dict = {}            # step index -> the step, for every step that can run before or beside a key
+        for holder in keyed:
+            for step in job.steps:
+                if step is holder:
+                    continue
+                if (step.index < holder.index or holder.background
+                        or (holder.group is not None and step.group == holder.group)):
+                    nearby[step.index] = step
+        evidence = any(place.reaches for place in placements) or any(
+            self._agent_step(step, step.agent_text()) or step.index in job.agent_script_steps for step in confined)
+        first = min(holder.index for holder in keyed) if keyed else 0
+        for step in sorted(nearby.values(), key=lambda s: s.index):
+            where = f"step '{one_line(step.name, 80)}'"
+            if step.confines:
+                if step in keyed:
+                    continue        # read above as a step that holds a key
+                uses = (step.uses or "").strip()
+                ref = uses.split("@", 1)[1] if "@" in uses else ""
+                if not re.fullmatch(r"[0-9a-f]{40}", ref) or ref not in released:
+                    unsure.append(f"{where} uses the action at '{one_line(ref, 60)}', which is not a commit OBAAF "
+                                  "lists as released, before or beside the step that holds the key, and what that "
+                                  "version's own steps do outside the sandbox is not established")
                 continue
-            what = "runs beside it" if step.background else egress_mod.leaves_process(step.run)
-            if what:
-                unsure.append(f"step '{one_line(step.name, 80)}', before it, may leave a process running "
-                              f"({what}) as the same user as the action's own steps, which hold the key, and such a "
-                              "process could read it")
+            why = self._agent_step(step, step.agent_text())
+            plain_before = step.index < first and not step.background and step.group is None
+            if why == "runs an agent CLI" and plain_before and step.index not in job.agent_script_steps:
+                if self._installs_only(job, step):
+                    why = None      # it installs the agent's CLI, which the confined command runs (2c.8)
+                elif self._package_mention_only(step):
+                    unsure.append(f"{where}, before the step that holds the key, names an agent's package in a "
+                                  "script the checker reads as neither an install it can vouch for nor a run")
+                    why = None
+            if why or step.index in job.agent_script_steps:
+                problems.append(f"{where} {why or 'runs an agent in a script'}, outside the sandbox, before or beside "
+                                "the step that holds the key, as the same user, and can reach the key through what "
+                                "it leaves for that step (its environment, its PATH, a process left running)")
+                continue
+            given = self._credentials(step.raw)
+            if given and not self._secret_refs(given):      # a secret of the job is said above
+                problems.append(f"{where} is given {self._names(given)}, before or beside the step that holds the "
+                                "key, so the agent may be that step (the checker tells where an agent runs by where "
+                                "its key goes)")
+                continue
+            text = step.text()
+            beside = any((step.background and step.index < holder.index)
+                         or (holder.background and step.index > holder.index)
+                         or (holder.group is not None and step.group == holder.group) for holder in keyed)
+            if beside:
+                unsure.append(f"{where} runs beside the step that holds the key, as the same user, and could read it "
+                              "from that step's process")
+            elif egress_mod.leaves_process(step.run):
+                unsure.append(f"{where}, before the step that holds the key, may leave a process running "
+                              f"({egress_mod.leaves_process(step.run)}) as the same user, which could read the key "
+                              "from that step's process")
+            if self._SETS_FOR_LATER_RE.search(text):
+                unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV or "
+                              "GITHUB_PATH, or names BASH_ENV, which can make the action's own steps, which hold the "
+                              "key, load or run something else (issue #139)")
+        if nearby and not evidence and not any(
+                self._agent_step(step, step.agent_text()) for step in nearby.values() if not step.confines):
+            unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
+                          "confined command, so it cannot tell where the agent runs: an agent that needs no key "
+                          "could run in a step before or beside the one that holds the key")
         if not held and not problems and not unsure:
             # Every secret of the job is in a confined step and none was placed: nothing to show.
             unsure.append("no secret of the job is placed by the checker in a step that uses the action")
@@ -1705,8 +1790,10 @@ class WorkflowRules:
             detail = ("every secret of the job goes to AWF's API proxy, or to nothing the command runs, in steps that "
                       "use OBAAF's egress action at a commit OBAAF lists as released, on the runner it was tested on: "
                       f"the command can use a key the proxy holds and cannot read it.{said} The step's own process "
-                      "holds each key outside the sandbox, where only the action's own steps run. Not stopped: the "
-                      "command can use the key through the proxy, so it can make the provider act for it (calls "
+                      "holds each key outside the sandbox. The steps that can run before or beside it were read for "
+                      "an agent, a credential, a process left running and a write to GITHUB_ENV or GITHUB_PATH; what "
+                      "an action used before it does, and what a script file it runs writes, were not. Not stopped: "
+                      "the command can use the key through the proxy, so it can make the provider act for it (calls "
                       "charged to the key, remote MCP servers, URLs the provider fetches)")
         else:
             detail = f"{egress_mod.joined(problems or unsure, 3)}.{said}".rstrip(".")
