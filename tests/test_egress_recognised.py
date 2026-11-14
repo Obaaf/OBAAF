@@ -743,7 +743,10 @@ class AgentInstallTest(unittest.TestCase):
                        "npm install -g @anthropic-ai/claude-code \\\n  && claude -p x",
                        "npm exec @anthropic-ai/claude-code -- -p x",
                        "npm install -g @anthropic-ai/claude-code; npx -y @openai/codex exec fix",
-                       "pnpm dlx @google/gemini-cli", "bunx @anthropic-ai/claude-code"):
+                       "pnpm dlx @google/gemini-cli", "bunx @anthropic-ai/claude-code",
+                       # Found by the second review: a path into the package runs it.
+                       "node node_modules/@anthropic-ai/claude-code/cli.js -p fix",
+                       "npm i -g @anthropic-ai/claude-code\nnode /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"):
             f = self.check(self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), NOT_MET, detail(f))
@@ -791,11 +794,15 @@ class AgentInstallTest(unittest.TestCase):
             f = self.check(self.install(plain, extra) + self.CONFINED)
             with self.subTest(extra=extra):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
-        for where in ("job", "workflow"):
-            kw = ({"job_extra": "    defaults: {run: {shell: 'env BASH_ENV=./run-agent.sh bash -e {0}'}}"}
-                  if where == "job" else {"top": "defaults: {run: {working-directory: tools}}"})
+        for kw in ({"job_extra": "    defaults: {run: {shell: 'env BASH_ENV=./run-agent.sh bash -e {0}'}}"},
+                   {"top": "defaults: {run: {working-directory: tools}}"},
+                   # Found by the second review: the env the step inherits.
+                   {"job_extra": "    env: {BASH_ENV: ./run-agent.sh}"},
+                   {"job_extra": "    env: {NODE_OPTIONS: --require ./agent.js}"},
+                   {"top": "env: {PATH: './bin:/usr/bin:/bin'}"},
+                   {"top": "env: {npm_config_script_shell: ./run-agent.sh}"}):
             f = self.check(self.install(plain) + self.CONFINED, **kw)
-            with self.subTest(where=where):
+            with self.subTest(kw=kw):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
 
     def test_only_a_plain_shell_step_is_read(self):

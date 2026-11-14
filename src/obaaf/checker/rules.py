@@ -800,9 +800,12 @@ class WorkflowRules:
         key of the step beyond the plain ones, so a step that runs an agent the patterns would miss
         is never read as an install. Each install must be global and name a listed package, with only
         options that take no value, and `sudo` only with `-E`, `-H` or `-n`. The step may have no `env`
-        or `working-directory`, and neither the job nor the workflow may set `defaults.run`: each can
-        make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`, `PATH`, a shell of the
-        author's choosing, a directory whose `.npmrc` is read). Found by the review of 2c.8."""
+        or `working-directory`, and neither the job nor the workflow may set any `env` or
+        `defaults.run`: each can make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`,
+        `PATH`, `npm_config_*`, a shell of the author's choosing). Found by the review of 2c.8. Not read,
+        and not readable from the workflow: what earlier steps put in the environment (`GITHUB_ENV`,
+        `GITHUB_PATH`, files in the home directory) and package-manager configuration in the working
+        directory, which `pnpm`, `yarn` and `bun` may read."""
         packages = self.detection.get("agent_installs") or {}
         if not packages or step.uses is not None or not isinstance(step.raw.get("run"), str):
             return False
@@ -811,6 +814,9 @@ class WorkflowRules:
         for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
             if defaults is not None and not (isinstance(defaults, dict) and "run" not in defaults):
                 return False
+        for env in (job.raw.get("env"), self.wf.raw.get("env")):
+            if env is not None and env != {}:
+                return False    # the step inherits it (second review of 2c.8)
         shell = step.raw.get("shell")
         if shell is not None and shell not in ("bash", "sh"):
             return False
@@ -860,6 +866,8 @@ class WorkflowRules:
         text = step.agent_text()
         if not packages or not text or self._PACKAGE_RUNNER_RE.search(text):
             return False
+        if any(f"{name}/" in text for name in packages):
+            return False        # a path into the package (`…/claude-code/cli.js`) runs it
         patterns = list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())
         others = [re.compile(p, re.M) for p in patterns if p not in packages]
         return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
