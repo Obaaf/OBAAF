@@ -136,14 +136,16 @@ class FromAReportToAGateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("OBAAF-GHA-003", out)
 
-    def test_lanes_ends_with_zero_and_says_nothing_of_a_workflow_it_could_not_read(self):
+    def test_lanes_fails_on_a_workflow_it_could_not_read_as_the_check_does(self):
+        # Slice 3.2a: until then --lanes ended with 0 and said nothing of the file.
         with TempDir() as tmp:
             repository(tmp, baseline=False)
             (tmp / ".github" / "workflows" / "broken.yml").write_text("on: [push\njobs: {", encoding="utf-8")
             code, out, err = run_cli("check", tmp, "--lanes")
             report = run_cli("check", tmp, "--fail-on", "never")[0]
-        self.assertEqual(code, 0)
-        self.assertNotIn("broken.yml", out + err)
+        self.assertEqual(code, 1)
+        self.assertNotIn("broken.yml", out)
+        self.assertIn("error: .github/workflows/broken.yml: cannot parse YAML", err)
         self.assertEqual(report, 1)
 
     def test_a_finding_left_out_of_the_baseline_because_its_ignore_entry_does_not_count(self):
@@ -282,7 +284,7 @@ class TheCommandsOnThePagesExistTest(unittest.TestCase):
         gate, upgrading = (path.read_text(encoding="utf-8") for path in DOCS)
         for text in ("tests/test_adoption_path.py", "| 0 |", "| 1 |", "| 2 |", "`never` included",
                      "Without `--owner`, `--reason` and `--expires` the status is 2", "no longer found",
-                     "`--lanes` lists and judges nothing", "is not written to the baseline",
+                     "`--lanes` lists and judges nothing", "the status is 1; a path with nothing to list is status 2", "is not written to the baseline",
                      "A step with no `name` or `id` is known by the action it uses"):
             with self.subTest(page="from-report-to-gate.md", text=text):
                 self.assertIn(text, gate)

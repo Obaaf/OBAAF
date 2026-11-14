@@ -39,6 +39,7 @@ Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit 
 | An input written in another case under `with:` (`REF:` for `ref:`) | It is read as the input it is, so a rule that looks at it now sees it | Fix the finding |
 | A release policy (`signing: keys`) or `obaaf dsse assemble --public-key` that names a key outside ECDSA P-256 and P-384, Ed25519 and RSA (P-521, secp256k1, DSA, Ed448, X25519, a binary curve) | The key is refused when it is loaded, with an error naming the file, and `obaaf verify release` and `obaaf dsse assemble` end with status 1. Before, a key on another prime curve was accepted, a binary-curve key ended both commands in a traceback (with the pinned cryptography 50.0.1), and the other kinds failed later | Sign with a P-256, P-384, Ed25519 or RSA key and name its public key in the policy |
 | A step that gives one input twice under two spellings (`ref:` and `REF:`) | An error for the file, and exit status 1 whatever `--fail-on` says: the checker cannot tell which value GitHub uses | Keep one of the two |
+| A step that runs `obaaf check --lanes` | It ends with 1 when a workflow or Jenkinsfile could not be read, and with 2 when the path has nothing to list or is not there; it ended with 0 in every case (slice 3.2a) | Fix the file the `error:` line names, or the path |
 
 `obaaf audit` is in no release, so nothing about it can change for someone on 0.3.0. If you run it from a commit after 0.3.0: it now applies rules and ends with status 1 on a finding at medium or above (`--fail-on never` gives the old status), and `--format json` prints a report with the snapshot under `snapshot`, where it printed the snapshot; with `--expected`, the comparison is under `drift` in that report, where it printed a document of its own, `obaaf-settings-drift/v0.1` ([the settings audit](settings-audit.md)).
 
@@ -46,7 +47,8 @@ The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycl
 
 ### What a script that reads the output will notice
 
-- **The text report begins differently**: `Accepted risk: ...` and `Other findings: ...` come first. The line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged.
+- **The text report begins differently**: `Accepted risk: ...` and `Other findings: ...` come first. **It also ends differently**: the last line is `Checked by obaaf VERSION.`, and with no configuration file two lines before it say what an unconfigured run leaves out.
+- **`obaaf check --lanes` can end with 1 or 2**: 1 when a workflow or Jenkinsfile could not be read (it is an `error:` line on standard error and its jobs are not listed), 2 when the path has nothing to list or is not there. It ended with 0 in every case before. The line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged.
 - **The `ignored:` lines** read `ignored: RULE path:line - accepted by OWNER until DATE: REASON`.
 - **A path is printed in quotes** where it heads its findings, unless it is made of visible ASCII characters with no space.
 - **The notes no longer list lane declarations that do nothing**; they are findings. In JSON they are in `findings` and no longer in `notes`.

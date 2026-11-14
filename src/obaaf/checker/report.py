@@ -360,7 +360,22 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append("Notes (advisory; they do not affect the result):")
         for note in result.notes:
             lines.append(f"  - {one_line(note)}")
+    lines.append("")
+    if result.config is not None and result.config.path is None:
+        # A first run (slice 3.2a): say what an unconfigured check cannot know, and what OBAAF does not look for.
+        lines.append(FIRST_RUN_CONFIG)
+        lines.append(FIRST_RUN_OTHER_TOOLS)
+    lines.append(f"Checked by obaaf {__version__}.")
     return "\n".join(lines).lstrip("\n") + "\n"
+
+
+# Printed at the end of a text report when no configuration file was read (slice 3.2a).
+FIRST_RUN_CONFIG = ("No configuration file was read, so a job counts as an agent job only when it runs an agent "
+                    "tool OBAAF knows. Run the same command with --lanes to see how each job was classified, and "
+                    "declare the others in .github/obaaf.yml (docs/checker-configuration.md).")
+FIRST_RUN_OTHER_TOOLS = ("Other tools find workflow mistakes OBAAF does not look for: run zizmor, actionlint and "
+                         "poutine beside it, and turn on GitHub's code scanning default setup, which analyses "
+                         "workflows with CodeQL (docs/landscape.md).")
 
 
 def _entry_text(entry: dict) -> str:

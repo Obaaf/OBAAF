@@ -756,10 +756,15 @@ class _LaneDeclarations:
 
 
 def lanes(target: Path, config: Config | None = None, platform: str = "auto",
-          notes: list | None = None) -> list[tuple[str, str, str, str]]:
+          notes: list | None = None, errors: list | None = None,
+          seen: list | None = None) -> list[tuple[str, str, str, str]]:
     """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
     checker classified them. Lane declarations that did nothing, which `check` reports as findings,
-    are added to `notes` as lines of text when it is given."""
+    are added to `notes` as lines of text when it is given. A file that could not be read, whose jobs
+    are therefore missing from the list, is added to `errors` as `check` words it (slice 3.2a), and
+    every file looked at, read or not, to `seen`."""
+    errors = [] if errors is None else errors
+    seen = [] if seen is None else seen
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
     config = config or Config.load(root)
     jenkins_sought = is_repo and platform != "github" and target.resolve() == root
@@ -772,21 +777,40 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     out = []
     for path in files:
         rel = path.relative_to(root).as_posix()
-        workflow = wf_mod.parse(rel, path.read_text(encoding="utf-8", errors="replace"))
+        seen.append(rel)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel, path)
+            continue
+        workflow = wf_mod.parse(rel, text)
         if workflow.error:
+            errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
         declared.workflow(workflow, path)
+        # What `check` reports as an error for the file (an input given twice under two spellings) can
+        # change what a job runs, so the listing of that file is not to be trusted either.
+        errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
     catalog = load()
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()
-        result = jenkins_mod.analyze(rel, path.read_bytes(), catalog, root, extra_agents=config.agents,
+        seen.append(rel)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel)
+            continue
+        result = jenkins_mod.analyze(rel, data, catalog, root, extra_agents=config.agents,
                                      lane_overrides=config.lanes)
         if result.error:
+            errors.append(f"{rel}: {result.error}")
             declared.unreadable(rel)
         else:
             declared.jenkinsfile(rel, result)
