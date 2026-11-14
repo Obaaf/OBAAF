@@ -7,6 +7,7 @@ disk), OBAAF-GHA-012 (an agent reading instructions from the change under review
 here; the record of every attempt, including the ones that held, is docs/bypass-attempts.md.
 """
 
+import time
 import unittest
 
 from helpers import TempDir
@@ -350,6 +351,173 @@ class ReleasedBaselinesStillNameTheirFindingsTest(unittest.TestCase):
                                        "workflow started by pull_request_target.")
         self.assertNotEqual(found.message, found.legacy)
         self.assertEqual(baseline._identity_v1(found)[-1], found.legacy)
+
+
+class FirstReviewTest(unittest.TestCase):
+    """What the review of the first version of this slice found (a separate reviewer, on the branch)."""
+
+    def test_adversarial_input_is_read_in_linear_time(self):
+        """A run of `=` after a git option took 97 s on a 100 KB line, and eight env values that each
+        read all eight took 83 s; an unclosed `${{` repeated took seconds. Each now takes well under a
+        second."""
+        env = "".join(f"      E{i}: \"" + "".join(f"${{{{ env.E{j} }}}}" for j in range(12)) + "\"\n" for i in range(12))
+        cases = [script_job("git --a" + "=" * 100000 + " '"),
+                 script_job("git" + " -c x" * 20000 + " '"),
+                 script_job("read" + " -a" * 20000 + " '"),
+                 script_job("git fetch " + "${{ env." * 12000),
+                 checkout_job(["ref: ${{ env.E0 }}"], job_extra="    env:\n" + env)]
+        with TempDir() as tmp:
+            for text in cases:
+                with self.subTest(text=text[150:190]):
+                    started = time.monotonic()
+                    check(tmp, text)
+                    self.assertLess(time.monotonic() - started, 10)
+
+    def test_option_values_in_quotes(self):
+        scripts = ['git -C "$GITHUB_WORKSPACE" fetch origin pull/${{ github.event.number }}/head',
+                   "git -c 'user.name=x' fetch origin pull/${{ github.event.number }}/head",
+                   'git --git-dir="$D/.git" fetch origin pull/${{ github.event.number }}/head',
+                   'git --work-tree "$D" checkout ${{ github.event.pull_request.head.sha }}',
+                   'gh pr -R "o/r" checkout "$N"',
+                   'gh pr --repo="o/r" checkout "$N"',
+                   'sh -c "git fetch origin refs/pull/${{ github.event.number }}/head"']
+        with TempDir() as tmp:
+            for script in scripts:
+                with self.subTest(script=script):
+                    env = "        env:\n          N: ${{ github.event.number }}\n          D: x\n"
+                    found = of(check(tmp, script_job(script, env=env)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+
+    def test_fetched_into_a_file_and_applied_later(self):
+        env = ("        env:\n          N: ${{ github.event.number }}\n"
+               "          U: ${{ github.event.pull_request.diff_url }}\n")
+        scripts = ['gh pr diff "$N" > pr.diff\ngit apply pr.diff',
+                   'curl -sL "${{ github.event.pull_request.patch_url }}" -o p\ngit am p',
+                   'curl -sL "$U" | patch -p1',
+                   'gh pr diff "$N" | patch -p1']
+        with TempDir() as tmp:
+            for script in scripts:
+                with self.subTest(script=script):
+                    found = of(check(tmp, script_job(script, env=env)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+
+    def test_a_github_script_call_written_over_several_lines(self):
+        contents = (f"actions/github-script@{SHA}\n        with:\n          script: |\n"
+                    "            const { data } = await github.rest.repos.getContent({\n"
+                    "              owner: context.repo.owner, repo: context.repo.repo, path: 'CLAUDE.md',\n"
+                    "              ref: context.payload.pull_request.head.sha,\n"
+                    "            })\n")
+        diff = (f"actions/github-script@{SHA}\n        with:\n          script: |\n"
+                "            const { data } = await github.rest.pulls.get({\n"
+                "              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number,\n"
+                "              mediaType: { format: 'diff' },\n"
+                "            })\n"
+                "            require('fs').writeFileSync('pr.diff', data)\n"
+                "            await exec.exec('git', ['apply', 'pr.diff'])\n")
+        reading = (f"actions/github-script@{SHA}\n        with:\n          script: |\n"
+                   "            const { data } = await github.rest.repos.getContent({\n"
+                   "              owner: context.repo.owner, repo: context.repo.repo, path: 'labels.yml' })\n"
+                   "            await github.rest.issues.addLabels({ issue_number: context.issue.number, labels: ['x'] })\n")
+        with TempDir() as tmp:
+            for name, uses, expected in (("contents", contents, [("high", "fetch")]),
+                                         ("diff", diff, [("high", "fetch")]),
+                                         ("default branch contents", reading, [])):
+                with self.subTest(name=name):
+                    found = of(check(tmp, script_job("", uses=uses)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], expected)
+
+    def test_ordinary_commands_beside_a_pull_requests_values_are_not_reported(self):
+        env = ("        env:\n          BRANCH: ${{ github.head_ref }}\n          N: ${{ github.event.number }}\n"
+               "          H: ${{ github.event.pull_request.head.sha }}\n          PR: ${{ github.event.number }}\n")
+        scripts = ['git switch -c "tracking/pr-${{ github.event.number }}" main',
+                   'git checkout -b "backport-$N" origin/main',
+                   'git clone --depth 1 --branch main https://github.com/octo-org/shared-config cfg',
+                   'git fetch origin main && gh pr comment "$N" --body ok',
+                   'git checkout main # PR $N',
+                   'git merge-base origin/main "$H"',
+                   'git show-ref "$H"',
+                   'git fetch -n origin main',
+                   'npm run pr-labels && git pull origin main',
+                   'echo "${{ github.event.pull_request.head.ref }}"; git pull origin main']
+        with TempDir() as tmp:
+            for script in scripts:
+                with self.subTest(script=script):
+                    self.assertEqual(of(check(tmp, script_job(script, env=env)), "OBAAF-GHA-002"), [])
+
+    def test_a_cannot_tell_finding_names_what_produces_the_value(self):
+        def wf(field):
+            return (f"on: issue_comment\npermissions: {{contents: read}}\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                    f"    steps:\n      - id: pr\n        run: echo \"sha=$(gh pr view 1 --json {field} -q .{field})\" >> \"$GITHUB_OUTPUT\"\n"
+                    f"      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n"
+                    "          ref: ${{ steps.pr.outputs.sha }}\n")
+        with TempDir() as tmp:
+            base = of(check(tmp, wf("baseRefOid")), "OBAAF-GHA-002")[0]
+            head = of(check(tmp, wf("headRefOid")), "OBAAF-GHA-002")[0]
+        self.assertEqual(base.kind, "checkout-unresolved")
+        self.assertNotEqual(baseline.key(base), baseline.key(head))
+
+    def test_a_token_or_key_given_to_checkout_is_named(self):
+        def wf(extra):
+            return (f"on: pull_request\npermissions: {{contents: read}}\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                    f"    steps:\n      - uses: {CHECKOUT}\n{extra}")
+        with TempDir() as tmp:
+            plain = of(check(tmp, wf("")), "OBAAF-GHA-011")[0]
+            pat = of(check(tmp, wf("        with:\n          token: ${{ secrets.ADMIN_PAT }}\n")), "OBAAF-GHA-011")[0]
+            key = of(check(tmp, wf("        with:\n          ssh-key: ${{ secrets.DEPLOY_KEY }}\n")), "OBAAF-GHA-011")[0]
+        self.assertEqual(len({baseline.key(plain), baseline.key(pat), baseline.key(key)}), 3)
+        self.assertIn("token input", pat.message)
+        self.assertNotIn("job token", pat.message)
+
+    def test_a_very_long_number_is_not_a_traceback(self):
+        text = checkout_job(["allow-unsafe-pr-checkout: 0x" + "f" * 5000, "ref: main"], on="pull_request")
+        with TempDir() as tmp:
+            self.assertEqual(len(of(check(tmp, text), "OBAAF-GHA-019")), 1)
+
+    def test_variables_set_in_other_ways(self):
+        scripts = ['read -r SHA < <(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")\ngit checkout "$SHA"',
+                   'for sha in $(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH"); do\n  git checkout "$sha"\ndone',
+                   'typeset SHA=$(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")\ngit checkout "$SHA"',
+                   'X=1; SHA=$(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")\ngit checkout "$SHA"',
+                   'A=`date +%s`\nSHA=$(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")\ngit checkout "$SHA"']
+        with TempDir() as tmp:
+            for script in scripts:
+                with self.subTest(script=script[:40]):
+                    found = of(check(tmp, script_job(script)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+
+    def test_a_step_env_that_reads_the_jobs_value_of_the_same_name(self):
+        job_env = "    env:\n      REF: ${{ github.event.pull_request.head.sha }}\n"
+        step_env = "        env:\n          REF: ${{ env.REF }}\n"
+        script = script_job('git fetch origin "$REF"', env=step_env).replace("    steps:\n", job_env + "    steps:\n", 1)
+        checkout = (f"on: pull_request_target\npermissions: {{}}\njobs:\n  b:\n    runs-on: ubuntu-latest\n{job_env}"
+                    f"    steps:\n      - uses: {CHECKOUT}\n{step_env}        with:\n          persist-credentials: false\n"
+                    "          ref: ${{ env.REF }}\n")
+        with TempDir() as tmp:
+            for text in (script, checkout):
+                with self.subTest(checkout=text is checkout):
+                    found = of(check(tmp, text), "OBAAF-GHA-002")
+                    self.assertEqual([f.severity for f in found], ["high"])
+
+    def test_constant_numbers_and_more_facts(self):
+        with TempDir() as tmp:
+            text = checkout_job(["allow-unsafe-pr-checkout: '${{ 0 }}'", "ref: main"])
+            self.assertEqual(of(check(tmp, text), "OBAAF-GHA-019"), [])
+            on_push = of(check(tmp, checkout_job(["allow-unsafe-pr-checkout: true", "ref: main"], on="push")),
+                         "OBAAF-GHA-019")[0]
+            on_target = of(check(tmp, checkout_job(["allow-unsafe-pr-checkout: true", "ref: main"])), "OBAAF-GHA-019")[0]
+            self.assertNotEqual(baseline.key(on_push), baseline.key(on_target))
+            review = ("on: pull_request_review_comment\npermissions: {}\njobs:\n  r:\n    runs-on: ubuntu-latest\n"
+                      f"    steps:\n      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n" + AGENT)
+            merge = of(check(tmp, review), "OBAAF-GHA-012")[0]
+            self.assertEqual(merge.legacy, "")        # 0.3.0 did not report it, so no old entry can name it
+            self.assertIn("condition", merge.facts)
+
+    def test_a_path_that_ends_in_an_agents_name_is_not_an_agent(self):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  t:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n"
+                "      - run: cd packages/cline && npm ci && npm test\n      - run: rm -rf /tmp/aider\n")
+        with TempDir() as tmp:
+            self.assertEqual(of(check(tmp, text), "OBAAF-GHA-012"), [])
 
 
 class ReaderUnitTest(unittest.TestCase):

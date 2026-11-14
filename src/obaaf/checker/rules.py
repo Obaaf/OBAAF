@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,14 +140,14 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
 
 
 def _truthy(value) -> bool:
-    return str(value).strip().lower() in ("true", "1", "yes")
+    return as_text(value).strip().lower() in ("true", "1", "yes")
 
 
 def _falsy(value) -> bool:
-    return str(value).strip().lower() in ("false", "0", "no")
+    return as_text(value).strip().lower() in ("false", "0", "no")
 
 
-_CONSTANT_RE = re.compile(r"\s*\$\{\{\s*(true|false|'[^']*')\s*\}\}\s*", re.I)
+_CONSTANT_RE = re.compile(r"\s*\$\{\{\s*(true|false|'[^']*'|[0-9]{1,9})\s*\}\}\s*", re.I)
 
 
 def _constant(value):
@@ -404,6 +405,27 @@ class WorkflowRules:
                 shown.append(f"the {where}'s if: {shown_value(raw)}")
         return Fact(values, f" (it runs only where {' and '.join(shown)} holds)" if shown else "")
 
+    def _sources(self, job: Job, reads: list) -> Fact:
+        """For a value the checker cannot read, what produces it, as part of what the finding is: the
+        step a `steps.ID` output comes from, the job a `needs.ID` output comes from, each as the digest
+        of how it is written. An acceptance of a "cannot tell" finding is then of that producer, and
+        a step changed to produce the head instead of the base makes the finding new."""
+        out = []
+        for read in reads:
+            parts = read.split(".")
+            if len(parts) < 2 or parts[0] not in ("steps", "needs"):
+                continue
+            if parts[0] == "steps":
+                raw = next((step.raw for step in job.steps if as_text(step.raw.get("id") or "").lower() == parts[1]), None)
+            else:
+                other = next((j for name, j in self.wf.jobs.items() if str(name).lower() == parts[1]), None)
+                raw = other.raw if other is not None else None
+            written = json.dumps(raw, sort_keys=True, default=as_text, ensure_ascii=False) if raw is not None else ""
+            digest = hashlib.sha256(written.encode("utf-8", "surrogatepass")).hexdigest()[:16] if raw is not None \
+                else "not in the file"
+            out.append(f"{parts[0]}.{parts[1]}: {digest}")
+        return Fact(sorted(set(out)), "")
+
     @staticmethod
     def _unsafe_checkout_allowed(step: Step) -> bool:
         """Whether a checkout step opts in to checking out a fork's pull request. Anything but a
@@ -421,6 +443,7 @@ class WorkflowRules:
                     self.add("OBAAF-GHA-019", step.line,
                              "Step '{step}' sets allow-unsafe-pr-checkout to {value}.", job, step,
                              legacy="Step '{step}' sets allow-unsafe-pr-checkout: true.",
+                             triggers=Fact(sorted(job.triggers()), ""),
                              value=Fact(value_identity(step.with_.get("allow-unsafe-pr-checkout")),
                                         shown_value(step.with_.get("allow-unsafe-pr-checkout"))))
                 if not privileged:
@@ -438,7 +461,7 @@ class WorkflowRules:
                              "by {triggers}{condition}. The checker cannot tell whether that is a pull request's "
                              "code; if it is not, accept this finding and say why.", job, step, severity="medium",
                              kind="checkout-unresolved", triggers=sorted(privileged), reads=reading.reads,
-                             condition=self._condition(job, step))
+                             condition=self._condition(job, step), sources=self._sources(job, reading.reads))
             elif privileged:
                 reading = pr_fetch(step, self._env_for(job, step))
                 if reading.state == "head":
@@ -453,7 +476,8 @@ class WorkflowRules:
                              "{reads}, in a workflow started by {triggers}{condition}. The checker cannot tell "
                              "whether that is a pull request's code; if it is not, accept this finding and say why.",
                              job, step, severity="medium", kind="fetch-unresolved", triggers=sorted(privileged),
-                             reads=reading.reads, condition=self._condition(job, step))
+                             reads=reading.reads, condition=self._condition(job, step),
+                             sources=self._sources(job, reading.reads))
 
     # -------------------------------------------------------------- GHA-010
     def script_injection(self, job: Job) -> None:
@@ -669,7 +693,7 @@ class WorkflowRules:
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' checks out the pull request's code ({reads}) in step '{step}', so "
                              "instruction files come from the change under review.", job, step, kind="head",
-                             reads=reading.reads, triggers=outside,
+                             reads=reading.reads, triggers=outside, condition=self._condition(job, step),
                              legacy="Agent job '{job}' checks out the pull request's code in step '{step}', so "
                                     "instruction files come from the change under review.")
                 elif reading.state == "unresolved" and outside:
@@ -677,27 +701,30 @@ class WorkflowRules:
                              "Agent job '{job}' can be started by {triggers} and step '{step}' checks out a ref or "
                              "repository taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code, whose instruction files the agent would then read.", job, step,
-                             severity="medium", kind="unresolved", reads=reading.reads, triggers=outside)
+                             severity="medium", kind="unresolved", reads=reading.reads, triggers=outside,
+                             condition=self._condition(job, step), sources=self._sources(job, reading.reads))
                 elif merge_events and self._merge_commit(step, ref, repository):
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' runs on {triggers} and step '{step}' checks out the "
                              "merge commit, which includes the pull request's instruction files.", job, step,
-                             kind="merge-commit", triggers=merge_events,
+                             kind="merge-commit", triggers=merge_events, condition=self._condition(job, step),
                              legacy="Agent job '{job}' runs on pull_request and step '{step}' checks out the merge "
-                                    "commit, which includes the pull request's instruction files.")
+                                    "commit, which includes the pull request's instruction files."
+                             if "pull_request" in merge_events else "")
             else:
                 reading = pr_fetch(step, self._env_for(job, step))
                 if reading.state == "head":
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' fetches the pull request's code ({reads}) in step '{step}'.", job, step,
-                             kind="fetch", reads=reading.reads, triggers=outside,
+                             kind="fetch", reads=reading.reads, triggers=outside, condition=self._condition(job, step),
                              legacy="Agent job '{job}' fetches the pull request's code in step '{step}'.")
                 elif reading.state == "unresolved" and outside:
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' can be started by {triggers} and step '{step}' fetches or checks out "
                              "code with a value taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code.", job, step, severity="medium", kind="fetch-unresolved",
-                             reads=reading.reads, triggers=outside)
+                             reads=reading.reads, triggers=outside, condition=self._condition(job, step),
+                             sources=self._sources(job, reading.reads))
 
         # GHA-020: egress restriction. The finding is always there for an agent job; what was
         # established about the one control that clears it decides where the finding stands.
@@ -2164,10 +2191,22 @@ class WorkflowRules:
             "builds pull requests" if not agent and not outside else "") if part)
         for step in job.steps:
             if step.uses_action("actions/checkout") and self._keeps_token(step):
+                token, key = step.with_.get("token"), step.with_.get("ssh-key")
+                if key not in (None, ""):
+                    credential = Fact(f"ssh-key: {value_identity(key)}",
+                                      f"the SSH key given in its ssh-key input ({shown_value(key)})")
+                    given = Fact(scopes.value, "")
+                elif token not in (None, ""):
+                    credential = Fact(f"token: {value_identity(token)}",
+                                      f"the token given in its token input ({shown_value(token)})")
+                    given = Fact(scopes.value, "")
+                else:
+                    credential = Fact("job token", "the job token")
+                    given = Fact(scopes.value, f" ({scopes.shown})")
                 self.add("OBAAF-GHA-011", step.line,
-                         "Step '{step}' persists the job token for later steps ({scopes}), in a job that {exposure}.",
-                         job, step, scopes=scopes, agent=agent, triggers=outside, exposure=Note(exposure),
-                         legacy="Step '{step}' persists the job token for later steps.")
+                         "Step '{step}' persists {credential} for later steps{scopes}, in a job that {exposure}.",
+                         job, step, credential=credential, scopes=given, agent=agent, triggers=outside,
+                         exposure=Note(exposure), legacy="Step '{step}' persists the job token for later steps.")
 
     @staticmethod
     def _keeps_token(step: Step) -> bool:

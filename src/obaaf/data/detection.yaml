@@ -35,10 +35,10 @@ agent_commands:
   - '@google/gemini-cli'
   - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
   - '@openai/codex'
-  - '(^|[\s;&|(/"''`])aider["''`]?\s'
+  - '(^|[\s;&|(])aider\s'
   - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
   - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '(^|[\s;&|(/"''`])cline["''`]?\s'
+  - '(^|[\s;&|(])cline\s'
 
 # Packages that install an agent's CLI, with the command each installs (flagship slice 2c.8). The
 # patterns above match their names, so a step that installs one is taken for running an agent. Before
