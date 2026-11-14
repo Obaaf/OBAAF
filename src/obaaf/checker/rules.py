@@ -292,10 +292,12 @@ class WorkflowRules:
         via = (" (it passes every secret: secrets: inherit)" if "*inherit" in names
                else " (it can take every secret)" if takes_all else "")
         every = sorted(n for n in names if n.startswith("*"))
+        found = job.environment_source() if state == "scalar" else None
+        source = found[0] if found else None
         reported: set[tuple] = set()
         for name, pattern, wanted in hits:
             match = (environment_match(declared, wanted) if state == "literal"
-                     else scalar_environment_match(declared, wanted) if state == "scalar" else None)
+                     else scalar_environment_match(declared, wanted, source) if state == "scalar" else None)
             if not caller and match == "same":
                 continue
             # One finding for each secret and the environment it needs, however many entries ask for it.
@@ -330,7 +332,8 @@ class WorkflowRules:
             elif state in ("literal", "scalar"):
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} in environment '{declared}', not {need}.",
-                         job, kind="other-environment", declared=as_text(declared), **values)
+                         job, kind="other-environment",
+                         declared=source if source is not None else shown_value(declared).strip("'"), **values)
             else:
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} without declaring {need}, so it "
@@ -2090,12 +2093,15 @@ class WorkflowRules:
         for step in job.steps:
             # A command continued on the next line is one command to the shell: a backslash in sh and
             # bash, a backtick in PowerShell, a caret in cmd.
-            text = re.sub(r"[\\`^][ \t]*\r?\n", " ", step.text())
+            # Both readings are matched, so joining never hides what a line alone shows (a later
+            # command on the joined line can stop a pattern that looks ahead, such as cosign's).
+            raw = step.text()
+            joined = re.sub(r"[\\`^][ \t]*\r?\n", " ", raw)
             if any(step.uses_action(a) for a in actions):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="action")
-            elif text and any(rx.search(text) for rx in commands):
+            elif raw and any(rx.search(raw) or rx.search(joined) for rx in commands):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")

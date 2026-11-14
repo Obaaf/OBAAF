@@ -170,6 +170,25 @@ class ProtectedSecretsTest(unittest.TestCase):
                 found = self.run_case(protected, job)
                 self.assertEqual([(f.kind, f.severity) for f in found], [expected])
 
+    def test_a_number_is_unconfirmed_only_where_it_may_be_the_wanted_name(self):
+        # Found by the second review: `1` was unconfirmed against any wanted name that looks like a
+        # number, though it can be none of 8, 2024 or "on"; and `0o10`, text to this reader, is 8 to
+        # a YAML 1.2 reader.
+        for protected, job, expected in (
+                ({"PYPI_TOKEN": "8"}, "    environment: 1\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "2024"}, "    environment: true\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "on"}, "    environment: false\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "10"}, "    environment: 010\n", ("environment-unsure", "medium")),
+                ({"PYPI_TOKEN": "010"}, "    environment: 010\n", ("environment-unsure", "medium")),
+                ({"PYPI_TOKEN": "8"}, "    environment: 0o10\n", ("environment-unsure", "medium")),
+                ({"PYPI_TOKEN": "0o10"}, "    environment: 0o10\n", ("environment-unsure", "medium")),
+                ({"PYPI_TOKEN": "1000"}, "    environment: 1e3\n", ("environment-unsure", "medium"))):
+            with self.subTest(job=job, protected=protected):
+                found = self.run_case(protected, job)
+                self.assertEqual([(f.kind, f.severity) for f in found], [expected])
+        self.assertEqual(self.run_case({"PYPI_TOKEN": "0o10"}, "    environment: '0o10'\n"), [])
+        self.assertIn("environment 'true'", self.run_case({"PYPI_TOKEN": "x1"}, "    environment: true\n")[0].message)
+
     def test_a_blank_or_missing_name_is_no_environment(self):
         for job in ("    environment: ''\n", "    environment: ' '\n", "    environment: {url: x}\n",
                     "    environment: {name: ''}\n"):
@@ -230,6 +249,13 @@ class SigningKeysTest(unittest.TestCase):
         with TempDir() as tmp:
             for body in steps:
                 with self.subTest(body=body.strip()[:40]):
+                    self.assertEqual(len(of(check(tmp, self.job(body)), "OBAAF-GHA-018")), 1)
+            # Joining continued lines must not hide what one line shows (second review).
+            for body in ("      - run: |\n          cosign sign --yes --key env://K \"$IMAGE\" && \\\n"
+                         "            cosign sign --yes --key awskms:///alias/backup \"$IMAGE\"\n",
+                         "      - run: |\n          cosign sign --key env://K $IMAGE:`cat tag`\n"
+                         "          cosign sign --key awskms:///alias/release $IMAGE:latest\n"):
+                with self.subTest(body=body.strip()[:50]):
                     self.assertEqual(len(of(check(tmp, self.job(body)), "OBAAF-GHA-018")), 1)
             for harmless in ("      - run: gpg --list-keys\n", "      - run: gpg --import-ownertrust t.txt\n",
                              "      - run: |\n          gpg --version\n          rpm --import https://x/k.asc\n"):

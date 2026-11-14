@@ -408,13 +408,42 @@ _NUMBER_OR_BOOLEAN = re.compile(r"[-+]?(\.?[0-9][0-9a-zA-Z_.:+-]*|\.(inf|nan))|t
                                 re.IGNORECASE)
 
 
-def scalar_environment_match(value, wanted: str | None) -> str:
-    """Whether an environment written as a number or true or false (`environment: 010`) can be the
-    one a protected_secrets entry names. YAML readers do not agree on the text of such a value, so
-    "unsure" where the wanted name could be one spelling of it, else "differs"."""
+def _spellings(source: str, value) -> set[str]:
+    """The names a plain value written as `source` may be to one YAML reader or another: the text
+    as written, and the number or true or false each reading makes of it, in decimal."""
+    out = {source.strip().lower(), as_text(value).lower()}
+    text = source.strip().lower()
+    if len(text) > 100:
+        return out
+    readings = []
+    for read in (lambda t: int(t, 10), lambda t: int(t, 0), lambda t: int(t.replace("_", ""), 0),
+                 lambda t: int(t, 8) if re.fullmatch(r"[-+]?0[0-7]+", t) else None, float):
+        try:
+            readings.append(read(text))
+        except (ValueError, OverflowError):
+            pass
+    for number in readings:
+        if number is None:
+            continue
+        out.add(str(number).lower())
+        if isinstance(number, float) and number.is_integer():
+            out.add(str(int(number)))
+    if text in ("true", "false"):
+        out.add(text)
+    return out
+
+
+def scalar_environment_match(value, wanted: str | None, source: str | None = None) -> str:
+    """Whether an environment written as a plain number or true or false (`environment: 010`), or
+    as text another reader takes for one (`0o10`), can be the one a protected_secrets entry names.
+    YAML readers do not agree on what such a value is, so "unsure" where the wanted name is one of
+    the names it may be (`010` may be 8, 10 or "010"), else "differs". Where the text as written
+    could not be found, "unsure" for any wanted name that looks like a number or true or false."""
     if wanted is None:
         return "unsure"
-    return "unsure" if _NUMBER_OR_BOOLEAN.fullmatch(wanted.strip()) else "differs"
+    if source is None:
+        return "unsure" if _NUMBER_OR_BOOLEAN.fullmatch(wanted.strip()) else "differs"
+    return "unsure" if wanted.strip().lower() in _spellings(source, value) else "differs"
 
 
 def environment_match(declared: str, wanted: str | None) -> str:
@@ -619,10 +648,37 @@ class Job:
         if written is None or (isinstance(written, str) and not written.strip()):
             return ("none", None)
         if isinstance(written, str):
-            return ("expression", written) if "${{" in written else ("literal", written)
+            if "${{" in written:
+                return ("expression", written)
+            # Text this reader keeps as text that another reads as a number or true or false
+            # (`0o10`, `1e3`) is a scalar too, unless it was quoted.
+            source = self.environment_source()
+            if source is not None and source[1] is None and _YAML12_SCALAR_RE.fullmatch(written):
+                return ("scalar", written)
+            return ("literal", written)
         if isinstance(written, (bool, int, float)):
             return ("scalar", written)
         return ("unreadable", written)
+
+    def environment_source(self) -> tuple[str, str | None] | None:
+        """The text of the job's environment name as written in the file, and its quoting style
+        (None for a plain value), read from the composed YAML; None where it cannot be found (a
+        merge key, a job reached another way)."""
+        root = self.workflow.composed()
+        def get(node, key):
+            found = None
+            if isinstance(node, yamlutil.yaml.MappingNode):
+                for k, v in node.value:
+                    if isinstance(k, yamlutil.yaml.ScalarNode) and k.value == key:
+                        found = v
+            return found
+        job = get(get(root, "jobs"), self.id)
+        env = get(job, "environment")
+        if isinstance(env, yamlutil.yaml.MappingNode):
+            env = get(env, "name")
+        if isinstance(env, yamlutil.yaml.ScalarNode):
+            return env.value, env.style
+        return None
 
     @property
     def environment(self) -> str | None:
@@ -914,6 +970,16 @@ class Workflow:
         """The workflow's own `permissions`, or None. Written with no value it is taken as not
         written (see Job.permissions)."""
         return Permissions.parse(self.raw.get("permissions"))
+
+    def composed(self):
+        """The file's YAML node tree (no values constructed), or None if it cannot be composed. Kept
+        for the life of the workflow."""
+        if "_composed" not in self.__dict__:
+            try:
+                self.__dict__["_composed"] = yamlutil.yaml.compose(self.text, Loader=yamlutil._Loader)
+            except Exception:       # anything the reader refuses: the source is simply not known
+                self.__dict__["_composed"] = None
+        return self.__dict__["_composed"]
 
     @property
     def callable(self) -> bool:
