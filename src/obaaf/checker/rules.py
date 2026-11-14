@@ -1735,6 +1735,9 @@ class WorkflowRules:
             if step.confines:
                 if step in keyed:
                     continue        # read above as a step that holds a key
+                # Its env is not read for ACTIONS_ALLOW_UNSECURE_COMMANDS: the third review of 2c.7 found every
+                # line the action prints that the command can influence is under `::stop-commands::` or kept to
+                # the characters of a host name, path or DNS name, so none can start with `::`.
                 uses = (step.uses or "").strip()
                 ref = uses.split("@", 1)[1] if "@" in uses else ""
                 if not re.fullmatch(r"[0-9a-f]{40}", ref) or ref not in released:
