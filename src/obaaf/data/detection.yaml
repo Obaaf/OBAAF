@@ -99,6 +99,9 @@ upload_actions:
   - js-devtools/npm-publish
   - goreleaser/goreleaser-action
   - rubygems/release-gem
+  # Flagship slice 2d.2e: release assets uploaded by actions the list did not name.
+  - svenstaro/upload-release-action
+  - actions/upload-release-asset
 upload_commands:
   - '(^|[\s;&|(])steamcmd\b.*\+run_app_build'
   - '(^|[\s;&|(])butler\s+push\b'
@@ -130,6 +133,22 @@ upload_commands:
   - '(^|[\s;&|(])(firebase\s+deploy|wrangler\s+(deploy|publish)|netlify\s+deploy\b[^\n]*--prod|vercel\b[^\n]*--prod)\b'
   - '(^|[\s;&|(])curl\b[^\n]*\s(-T|--upload-file)\s'
   - '\b(createRelease|uploadReleaseAsset|updateRelease)\s*\('
+  # Flagship slice 2d.2e: publishing the list did not name. The Maven, Gradle and JFrog forms are the
+  # Jenkins list's; `gh` with options before `release`; registries for charts, images and packages.
+  - '(^|[\s;&|(])(\./)?(mvn|mvnw)\b[^\n;&|]*\s(deploy|release:perform)\b'
+  - '(^|[\s;&|(])(\./)?(gradle|gradlew)\b[^\n;&|]*\s(publish\w*|uploadArchives)\b'
+  - '(^|[\s;&|(])(\./)?sbt\b[^\n;&|]*\s(\+?publish(Signed)?|\+?release)\b'
+  - '(^|[\s;&|(])(jf|jfrog)\s+rt\s+(u|upload|dp|docker-push|bp|build-publish)\b'
+  - '(^|[\s;&|(])gh\s+(-\S+\s+\S+\s+)*release\s+(upload|create|edit)\b'
+  - '(^|[\s;&|(])(helm|oras|podman|crane|skopeo)\s+(push|copy)\b'
+  - '(^|[\s;&|(])(semantic-release|changeset\s+publish|bun\s+publish|jsr\s+publish|vsce\s+publish|ovsx\s+publish)\b'
+  - '(^|[\s;&|(])(maturin|pdm)\s+(publish|upload)\b'
+  - '(^|[\s;&|(])pod\s+trunk\s+push\b'
+  - '(^|[\s;&|(])goreleaser\s+release\b'
+  - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3api\s+put-object\b'
+  - '(^|[\s;&|(])rclone\s+(copy|copyto|sync|move)\b'
+  - 'uploads\.github\.com'
+  - '\brequest\s*\(\s*[''"]POST\s+/repos/[^''"]*/releases'
 
 # Jenkins only (advisory): Pipeline steps and commands that publish outside Jenkins. The
 # commands extend upload_commands for Jenkinsfiles; they are kept separate so adding them
@@ -195,8 +214,9 @@ release_verify_commands:
 # Steps that verify an agent's signed record (R8) and check its proposal (R4) before applying
 # it. An effect job needs both, in the job itself or in a job it needs (OBAAF-GHA-021).
 record_verify_commands:
+  # Flagship slice 2d.2e: `gh attestation verify` is no longer counted here. It checks a signature and
+  # a predicate type, not the record's run, snapshot or what the agent was allowed.
   - '(^|[\s;&|(])obaaf\s+verify\s+agent-run\b'
-  - '(^|[\s;&|(])gh\s+attestation\s+verify\b'
 proposal_check_commands:
   - '(^|[\s;&|(])obaaf\s+proposal\s+check\b'
 

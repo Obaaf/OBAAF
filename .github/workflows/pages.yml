@@ -51,6 +51,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # D-019: a release job reads no cache another workflow could have written (OBAAF-GHA-006).
+    cache-mode: none
     permissions:
       pages: write
       id-token: write

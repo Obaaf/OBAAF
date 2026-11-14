@@ -651,6 +651,346 @@ def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set
     return found, skip
 
 
+# Flagship slice 2d.2e: which commands of a script stop it when they fail.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([^\s'\"<>;&|()]+)\2")
+_ASSIGN_WORD_RE = re.compile(r"[A-Za-z_]\w*(\[[^\]]*\])?\+?=")
+_PIPELINE_ENDS = frozenset({";", "&&", "||", "&", ";;", "\n"})
+_CONTINUES = frozenset({"&&", "||", "|", "|&"})
+# Commands that run the command after them and return its status, with their options that take a value.
+_PASS_THROUGH = {"command": set(), "exec": {"-a"}, "time": {"-f", "-o"}, "nice": {"-n"}, "nohup": set(),
+                 "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-D"}, "env": {"-u", "-C", "-S"},
+                 "timeout": {"-s", "-k"}}
+
+
+def _strip_prefix(words: list[str]) -> list[str]:
+    """A command's words from its name on: without `NAME=value` words before it and without a
+    command that runs it and returns its status (`env X=1`, `sudo -u u`, `timeout 300`, `command`)."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if _ASSIGN_WORD_RE.match(word):
+            i += 1
+            continue
+        if word in _PASS_THROUGH:
+            options, i = _PASS_THROUGH[word], i + 1
+            while i < len(words) and (words[i].startswith("-") or (word == "env" and _ASSIGN_WORD_RE.match(words[i]))):
+                i += 2 if words[i] in options else 1
+            if word == "timeout" and i < len(words) and words[i][:1].isdigit():
+                i += 1
+            continue
+        break
+    return words[i:]
+
+
+def _errexit_change(words: list[str]) -> tuple[bool | None, bool | None]:
+    """What a `set` command does to errexit and pipefail: (True, ...) turns one on, (False, ...) off,
+    None leaves it."""
+    errexit = pipefail = None
+    for i, word in enumerate(words[1:], 1):
+        if not word or word[0] not in "+-" or word in ("-", "--", "+"):
+            break
+        on = word[0] == "-"
+        letters = word[1:]
+        if "e" in letters:
+            errexit = on
+        if "o" in letters and i + 1 < len(words):
+            name = words[i + 1]
+            if name == "errexit":
+                errexit = on
+            elif name == "pipefail":
+                pipefail = on
+    return errexit, pipefail
+
+
+_MASK = dict(zip(";&|()<>", "\ue001\ue002\ue003\ue004\ue005\ue006\ue007"))
+_UNMASK = {v: k for k, v in _MASK.items()}
+_OPERATORS = ("<<<", "<<-", "&&", "||", ";;", "|&", ">>", "<<", ">&", "<&", "&>", ";", "&", "|", "(", ")", "<", ">")
+
+
+def _script_tokens(line: str) -> list[str] | None:
+    """A line split as a POSIX shell splits it, each operator a word of its own. An operator character
+    inside quotes or after a backslash is part of a word, never an operator. None when the line cannot
+    be split (an unclosed quote)."""
+    masked, quote, escaped = [], "", False
+    for ch in line:
+        if escaped:
+            masked.append(_MASK.get(ch, ch))
+            escaped = False
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = True
+            masked.append(ch)
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+            masked.append(_MASK.get(ch, ch) if ch != quote else ch)
+            continue
+        if ch in "'\"":
+            quote = ch
+        masked.append(ch)
+    if quote:
+        return None
+    words = _shell_words("".join(masked))
+    if words is None:
+        return None
+    out = []
+    for word in words:
+        if word and all(ch in ";&|()<>" for ch in word):
+            while word:
+                op = next(o for o in _OPERATORS if word.startswith(o))
+                out.append(op)
+                word = word[len(op):]
+        else:
+            text = "".join(_UNMASK.get(ch, ch) for ch in word)
+            # A quoted operator (`";"`) is a word, kept with its quotes so it is never read as one.
+            out.append(f"'{text}'" if text != word and text in _OPERATORS else text)
+    return out
+
+
+def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[list[str]], bool]:
+    """The commands of a POSIX shell script whose failure ends the script with a failure, each as its
+    words from the command's name on (flagship slice 2d.2e), and whether the whole script was read.
+
+    The reader is strict: a command counts only when it is a pipeline of its own at the top level of
+    the script (not inside `if`, `while`, `for`, `case`, a function, a `{ }` group, a subshell or a
+    substitution), begins a line or follows `;`, is not negated with `!`, is not sent to the background,
+    and is not part of an `&&` or `||` list, except `CMD || exit [N]`, `CMD || false` and
+    `CMD || { ...; exit N; }`. A pipeline counts only under pipefail. Errexit must be on: from the shell
+    (`errexit`) or turned on by `set -e` at the top level; `set +e` in any spelling, anywhere, turns it
+    off for what follows. After a `trap`, a `shopt` that names errexit, an `exit` or `return` at the top
+    level, or a line that cannot be split, nothing more counts. Here-document bodies are skipped. A
+    command whose name is a function or an alias the script defines is not counted."""
+    lines = script_lines(text)
+    tokens: list[str] = []
+    complete = True
+    pending: list[tuple[str, bool]] = []
+    for raw_line in lines:
+        if pending:
+            delimiter, tabs = pending[0]
+            if (raw_line.lstrip("\t") if tabs else raw_line) == delimiter:
+                pending.pop(0)
+            continue
+        line = _strip_comment(raw_line)
+        if not line.strip():
+            continue
+        for match in _HEREDOC_RE.finditer(line):
+            pending.append((match.group(3), match.group(1) == "-"))
+        words = _script_tokens(line)
+        if words is None:
+            complete = False
+            break
+        tokens += words + ["\n"]
+    if pending:
+        complete = False
+
+    out: list[tuple[list[str], int]] = []   # (words, index of the pipeline)
+    defined: set[str] = set()
+    pipelines: list[dict] = []
+    depth = 0
+    i = 0
+    stopped = False
+    current: dict | None = None
+    command: list[str] = []
+    before = ";"
+
+    def end_command() -> None:
+        nonlocal command
+        if current is not None and command:
+            current["commands"].append(command)
+        command = []
+
+    def end_pipeline(after: str) -> None:
+        nonlocal current, before
+        end_command()
+        if current is not None and current["commands"]:
+            current["after"] = after
+            pipelines.append(current)
+        current = None
+        before = after if after != "\n" else ";"
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "\n":
+            if command or (current and current["commands"]):
+                previous = tokens[i - 1] if i else ""
+                if previous not in _CONTINUES:
+                    end_pipeline(";")
+            i += 1
+            continue
+        if tok in _PIPELINE_ENDS:
+            if tok in ("&&", "||") and current is None and not command:
+                before = tok          # after a compound command (`fi && x`)
+            else:
+                end_pipeline(tok)
+            i += 1
+            continue
+        if tok in ("|", "|&"):
+            end_command()
+            if current is not None:
+                current["piped"] = True
+            i += 1
+            continue
+        at_start = not command
+        if at_start and current is None:
+            current = {"before": before, "depth": depth, "negated": False, "piped": False, "commands": [],
+                       "start": i}
+        if at_start:
+            if tok == "!":
+                current["negated"] = True
+                i += 1
+                continue
+            if tok in ("if", "while", "until", "{", "("):
+                depth += 1
+                current["depth"] = max(current["depth"], depth)
+                i += 1
+                continue
+            if tok in ("then", "do", "else", "elif"):
+                i += 1
+                continue
+            if tok in ("fi", "done", "}", ")"):
+                depth = max(0, depth - 1)
+                current = None if current and not current["commands"] else current
+                i += 1
+                # Redirections and the like after a compound command belong to it.
+                while i < len(tokens) and tokens[i] not in _PIPELINE_ENDS and tokens[i] not in ("|", "|&"):
+                    i += 1
+                continue
+            if tok in ("for", "select", "case"):
+                closer = "done" if tok != "case" else "esac"
+                if tok != "case":
+                    depth += 1
+                    current = None
+                    while i < len(tokens) and tokens[i] != "do":
+                        i += 1
+                    i += 1
+                    continue
+                # A `case` is skipped whole: its patterns end with `)`.
+                nested = 0
+                i += 1
+                while i < len(tokens):
+                    if tokens[i] == "case":
+                        nested += 1
+                    elif tokens[i] == closer:
+                        if nested == 0:
+                            break
+                        nested -= 1
+                    i += 1
+                current = None
+                i += 1
+                while i < len(tokens) and tokens[i] not in _PIPELINE_ENDS:
+                    i += 1
+                continue
+            if tok == "function" and i + 1 < len(tokens):
+                defined.add(tokens[i + 1])
+                current = None
+                i += 2
+                continue
+            if tok == "alias":
+                for word in tokens[i + 1:]:
+                    if word in _PIPELINE_ENDS:
+                        break
+                    defined.add(word.split("=", 1)[0])
+        if tok == "(":
+            # Not at the start of a command: a substitution `$(...)`, an array `a=(...)` or a function
+            # definition `name()`. Its content is skipped; a definition's name is remembered.
+            if command and i + 1 < len(tokens) and tokens[i + 1] == ")" and len(command) == 1:
+                defined.add(command[0])
+                command = []
+                current = None
+                i += 2
+                continue
+            nested = 0
+            while i < len(tokens):
+                if tokens[i] == "(":
+                    nested += 1
+                elif tokens[i] == ")":
+                    nested -= 1
+                    if nested == 0:
+                        break
+                i += 1
+            command.append("$(…)")
+            i += 1
+            continue
+        command.append(tok)
+        i += 1
+    end_pipeline(";")
+
+    state_errexit, state_pipefail = errexit, pipefail
+    results: list[list[str]] = []
+    for n, pipe in enumerate(pipelines):
+        words_of = [_strip_prefix(c) for c in pipe["commands"]]
+        names = [w[0] if w else "" for w in words_of]
+        for words in words_of:
+            if not words:
+                continue
+            if words[0] == "set":
+                on_e, on_pipe = _errexit_change(words)
+                if on_e is False or (on_e and pipe["depth"] == 0):
+                    state_errexit = on_e
+                if on_pipe is False or (on_pipe and pipe["depth"] == 0):
+                    state_pipefail = on_pipe
+            if words[0] in ("trap",) or (words[0] == "shopt" and "errexit" in words) or "BASH_ENV" in " ".join(words):
+                stopped = True
+        if stopped:
+            break
+        if pipe["depth"] == 0 and names and names[0] in ("exit", "return", "exec") and len(names) == 1:
+            if names[0] != "exec":
+                break
+        if pipe["depth"] or pipe["negated"] or pipe["before"] not in (";",) or not state_errexit:
+            continue
+        if pipe["piped"] and len(words_of) > 1 and not state_pipefail:
+            continue
+        after = pipe.get("after", ";")
+        if after in ("&", "&&"):
+            continue
+        if after == "||":
+            following = pipelines[n + 1] if n + 1 < len(pipelines) else None
+            if not _stops_with_failure(following, tokens):
+                continue
+        for words in words_of:
+            if words and words[0] not in defined:
+                results.append(words)
+    return results, complete and not stopped
+
+
+def _stops_with_failure(pipe: dict | None, tokens: list[str]) -> bool:
+    """Whether the pipeline after `CMD ||` ends the script with a failure: `exit`, `exit N` with N not
+    0, `false`, or a `{ ...; }` group that runs one of them at its own top level."""
+    if pipe is None:
+        return False
+    words = _strip_prefix(pipe["commands"][0]) if pipe["commands"] else []
+    if pipe["depth"] == 0 and words:
+        return _failing_exit(words)
+    # A group: read its tokens from where the pipeline started.
+    i = pipe.get("start", 0)
+    if i >= len(tokens) or tokens[i] != "{":
+        return False
+    depth, j, command = 0, i, []
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok == "{":
+            depth += 1
+        elif tok == "}":
+            depth -= 1
+            if depth == 0:
+                return bool(command) and _failing_exit(command)
+        elif tok in _PIPELINE_ENDS:
+            if depth == 1 and command and _failing_exit(command):
+                return True
+            command = []
+        elif depth == 1:
+            command.append(tok)
+        j += 1
+    return False
+
+
+def _failing_exit(words: list[str]) -> bool:
+    if words[0] == "false" and len(words) == 1:
+        return True
+    return words[0] == "exit" and (len(words) == 1 or (words[1] != "0" and words[1].lstrip("-").isdigit()))
+
+
 def _remote(words: list[str]) -> tuple[str, str] | None:
     """`git remote add NAME URL` or `git remote set-url NAME URL`: the remote's name and address."""
     for i, word in enumerate(words):
@@ -1257,7 +1597,19 @@ class Step:
         """'owner/repo[/path]' for a remote action, without the ref."""
         if not self.uses or self.uses.startswith(("./", "docker://")):
             return None
-        return self.uses.split("@", 1)[0]
+        action = self.uses.split("@", 1)[0]
+        # Flagship slice 2d.2e: `actions/cache/save/../restore` is read as the path it names, whether or
+        # not GitHub resolves it (if it does not, the workflow fails and nothing runs).
+        if "/." in action:
+            parts: list[str] = []
+            for part in action.split("/"):
+                if part == "..":
+                    if len(parts) > 2:
+                        parts.pop()
+                elif part not in (".", ""):
+                    parts.append(part)
+            action = "/".join(parts)
+        return action
 
     def uses_action(self, prefix: str) -> bool:
         action = self.action
@@ -1718,6 +2070,13 @@ class Job:
                 out.append(step)
                 continue
             if any(step.uses_action(a) for a in actions):
+                out.append(step)
+                continue
+            # Flagship slice 2d.2e: an image build that pushes (`push: true`, or a value set when the job
+            # runs) publishes.
+            if (step.uses_action("docker/build-push-action") or step.uses_action("docker/bake-action")) and (
+                    "${{" in as_text(step.with_.get("push", "")) or as_text(step.with_.get("push", "")).strip().lower()
+                    in ("true", "1", "yes")):
                 out.append(step)
                 continue
             # Everything the step runs as a command line, also with each command continued on the next

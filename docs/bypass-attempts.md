@@ -16,9 +16,10 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | 2d.2b | What a job can reach: OBAAF-GHA-001, 003, 004, 005, 018, 024 | 2026-11-14 | `tests/test_reach_bypasses.py` |
 | 2d.2c | What a run checks out: OBAAF-GHA-002, 011, 012, 019 | 2026-11-14 | `tests/test_checkout_bypasses.py` |
 | **2d.2d** | **Triggers, scripts and release jobs: OBAAF-GHA-010, 013, 015** | **2026-11-14** | `tests/test_trigger_script_release_bypasses.py` |
+| **2d.2e** | **Release and effect jobs: OBAAF-GHA-006, 007, 014, 016, 017, 021, 022** | **2026-11-14** | `tests/test_release_effect_bypasses.py` |
 | Still open | The rest of 2d.2: see [the plan](flagship.md) | | |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out) and [2d.2d](#2d2d-triggers-scripts-and-release-jobs).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs) and [2d.2e](#2d2e-release-and-effect-jobs).
 
 ## 2d.2b: what a job can reach
 
@@ -373,3 +374,325 @@ GitHub's documentation could not be read from the session (the fetch was not app
 | 185 | harmless job on issue_comment whose script says echo "skip docker push in CI" (144: echo text with 'npm publish' on pull_request) | false positive | high |
 | 146 | docker push to a localhost:5000 service-container registry in a PR test | false positive | medium (pull-request) |
 | 145 | checkout with secrets.SUBMODULE_DEPLOY_KEY (read-only SSH deploy key for submodules); 186 NODE_AUTH_TOKEN for npm ci | false positive | nothing |
+
+## 2d.2e: release and effect jobs
+
+Run `tattler`, 2026-11-14, on a copy of `flagship` at `d05095a`. Two Opus 5.5 reviewers that did not write the code attacked seven rules in parallel: reviewer A OBAAF-GHA-006, 007 and 014 (123 attempts: 56 ways past, 25 of them not verified, 10 false positives, 57 held), reviewer B OBAAF-GHA-016, 017, 021 and 022 (144 attempts, about 40 of them controls: 65 ways past). The classes were then fixed, and every attempt was run again with the old and the new checker; the two tables at the end of this section are that run, generated from the attempt directories. Expectrail at `3ce1c2a` (a read-only copy of `.github` and `AGENTS.md`, `fresh-*` left out unread) gives the same 43 findings, in the same states, with both.
+
+GitHub's documentation could not be read from the session. What `cache-mode` does was read from GitHub's changelogs of [2026-09-10](https://github.blog/changelog/2026-09-10-control-github-actions-cache-access-with-cache-mode) and [2026-06-26](https://github.blog/changelog/2026-06-26-read-only-actions-cache-for-untrusted-triggers/) on 2026-11-14: four values (`read`, `write`, `write-only`, `none`), set on the workflow or the job, the job's value winning, enforced by the cache service, and carried into a called workflow, which "cannot receive more cache access than its caller granted". The changelogs do not say whether a value in another case, an expression or a null is accepted. What bash does was run by reviewer B on bash 5.2.21 and dash (`bash -e`, `bash --noprofile --norc -eo pipefail`, `sh -e`); what PowerShell and GitHub's runner do was not run. Where a way past depends on what was not run, the record says "not verified", and the fix is chosen to be right either way.
+
+### OBAAF-GHA-016 Upload without a provenance check, and OBAAF-GHA-021 Agent output applied without verifying its record
+
+Both rules asked whether a step's text matched a check's pattern and whether the rest of that one line held `||` or `&`. That is the class: the text of a check is not a check.
+
+**Got through, now fixed.** The check's text where it never runs or its failure is ignored: in a comment (105, 205), an `echo` (106), a here-document (107), after `exit 0` (108), in a function never called (117), after `:` (130) or `true ||` (242), in an `&&` list that is not the last command (109, 115, 243), in an `if`, `until` or `!` (110, 111, 112, 209), in a substitution (129, 132, 244), in `sh -c` (131), in a pipe without pipefail (113, 114, 139, 208), with `|| true` on the next line (119), sent to the background with `& wait` (127), after errexit was turned off in any spelling but `set +e` (121 to 126, `set +o errexit`, `set +eu`, `shopt -uo errexit`, a `trap`), through `BASH_ENV` (143, 144), in a shell that does not stop on failure (135, 141, `bash {0}`; 136, 137, 138, PowerShell, cmd, Python; 142, the default shell of a Windows runner, not verified), in `actions/github-script` (180, 181), behind a function that shadows `obaaf` (145), with `--help` (146, 240), and with `--pre-approval`, which skips the approvals and now counts as a provenance check (147). A later upload with `if: always()` or `!cancelled()` after an upload that was checked (162, 163): every upload is now checked, not only the first. A needed job with `continue-on-error` (169, 170, 225, not verified): it is no gate itself, and the jobs it needs still are. For 021: the checks after the step that applies (204), and an apply step with `if: always()` (211). `gh attestation verify` counted as verifying the agent-run record (206): it checks a signature and a predicate type, not the record's run, snapshot or permissions, so it no longer counts.
+
+What a check is now: a command of its own at the top level of a `run` script (not inside `if`, `while`, `for`, `case`, a function, a `{ }` group, a subshell or a substitution), at the start of a line or after `;`, not negated, not in the background, not in an `&&` or `||` list except `CMD || exit [N]`, `CMD || false` and `CMD || { ...; exit N; }`, in a pipe only under pipefail, in bash or sh with errexit on (GitHub's `bash -e` on Linux and macOS, `shell: bash`, `shell: sh`, or `set -e` in the script), with no `set +e`, `trap`, `shopt ... errexit` or `BASH_ENV` before it, in a step that runs on success only. Anything else is no check. For 021, the checks count only before the first step that may apply, which is anything but a checkout, a download of artifacts or a setup action, and none count when a step that may apply runs after a failure.
+
+**False positives fixed.** `obaaf verify release ... || exit 1` (184) and `|| { echo ...; exit 1; }` (188), `||` in a comment after the command (185), `set +e` after the check (186), `"obaaf" verify` (187), and `if: ${{success()}}` or `if: true` on the check step (160, 161).
+
+**False positives kept** (failing closed): the check and the upload in one step (166; the rule asks for an earlier step), a check in a `docker://` step's arguments (182) or a local action (183, slice 2d.4), a check in a subshell `( ... )` (116, newly reported: write it without the parentheses), an `if:` on the check step that is always true for the workflow's triggers (159), and chains through a job with `if: always()` (174, 228, not verified). **Under stated limits:** whether the files verified are the files uploaded (148, 149).
+
+### OBAAF-GHA-017 Release builds without provenance
+
+**Got through, now fixed.** A provenance step that never runs or whose failure is ignored (190 `if: false`, 191 a job no trigger reaches, 192 `continue-on-error`), its text in a comment or an `echo` (193, 194), an attestation of an SBOM only (195 `actions/attest` with `sbom-path`, 196 `cosign attest --type spdxjson`), and "verified elsewhere" accepted from any verify text in the job, after the upload (198) or in an `echo` (200, which also lowered OBAAF-GHA-016 to medium). **Got through, not fixed here:** an attestation job that signs other files than the publishing job uploads and is not tied to it by `needs` (199), and an attestation job that needs a job with `if: false` (201); both are stated limits.
+
+### OBAAF-GHA-022 Agent output applied without an approval gate, and OBAAF-GHA-014 Release job not behind a protected environment
+
+Both took any value that was not empty for an environment. **Got through, now fixed.** A blank name (213, 215, 074, 075), an expression that can be blank (216, 221, 079, 080, 078, 110), a variable that may be unset (217, 083), a matrix with a blank value (222, 084), `${{ null }}` (223), an expression on the needed job (231), and a number or `true` (081, 219): an environment now counts only when its name is written as text, or as an expression whose every value the checker can list with none blank; anything else is "cannot tell" for 014 (kinds `blank`, `open`, `unreadable`) and no gate for 022. **Under a stated limit:** an environment with no protection rules (`environment: ci`, 082; `deployment: false`, 241, not verified): whether it has required reviewers is read by `obaaf audit`, not here.
+
+**OBAAF-GHA-014, publishing the lists did not name.** Now an upload: `docker/build-push-action` and `docker/bake-action` with `push` true or set when the job runs (086), `svenstaro/upload-release-action` and `actions/upload-release-asset` (089), `mvn deploy`, `gradle publish`, `sbt publish` (091), `helm`, `oras`, `podman`, `crane` and `skopeo` push (092), `aws s3api put-object` and `rclone copy` (093), `gh` with options before `release` (094), `semantic-release`, `changeset publish`, `goreleaser release` (095), `bun`, `jsr`, `vsce`, `ovsx`, `maturin`, `pdm publish` and `pod trunk push` (100), github-script `request('POST /repos/.../releases')` (098) and `uploads.github.com` (099). A release job with no upload the lists know is reported when it holds what publishing needs (`packages: write`, a publishing action, a secret whose name says it publishes; kind `capability`), so a deployment through `actions/deploy-pages`, `peaceiris/actions-gh-pages`, `aws-actions/...` or `azure/webapps-deploy` (087, 088, 090) is reported when the job is a release job. **Not counted as publishing, by design:** those deployments in a job that is not otherwise a release job (a documentation site is not a release unless declared one), `rsync` and `scp` (093), a script file (`./release.sh`, `make release`, 095), a command built from a variable (`$D push`, 104), a tag pushed by name (`git push origin v1.2.3`, 099), and a `docker://` step whose image pushes (097). **Got through, not fixed here:** a publish inside a local reusable workflow the release job calls (103, 034; slice 2d.4).
+
+### OBAAF-GHA-006 Release job can read a shared cache
+
+**Got through, now fixed.** Cache steps the closed list missed, or whose inputs it read as text: an action path with `..` (014, now read as the path it names, whether or not GitHub resolves it), a local composite action (015, taken to restore: it is not read, slice 2d.4), `actions-rust-lang/setup-rust-toolchain` (016), cache inputs written as expressions (017, 018, 019, 026) or all inputs as one expression (020), `oven-sh/setup-bun` (021), `pnpm/action-setup` with `cache` (022), `ccache` and `sccache` (023, 024), `docker/bake-action` with `type=gha` (025), `crazy-max/ghaction-github-runtime` and `--cache-from type=gha` in a script (028), github-script with the cache toolkit (029), `jdx/mise-action`, `magic-nix-cache-action` and `mlugg/setup-zig` (105). A release job that downloads artifacts from a job it needs that restores a cache (033), the Clinejection shape: now kind `needed-job-restores`. An acceptance of `actions/cache` with `lookup-only` that also covered `actions/cache/restore` (117) and an accepted low finding that covered steps added later (118): the facts now hold each step's name and the action that restores. **False positives fixed:** `lookup-only: true` (011) and a release job with `cache-mode: write-only` and no cache step (122). **False positives kept:** a cache step whose `if:` never lets it run (032, 111), and a called release job whose caller sets `cache-mode: none` (035, not verified; the checker does not see the caller). **Under stated limits:** a `docker://` cache client (031, not verified), a local reusable workflow that restores (034, slice 2d.4), and a self-hosted runner's local caches (040).
+
+### OBAAF-GHA-007 Low-trust workflow can write the default-branch cache
+
+**Got through, now fixed** (all not verified: GitHub may reject these files). A value in another case or with space (042, 043), an expression (044, 045, 109), a number or `true` (070), a block scalar (048), a key in another spelling (047): each is now reported as a value the checker cannot read (kind `unreadable`). A null at the job (046, 071) hid the workflow's `write`; it no longer does. **Not fixed here:** `check_run`, `check_suite`, `status` and `deployment_status` as triggers (054 to 057, issue #166), the default a job gets when it declares nothing (064), and a top-level `On:` key (108), which hides the triggers from every rule and is outside this tranche. **False positives kept:** the review events, which write the pull request's own cache scope (060, not verified), and an `if:` on `head.repo.full_name` or `author_association` (106, 107).
+
+### What changed for adopters
+
+- A gate can fail where it passed: a check that does not stop the upload is no check; a later upload, a needed job with `continue-on-error`, an environment that may be blank, publishing the lists now know, a release job that holds publishing credentials, cache steps now known, and cache-mode values the checker cannot read.
+- Every v0.2 acceptance of OBAAF-GHA-006, 014, 016, 021 and 022 needs accepting again: the steps, the restoring actions, the environment as written and what the job may write are now facts. A v0.1 entry from 0.3.0 still names a finding whose message did not change.
+- Some findings go away: a check written `|| exit 1`, `lookup-only: true`, `write-only` with no cache step.
+- This repository: `release-pypi.yml#publish` uses the local action `./actions/setup-obaaf`, which is now taken to restore a cache (it does not), so the job and `pages.yml#deploy` now set `cache-mode: none`, as decision D-019 asks of every release job.
+
+#### Every attempt of reviewer A (OBAAF-GHA-006, 007, 014), before and after the fixes
+
+What the checker reported for these seven rules on each attempt's workflow, with the checker before slice 2d.2e and after it. The attempt numbers are the ones used above.
+
+| # | Before | Now |
+| --- | --- | --- |
+| 001 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 002 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 003 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 004 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 005 | nothing | nothing |
+| 006 | nothing | nothing |
+| 007 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 008 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 009 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 010 | nothing | nothing |
+| 011 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 low no-cache-mode |
+| 012 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 013 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 014 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 015 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 016 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 017 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 018 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 019 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 020 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 021 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 022 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 023 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 024 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 025 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 026 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 027 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 028 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 029 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 030 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 low no-cache-mode |
+| 031 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 low no-cache-mode |
+| 032 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 033 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-006 high needed-job-restores, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 034 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 low no-cache-mode |
+| 035 | OBAAF-GHA-006 high restores, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-006 high restores, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 036 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 037 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 low no-cache-mode |
+| 038 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 039 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 040 | nothing | nothing |
+| 041 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 042 | nothing | OBAAF-GHA-007 high unreadable |
+| 043 | nothing | OBAAF-GHA-007 high unreadable |
+| 044 | nothing | OBAAF-GHA-007 high unreadable |
+| 045 | nothing | OBAAF-GHA-007 high unreadable |
+| 046 | nothing | OBAAF-GHA-007 high |
+| 047 | nothing | OBAAF-GHA-007 high unreadable |
+| 048 | nothing | OBAAF-GHA-007 high unreadable |
+| 049 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 050 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 051 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 052 | nothing | nothing |
+| 053 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 054 | nothing | nothing |
+| 055 | nothing | nothing |
+| 056 | nothing | nothing |
+| 057 | nothing | nothing |
+| 058 | nothing | nothing |
+| 059 | nothing | nothing |
+| 060 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 061 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 062 | nothing | nothing |
+| 063 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 064 | nothing | nothing |
+| 065 | nothing | nothing |
+| 066 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 067 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 068 | nothing | nothing |
+| 069 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 070 | nothing | OBAAF-GHA-007 high unreadable |
+| 071 | nothing | OBAAF-GHA-007 high |
+| 072 | nothing | nothing |
+| 073 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 074 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium blank, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 075 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium blank, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 076 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 077 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 078 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 079 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 080 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 081 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium unreadable, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 082 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 083 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 084 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 085 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium unreadable, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 086 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 087 | nothing | OBAAF-GHA-014 medium capability |
+| 088 | nothing | OBAAF-GHA-014 medium capability |
+| 089 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 090 | nothing | OBAAF-GHA-014 medium capability |
+| 091 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 092 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 093 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 094 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 095 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 096 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 097 | nothing | nothing |
+| 098 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 099 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 100 | nothing | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 101 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 102 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 103 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 low no-cache-mode, OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 104 | nothing | nothing |
+| 105 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 106 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 107 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 108 | nothing | nothing |
+| 109 | nothing | OBAAF-GHA-007 high unreadable |
+| 110 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium open, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 111 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 112 | nothing | nothing |
+| 113 | nothing | nothing |
+| 114 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 115 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 116 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 117 | OBAAF-GHA-006 high restores | OBAAF-GHA-006 high restores |
+| 118 | OBAAF-GHA-006 low no-cache-mode | OBAAF-GHA-006 high restores |
+| 119 | OBAAF-GHA-007 high | OBAAF-GHA-007 high |
+| 120 | OBAAF-GHA-006 low no-cache-mode, OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-006 low no-cache-mode, OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 121 | file refused | file refused |
+| 122 | OBAAF-GHA-006 low no-cache-mode | nothing |
+| 123 | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-014 medium, OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+
+#### Every attempt of reviewer B (OBAAF-GHA-016, 017, 021, 022), before and after the fixes
+
+| # | Before | Now |
+| --- | --- | --- |
+| 101 | nothing | nothing |
+| 102 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 103 | OBAAF-GHA-016 medium provenance-only | OBAAF-GHA-016 medium provenance-only |
+| 104 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 105 | nothing | OBAAF-GHA-016 high unchecked |
+| 106 | nothing | OBAAF-GHA-016 high unchecked |
+| 107 | nothing | OBAAF-GHA-016 high unchecked |
+| 108 | nothing | OBAAF-GHA-016 high unchecked |
+| 109 | nothing | OBAAF-GHA-016 high unchecked |
+| 110 | nothing | OBAAF-GHA-016 high unchecked |
+| 111 | nothing | OBAAF-GHA-016 high unchecked |
+| 112 | nothing | OBAAF-GHA-016 high unchecked |
+| 113 | nothing | OBAAF-GHA-016 high unchecked |
+| 114 | nothing | OBAAF-GHA-016 high unchecked |
+| 115 | nothing | OBAAF-GHA-016 high unchecked |
+| 116 | nothing | OBAAF-GHA-016 high unchecked |
+| 117 | nothing | OBAAF-GHA-016 high unchecked |
+| 118 | nothing | OBAAF-GHA-016 high unchecked |
+| 119 | nothing | OBAAF-GHA-016 high unchecked |
+| 120 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 121 | nothing | OBAAF-GHA-016 high unchecked |
+| 122 | nothing | OBAAF-GHA-016 high unchecked |
+| 123 | nothing | OBAAF-GHA-016 high unchecked |
+| 124 | nothing | OBAAF-GHA-016 high unchecked |
+| 125 | nothing | OBAAF-GHA-016 high unchecked |
+| 126 | nothing | OBAAF-GHA-016 high unchecked |
+| 127 | nothing | OBAAF-GHA-016 high unchecked |
+| 128 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 129 | nothing | OBAAF-GHA-016 high unchecked |
+| 130 | nothing | OBAAF-GHA-016 high unchecked |
+| 131 | nothing | OBAAF-GHA-016 high unchecked |
+| 132 | nothing | OBAAF-GHA-016 high unchecked |
+| 133 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 134 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 135 | nothing | OBAAF-GHA-016 high unchecked |
+| 136 | nothing | OBAAF-GHA-016 high unchecked |
+| 137 | nothing | OBAAF-GHA-016 high unchecked |
+| 138 | nothing | OBAAF-GHA-016 high unchecked |
+| 139 | nothing | OBAAF-GHA-016 high unchecked |
+| 140 | nothing | nothing |
+| 141 | nothing | OBAAF-GHA-016 high unchecked |
+| 142 | nothing | OBAAF-GHA-016 high unchecked |
+| 143 | nothing | OBAAF-GHA-016 high unchecked |
+| 144 | nothing | OBAAF-GHA-016 high unchecked |
+| 145 | nothing | OBAAF-GHA-016 high unchecked |
+| 146 | nothing | OBAAF-GHA-016 high unchecked |
+| 147 | nothing | OBAAF-GHA-016 medium provenance-only |
+| 148 | nothing | nothing |
+| 149 | nothing | nothing |
+| 150 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 151 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 152 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 153 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 154 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 155 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 156 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 157 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 158 | nothing | nothing |
+| 159 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 160 | OBAAF-GHA-016 high unchecked | nothing |
+| 161 | OBAAF-GHA-016 high unchecked | nothing |
+| 162 | nothing | OBAAF-GHA-016 high unchecked |
+| 163 | nothing | OBAAF-GHA-016 high unchecked |
+| 164 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 165 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 166 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 167 | nothing | nothing |
+| 168 | nothing | nothing |
+| 169 | nothing | OBAAF-GHA-016 high unchecked |
+| 170 | nothing | OBAAF-GHA-016 high unchecked |
+| 171 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 172 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 173 | nothing | nothing |
+| 174 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 175 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 176 | nothing | nothing |
+| 177 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 178 | nothing | OBAAF-GHA-016 high unchecked |
+| 179 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 180 | nothing | OBAAF-GHA-016 high unchecked |
+| 181 | nothing | OBAAF-GHA-016 high unchecked |
+| 182 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 183 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 184 | OBAAF-GHA-016 high unchecked | nothing |
+| 185 | OBAAF-GHA-016 high unchecked | nothing |
+| 186 | OBAAF-GHA-016 high unchecked | nothing |
+| 187 | OBAAF-GHA-016 high unchecked | nothing |
+| 188 | OBAAF-GHA-016 high unchecked | nothing |
+| 189 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 190 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 191 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 192 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 193 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 194 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 195 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 196 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 197 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 198 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 199 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 200 | OBAAF-GHA-016 medium provenance-only | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 201 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 202 | nothing | nothing |
+| 203 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 204 | nothing | OBAAF-GHA-021 high unchecked |
+| 205 | nothing | OBAAF-GHA-021 high unchecked |
+| 206 | nothing | OBAAF-GHA-021 high unchecked |
+| 207 | OBAAF-GHA-021 medium no-proposal | OBAAF-GHA-021 medium no-proposal |
+| 208 | nothing | OBAAF-GHA-021 high unchecked |
+| 209 | nothing | OBAAF-GHA-021 high unchecked |
+| 210 | nothing | OBAAF-GHA-021 high unchecked |
+| 211 | nothing | OBAAF-GHA-021 high unchecked |
+| 212 | OBAAF-GHA-022 high | OBAAF-GHA-022 high |
+| 213 | nothing | OBAAF-GHA-022 high |
+| 214 | OBAAF-GHA-022 high | OBAAF-GHA-022 high |
+| 215 | nothing | OBAAF-GHA-022 high |
+| 216 | nothing | OBAAF-GHA-022 high |
+| 217 | nothing | OBAAF-GHA-022 high |
+| 218 | OBAAF-GHA-022 high | OBAAF-GHA-022 high |
+| 219 | nothing | OBAAF-GHA-022 high |
+| 220 | OBAAF-GHA-022 high | OBAAF-GHA-022 high |
+| 221 | nothing | OBAAF-GHA-022 high |
+| 222 | nothing | OBAAF-GHA-022 high |
+| 223 | nothing | OBAAF-GHA-022 high |
+| 224 | nothing | nothing |
+| 225 | nothing | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 226 | nothing | nothing |
+| 227 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 228 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 229 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 230 | nothing | nothing |
+| 231 | nothing | OBAAF-GHA-022 high |
+| 232 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 233 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 234 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 235 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 236 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 237 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 238 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
+| 239 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-016 medium provenance-only, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-016 medium provenance-only, OBAAF-GHA-017 medium |
+| 240 | nothing | OBAAF-GHA-021 high unchecked |
+| 241 | nothing | nothing |
+| 242 | nothing | OBAAF-GHA-016 high unchecked |
+| 243 | nothing | OBAAF-GHA-016 high unchecked |
+| 244 | nothing | OBAAF-GHA-016 high unchecked |

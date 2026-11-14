@@ -106,7 +106,7 @@ A job that runs an AI agent references a secret, inherits secrets, or uses an en
 
 **Release job can read a shared cache** (high). Requirements: G4.1, G4.2, R7. Supports: FR4.
 
-A release job restores a GitHub Actions cache, directly or through a setup action that caches by default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the same branch or the default branch, so a poisoned entry would reach the release build. A release job with no cache step but no `cache-mode: none` is reported at low severity.
+A release job restores a GitHub Actions cache, directly or through a setup action that caches by default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the same branch or the default branch, so a poisoned entry would reach the release build. A release job with no cache step but no `cache-mode: none` is reported at low severity. Since flagship slice 2d.2e: an input written as an expression is read as the value that restores, a local action is taken to restore (it is not read; slice 2d.4), `lookup-only: true` restores nothing, and a release job that downloads artifacts from a job it needs is reported when that job restores a cache (kind `needed-job-restores`). Not followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), a cache-mode a calling workflow sets for a reusable workflow it calls (the called job is reported), outputs passed between jobs, and actions that cache that are not listed.
 
 **Fix.** Set `cache-mode: none` on release jobs and remove cache restore steps, or regenerate derived data inside the release lane.
 
@@ -114,7 +114,7 @@ A release job restores a GitHub Actions cache, directly or through a setup actio
 
 **Low-trust workflow can write the default-branch cache** (high). Requirements: G4.1, R7. Supports: FR4.
 
-The workflow runs on triggers that outsiders can start (for example pull_request_target, issue_comment or workflow_run) and declares a write-capable `cache-mode`. Code or an agent steered by an outsider could then poison caches that release workflows restore, as in the Clinejection case. GitHub gives some of these triggers read-only cache access by default (pull_request_target, issue_comment, and workflow_run runs that follow a pull request from a fork), but not every case, and this rule cannot see the default a job gets when it declares nothing.
+The workflow runs on triggers that outsiders can start (for example pull_request_target, issue_comment or workflow_run) and declares a write-capable `cache-mode`. Code or an agent steered by an outsider could then poison caches that release workflows restore, as in the Clinejection case. GitHub gives some of these triggers read-only cache access by default (pull_request_target, issue_comment, and workflow_run runs that follow a pull request from a fork), but not every case, and this rule cannot see the default a job gets when it declares nothing. The value is read the widest way (flagship slice 2d.2e): a value that is not exactly `none`, `read`, `write` or `write-only` (another case, an expression, a number, a block scalar) is reported as one the checker cannot read, a null at the job does not hide the workflow's value, and a key in another spelling is read. Not followed: `check_run`, `check_suite`, `status` and `deployment_status` (issue #166), and an `if:` that keeps forks or outsiders out (reported anyway).
 
 **Fix.** Remove the write-capable `cache-mode`, or set `cache-mode: none` (or `read`) explicitly for jobs in this workflow.
 
@@ -170,7 +170,7 @@ A job that pull requests, outside events or an agent can drive runs on a self-ho
 
 **Release job not behind a protected environment** (medium). Requirements: G6.2. Supports: FR6.
 
-A release job that uploads or publishes does not reference an environment, so no person has to approve it and its credentials are not held back until approval.
+A release job that uploads or publishes does not reference an environment, so no person has to approve it and its credentials are not held back until approval. An environment counts only when its name is written as text, or as an expression whose every value the checker can list and none is blank (flagship slice 2d.2e); a blank name, a number, true or false, or an expression that can be blank or name something else is reported as cannot tell. A release job with no upload the lists know is reported when it holds what publishing needs (`packages: write`, a publishing action, a secret whose name says it publishes). Not read: whether the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a cloud service (not counted as publishing unless the job is declared a release job), a command built from a variable (`$D push`), `rsync` and `scp`, and a publish inside a local action or reusable workflow (slice 2d.4).
 
 **Fix.** Reference an environment (for example `environment: release`) configured with required reviewers, self-review prevention and no administrator bypass.
 
@@ -186,7 +186,7 @@ A release workflow can be started by pull requests, comments, issues or another 
 
 **Upload without a provenance check** (high). Requirements: G7.2, G5.2, R8. Supports: FR6.
 
-A release job uploads or publishes artifacts without first verifying their provenance, approvals and agent-run records in an earlier step of the same job or in a job it depends on.
+A release job uploads or publishes artifacts without first verifying their provenance, approvals and agent-run records in an earlier step of the same job or in a job it depends on. A check counts only where its failure stops the upload (flagship slice 2d.2e): a command of its own at the top level of a `run` script, in bash or sh with errexit on (GitHub's default `bash -e` on Linux and macOS, or `set -e`), not inside `if`, `while`, a function, a substitution or a `{ }` group, not negated, not sent to the background, not in an `&&` or `||` list (except `|| exit 1`), and in a pipe only under pipefail, with no `set +e`, `trap` or `BASH_ENV` before it; given `--help` or `--version` it is no check, and with `--pre-approval` it is a provenance check. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://` step or the default shell of a runner that may be Windows does not count, and neither does a needed job with `continue-on- error`. Every upload step is checked, not only the first. Not read: whether the files verified are the files uploaded.
 
 **Fix.** Add `obaaf verify release` as a step before the upload, in the same job or in a job the upload job needs, and let a failure stop the job: no `|| true`, `continue-on-error` or `if: always()`. A provenance-only check such as `gh attestation verify` is reported at medium, because it does not check approvals or agent records.
 
@@ -194,7 +194,7 @@ A release job uploads or publishes artifacts without first verifying their prove
 
 **Release builds without provenance** (medium). Requirements: G7.1. Supports: FR5.
 
-A release workflow publishes artifacts but no job signs provenance for them.
+A release workflow publishes artifacts but no job signs provenance for them. A provenance step counts only when it runs on success (no `continue-on-error`, no `if:` that may skip it, in a job some trigger reaches) and, for a command, when its failure stops the job; an attestation of an SBOM only does not count (flagship slice 2d.2e). Provenance verified before the upload counts only when the check comes before every upload and stops it. Not read: whether the provenance signed is for the files published, and whether a provenance job is tied to the publishing job by `needs`.
 
 **Fix.** Add a separate attestation job that signs provenance and an OBAAF build record for every release artifact (see templates/github-actions/workflows/obaaf-release.yml), or verify provenance signed by another workflow before the upload (see obaaf-publish.yml).
 
@@ -226,7 +226,7 @@ Nothing the checker can verify limits the agent job's network access. The findin
 
 **Agent output applied without verifying its record** (high). Requirements: G8.3, R4, R8. Supports: FR8, FR10.
 
-A workflow started by another workflow's run downloads that run's output and can write to the repository, but neither it nor a job it needs both verifies the agent-run record and checks the proposal before applying it. Doing only one of the two is reported at medium.
+A workflow started by another workflow's run downloads that run's output and can write to the repository, but neither it nor a job it needs both verifies the agent-run record and checks the proposal before applying it. Doing only one of the two is reported at medium. The checks count only before the first step that may apply (anything but a checkout, a download of artifacts or a setup action), each where its failure stops the job (as for OBAAF-GHA-016), and none count when a step that may apply runs after a failure (flagship slice 2d.2e). `gh attestation verify` is no longer a record check: it checks a signature, not the record. What the job may write is one of the finding's facts, so an acceptance does not cover the same job given wider write access; it does cover other commands with the same access.
 
 **Fix.** Verify the agent-run record with `obaaf verify agent-run` and check the proposal with `obaaf proposal check --repo .` before applying it, in the job that applies it or in a job it needs whose failure stops it (no `if: always()`), and let a failure stop the job (see obaaf-agent-apply.yml).
 
@@ -236,7 +236,7 @@ A workflow started by another workflow's run downloads that run's output and can
 
 **Agent output applied without an approval gate** (high). Requirements: G8.1, R4. Supports: FR8.
 
-A job applies agent output with write permissions, but neither it nor a job it needs references an environment, so no person other than the requester has to approve the change.
+A job applies agent output with write permissions, but neither it nor a job it needs references an environment, so no person other than the requester has to approve the change. An environment counts only when it is established as for OBAAF-GHA-014, on the job or on a job it needs that has no `continue-on-error` (flagship slice 2d.2e). Whether the environment has required reviewers is not read here; `obaaf audit` reads it.
 
 **Fix.** Reference an environment with required reviewers and self-review prevention on the job that applies agent proposals, or on a job it needs without `if: always()`.
 
