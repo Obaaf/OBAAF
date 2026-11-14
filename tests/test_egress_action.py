@@ -10,7 +10,9 @@ but host names.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -290,6 +292,86 @@ class InnerScript(unittest.TestCase):
         for what in ("direct IPv6", "unlisted host example.com", "sudo", "Docker socket"):
             self.assertIn(what, script)
 
+    def test_a_writable_socket_or_pipe_outside_the_scratch_directory_stops_the_command(self):
+        script = egress.inner_script("/tmp/obaaf-egress.abc", "/tmp/obaaf-egress.abc/workspace",
+                                     "/tmp/obaaf-egress.abc/command.sh", "/tmp/obaaf-egress.abc/.m",
+                                     "n" * 32, "example.com")
+        endpoints = script.index("endpoints=\"$(find /tmp /run /var /home /etc ")
+        self.assertLess(endpoints, script.index("if [ \"$failed\" -ne 0 ]"))
+        self.assertIn("-path '/tmp/obaaf-egress.abc'", script)
+        self.assertIn("\\( -type s -o -type p \\) -writable -print", script)
+        self.assertIn("sockets or pipes it could write ($endpoints) GOT OUT\"\n  failed=1", script)
+
+
+class AfterTheRun(unittest.TestCase):
+    """What the action reads back from the scratch directory and the proxy's
+    log, which the command wrote or chose (slice 2c.6)."""
+
+    def test_the_marker_is_read_only_from_a_regular_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "m"
+            marker.write_text("nonce\n")
+            self.assertEqual(egress.read_marker(marker), "nonce\n")
+            target = Path(tmp) / "elsewhere"
+            target.write_text("nonce\n")
+            link = Path(tmp) / "link"
+            link.symlink_to(target)
+            self.assertIsNone(egress.read_marker(link))
+            fifo = Path(tmp) / "fifo"
+            os.mkfifo(fifo)
+            self.assertIsNone(egress.read_marker(fifo))  # and does not block
+            self.assertIsNone(egress.read_marker(Path(tmp) / "absent"))
+
+    def test_removed_entries_are_relative_and_plain_text(self):
+        root = Path("/tmp/obaaf-egress.abc")
+        data = b"/tmp/obaaf-egress.abc/workspace/a\0/tmp/obaaf-egress.abc/home/b c\n$(x)\0"
+        self.assertEqual(egress.split_null_list(data, root), ["workspace/a", "home/b?c?$(x)"])
+
+    def test_refused_hosts_come_from_the_request_and_are_plain_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "access.log"
+            log.write_text(
+                # A Host header the command chose, on a request for example.net.
+                '1.0 172.30.0.20:1 $(curl$IFS@evil) 0.0.0.0:0 1.1 GET 403 TCP_DENIED:HIER_NONE http://example.net/x "c"\n'
+                # A CONNECT to example.org sent with Host: api.github.com.
+                '1.0 172.30.0.20:2 api.github.com:443 0.0.0.0:0 1.1 CONNECT 403 TCP_DENIED:HIER_NONE example.org:443 "c"\n'
+                '1.0 172.30.0.20:3 x 0.0.0.0:0 1.1 CONNECT 403 TCP_DENIED:HIER_NONE $(id)`x`:443 "c"\n'
+                '1.0 172.30.0.20:4 api.github.com:443 1.2.3.4:443 1.1 CONNECT 200 TCP_TUNNEL:HIER_DIRECT api.github.com:443 "c"\n')
+            self.assertEqual(egress._denied_hosts(Path(tmp)), ["example.net", "example.org", "??id??x?"])
+
+
+class GitCredentials(unittest.TestCase):
+    """The action refuses a workspace where a checkout kept its token (slice 2c.6)."""
+
+    def tree(self, files: dict[str, str]) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        for name, text in files.items():
+            path = tmp / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return tmp
+
+    def test_no_kept_token(self):
+        root = self.tree({".git/config": "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/o/r\n",
+                          "src/config": "extraheader = not a git configuration\n"})
+        self.assertIsNone(egress.git_credentials(root))
+
+    def test_a_token_in_the_configuration_before_checkout_v6(self):
+        root = self.tree({".git/config": '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic x\n'})
+        self.assertIn("extraheader", egress.git_credentials(root))
+
+    def test_an_included_file_as_checkout_v6_and_later_write(self):
+        root = self.tree({".git/config": '[core]\n[includeIf "gitdir:/home/runner/work/r/r/.git"]\n\tpath = /home/runner/work/_temp/x.config\n'})
+        self.assertIn("includes another file", egress.git_credentials(root))
+        root = self.tree({".git/config": "[Include]\n\tpath = x\n"})
+        self.assertIn("includes another file", egress.git_credentials(root))
+
+    def test_a_second_checkout_or_a_submodule(self):
+        for name in ("other/.git/config", ".git/modules/sub/config"):
+            root = self.tree({".git/config": "[core]\n", name: '[http]\n\textraHeader = x\n'})
+            self.assertIn(name, egress.git_credentials(root))
+
 
 class ActionFile(unittest.TestCase):
     def test_no_input_reaches_a_shell_line(self):
@@ -298,6 +380,10 @@ class ActionFile(unittest.TestCase):
             if "${{ inputs." in line:
                 # Inputs go to the environment of a step, never into a run line.
                 self.assertRegex(line.strip(), r"^INPUT_[A-Z_]+: \$\{\{ inputs\.[a-z][a-z-]* \}\}$")
+
+    def test_the_removed_output_is_declared(self):
+        text = (ROOT / "actions" / "egress" / "action.yml").read_text()
+        self.assertIn("value: ${{ steps.run.outputs.removed }}", text)
 
     def test_python_runs_isolated(self):
         text = (ROOT / "actions" / "egress" / "action.yml").read_text()

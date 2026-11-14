@@ -53,7 +53,7 @@ jobs:
           python3 -I -c '
           import json, socket
           out = {}
-          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com"):
+          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com", "api.github.com"):
               out[host] = sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
           print(json.dumps(out, indent=1))
           ' > "$RUNNER_TEMP/resolved.json"
@@ -114,6 +114,8 @@ jobs:
           ACTION_EXIT: ${{ steps.inside.outputs.exit-code }}
           ACTION_CONFINED: ${{ steps.inside.outputs.confined }}
           INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
+          INSIDE_SCRATCH: ${{ steps.inside.outputs.scratch }}
+          REMOVED: ${{ steps.inside.outputs.removed }}
           LOG_DIR: ${{ steps.inside.outputs.log-dir }}
           DNS_LOG: ${{ steps.inside.outputs.dns-log }}
           DNS_REFUSED: ${{ steps.inside.outputs.dns-refused }}
@@ -140,6 +142,8 @@ jobs:
             --action-confined "$ACTION_CONFINED" \
             --summary "$GITHUB_STEP_SUMMARY" \
             --dns-refused "$DNS_REFUSED" \
+            --scratch "$INSIDE_SCRATCH" \
+            --removed "$REMOVED" \
             --json-out "$RUNNER_TEMP/egress-results/verdict.json"
 
       - name: Keep the results
@@ -305,8 +309,28 @@ jobs:
           if grep -q "^allowed 1 api.anthropic.com" "$KEYS_DNS_LOG" && grep -q "^allowed 1 api.openai.com" "$KEYS_DNS_LOG"; then ok "the action's resolver answered both providers' hosts"; else bad "the resolver did not answer both providers: $(grep -c . "$KEYS_DNS_LOG") lines"; fi
           exit "$fail"
 
+      # Last, because it leaves a repository with a kept token in the workspace,
+      # which the action refuses from here on.
+      - name: A second checkout that keeps its token (actions/checkout's default)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: kept-token
+
+      - name: How that checkout kept its token (names only, no values)
+        run: git config --file kept-token/.git/config --name-only --list
+
+      - name: A workspace holding a kept token is refused before anything runs
+        id: keptoken
+        continue-on-error: true
+        uses: ./actions/egress
+        with:
+          allow: api.github.com
+          run: "true"
+
       - name: Check what happened
         env:
+          KEPTOKEN_OUTCOME: ${{ steps.keptoken.outcome }}
+          KEPTOKEN_CONFINED: ${{ steps.keptoken.outputs.confined }}
           FAILS_OUTCOME: ${{ steps.fails.outcome }}
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
@@ -331,6 +355,7 @@ jobs:
           if [ "$ADDRESS_OUTCOME" = failure ]; then ok "an address is refused"; else bad "an address was accepted"; fi
           if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
           if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
+          if [ "$KEPTOKEN_OUTCOME" = failure ] && [ -z "$KEPTOKEN_CONFINED" ]; then ok "a workspace with a checkout that kept its token is refused before the command runs"; else bad "a kept token: outcome $KEPTOKEN_OUTCOME, confined '$KEPTOKEN_CONFINED'"; fi
           if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
           if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"

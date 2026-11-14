@@ -159,6 +159,75 @@ try dns-via-proxy-http  curl -sS --max-time $T -o /dev/null --proxy "${HTTP_PROX
 try dns-default-getent  getent ahosts "$prefix-getent.example.com"
 try dns-default-dig     dig +time=3 +tries=1 "$prefix-digdefault.example.com" A
 
+# --- must block: programs on the runner that listen in /tmp (slice 2c.6) -----
+# A socket or named pipe in the runner's /tmp, which is mounted into the
+# sandbox, belongs to a program outside it. Every .NET program (the runner's
+# own Runner.Listener and Runner.Worker among them) listens on
+# /tmp/dotnet-diagnostic-<pid>-...-socket unless told not to; that socket can
+# make it dump its memory or load a library. Outside, each is counted and
+# connected to (the control); inside, none may accept a connection or be
+# writable. The scratch directory is the command's own and is left out.
+if [ "$mode" = inside ]; then own="$(dirname "${TMPDIR:-/nonexistent/x}")"; else own=/nonexistent; fi
+endpoints="$(find /tmp -maxdepth 4 \( -path "$own" -o -path /tmp/gh-aw \) -prune -o \( -type s -o -type p \) -print 2>/dev/null)"
+note "FACT tmp_endpoints $(printf '%s\n' "$endpoints" | grep -c . ) $(printf '%s\n' "$endpoints" | sed -E 's/[0-9]+/N/g' | sort -u | tr '\n' ' ' | cut -c1-600)"
+sockets=0; connected=0; pipes=0; writable=0
+while IFS= read -r ep; do
+  [ -n "$ep" ] || continue
+  if [ -S "$ep" ]; then
+    sockets=$((sockets + 1))
+    curl -sS --max-time 3 --unix-socket "$ep" -o /dev/null http://localhost/ >/dev/null 2>&1
+    # 7: could not connect. Anything else means the socket accepted the connection.
+    [ $? -ne 7 ] && connected=$((connected + 1))
+  elif [ -p "$ep" ]; then
+    pipes=$((pipes + 1))
+    [ -w "$ep" ] && writable=$((writable + 1))
+  fi
+done <<< "$endpoints"
+note "RESULT tmp-socket-connect $connected $sockets"
+note "RESULT tmp-pipe-writable $writable $pipes"
+diag="$(python3 - <<'PY' 2>/dev/null
+import glob, socket, struct
+magic = b"DOTNET_IPC_V1\0"
+# ProcessInfo (command set 0x04, command 0x00): it answers with the process's
+# id and command line, and changes nothing.
+request = magic + struct.pack("<HBBH", 20, 0x04, 0x00, 0)
+answered = total = 0
+for path in glob.glob("/tmp/dotnet-diagnostic-*"):
+    total += 1
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(path)
+        s.sendall(request)
+        if s.recv(64).startswith(magic):
+            answered += 1
+        s.close()
+    except OSError:
+        pass
+print(answered, total)
+PY
+)"
+note "RESULT dotnet-diagnostics ${diag:-? ?}"
+
+# --- must not reach a later step: links, pipes and sockets in the copy (slice 2c.6) --
+# A later step reads or uploads the scratch directory with the runner's full
+# access; a link left there would point it at the runner's own files. The
+# action deletes every entry that is not a regular file or a directory, and
+# the workflow checks that these are gone and listed in its removed output.
+if [ "$mode" = inside ]; then
+  made=0
+  ln -s /proc/self/environ escape-link-environ 2>/dev/null && made=$((made + 1))
+  ln -s /home/runner/work/_temp escape-link-runner-temp 2>/dev/null && made=$((made + 1))
+  ln -s ../../../../../../../etc/hostname escape-link-relative 2>/dev/null && made=$((made + 1))
+  mkdir -p escape-dir && ln -s / escape-dir/escape-link-root 2>/dev/null && made=$((made + 1))
+  mkfifo escape-fifo 2>/dev/null && made=$((made + 1))
+  python3 -c "import socket; socket.socket(socket.AF_UNIX).bind('escape-socket')" 2>/dev/null && made=$((made + 1))
+  ln -s /proc/self/environ "$HOME/escape-link-home" 2>/dev/null && made=$((made + 1))
+  # A directory the action cannot list as the runner's user, holding a link.
+  mkdir -p escape-locked && ln -s /proc/self/environ escape-locked/escape-link-hidden 2>/dev/null && made=$((made + 1)) && chmod 000 escape-locked
+  note "RESULT plant-special $made"
+fi
+
 # --- recorded, not asserted --------------------------------------------------
 code=$(curl -sS --max-time $T -o /dev/null -w '%{http_code}' -H 'Host: example.org' https://api.github.com/ 2>/dev/null)
 note "RESULT host-mismatch $? $code"
