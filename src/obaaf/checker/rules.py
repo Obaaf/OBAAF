@@ -775,6 +775,64 @@ class WorkflowRules:
 
     _OUTPUTS = frozenset({"workspace", "scratch"})
 
+    # A command that installs packages with a JavaScript package manager, with `sudo` and its short
+    # options before it (slice 2c.8). What follows it is read token by token in `_installs_only`.
+    _INSTALL_RE = re.compile(r"(?:sudo(?:[ \t]+-[A-Za-z]+)*[ \t]+)?"
+                             r"(?:npm[ \t]+(?:install|i|add)|pnpm[ \t]+(?:add|install|i)|yarn[ \t]+global[ \t]+add"
+                             r"|bun[ \t]+(?:add|install|i))((?:[ \t]+[^ \t]+)+)")
+    _INSTALL_OPTION_RE = re.compile(r"--?[A-Za-z][A-Za-z0-9-]*")
+    # Characters that let a shell line do more than its words say: substitutions, pipes, redirections,
+    # groups, background jobs, quotes, globs, escapes and comments after a command. A script that has
+    # any of them is not read as installs only.
+    _SHELL_MORE_RE = re.compile(r"[`$|<>(){}&'\"\\*?!#\[\]]")
+
+    def _installs_only(self, step: Step) -> bool:
+        """Whether a step does nothing but install agents' packages (`agent_installs` in detection.yaml) and print their
+        CLIs' versions, read from its shell script (slice 2c.8): `sudo npm install -g
+        @anthropic-ai/claude-code` and then `claude --version`, for one. Each line, and each command
+        on it separated by `&&` or `;`, must be one of those two and nothing else; comment lines are
+        skipped. Anything else makes it False, as does a script in another shell, an action, or a
+        key of the step beyond the plain ones, so a step that runs an agent the patterns would miss
+        is never read as an install."""
+        packages = self.detection.get("agent_installs") or {}
+        if not packages or step.uses is not None or not isinstance(step.raw.get("run"), str):
+            return False
+        if set(step.raw) - {"name", "id", "run", "shell", "if", "env", "timeout-minutes", "continue-on-error",
+                            "working-directory"}:
+            return False
+        shell = step.raw.get("shell")
+        if shell is not None and shell not in ("bash", "sh"):
+            return False
+        clis = {str(cli) for cli in packages.values()}
+        names = {str(name) for name in packages}
+        version_re = re.compile(rf"(?:{'|'.join(re.escape(cli) for cli in sorted(clis))})[ \t]+(?:--version|-v|-V)")
+        installed = False
+        for line in step.run.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            commands = [part.strip() for part in re.split(r"&&|;", line)]
+            for command in commands:
+                if not command or self._SHELL_MORE_RE.search(command):
+                    return False
+                if version_re.fullmatch(command):
+                    continue
+                found = self._INSTALL_RE.fullmatch(command)
+                if not found:
+                    return False
+                for token in found.group(1).split():
+                    if self._INSTALL_OPTION_RE.fullmatch(token):
+                        continue
+                    if token.startswith("@"):
+                        rest, at, version = token[1:].partition("@")
+                        name = "@" + rest
+                    else:
+                        name, at, version = token.partition("@")
+                    if name not in names or (at and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.^~_-]*", version)):
+                        return False
+                    installed = True
+        return installed
+
     def _reads_output(self, step: Step, ids: set) -> list[str]:
         """Where a step refers to what a confined command could write: an `outputs.workspace` or
         `outputs.scratch` of a confined step (also through `steps.*`, a computed index or `toJSON`),
@@ -1114,9 +1172,19 @@ class WorkflowRules:
             outside.append("the job's token can call GitHub Models (models permission), and every action is given "
                            "that token")
         unread_token = perms is None
+        # Which steps can run after (or beside) the confined command: read here, and below for what
+        # they could run of what the command wrote.
+        first = min(step.index for step in confined)
+        groups = {step.group for step in confined if step.group is not None}
+        concurrent = any(step.background for step in confined)
         agents_outside = []
         for step in others:
             why = self._agent_step(step, step.agent_text())
+            before = (step.index < first and not step.background and not concurrent
+                      and (step.group is None or step.group not in groups))
+            if (why == "runs an agent CLI" and before and step.index not in job.agent_script_steps
+                    and self._installs_only(step)):
+                continue        # it installs the agent's CLI, which the confined command then runs (2c.8)
             if why or step.index in job.agent_script_steps:
                 agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
         # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
@@ -1150,9 +1218,6 @@ class WorkflowRules:
         # the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.
-        first = min(step.index for step in confined)
-        groups = {step.group for step in confined if step.group is not None}
-        concurrent = any(step.background for step in confined)
         ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
         defaults = job.raw.get("defaults")
         if defaults is not None and self._reads_output(Step(index=-1, raw={"defaults": defaults}, line=0), ids):

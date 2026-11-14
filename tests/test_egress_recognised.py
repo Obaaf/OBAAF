@@ -712,6 +712,72 @@ class ModelKeysTest(unittest.TestCase):
         self.assertEqual(egress_mod.NAME_RE.pattern, action_mod._NAME_RE.pattern)
 
 
+class AgentInstallTest(unittest.TestCase):
+    """A step before OBAAF's egress action that only installs an agent's CLI is not taken for running
+    the agent outside the confined command (flagship slice 2c.8): the patterns that recognise an agent
+    match its package's name, and installing it in one step and running it confined in the next is the
+    natural way to use the action. Anything more in the step and it counts, as before."""
+
+    CONFINED = keyed(run="claude -p 'review the change'")
+
+    def check(self, steps, cat=None, **kw):
+        return egress(run_check(workflow(steps, **kw), cat=cat, config=kw.pop("config", None)))
+
+    def install(self, script, extra=""):
+        return f"      - name: Install the agent\n{extra}        run: {json.dumps(script)}\n"
+
+    def test_an_install_before_the_action_is_not_an_agent_outside_it(self):
+        for script in ("sudo npm install -g @anthropic-ai/claude-code\nclaude --version",
+                       "npm i -g @anthropic-ai/claude-code@2.1.0",
+                       "npm install --global @openai/codex@latest && codex --version",
+                       "# the CLI the action runs\npnpm add -g @google/gemini-cli; gemini -v",
+                       "sudo -E npm install -g @anthropic-ai/claude-code @openai/codex",
+                       "yarn global add @anthropic-ai/claude-code", "bun add -g @anthropic-ai/claude-code"):
+            f = self.check(CHECKOUT + "\n" + self.install(script) + self.CONFINED)
+            with self.subTest(script=script):
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+
+    def test_anything_more_in_the_step_still_counts(self):
+        for script in ("npx @anthropic-ai/claude-code -p 'fix it'",
+                       "npm install -g @anthropic-ai/claude-code && claude -p 'fix it'",
+                       "npm install -g @anthropic-ai/claude-code\nclaude 'fix it'",
+                       "npm install -g @anthropic-ai/claude-code\nnode agent.js",
+                       "npm install -g @anthropic-ai/claude-code typescript",
+                       "npm install -g @anthropic-ai/claude-code-extra",
+                       "npm install -g $(echo @anthropic-ai/claude-code)",
+                       "npm install -g @anthropic-ai/claude-code | tee log",
+                       "npm install -g @anthropic-ai/claude-code & claude --version",
+                       "npm install -g @anthropic-ai/claude-code \\\n  && claude -p x",
+                       "npm install -g @anthropic-ai/claude-code # then run it",
+                       "npm install -g '@anthropic-ai/claude-code'",
+                       "npm install -g --registry=https://example.com @anthropic-ai/claude-code",
+                       "npm exec @anthropic-ai/claude-code -- -p x",
+                       "sudo -u root npm install -g @anthropic-ai/claude-code"):
+            f = self.check(self.install(script) + self.CONFINED)
+            with self.subTest(script=script):
+                self.assertEqual(verdict(f), NOT_MET, detail(f))
+                self.assertIn("outside the confined command", detail(f))
+
+    def test_only_a_plain_shell_step_is_read(self):
+        for extra in ("        shell: python\n", "        shell: bash -e {0}\n", "        background: true\n"):
+            f = self.check(self.install("npm install -g @anthropic-ai/claude-code", extra) + self.CONFINED)
+            with self.subTest(extra=extra):
+                self.assertNotEqual(verdict(f), VERIFIED)
+        script = f"      - uses: actions/github-script@{SHA}\n        with: {{script: 'npm install -g @anthropic-ai/claude-code'}}\n"
+        self.assertEqual(verdict(self.check(script + self.CONFINED)), NOT_MET)
+
+    def test_an_install_after_the_action_still_counts(self):
+        f = self.check(self.CONFINED + "\n" + self.install("npm install -g @anthropic-ai/claude-code").rstrip("\n"))
+        self.assertEqual(verdict(f), NOT_MET)
+        self.assertIn("outside the confined command", detail(f))
+
+    def test_which_jobs_are_agent_jobs_does_not_change(self):
+        """A job whose only mention of an agent is the install step is still an agent job."""
+        steps = self.install("npm install -g @anthropic-ai/claude-code") + "      - run: make test"
+        result = run_check(workflow(steps), config={"lanes": {}})
+        self.assertTrue(any(f.rule == "OBAAF-GHA-020" for f in result.findings))
+
+
 class HardenRunnerTest(unittest.TestCase):
     """Harden-Runner covers the job only when four things can be established; the repository's tier
     never can be from the workflow, so it is "cannot tell" at best."""
