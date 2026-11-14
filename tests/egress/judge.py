@@ -96,7 +96,7 @@ SPECIAL_PLANTED = [
     "workspace/escape-dir/escape-link-root",
     "workspace/escape-fifo",
     "workspace/escape-socket",
-    "home/escape-link-home",
+    "home/.cache/escape-link-home",
     "workspace/escape-locked/escape-link-hidden",
 ]
 

@@ -222,7 +222,9 @@ if [ "$mode" = inside ]; then
   mkdir -p escape-dir && ln -s / escape-dir/escape-link-root 2>/dev/null && made=$((made + 1))
   mkfifo escape-fifo 2>/dev/null && made=$((made + 1))
   python3 -c "import socket; socket.socket(socket.AF_UNIX).bind('escape-socket')" 2>/dev/null && made=$((made + 1))
-  ln -s /proc/self/environ "$HOME/escape-link-home" 2>/dev/null && made=$((made + 1))
+  # In one of the home's tool directories, which AWF mounts from the scratch
+  # home (the top of the home is AWF's own directory, which the action deletes).
+  mkdir -p "$HOME/.cache" && ln -s /proc/self/environ "$HOME/.cache/escape-link-home" 2>/dev/null && made=$((made + 1))
   # A directory the action cannot list as the runner's user, holding a link.
   mkdir -p escape-locked && ln -s /proc/self/environ escape-locked/escape-link-hidden 2>/dev/null && made=$((made + 1)) && chmod 000 escape-locked
   note "RESULT plant-special $made"
