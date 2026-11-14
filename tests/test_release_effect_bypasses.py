@@ -143,6 +143,14 @@ class BindingReaderTest(unittest.TestCase):
         "path from printf": f'printf -v PATH %s "$PWD/f"\n{VERIFY}',
         "path as a prefix": f'PATH="$PWD/f:$PATH" {VERIFY}',
         "mapfile callback": f"mapfile -t -C 'exit 0 #' -c 1 a <<< x\n{VERIFY}",
+        # The third pass of the review.
+        "bash's command table": f"BASH_CMDS[obaaf]=/bin/true\n{VERIFY}",
+        "the command table in a quoted expansion": ': "${BASH_CMDS[obaaf]:=/bin/true}"\n' + VERIFY,
+        "path in a quoted arithmetic expansion": ': "$((PATH=5))"\n' + VERIFY,
+        "path through PS4": f"PS4='$((PATH=5))'\nset -x\n{VERIFY}",
+        "an interpreter variable exported": f"export PYTHONPATH=dir\n{VERIFY}",
+        "an interpreter variable as a prefix": f"PYTHONPATH=dir {VERIFY}",
+        "a preload library": f"LD_PRELOAD=x.so {VERIFY}",
     }
 
     BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",
@@ -469,6 +477,7 @@ class PublishingTheListsMissedTest(unittest.TestCase):
                       "helm push chart.tgz oci://localhost:5000/charts"]
 
     STILL_PUBLISHING = ["npm publish # was --dry-run", "npm publish --dry-run=false", "npm publish; echo --dry-run",
+                        "npm publish --dry-run false", "uv publish --dry-run false",
                         "cargo publish --token t # --dry-run on PRs", "goreleaser release --clean # not --snapshot",
                         "helm push c.tgz oci://ghcr.io/o/charts && curl -fsS localhost:8080/health",
                         "npx semantic-release && test -d dist",

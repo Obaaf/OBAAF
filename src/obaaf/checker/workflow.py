@@ -771,6 +771,16 @@ _DENIED_NAMES = frozenset({"exit", "return", "exec", "eval", "source", ".", "bui
 _SHELL_VARIABLE_RE = re.compile(r"(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH)(\+?=|$)")
 
 
+# Anywhere in a word before a check (flagship slice 2d.2e, third review): a name of the shell's own state
+# that changes what a name runs (read or written: `BASH_CMDS[obaaf]=`, `$((PATH=5))`), an assignment to a
+# variable an interpreter reads at start (`PYTHONPATH=`, `LD_PRELOAD=`), an arithmetic expansion, or a
+# `${NAME=...}` or `${NAME:=...}`, which assigns in the current shell even inside quotes.
+_SHELL_STATE_ANYWHERE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH|BASH_CMDS|BASH_ALIASES)(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_])(PS4|PROMPT_COMMAND|PYTHON\w*|LD_\w*|NODE_OPTIONS|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS)\+?="
+    r"|\$\(\(|\(\(|\$\[|\$\{[#!]?[A-Za-z_]\w*(\[[^\]]*\])?:?=")
+
+
 def _assignment(word: str) -> bool:
     return bool(_ASSIGN_WORD_RE.match(word))
 
@@ -780,6 +790,8 @@ def _safe_command(words: list[tuple[str, bool]], allowed: frozenset = frozenset(
     command named by a plain word (no quote, no expansion) that is not denied (except names in
     `allowed`), with no word naming a shell variable, a reserved word or a substitution that is not
     quoted."""
+    if any(_SHELL_STATE_ANYWHERE_RE.search(word) for word, _quoted in words):
+        return False
     i = 0
     while i < len(words) and _assignment(words[i][0]) and not words[i][0].startswith(("$", "`")):
         word = words[i][0]
@@ -926,7 +938,8 @@ def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[lis
                 if len(inner) < 2 or inner[1][0] != "in" or not re.fullmatch(r"[A-Za-z_]\w*", inner[0][0]) \
                         or _SHELL_VARIABLE_RE.match(inner[0][0] + "="):
                     return out, False
-                if any(w in _OPERATORS or w in _RESERVED for w, q in inner[2:] if not q):
+                if any(w in _OPERATORS or w in _RESERVED for w, q in inner[2:] if not q) or any(
+                        _SHELL_STATE_ANYWHERE_RE.search(w) for w, _q in inner):
                     return out, False
                 inner = []
             if first != "elif":
@@ -969,7 +982,8 @@ def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | N
     words = [w for w, _q in tokens]
     i = 0
     while i < len(words) and _ASSIGN_WORD_RE.match(words[i]):
-        if _SHELL_VARIABLE_RE.match(words[i]) or "`" in words[i] or "$(" in words[i]:
+        if _SHELL_VARIABLE_RE.match(words[i]) or _SHELL_STATE_ANYWHERE_RE.search(words[i]) or "`" in words[i] \
+                or "$(" in words[i]:
             return None
         i += 1
     if i >= len(words) or tokens[i][1] or not re.fullmatch(r"[A-Za-z0-9_][\w.+-]*", words[i]):
