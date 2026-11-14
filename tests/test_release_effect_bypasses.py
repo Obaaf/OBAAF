@@ -151,6 +151,12 @@ class BindingReaderTest(unittest.TestCase):
         "an interpreter variable exported": f"export PYTHONPATH=dir\n{VERIFY}",
         "an interpreter variable as a prefix": f"PYTHONPATH=dir {VERIFY}",
         "a preload library": f"LD_PRELOAD=x.so {VERIFY}",
+        # The fourth pass: arithmetic carried by a variable's value (x holds `PATH=5`).
+        "an array subscript assignment": f'a=PA; b=TH; x="$a$b=5"\ny[x]=1\n{VERIFY}',
+        "an array subscript read": 'a=PA; b=TH; x="$a$b=5"\necho "${y[x]}"\n' + VERIFY,
+        "a substring offset": 'a=PA; b=TH; x="$a$b=5"\necho "${s:x}"\n' + VERIFY,
+        "double brackets": f'a=PA; b=TH; x="$a$b=5"\n[[ x -eq 5 ]]\n{VERIFY}',
+        "an indirect expansion": 'x="y[PATH=5]"\necho "${!x}"\n' + VERIFY,
     }
 
     BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",
@@ -478,6 +484,8 @@ class PublishingTheListsMissedTest(unittest.TestCase):
 
     STILL_PUBLISHING = ["npm publish # was --dry-run", "npm publish --dry-run=false", "npm publish; echo --dry-run",
                         "npm publish --dry-run false", "uv publish --dry-run false",
+                        "npm publish --dry-run --dry-run=false", "npm publish --dry-run --no-dry-run",
+                        "npx semantic-release --dry-run --no-dry-run",
                         "cargo publish --token t # --dry-run on PRs", "goreleaser release --clean # not --snapshot",
                         "helm push c.tgz oci://ghcr.io/o/charts && curl -fsS localhost:8080/health",
                         "npx semantic-release && test -d dist",

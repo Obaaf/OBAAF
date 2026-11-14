@@ -778,7 +778,10 @@ _SHELL_VARIABLE_RE = re.compile(r"(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUN
 _SHELL_STATE_ANYWHERE_RE = re.compile(
     r"(?<![A-Za-z0-9_])(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH|BASH_CMDS|BASH_ALIASES)(?![A-Za-z0-9_])"
     r"|(?<![A-Za-z0-9_])(PS4|PROMPT_COMMAND|PYTHON\w*|LD_\w*|NODE_OPTIONS|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS)\+?="
-    r"|\$\(\(|\(\(|\$\[|\$\{[#!]?[A-Za-z_]\w*(\[[^\]]*\])?:?=")
+    r"|\$\(\(|\(\(|\$\[|\$\{[#!]?[A-Za-z_]\w*(\[[^\]]*\])?:?="
+    # Arithmetic a variable's value can carry (fourth review): an array subscript other than `@` or `*`, a
+    # substring offset, an indirect expansion, and `[[`, each of which evaluates text as arithmetic.
+    r"|\$\{#?[A-Za-z_]\w*\[(?![@*]\])|\$\{#?[A-Za-z_]\w*:(?![-+=?])|\$\{!|^\[\[$|^[A-Za-z_]\w*\[")
 
 
 def _assignment(word: str) -> bool:
