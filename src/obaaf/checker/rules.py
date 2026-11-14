@@ -2543,7 +2543,16 @@ class WorkflowRules:
             checked = self._upload_checks(job, uploads)
             unchecked = [s for s, k in checked if k is None]
             partial = [s for s, k in checked if k == "provenance"]
-            if unchecked:
+            unvouched = self._unvouched_checks(job, unchecked[0]) if unchecked else []
+            if unchecked and unvouched:
+                self.add("OBAAF-GHA-016", unchecked[0].line,
+                         "Step '{step}' uploads after a check the checker cannot vouch for: {checks} names "
+                         "`obaaf verify release` or another check, but not on a line of its own in a bash step "
+                         "that stops when it fails, or after a line the checker does not read. Write the check "
+                         "that way, or accept this finding and say why the check stops the upload.", job,
+                         unchecked[0], kind="cannot-tell", steps=Fact([self._release_step(s) for s in unchecked], ""),
+                         checks=Fact(unvouched, ", ".join(f"'{c}'" for c in unvouched[:3])))
+            elif unchecked:
                 self.add("OBAAF-GHA-016", unchecked[0].line,
                          "Step '{step}' uploads without an earlier check that stops it when "
                          "verification fails.", job, unchecked[0], kind="unchecked",
@@ -2599,7 +2608,8 @@ class WorkflowRules:
             if word in ("--noprofile", "--norc"):
                 i += 1
                 continue
-            if not re.fullmatch(r"[-+][a-zA-Z]+", word) or set(word[1:]) & set("ilsc"):
+            # Only options known to change nothing but errexit, pipefail, unset variables and tracing.
+            if not re.fullmatch(r"-[euxo]+", word):
                 return None
             on = word[0] == "-"
             if "e" in word[1:]:
@@ -2687,6 +2697,27 @@ class WorkflowRules:
                           if not (s.group is None and s.background) and not (s.group and s.group == up.group)}
             kinds.discard(None)
             out.append((up, "full" if "full" in kinds else "provenance" if kinds else None))
+        return out
+
+    def _unvouched_checks(self, job: Job, upload: Step) -> list[str]:
+        """Earlier steps of the job, and steps of the jobs it needs, whose script names a release check that
+        `_binding_matches` could not vouch for (flagship slice 2d.2e): the finding then says the checker
+        cannot tell, not that there is no check."""
+        patterns = [re.compile(p) for p in self.detection.get("verify_commands", [])]
+        steps = [(job, s) for s in job.steps[: upload.index]]
+        for name in self._needed_jobs(job):
+            steps += [(self.wf.jobs[name], s) for s in self.wf.jobs[name].steps]
+        return [f"{j.id}: {s.name}" for j, s in steps
+                if s.text() and any(p.search(s.text()) for p in patterns) and self._verify_kind(j, s) is None]
+
+    def _needed_jobs(self, job: Job) -> list[str]:
+        out, todo = [], list(job.needs)
+        while todo:
+            name = todo.pop(0)
+            if name in out or name not in self.wf.jobs or name == job.id:
+                continue
+            out.append(name)
+            todo += self.wf.jobs[name].needs
         return out
 
     def _environment_state(self, job: Job) -> str:
@@ -3061,8 +3092,7 @@ class WorkflowRules:
         action = (step.action or "").lower()
         return (step.uses_action("actions/checkout") or step.uses_action("actions/download-artifact")
                 or step.uses_action("dawidd6/action-download-artifact") or action.startswith("actions/setup-")
-                or bool(re.fullmatch(r"[^/]+/obaaf/actions/setup-obaaf", action))
-                or (step.uses or "").rstrip("/") == "./actions/setup-obaaf")
+                or bool(re.fullmatch(r"[^/]+/obaaf/actions/setup-obaaf", action)))
 
     # Commands that only read or prepare, which may come in a step beside the checks of an effect job
     # (flagship slice 2d.2e): any other command in that step may apply, and the step's checks do not count.
@@ -3075,6 +3105,8 @@ class WorkflowRules:
         """Whether every command of a `run` step, where a command starts, is one of `_PREPARING` (the
         contents of an array assigned with `NAME=(...)` are no commands)."""
         assignment = re.compile(r"[A-Za-z_]\w*(\[[^\]]*\])?\+?=")
+        if "`" in step.run or "$(" in step.run or "<(" in step.run or ">(" in step.run:
+            return False        # a substitution runs commands, quoted or not
         for line in re.sub(r"\\\n", " ", step.run).split("\n"):
             tokens = _script_tokens(_strip_comment_text(line))
             if tokens is None:

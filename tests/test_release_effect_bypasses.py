@@ -123,6 +123,26 @@ class BindingReaderTest(unittest.TestCase):
         "expression with shell syntax after": VERIFY + " ${{ '|| true' }}",
         "expression with shell syntax before": "${{ 'exit 0' }}\n" + VERIFY,
         "expression the checker cannot read": "${{ inputs.prepare }}\n" + VERIFY,
+        # The second pass of the review.
+        "quotes inside exit": f'e"x"it 0\n{VERIFY}',
+        "backslash inside exit": f"e\\xit 0\n{VERIFY}",
+        "empty quotes inside exit": f"ex''it 0\n{VERIFY}",
+        "empty quotes inside eval": f"ev''al 'set +e'\n{VERIFY}\necho after",
+        "exit continued over two lines": f"ex\\\nit 0\n{VERIFY}",
+        "if continued over two lines": f"i\\\nf false; then\n{VERIFY}\nfi",
+        "a comment ending in a backslash": f"# note \\\nexit 0\n{VERIFY}",
+        "an escaped space before a hash": f"echo a\\ #; exit 0\n{VERIFY}",
+        "time if": f"time if false; then\n{VERIFY}\nfi",
+        "a command named fi": f"if false; then\nX=1 fi\n{VERIFY}\nfi",
+        "a parenthesis in an expansion": "if false; then\necho ${x:-)}\n" + VERIFY + "\nfi",
+        "a parenthesis after a comment sign": f"if false; then\n(true)#)\n{VERIFY}\nfi",
+        "or at the end of the line before": f"true ||\n{VERIFY}",
+        "and at the end of the line before": f"false &&\n{VERIFY}\necho done",
+        "path from a loop": f'for PATH in "$PWD/f:$PATH"; do :; done\n{VERIFY}',
+        "path from read": f'read -r PATH <<< "$PWD/f"\n{VERIFY}',
+        "path from printf": f'printf -v PATH %s "$PWD/f"\n{VERIFY}',
+        "path as a prefix": f'PATH="$PWD/f:$PATH" {VERIFY}',
+        "mapfile callback": f"mapfile -t -C 'exit 0 #' -c 1 a <<< x\n{VERIFY}",
     }
 
     BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",
@@ -134,14 +154,14 @@ class BindingReaderTest(unittest.TestCase):
                 with self.subTest(label):
                     script = "echo skip" + char + VERIFY
                     step = "      - name: Verify\n        run: " + json.dumps(script) + "\n"
-                    self.assertEqual(kinds(check(tmp, release(step + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+                    self.assertEqual(kinds(check(tmp, release(step + UPLOAD)), "OBAAF-GHA-016"), [("high", "cannot-tell")])
 
     def test_a_check_whose_failure_does_not_stop_the_job_does_not_count(self):
         with TempDir() as tmp:
             for label, script in self.IGNORED.items():
                 with self.subTest(label):
                     result = check(tmp, release(run(script, "Verify") + UPLOAD))
-                    self.assertEqual(kinds(result, "OBAAF-GHA-016"), [("high", "unchecked")])
+                    self.assertEqual(kinds(result, "OBAAF-GHA-016"), [("high", "cannot-tell")])
 
     BINDING = {
         "plain": VERIFY,
@@ -173,19 +193,20 @@ class BindingReaderTest(unittest.TestCase):
     def test_the_shell_is_read(self):
         with TempDir() as tmp:
             for shell in ("bash {0}", "cmd", "python", "pwsh", "powershell", "${{ inputs.shell }}", "bash -e +e {0}",
-                          "bash -eo pipefail +o errexit {0}", "bash -el {0}", "bash -e --login {0}", "bash -ie {0}"):
+                          "bash -eo pipefail +o errexit {0}", "bash -el {0}", "bash -e --login {0}", "bash -ie {0}",
+                          "bash -en {0}", "sh -en {0}", "bash -et {0}", "bash -eD {0}"):
                 with self.subTest(shell):
                     step = run(VERIFY, "Verify", f"        shell: {shell}\n")
                     self.assertEqual(kinds(check(tmp, release(step + UPLOAD)), "OBAAF-GHA-016"),
-                                     [("high", "unchecked")])
+                                     [("high", "cannot-tell")])
             defaults = release(run(VERIFY, "Verify") + UPLOAD,
                                job_extra="    environment: release\n    cache-mode: none\n"
                                          "    defaults:\n      run:\n        shell: bash {0}\n")
-            self.assertEqual(kinds(check(tmp, defaults), "OBAAF-GHA-016"), [("high", "unchecked")])
+            self.assertEqual(kinds(check(tmp, defaults), "OBAAF-GHA-016"), [("high", "cannot-tell")])
             for runner in ("windows-latest", "self-hosted", "[self-hosted, build]", "{group: g}", "${{ inputs.runner }}"):
                 with self.subTest(runner):
                     text = release(run(VERIFY, "Verify") + UPLOAD).replace("ubuntu-latest", runner)
-                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), [("high", "unchecked")])
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), [("high", "cannot-tell")])
             linux = release(run(VERIFY, "Verify") + UPLOAD).replace("ubuntu-latest", "[self-hosted, linux]")
             self.assertEqual(of(check(tmp, linux), "OBAAF-GHA-016"), [])
             for shell in ("bash -e {0}", "sh -e {0}", "bash --noprofile --norc -eo pipefail {0}", "sh"):
@@ -198,20 +219,20 @@ class BindingReaderTest(unittest.TestCase):
     def test_bash_env_anywhere_before_the_check_makes_it_not_count(self):
         with TempDir() as tmp:
             in_env = run(VERIFY, "Verify", "        env:\n          BASH_ENV: /tmp/x\n")
-            self.assertEqual(kinds(check(tmp, release(in_env + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+            self.assertEqual(kinds(check(tmp, release(in_env + UPLOAD)), "OBAAF-GHA-016"), [("high", "cannot-tell")])
             for script in ('echo "BASH_ENV=/tmp/x" >> "$GITHUB_ENV"', 'echo "$PWD/fake" >> "$GITHUB_PATH"',
                            "echo 'BASH_FUNC_obaaf%%=() { :; }' >> \"$GITHUB_ENV\""):
                 with self.subTest(script):
                     written = run(script, "Prepare") + run(VERIFY, "Verify")
-                    self.assertEqual(kinds(check(tmp, release(written + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+                    self.assertEqual(kinds(check(tmp, release(written + UPLOAD)), "OBAAF-GHA-016"), [("high", "cannot-tell")])
             as_expression = run(VERIFY, "Verify", "        env: ${{ fromJSON(vars.E) }}\n")
-            self.assertEqual(kinds(check(tmp, release(as_expression + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+            self.assertEqual(kinds(check(tmp, release(as_expression + UPLOAD)), "OBAAF-GHA-016"), [("high", "cannot-tell")])
 
     def test_a_github_script_check_does_not_count(self):
         with TempDir() as tmp:
             script = (f"      - name: Verify\n        uses: actions/github-script@{SHA}\n        with:\n"
                       f"          script: |\n            // {VERIFY}\n")
-            self.assertEqual(kinds(check(tmp, release(script + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+            self.assertEqual(kinds(check(tmp, release(script + UPLOAD)), "OBAAF-GHA-016"), [("high", "cannot-tell")])
 
     def test_the_conditions_github_reads_as_success_count(self):
         with TempDir() as tmp:
@@ -357,6 +378,20 @@ class EffectOrderTest(unittest.TestCase):
                       "obaaf proposal check d --repo .", "All in one")
             self.assertEqual(kinds(check(tmp, self.effect(one)), "OBAAF-GHA-021"), [("high", "unchecked")])
 
+    def test_a_substitution_in_a_check_step_may_apply(self):
+        with TempDir() as tmp:
+            for prepare in ('echo "$(git apply d/patch && git push origin HEAD)"', "echo `git push origin HEAD`"):
+                with self.subTest(prepare):
+                    steps = run(prepare + "\nobaaf verify agent-run --policy p\nobaaf proposal check d --repo .", "Check")
+                    self.assertEqual(kinds(check(tmp, self.effect(steps + self.APPLY)), "OBAAF-GHA-021"),
+                                     [("high", "unchecked")])
+
+    def test_a_local_setup_obaaf_is_not_taken_for_obaafs(self):
+        with TempDir() as tmp:
+            local = "      - uses: ./actions/setup-obaaf\n"
+            self.assertEqual(kinds(check(tmp, self.effect(local + self.CHECKS + self.APPLY)), "OBAAF-GHA-021"),
+                             [("high", "unchecked")])
+
     def test_only_a_setup_obaaf_from_a_repository_named_obaaf_prepares(self):
         with TempDir() as tmp:
             other = f"      - uses: attacker/anything/actions/setup-obaaf@{SHA}\n"
@@ -432,6 +467,19 @@ class PublishingTheListsMissedTest(unittest.TestCase):
                       "skopeo copy docker://docker.io/library/alpine oci-archive:alpine.tar",
                       "mvn -B deploy -DaltDeploymentRepository=local::file:./target/staging-deploy",
                       "helm push chart.tgz oci://localhost:5000/charts"]
+
+    STILL_PUBLISHING = ["npm publish # was --dry-run", "npm publish --dry-run=false", "npm publish; echo --dry-run",
+                        "cargo publish --token t # --dry-run on PRs", "goreleaser release --clean # not --snapshot",
+                        "helm push c.tgz oci://ghcr.io/o/charts && curl -fsS localhost:8080/health",
+                        "npx semantic-release && test -d dist",
+                        "mvn -B deploy -DaltSnapshotDeploymentRepository=snap::default::file:./snap"]
+
+    def test_a_dry_run_flag_counts_only_on_the_same_command(self):
+        with TempDir() as tmp:
+            for command in self.STILL_PUBLISHING:
+                with self.subTest(command):
+                    text = f"on: push\npermissions: {{}}\njobs:\n  r:\n    runs-on: ubuntu-latest\n    steps:\n{run(command)}"
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-014"), [("medium", "")])
 
     def test_dry_runs_and_local_targets_are_not_uploads(self):
         with TempDir() as tmp:
@@ -588,7 +636,7 @@ class ProvenanceTest(unittest.TestCase):
             self.assertEqual(len(of(check(tmp, after), "OBAAF-GHA-017")), 1)
             echo = self.workflow(nothing, publish_extra=run("echo gh attestation verify x", "Verify"))
             self.assertEqual(len(of(check(tmp, echo), "OBAAF-GHA-017")), 1)
-            self.assertEqual(kinds(check(tmp, echo), "OBAAF-GHA-016"), [("high", "unchecked")])
+            self.assertEqual(kinds(check(tmp, echo), "OBAAF-GHA-016"), [("high", "cannot-tell")])
 
 
 class TemplatesStayCleanTest(unittest.TestCase):

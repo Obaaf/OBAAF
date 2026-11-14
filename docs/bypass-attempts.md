@@ -387,7 +387,7 @@ Both rules asked whether a step's text matched a check's pattern and whether the
 
 **Got through, now fixed.** The check's text where it never runs or its failure is ignored: in a comment (105, 205), an `echo` (106), a here-document (107), after `exit 0` (108), in a function never called (117), after `:` (130) or `true ||` (242), in an `&&` list that is not the last command (109, 115, 243), in an `if`, `until` or `!` (110, 111, 112, 209), in a substitution (129, 132, 244), in `sh -c` (131), in a pipe without pipefail (113, 114, 139, 208), with `|| true` on the next line (119), sent to the background with `& wait` (127), after errexit was turned off in any spelling but `set +e` (121 to 126, `set +o errexit`, `set +eu`, `shopt -uo errexit`, a `trap`), through `BASH_ENV` (143, 144), in a shell that does not stop on failure (135, 141, `bash {0}`; 136, 137, 138, PowerShell, cmd, Python; 142, the default shell of a Windows runner, not verified), in `actions/github-script` (180, 181), behind a function that shadows `obaaf` (145), with `--help` (146, 240), and with `--pre-approval`, which skips the approvals and now counts as a provenance check (147). A later upload with `if: always()` or `!cancelled()` after an upload that was checked (162, 163): every upload is now checked, not only the first. A needed job with `continue-on-error` (169, 170, 225, not verified): it is no gate itself, and the jobs it needs still are. For 021: the checks after the step that applies (204), and an apply step with `if: always()` (211). `gh attestation verify` counted as verifying the agent-run record (206): it checks a signature and a predicate type, not the record's run, snapshot or permissions, so it no longer counts.
 
-What a check is now. The first reader tried to follow bash's grammar; the slice's own reviewer (see "Review" below) got past it 50 more ways, so it was replaced by a reader that accepts only what it can vouch for. A check counts when its line is that one command (`|| exit N` with N from 1 to 255, `|| exit` and `|| { plain; commands; exit N; }` allowed after it, and a pipe under pipefail), the line is at the top level of a `run` script in bash or sh with errexit on (GitHub's `bash -e` on a runner labelled as Linux or macOS, `shell: bash`, `shell: sh`, or `set -e` before it), the step runs on success only, and every line before it is plain: outside quotes no `exit`, `return`, `exec`, `eval`, `source`, `.`, `builtin`, `command`, `trap`, `shopt`, `alias`, `hash`, `unset`, `declare`, function, `case`, here-document, `set` with anything but `-` options, assignment to `PATH`, `BASH_ENV` or `ENV`, command named by an expansion, or `${{ }}` expression whose value could hold shell syntax (a text written in the expression is put in as GitHub puts it; `github.sha`, run ids and other values that cannot hold shell syntax are one word; any other ends the reading). A script with a line break bash does not see (a carriage return, a form feed, U+2028) or with `$'...'` is not read. An earlier step that names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`, an `env` written as one expression, and a login or interactive shell all mean no check. For 021 the checks count only before the first step that may apply (anything but a checkout, a download of artifacts, a GitHub setup action or `setup-obaaf` from a repository named `obaaf`), only in a step that runs nothing but the checks and commands that only read or prepare, and none when a step that may apply runs after a failure.
+What a check is now. The first reader tried to follow bash's grammar, and the slice's reviewer got past it 50 more ways; the second used a deny-list over the lines before the check, and the reviewer got past it 20 more ways (see "Review" below). The reader now accepts only what it can vouch for and stops at the first line it cannot. A check counts when its line is that one command (`|| exit N` with N from 1 to 255, `|| exit` and `|| { plain; commands; exit N; }` allowed after it, and a pipe under pipefail), outside any compound command, in a `run` script in bash or sh with errexit on (GitHub's `bash -e` on a runner labelled as Linux or macOS, `shell: bash`, `shell: sh`, a custom shell with only `-e`, `-u`, `-x` and `-o` options, or `set -e` before it), the step runs on success only, and every line before it is one of: simple commands joined by `;`, `&&`, `||` or `|`, each named by a plain word that cannot leave the script, run text as commands, or change what a name runs or how the shell behaves, with no assignment to `PATH`, `BASH_ENV` or `ENV`, no reserved word, no `&`, no here-document, no unquoted `(` but an array assignment, no backslash but one ending the line (joined as bash joins it, after the comment is taken off), and no `${{ }}` expression whose value could hold shell syntax (a text written in the expression is put in as GitHub puts it; `github.sha`, run ids and other values that cannot hold shell syntax are one word); or a plain `if ...; then`, `elif ...; then`, `while ...; do`, `until ...; do`, `for NAME in ...; do`, `else`, `fi` or `done` line. A script with a line break bash does not see or with `$'...'` is not read. An earlier step that names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`, an `env` written as one expression, and a login or interactive shell all mean no check. When a step names a check the reader cannot vouch for, OBAAF-GHA-016 is kind `cannot-tell` (still high) rather than `unchecked`. For 021 the checks count only before the first step that may apply (anything but a checkout, a download of artifacts, a GitHub setup action or a `setup-obaaf` from a repository named `obaaf`), only in a step that runs nothing but the checks and commands that only read or prepare, with no substitution, and none count when a step that may apply runs after a failure. **Stated, not fixed:** what commands and actions earlier in the job do to the runner (replace the `obaaf` binary, rewrite the policy file, write `GITHUB_ENV` or the path file under a name the text search does not see) cannot be ruled out by reading a script.
 
 **False positives fixed.** `obaaf verify release ... || exit 1` (184) and `|| { echo ...; exit 1; }` (188), `||` in a comment after the command (185), `set +e` after the check (186), and `if: ${{success()}}` or `if: true` on the check step (160, 161).
 
@@ -413,7 +413,7 @@ Both took any value that was not empty for an environment. **Got through, now fi
 
 ### Review
 
-One Opus 5.5 reviewer that did not write the code reviewed the slice. Its first pass found the "Now" column right for all 267 attempts, no crash on about 80 odd inputs, and ten blocking findings, all fixed and tested in `tests/test_release_effect_bypasses.py`:
+One Opus 5.5 reviewer that did not write the code reviewed the slice. Its first pass found the "Now" column right for all 267 attempts, no crash on about 80 odd inputs, and ten blocking findings; each is tested in `tests/test_release_effect_bypasses.py`, and what the second pass found still open is said after the list:
 
 1. An `exit` inside an `if`, a `case`, a `{ }` group, a loop or a function before the check.
 2. `${{ }}` read as one word, though GitHub puts its value into the script first (`${{ '|| true' }}` after the check, `${{ 'exit 0' }}` before it).
@@ -427,6 +427,8 @@ One Opus 5.5 reviewer that did not write the code reviewed the slice. Its first 
 10. The widened publishing list made ordinary CI release jobs (`publishToMavenLocal`, `goreleaser release --snapshot`, `semantic-release --dry-run`, `rclone copy` from a remote, `skopeo copy` to a file, `mvn deploy` to a `file:` repository, `helm push` to `localhost`), with facts that made an acceptance of the dry run cover the real one: dry runs and local targets are not uploads now, and `rclone` and `skopeo` are not listed.
 
 Also corrected from its non-blocking points: the claim that every acceptance of OBAAF-GHA-006 changed (`no-cache-mode` did not), the 021 description's claim about acceptances (it holds for baseline entries, not `ignore` entries), a code span broken by a line wrap in the catalogue, and the upgrade page, which had no rows for this slice. Kept, and stated: `_jobs_feeding` may name a job whose output the release does not use; `${{ inputs.environment }}` with a `choice` input is "cannot tell"; `$((1 << 2))` or `"a<<b"` before a check makes the reader stop (a check that does run is reported missing); actions that cache are still a list; arguments of the check (`--gh PATH`, a policy file an earlier step writes) are not read.
+
+A second pass, on the reader that replaced the first, found every first-pass case reported, no crash on 20,000 fuzzed scripts, and these, all fixed and tested unless said: quoting or a backslash inside `exit` or `eval` (the deny-list ran on text with quoted parts blanked); a line continuation read as a space where bash removes it, and a comment ending in a backslash; an escaped space before `#`; depth fooled by `time if`, a command named `fi`, a `)` inside an expansion or after `#`; a line ending in `||` or `&&` that continues onto the check's line; `PATH` set by `for`, `read` or `printf -v`, or as a prefix on the check's own line, and `mapfile -C`; shell options `-n`, `-t` and `-D` (the options are now an allow-list); a substitution inside a quoted or backquoted word in an OBAAF-GHA-021 check step; the local `./actions/setup-obaaf` taken for OBAAF's (an agent's artifact downloaded to `.` could provide it); and dry-run, `--snapshot`, `localhost` and `file:` exceptions that matched anywhere on the line, so `npm publish # was --dry-run` lost an upload the base checker reported (they now stop at `;`, `&`, `|` and `#`, and the Maven one reads only `-DaltDeploymentRepository`). **Stated, not fixed:** `BASH_ENV` or the path file written under a name the text search does not see (`"BASH""_ENV"`, the runner's `add_path_*` file), `cp /bin/true "$(which obaaf)"` and other changes earlier commands or actions make to the runner, and a `setup-obaaf` from any repository named `obaaf` taken for OBAAF's (the templates may point at a fork). From its non-blocking points, a step whose check cannot be vouched for is now `cannot-tell` instead of "no check".
 
 ### What changed for adopters
 
@@ -573,61 +575,61 @@ What the checker reported for these seven rules on each attempt's workflow, with
 | 102 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 103 | OBAAF-GHA-016 medium provenance-only | OBAAF-GHA-016 medium provenance-only |
 | 104 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
-| 105 | nothing | OBAAF-GHA-016 high unchecked |
-| 106 | nothing | OBAAF-GHA-016 high unchecked |
-| 107 | nothing | OBAAF-GHA-016 high unchecked |
-| 108 | nothing | OBAAF-GHA-016 high unchecked |
-| 109 | nothing | OBAAF-GHA-016 high unchecked |
-| 110 | nothing | OBAAF-GHA-016 high unchecked |
-| 111 | nothing | OBAAF-GHA-016 high unchecked |
-| 112 | nothing | OBAAF-GHA-016 high unchecked |
-| 113 | nothing | OBAAF-GHA-016 high unchecked |
-| 114 | nothing | OBAAF-GHA-016 high unchecked |
-| 115 | nothing | OBAAF-GHA-016 high unchecked |
-| 116 | nothing | OBAAF-GHA-016 high unchecked |
-| 117 | nothing | OBAAF-GHA-016 high unchecked |
-| 118 | nothing | OBAAF-GHA-016 high unchecked |
-| 119 | nothing | OBAAF-GHA-016 high unchecked |
-| 120 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 121 | nothing | OBAAF-GHA-016 high unchecked |
-| 122 | nothing | OBAAF-GHA-016 high unchecked |
-| 123 | nothing | OBAAF-GHA-016 high unchecked |
-| 124 | nothing | OBAAF-GHA-016 high unchecked |
-| 125 | nothing | OBAAF-GHA-016 high unchecked |
-| 126 | nothing | OBAAF-GHA-016 high unchecked |
-| 127 | nothing | OBAAF-GHA-016 high unchecked |
-| 128 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 129 | nothing | OBAAF-GHA-016 high unchecked |
-| 130 | nothing | OBAAF-GHA-016 high unchecked |
-| 131 | nothing | OBAAF-GHA-016 high unchecked |
-| 132 | nothing | OBAAF-GHA-016 high unchecked |
-| 133 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 134 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 135 | nothing | OBAAF-GHA-016 high unchecked |
-| 136 | nothing | OBAAF-GHA-016 high unchecked |
-| 137 | nothing | OBAAF-GHA-016 high unchecked |
-| 138 | nothing | OBAAF-GHA-016 high unchecked |
-| 139 | nothing | OBAAF-GHA-016 high unchecked |
+| 105 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 106 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 107 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 108 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 109 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 110 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 111 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 112 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 113 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 114 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 115 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 116 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 117 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 118 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 119 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 120 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 121 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 122 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 123 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 124 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 125 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 126 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 127 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 128 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 129 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 130 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 131 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 132 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 133 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 134 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 135 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 136 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 137 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 138 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 139 | nothing | OBAAF-GHA-016 high cannot-tell |
 | 140 | nothing | nothing |
-| 141 | nothing | OBAAF-GHA-016 high unchecked |
-| 142 | nothing | OBAAF-GHA-016 high unchecked |
-| 143 | nothing | OBAAF-GHA-016 high unchecked |
-| 144 | nothing | OBAAF-GHA-016 high unchecked |
-| 145 | nothing | OBAAF-GHA-016 high unchecked |
-| 146 | nothing | OBAAF-GHA-016 high unchecked |
+| 141 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 142 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 143 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 144 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 145 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 146 | nothing | OBAAF-GHA-016 high cannot-tell |
 | 147 | nothing | OBAAF-GHA-016 medium provenance-only |
 | 148 | nothing | nothing |
 | 149 | nothing | nothing |
-| 150 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 151 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 152 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 153 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 154 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 150 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 151 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 152 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 153 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 154 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
 | 155 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 156 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 157 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 158 | nothing | nothing |
-| 159 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 159 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
 | 160 | OBAAF-GHA-016 high unchecked | nothing |
 | 161 | OBAAF-GHA-016 high unchecked | nothing |
 | 162 | nothing | OBAAF-GHA-016 high unchecked |
@@ -646,10 +648,10 @@ What the checker reported for these seven rules on each attempt's workflow, with
 | 175 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 176 | nothing | nothing |
 | 177 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 178 | nothing | OBAAF-GHA-016 high unchecked |
-| 179 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 180 | nothing | OBAAF-GHA-016 high unchecked |
-| 181 | nothing | OBAAF-GHA-016 high unchecked |
+| 178 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 179 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
+| 180 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 181 | nothing | OBAAF-GHA-016 high cannot-tell |
 | 182 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 183 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 184 | OBAAF-GHA-016 high unchecked | nothing |
@@ -668,7 +670,7 @@ What the checker reported for these seven rules on each attempt's workflow, with
 | 197 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
 | 198 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
 | 199 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 200 | OBAAF-GHA-016 medium provenance-only | OBAAF-GHA-016 high unchecked, OBAAF-GHA-017 medium |
+| 200 | OBAAF-GHA-016 medium provenance-only | OBAAF-GHA-016 high cannot-tell, OBAAF-GHA-017 medium |
 | 201 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 202 | nothing | nothing |
 | 203 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
@@ -704,12 +706,12 @@ What the checker reported for these seven rules on each attempt's workflow, with
 | 233 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 234 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
 | 235 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
-| 236 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high unchecked |
+| 236 | OBAAF-GHA-016 high unchecked | OBAAF-GHA-016 high cannot-tell |
 | 237 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
 | 238 | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high | OBAAF-GHA-021 high unchecked, OBAAF-GHA-022 high |
 | 239 | OBAAF-GHA-016 high unchecked, OBAAF-GHA-016 medium provenance-only, OBAAF-GHA-017 medium | OBAAF-GHA-016 high unchecked, OBAAF-GHA-016 medium provenance-only, OBAAF-GHA-017 medium |
 | 240 | nothing | OBAAF-GHA-021 high unchecked |
 | 241 | nothing | nothing |
-| 242 | nothing | OBAAF-GHA-016 high unchecked |
-| 243 | nothing | OBAAF-GHA-016 high unchecked |
-| 244 | nothing | OBAAF-GHA-016 high unchecked |
+| 242 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 243 | nothing | OBAAF-GHA-016 high cannot-tell |
+| 244 | nothing | OBAAF-GHA-016 high cannot-tell |

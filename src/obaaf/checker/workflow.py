@@ -759,44 +759,207 @@ def _unquoted(line: str) -> str:
     return "".join(out)
 
 
-def _plain_line(line: str, tokens: list[tuple[str, bool]]) -> bool:
-    """Whether a line may come before a check: nothing in it can leave the script, run text as commands,
-    change what a name runs or turn errexit off (see `binding_commands`)."""
-    bare = _unquoted(line)
-    if (_DENIED_RE.search(bare) or _DOT_COMMAND_RE.search(bare) or _FUNCTION_RE.search(bare)
-            or _EXPANDED_NAME_RE.search(line) or _SHELL_STATE_RE.search(line) or re.search(r"(?<!<)<<(?!<)", line)
-            or UNKNOWN_EXPRESSION in line):
-        return False
-    words = [w for w, _q in tokens]
-    for i, word in enumerate(words):
-        if word == "set" and (i == 0 or words[i - 1] in _COMMAND_STARTERS):
-            j = i + 1
-            while j < len(words) and words[j] not in _COMMAND_STARTERS and words[j] not in _REDIRECTS:
-                option = words[j]
-                if not re.fullmatch(r"-[a-zA-Z]+", option):
+_RESERVED = frozenset({"if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
+                       "done", "in", "function", "time", "coproc", "{", "}", "!"})
+# Names a line before a check may not run: a way to leave the script, to run text as commands, to change
+# what a name runs or how the shell behaves, or to read text into a variable that changes it.
+_DENIED_NAMES = frozenset({"exit", "return", "exec", "eval", "source", ".", "builtin", "command", "trap", "shopt",
+                           "alias", "unalias", "hash", "enable", "unset", "declare", "typeset", "readonly", "local",
+                           "mapfile", "readarray", "logout", "set", "ulimit", "kill", "suspend", "wait", "fg", "bg",
+                           "disown", "getopts", "let", "printf", "read", "export", "cd", "pushd", "popd", "time"})
+# Variables that change what a name runs or how the shell starts.
+_SHELL_VARIABLE_RE = re.compile(r"(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH)(\+?=|$)")
+
+
+def _assignment(word: str) -> bool:
+    return bool(_ASSIGN_WORD_RE.match(word))
+
+
+def _safe_command(words: list[tuple[str, bool]], allowed: frozenset = frozenset()) -> bool:
+    """Whether one simple command may come before a check: assignments to no shell variable, then a
+    command named by a plain word (no quote, no expansion) that is not denied (except names in
+    `allowed`), with no word naming a shell variable, a reserved word or a substitution that is not
+    quoted."""
+    i = 0
+    while i < len(words) and _assignment(words[i][0]) and not words[i][0].startswith(("$", "`")):
+        word = words[i][0]
+        if _SHELL_VARIABLE_RE.match(word) or "`" in word or ("$(" in word and not words[i][1]):
+            return False
+        if word.endswith("=") and i + 1 < len(words) and words[i + 1][0] == "(":
+            j = i + 2
+            while j < len(words) and words[j][0] != ")":
+                if words[j][0] in _OPERATORS and not words[j][1]:
                     return False
-                if "o" in option:
-                    if j + 1 >= len(words) or words[j + 1] not in _SET_OPTIONS:
-                        return False
-                    j += 1
                 j += 1
+            if j >= len(words):
+                return False
+            i = j + 1
+            continue
+        i += 1
+    if i >= len(words):
+        return True
+    name, quoted = words[i]
+    if quoted or not re.fullmatch(r"[A-Za-z0-9_][\w.+-]*|\[|\[\[|:", name) or name in _RESERVED or (
+            name in _DENIED_NAMES and name not in allowed):
+        return False
+    for word, was_quoted in words[i + 1:]:
+        if not was_quoted and word in _RESERVED - {"in"}:
+            return False
+        if _SHELL_VARIABLE_RE.match(word) or "`" in word:
+            return False
+        if word in ("(", ")") and not was_quoted:
+            return False
     return True
 
 
-def _set_change(words: list[str]) -> tuple[bool | None, bool | None]:
-    """What a `set` command that `_plain_line` allows turns on: (errexit, pipefail), None for unchanged."""
-    errexit = pipefail = None
-    for i, word in enumerate(words[1:], 1):
-        if not word.startswith("-"):
-            continue
-        if "e" in word[1:]:
-            errexit = True
-        if "o" in word[1:] and i + 1 < len(words):
-            if words[i + 1] == "errexit":
-                errexit = True
-            elif words[i + 1] == "pipefail":
-                pipefail = True
+def _set_words(words: list[str]) -> tuple[bool, bool] | None:
+    """(errexit, pipefail) turned on by `set` with only `-e`, `-u`, `-x` and `-o errexit|pipefail|nounset|xtrace`;
+    None for any other `set`."""
+    errexit = pipefail = False
+    i = 1
+    while i < len(words):
+        option = words[i]
+        if not re.fullmatch(r"-[euxo]+", option):
+            return None
+        errexit = errexit or "e" in option
+        if "o" in option:
+            if i + 1 >= len(words) or words[i + 1] not in _SET_OPTIONS:
+                return None
+            errexit = errexit or words[i + 1] == "errexit"
+            pipefail = pipefail or words[i + 1] == "pipefail"
+            i += 1
+        i += 1
     return errexit, pipefail
+
+
+def _split_commands(tokens: list[tuple[str, bool]]) -> list[list[tuple[str, bool]]] | None:
+    """A line's simple commands, split at `;`, `&&`, `||` and `|`; None when it holds another operator
+    (`&`, `(`, `)` outside an array assignment, a here-document) or ends with one that continues it."""
+    out, current, i = [], [], 0
+    while i < len(tokens):
+        word, quoted = tokens[i]
+        if not quoted and word in (";", "&&", "||", "|", "|&"):
+            if not current:
+                return None
+            out.append(current)
+            current = []
+        elif not quoted and word in ("&", ";;", "<<", "<<-"):
+            return None
+        else:
+            current.append((word, quoted))
+        i += 1
+    if not current:
+        return None        # empty, or a line that ends with `;`, `&&`, `||` or `|` and goes on below
+    out.append(current)
+    return out
+
+
+def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[list[str]], bool]:
+    """The commands of a POSIX shell script whose failure ends the script with a failure, each as its
+    words from the command's name on (flagship slice 2d.2e), and whether the whole script was read.
+
+    The reader accepts only what it can vouch for, and stops at the first line it cannot. A command
+    counts when its line is that one command (optionally followed by `|| exit N` with N from 1 to 255,
+    `|| exit`, or `|| { plain; commands; exit N; }`, or piped under pipefail), it is not inside a
+    compound command, errexit is on (from the shell or a `set -e` line before it), and every line before
+    it is one of: simple commands joined by `;`, `&&`, `||` or `|`, each named by a plain word that is not
+    a way to leave the script, run text, change what a name runs or how the shell behaves (`exit`,
+    `exec`, `eval`, `source`, `.`, `builtin`, `command`, `trap`, `set` other than `-e`, `-u`, `-x`, `-o`,
+    `export`, `read`, `printf`, `cd` and the like), assigning no shell variable (`PATH`, `BASH_ENV`,
+    `IFS`), with no reserved word, no unquoted `(` or `)` but an array assignment, no `&`, no
+    here-document and no expression the checker cannot read; or a line `if ...; then`, `elif ...; then`,
+    `while ...; do`, `until ...; do`, `for NAME in ...; do`, `else`, `fi` or `done` whose other words are
+    such commands. A line continued with a backslash is joined to the next as bash joins it, after the
+    comment is taken off; any other backslash, a line break bash does not see (a carriage return, a form
+    feed, U+2028) or `$'...'` ends the reading. `read`, `printf`, `export`, `cd` and `local` are allowed
+    inside a loop's body and an `if` only as `read -r NAME` and the like, never naming a shell
+    variable."""
+    if _ODD_CHARS_RE.search(text) or "$'" in text or '$"' in text:
+        return [], False
+    physical = text.split("\n")
+    lines: list[str] = []
+    pending = ""
+    for raw_line in physical:
+        if "\\" in raw_line.rstrip()[:-1]:
+            lines.append(pending + raw_line)       # a backslash other than at the end: reading stops here
+            pending = ""
+            continue
+        line = _strip_comment(raw_line)
+        if line.rstrip().endswith("\\") and not line.rstrip().endswith("\\\\"):
+            pending += line.rstrip()[:-1]
+            continue
+        lines.append(pending + line)
+        pending = ""
+    if pending:
+        lines.append(pending)
+    out: list[list[str]] = []
+    depth = 0
+    readers = frozenset({"read", "printf", "export", "cd", "local"})
+    for line in lines:
+        if not line.strip():
+            continue
+        if "\\" in line or UNKNOWN_EXPRESSION in line:
+            return out, False
+        tokens = _script_tokens(line)
+        if tokens is None:
+            return out, False
+        words = [w for w, _q in tokens]
+        if depth == 0 and errexit:
+            command = _check_line(tokens, pipefail)
+            if command is not None:
+                out.append(command)
+        first = words[0] if not tokens[0][1] else ""
+        if first in ("fi", "done") and len(words) == 1:
+            if depth == 0:
+                return out, False
+            depth -= 1
+            continue
+        if first == "else" and len(words) == 1 and depth > 0:
+            continue
+        inner = tokens
+        if first in ("if", "elif", "while", "until", "for"):
+            closer = "then" if first in ("if", "elif") else "do"
+            if words[-1] != closer or tokens[-1][1] or len(words) < 3 or words[-2] != ";" or (first == "elif" and depth == 0):
+                return out, False
+            inner = tokens[1:-2]
+            if first == "for":
+                if len(inner) < 2 or inner[1][0] != "in" or not re.fullmatch(r"[A-Za-z_]\w*", inner[0][0]) \
+                        or _SHELL_VARIABLE_RE.match(inner[0][0] + "="):
+                    return out, False
+                if any(w in _OPERATORS or w in _RESERVED for w, q in inner[2:] if not q):
+                    return out, False
+                inner = []
+            if first != "elif":
+                depth += 1
+        if inner:
+            commands = _split_commands(inner)
+            if commands is None:
+                return out, False
+            for command_words in commands:
+                plain = [w for w, _q in command_words]
+                name_at = next((k for k, w in enumerate(plain) if not _assignment(w)), len(plain))
+                name = plain[name_at] if name_at < len(plain) else ""
+                if name == "set":
+                    change = _set_words(plain[name_at:])
+                    if change is None or name_at:
+                        return out, False
+                    if depth == 0 and first not in ("if", "while", "until", "elif"):
+                        errexit = errexit or change[0]
+                        pipefail = pipefail or change[1]
+                    continue
+                if name in readers:
+                    if any(_SHELL_VARIABLE_RE.match(w) for w in plain[name_at + 1:]) \
+                            or any(w.startswith("-") and set(w[1:]) - set("rasneptd") for w in plain[name_at + 1:]):
+                        return out, False
+                    if name in ("read", "printf") and any("v" in w[1:] or "C" in w or "u" in w[1:]
+                                                          for w in plain[name_at + 1:] if w.startswith("-")):
+                        return out, False
+                    if not _safe_command(command_words, allowed=readers):
+                        return out, False
+                    continue
+                if not _safe_command(command_words):
+                    return out, False
+    return out, True
 
 
 def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | None:
@@ -806,6 +969,8 @@ def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | N
     words = [w for w, _q in tokens]
     i = 0
     while i < len(words) and _ASSIGN_WORD_RE.match(words[i]):
+        if _SHELL_VARIABLE_RE.match(words[i]) or "`" in words[i] or "$(" in words[i]:
+            return None
         i += 1
     if i >= len(words) or tokens[i][1] or not re.fullmatch(r"[A-Za-z0-9_][\w.+-]*", words[i]):
         return None
@@ -839,70 +1004,12 @@ def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | N
             parts.append(current)
             last = parts[-1]
             if len(last) == 2 and last[0] == "exit" and _EXIT_CODE_RE.fullmatch(last[1]) and all(
-                    p and not _DENIED_RE.search(" ".join(p)) for p in parts[:-1]):
+                    p and p[0] not in _DENIED_NAMES and p[0] not in _RESERVED for p in parts[:-1]):
                 return command
         return None
     if pipefail and all(op in ("|",) or op in _REDIRECTS for op in ops):
         return command
     return None
-
-
-def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[list[str]], bool]:
-    """The commands of a POSIX shell script whose failure ends the script with a failure, each as its
-    words from the command's name on (flagship slice 2d.2e), and whether the whole script was read.
-
-    The reader is strict and fails closed. A command counts only when its line is that one command
-    (`|| exit N` and `|| { ...; exit N; }` allowed after it, and a pipe under pipefail), the line is
-    at the top level of the script (not inside `if`, `while`, `for`, `{ }` or `( )`), errexit is on
-    (from the shell, or `set -e` before it), and every line before it is plain: outside quotes it
-    holds no way to leave the script (`exit`, `return`, `exec`, `break`), to run text as commands
-    (`eval`, `source`, `.`, a command named by an expansion), to change what a name runs (a function,
-    `alias`, `hash`, `builtin`, `command`, `PATH=`, `BASH_ENV=`, `GITHUB_PATH`), to turn errexit off
-    (`set` with anything but `-` options, `trap`, `shopt`), no `case`, here-document or expression whose
-    value the checker does not know. Reading stops at the first line that is not plain. A script with a
-    line break other than a line feed (a carriage return, a form feed, U+2028) or with `$'...'` is not
-    read at all."""
-    if _ODD_CHARS_RE.search(text) or "$'" in text or '$"' in text:
-        return [], False
-    lines = re.sub(r"\\\n", " ", text).split("\n")
-    out: list[list[str]] = []
-    depth = 0
-    for raw_line in lines:
-        line = _strip_comment(raw_line)
-        if not line.strip():
-            continue
-        tokens = _script_tokens(line)
-        if tokens is None:
-            return out, False
-        if depth == 0 and errexit:
-            command = _check_line(tokens, pipefail)
-            if command is not None:
-                out.append(command)
-        if not _plain_line(line, tokens):
-            return out, False
-        # Depth: unquoted keywords and braces where a command starts.
-        words = [w for w, _q in tokens]
-        expecting = True
-        for word, quoted in tokens:
-            if quoted:
-                expecting = False
-                continue
-            if word == "(":
-                depth += 1          # a subshell, a substitution or an array: each closed by its `)`
-            elif word == ")":
-                depth = max(0, depth - 1)
-            elif expecting and word in _OPENERS:
-                depth += 1
-            elif expecting and word in _CLOSERS:
-                depth = max(0, depth - 1)
-            expecting = word in _COMMAND_STARTERS or (expecting and _ASSIGN_WORD_RE.match(word) is not None)
-        if depth == 0:
-            first = words[0] if words else ""
-            if first == "set":
-                on_e, on_pipe = _set_change(words)
-                errexit = errexit or bool(on_e)
-                pipefail = pipefail or bool(on_pipe)
-    return out, True
 
 
 def _remote(words: list[str]) -> tuple[str, str] | None:

@@ -448,22 +448,28 @@ rules:
     description: >-
       A release job uploads or publishes artifacts without first verifying their provenance, approvals
       and agent-run records in an earlier step of the same job or in a job it depends on. A check counts
-      only where its failure stops the upload (flagship slice 2d.2e): its line is that one command,
-      optionally followed by `|| exit N` or `|| { ...; exit N; }`, or piped under pipefail; the line is
-      at the top level of a `run` script in bash or sh with errexit on (GitHub's default `bash -e` on a
-      runner labelled as Linux or macOS, `shell: bash`, `shell: sh`, or `set -e`); and every line before
-      it is plain: outside quotes it holds no `exit`, `return`, `exec`, `eval`, `source`, `.`,
-      `builtin`, `command`, `trap`, `shopt`, `alias`, `hash`, function, `case`, here-document, `set`
-      with anything but `-` options, assignment to `PATH` or `BASH_ENV`, command named by an expansion,
-      or expression whose value could hold shell syntax. The step runs on success only, no `BASH_ENV`,
-      `BASH_FUNC` or `GITHUB_PATH` is set by it or named by an earlier step, and the shell is not a
-      login shell. Given `--help` or `--version` it is no check; with `--pre-approval` it is a
-      provenance check. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://` step,
-      a subshell, or on a runner that may be Windows (a self-hosted runner without an OS label, a group,
-      an expression) does not count, and neither does a needed job with `continue-on-error`. Every
-      upload step is checked, not only the first. Not read: what an action used before the check changes
-      for later steps (an exported variable, the path, the `obaaf` it installed: a `setup-obaaf` from a
-      repository named `obaaf` is trusted), and whether the files verified are the files uploaded.
+      only where its failure stops the upload (flagship slice 2d.2e). The reader accepts only what it
+      can vouch for and stops at the first line it cannot: the check's line is that one command
+      (optionally followed by `|| exit N` or `|| { ...; exit N; }`, or piped under pipefail), outside
+      any compound command, in a `run` script in bash or sh with errexit on (GitHub's default `bash -e`
+      on a runner labelled as Linux or macOS, `shell: bash`, `shell: sh`, a custom shell with only `-e`,
+      `-u`, `-x` and `-o` options, or `set -e` before it), in a step that runs on success only; and
+      every line before it is a simple command joined by `;`, `&&`, `||` or `|`, named by a plain word
+      that cannot leave the script, run text as commands, or change what a name runs or how the shell
+      behaves (no `exit`, `exec`, `eval`, `source`, `.`, `builtin`, `command`, `trap`, `set` but `-e`,
+      `-u`, `-x`, `-o`, no assignment to `PATH` or `BASH_ENV`, no `&`, here-document, reserved word,
+      backslash but at the end of a line, or expression whose value could hold shell syntax), or a plain
+      `if ...; then`, `while ...; do`, `for NAME in ...; do`, `else`, `fi` or `done` line. No earlier
+      step may name `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`. Given `--help` or `--version` it is no
+      check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot
+      vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own,
+      early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://`
+      step, a subshell, or on a runner that may be Windows does not count, and neither does a needed job
+      with `continue-on-error`. Every upload step is checked, not only the first. Not read: what
+      commands and actions earlier in the job do to the runner (replace the `obaaf` it runs, rewrite the
+      policy it reads, export a variable through a file command the checker does not see); a
+      `setup-obaaf` from a repository named `obaaf` is trusted to install the real `obaaf`; and whether
+      the files verified are the files uploaded.
     fix: >-
       Add `obaaf verify release` as a step before the upload, in the same job or in a job the upload
       job needs, and let a failure stop the job: no `|| true`, `continue-on-error` or `if: always()`.
@@ -577,13 +583,14 @@ rules:
       repository, but neither it nor a job it needs both verifies the agent-run record and checks the
       proposal before applying it. Doing only one of the two is reported at medium. The checks count
       only before the first step that may apply (anything but a checkout, a download of artifacts, a
-      GitHub setup action or OBAAF's), each where its failure stops the job as for OBAAF-GHA-016, in a
-      step that runs nothing but the checks and commands that only read or prepare (`set`, `echo`,
-      `read`, `jq`, `sha256sum` and the like); none count when a step that may apply runs after a
-      failure (flagship slice 2d.2e). `gh attestation verify` is no longer a record check: it checks a
-      signature, not the record. What the job may write is one of the finding's facts, so a baseline
-      entry does not cover the same job given wider write access; it does cover other commands with the
-      same access, and an `ignore` entry (rule, file, job) covers both.
+      GitHub setup action, or a `setup-obaaf` from a repository named `obaaf`, which is trusted because
+      the templates may point at a fork), each where its failure stops the job as for OBAAF-GHA-016, in
+      a step that runs nothing but the checks and commands that only read or prepare (`set`, `echo`,
+      `read`, `jq`, `sha256sum` and the like, with no substitution); none count when a step that may
+      apply runs after a failure (flagship slice 2d.2e). `gh attestation verify` is no longer a record
+      check: it checks a signature, not the record. What the job may write is one of the finding's
+      facts, so a baseline entry does not cover the same job given wider write access; it does cover
+      other commands with the same access, and an `ignore` entry (rule, file, job) covers both.
     fix: >-
       Verify the agent-run record with `obaaf verify agent-run` and check the proposal with `obaaf
       proposal check --repo .` before applying it, in the job that applies it or in a job it needs
