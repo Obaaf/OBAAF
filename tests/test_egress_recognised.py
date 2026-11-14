@@ -906,7 +906,7 @@ def floor_problems(releases, floor):
             problems.append(f"{sha[:12]} could not be checked ({exc})")
             continue
         if found.returncode != 0:
-            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the merge of slice 2c.4")
+            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the floor (slice 2c.6's last change to the action)")
             continue
         differs = lists_differ(sha)
         if differs:
