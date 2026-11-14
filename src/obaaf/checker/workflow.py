@@ -52,6 +52,12 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
 # Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
 HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
+# A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
+# reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
+_YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+                               r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+                               r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+                               r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)")
 # Step forms that hold no run or uses of their own (background steps, NGA features on GitHub.com).
 CONTROL_STEP_KEYS = {"wait", "wait-all", "cancel"}
 
@@ -565,9 +571,10 @@ class Job:
         is false to GitHub (an empty text): unless `x` is a key of the matrix with a list of values and
         every `include` entry sets it, a row may lack it, because an `include` entry that cannot be added
         to any combination makes a row of its own. So the sets can be more than the job runs on, never
-        fewer. A matrix key, an `include` or an `include` entry computed when the job runs, a key
-        written in another case (GitHub compares property names without regard to case), or any other
-        expression leaves the labels unresolved."""
+        fewer. The values of `x` computed when the job runs, an `include` or an `include` entry computed
+        when the job runs, a key written in another case (GitHub compares property names without
+        regard to case), a key that is not plain ASCII text with no expression, a value YAML 1.2 could
+        read as other than text, or any other expression leaves the labels unresolved."""
         labels = self.runs_on
         expr = [label for label in labels if "${{" in label]
         if not expr:
@@ -599,7 +606,14 @@ class Job:
         include = matrix.get("include", [])
         if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
             return None
-        keys = [str(key) for key in matrix] + [str(key) for entry in include for key in entry]
+        # Every key must be plain ASCII text with no expression, so that the checker's comparison is
+        # GitHub's: a key YAML reads as true or a number, one computed when the job runs, or one with a
+        # letter outside ASCII (whose case GitHub may fold otherwise) leaves the labels unresolved
+        # (found by the review of 2d.7).
+        keys = list(matrix) + [key for entry in include for key in entry]
+        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
+                                     for key in keys):
+            return None
         if any(key != name and key.lower() == name.lower() for key in keys):
             return None
         if name in matrix and not isinstance(matrix[name], list):
@@ -611,6 +625,8 @@ class Job:
         out: list[list[str]] = []
         falsy = False
         for value in values + extra:
+            if isinstance(value, str) and _YAML12_SCALAR_RE.fullmatch(value):
+                return None     # text to this reader, and maybe a number or false to GitHub's (YAML 1.2)
             if isinstance(value, str) and "${{" not in value:
                 if value == "" and default is not None:
                     falsy = True        # `'' || 'label'` is the label

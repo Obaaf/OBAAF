@@ -105,6 +105,22 @@ class MatrixDefaultTest(unittest.TestCase):
             "two expressions": ("${{ matrix.os }}${{ matrix.arch }}", FLASK),
             "an index": ("${{ matrix['os'] || 'ubuntu-latest' }}", FLASK),
             "an unclosed default": ("${{ matrix.os || 'ubuntu-latest }}", FLASK),
+            # Found by the review of 2d.7: keys GitHub may read as `x` that this reader does not.
+            "a key YAML reads as true": ("${{ matrix.True || 'ubuntu-latest' }}",
+                                         "    strategy:\n      matrix:\n        True: [self-hosted]\n"),
+            "the same in an include entry": ("${{ matrix.True || 'ubuntu-latest' }}",
+                                             FLASK + "          - {True: self-hosted}\n"),
+            "a key computed when the job runs": ("${{ matrix.os || 'ubuntu-latest' }}",
+                                                 "    strategy:\n      matrix:\n        ${{ vars.KEY }}: [self-hosted]\n"),
+            "a computed key in an include entry": ("${{ matrix.os || 'ubuntu-latest' }}",
+                                                   FLASK + "          - {'${{ vars.KEY }}': self-hosted}\n"),
+            "a key with a letter outside ASCII": ("${{ matrix.os || 'ubuntu-latest' }}",
+                                                  "    strategy:\n      matrix:\n        o\u017f: [self-hosted]\n"),
+            "a dotless i": ("${{ matrix.ci || 'ubuntu-latest' }}",
+                            "    strategy:\n      matrix:\n        c\u0131: [self-hosted]\n"),
+            # A value YAML 1.2 reads as the number 0, which is false, so GitHub would use the default.
+            "a value that is zero to YAML 1.2": ("${{ matrix.os || 'my-runner' }}",
+                                                 "    strategy:\n      matrix:\n        os: [ubuntu-latest, 0o0]\n"),
         }
         for name, (runs_on, strategy) in cases.items():
             with self.subTest(name):
@@ -117,6 +133,16 @@ class MatrixDefaultTest(unittest.TestCase):
         self.assertEqual(gha013(workflow("${{ matrix.os }}", strategy)), [])
         # A trusted trigger is not reported whatever the labels.
         self.assertEqual(gha013(workflow("${{ matrix.os || 'my-runner' }}", on="push")), [])
+
+    def test_an_unread_key_does_not_verify_the_native_firewall(self):
+        """Found by the review of 2d.7: with a key YAML reads as true, the default filled in and GitHub's
+        native egress firewall was verified for a job that may run on a self-hosted runner."""
+        from test_egress_recognised import FIREWALL, egress, run_check, verdict
+        from test_egress_recognised import workflow as agent_workflow
+        strategy = "    strategy:\n      matrix:\n        True: [self-hosted]"
+        text = agent_workflow("      - run: python -m agents.fix", runs_on="${{ matrix.True || 'ubuntu-24.04-firewall' }}",
+                              job_extra=strategy)
+        self.assertNotEqual(verdict(egress(run_check(text, policy=FIREWALL))), "verified")
 
 
 if __name__ == "__main__":
