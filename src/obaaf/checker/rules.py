@@ -875,25 +875,12 @@ class WorkflowRules:
             if unset:
                 place.problems.append(f"{where} names {name} under model-keys and no env of the step, the job or "
                                       "the workflow sets it, so the action refuses to run")
-        # The inputs. Only `run` reaches the command, as its text; a credential in any other input is
-        # not placed (an allow-list or a list of names computed from one is reported above).
-        if isinstance(given, dict):
-            for name, value in given.items():
-                found = self._credentials(value)
-                if not found:
-                    continue
-                if input_name(name) == "run":
-                    place.command.append(("in its run input", found))
-                else:
-                    place.unsure.append(f"{where} gives {', '.join(found[:3])} in its {one_line(name, 40)} input, "
-                                        "which the action does not pass on as a variable")
-        elif given is not None:
-            found = self._credentials(given)
-            if found:
-                place.unsure.append(f"{where} computes its inputs when the job runs, with {', '.join(found[:3])}")
-        # The step's environment, which the action reads names from.
+        # The step's environment, which the action reads names from, and which GitHub also puts in the
+        # `env` context its inputs are written with: `${{ env.KEY }}` in `run` hands the command the
+        # value whatever `model-keys` says.
+        held: dict = {}          # step env name -> the credentials its value holds
+        folded: dict = {}        # step env name in upper case -> the names written
         if isinstance(step_env, dict):
-            folded: dict = {}
             for name in step_env:
                 folded.setdefault(str(name).upper(), []).append(str(name))
             said: set = set()
@@ -902,38 +889,77 @@ class WorkflowRules:
                 if not found:
                     continue
                 name = str(name)
+                held[name] = found
                 same = folded[name.upper()]
-                if len(same) > 1:
-                    if name.upper() not in said:
-                        said.add(name.upper())
-                        place.unsure.append(f"{where} sets {' and '.join(one_line(n, 60) for n in same)} in its env, "
-                                            "which differ only in case, and which of them the action reads is not "
-                                            "established")
-                elif env_names is None or key_names is None:
-                    continue        # said above: an input is not readable
-                elif name in key_names and name in egress_mod.MODEL_KEYS and name not in env_names:
-                    place.proxy.append((name, found))
-                elif name in env_names:
-                    if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name):
-                        continue    # the action refuses to run, which `problems` says
-                    place.command.append((f"as {name}", found))
-                else:
-                    place.neither.append((name, found))
+                if len(same) > 1 and name.upper() not in said:
+                    said.add(name.upper())
+                    place.unsure.append(f"{where} sets {' and '.join(one_line(n, 60) for n in same)} in its env, "
+                                        "which differ only in case, and which of them the action reads is not "
+                                        "established")
         elif step_env is not None:
             found = self._credentials(step_env)
             if found:
-                place.unsure.append(f"{where} computes its env when the job runs, with {', '.join(found[:3])}, so the "
+                place.unsure.append(f"{where} computes its env when the job runs, with {self._names(found)}, so the "
                                     "checker cannot tell which variables hold them")
+        # The inputs. Only `run` reaches the command, as its text, with what it writes in from `secrets`,
+        # `github.token` or the step's env (the env context's names are not case sensitive); a
+        # credential in any other input is not placed (an allow-list or a list of names computed from
+        # one is reported above).
+        through_run: set = set()
+        if isinstance(given, dict):
+            for name, value in given.items():
+                found = self._credentials(value)
+                refs, everything = self._env_refs(value)
+                via = [env for env in held if everything or env.lower() in refs]
+                if input_name(name) == "run":
+                    if found:
+                        place.command.append(("in its run input", found))
+                    for env in via:
+                        through_run.add(env)
+                        place.command.append((f"in its run input, through env.{env}", held[env]))
+                    if everything and held:
+                        place.unsure.append(f"{where} writes the whole env context, or a part of it the checker "
+                                            "cannot name, into its run input")
+                elif found or via:
+                    shown = found + [f"env.{env}" for env in via]
+                    place.unsure.append(f"{where} gives {self._names(shown)} in its {one_line(name, 40)} input, "
+                                        "which the action does not pass on as a variable")
+        elif given is not None:
+            found = self._credentials(given)
+            if found:
+                place.unsure.append(f"{where} computes its inputs when the job runs, with {self._names(found)}")
+        # Each credential of the step's env, by the name it is set under.
+        for name, found in held.items():
+            if len(folded[name.upper()]) > 1 or name in through_run:
+                continue        # said above
+            if env_names is None or key_names is None:
+                continue        # said above: an input is not readable
+            if name in key_names and name in egress_mod.MODEL_KEYS and name not in env_names:
+                place.proxy.append((name, found))
+            elif name in env_names:
+                if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name):
+                    continue    # the action refuses to run, which `problems` says
+                place.command.append((f"as {name}", found))
+            else:
+                place.neither.append((name, found))
         rest = {name: value for name, value in step.raw.items() if name not in ("with", "env")}
         found = self._credentials(rest)
         if found:
-            place.unsure.append(f"{where} is given {', '.join(found[:3])} outside its env and its inputs, where the "
+            place.unsure.append(f"{where} is given {self._names(found)} outside its env and its inputs, where the "
                                 "checker does not place it")
         return place
 
+    @staticmethod
+    def _names(items: list, limit: int = 3) -> str:
+        """Names joined for a report, saying how many more there are rather than cutting them off."""
+        items = list(dict.fromkeys(items))
+        more = f" and {len(items) - limit} more" if len(items) > limit else ""
+        return ", ".join(items[:limit]) + more
+
     def _key_routes(self, job: Job) -> str:
         """Where the credentials given to the job's steps that use OBAAF's egress action go, in words,
-        for OBAAF-GHA-005's controls; empty when no such step is given one the checker can place."""
+        for OBAAF-GHA-005's controls, with what the checker could not place and what makes the action
+        refuse to run; empty when there is none of these."""
         if job.reusable:
             return ""
         parts: list[str] = []
@@ -943,27 +969,32 @@ class WorkflowRules:
             place = self._placement(job, step)
             bits: list[str] = []
             for name, found in place.proxy:
-                bits.append(f"{name} ({', '.join(found[:3])}) goes to AWF's API proxy, which the command can use and "
+                bits.append(f"{name} ({self._names(found)}) goes to AWF's API proxy, which the command can use and "
                             f"cannot read, and which reaches {egress_mod.MODEL_KEYS[name]} whatever the allow-list says")
             for how, found in place.command:
-                bits.append(f"{', '.join(found[:3])} is passed to the command {how}, which can send it to a listed host "
+                bits.append(f"{self._names(found)} is passed to the command {how}, which can send it to a listed host "
                             "or print it to the job's log")
             for name, found in place.neither:
-                bits.append(f"{name} ({', '.join(found[:3])}) is named under neither env nor model-keys, so the action "
-                            "passes it to neither")
+                bits.append(f"{name} ({self._names(found)}) is named under neither env nor model-keys and written "
+                            "nowhere in the inputs, so the action passes it to neither")
+            if place.unsure:
+                bits.append("the checker could not place: " + egress_mod.joined(place.unsure, 3))
+            if place.problems:
+                bits.append("the action would refuse to run: " + egress_mod.joined(place.problems, 3))
             if bits:
                 parts.append(f"in {place.step}, " + "; ".join(bits))
         return "; ".join(parts)
 
     def _leaks(self, placements: list) -> str:
         """What a cleared OBAAF-GHA-020 under OBAAF's egress action does not stop, so the report never
-        reads as more: the listed hosts, names under them, the provider behind each model key, and the
-        job's log and artifacts."""
-        passed = sorted({cred for place in placements for _how, found in place.command for cred in found})
+        reads as more: the listed hosts and what they can be made to do, names under them, the provider
+        behind each model key, and the job's log and artifacts."""
+        passed = [cred for place in placements for _how, found in place.command for cred in found]
         keys = sorted({name for place in placements for name, _found in place.proxy})
         hosts = sorted({host for place in placements for host in place.hosts})
         parts = ["anything the confined command sends to a listed host"
-                 + (f", the credentials passed to it included ({', '.join(passed[:3])})" if passed else ""),
+                 + (f", the credentials passed to it included ({self._names(passed)}), with which a listed host "
+                    "can be made to act for it" if passed else ""),
                  "data in a name under a listed name, which leaves the runner in a DNS query to that name's DNS servers"]
         if hosts:
             given = f"with {', '.join(keys)} given to AWF's API proxy" if keys else "through AWF's API proxy"

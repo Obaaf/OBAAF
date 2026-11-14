@@ -248,11 +248,13 @@ class Placement:
     has a reason in `unsure` or `problems`:
 
     - `proxy`: (variable, credentials) set in the step's `env` under a name its `model-keys` input
-      names; the action gives it to AWF's API proxy, which the command can use and cannot read;
+      names, and not written into `run`; the action gives it to AWF's API proxy, which the command
+      can use and cannot read;
     - `command`: (how, credentials) the command can read: set in the step's `env` under a name its
-      `env` input names, or written in its `run` input;
-    - `neither`: (variable, credentials) set in the step's `env` under a name neither input names;
-      the action passes it to neither.
+      `env` input names, or written in its `run` input, directly or through the `env` context
+      (`${{ env.KEY }}`, which holds the step's own env);
+    - `neither`: (variable, credentials) set in the step's `env` under a name neither input names,
+      and not written into any input; the action passes it to neither.
 
     `hosts` are the API hosts AWF's API proxy reaches for the model keys the step names, whatever
     `allow` says. `unsure` holds what the checker cannot place ("cannot tell"); `problems` what makes
