@@ -18,7 +18,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    _sub_expressions, binding_commands, scalar_environment_match, shown_value, upload_readings, value_identity,
+    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -191,10 +191,39 @@ def _continues_on_error(raw) -> bool:
     return value not in (None, False) and "".join(as_text(value).split()).lower() not in ("false", "${{false}}")
 
 
-def _expressions_as_words(script: str) -> str:
-    """A script with each `${{ }}` made one plain word, so the text inside an expression (`a || 'b'`)
-    is not read as shell. What GitHub puts there when the job runs is not read."""
-    return _sub_expressions(script, lambda _expression: "OBAAF_EXPRESSION")
+# Expressions whose value cannot hold shell syntax: numbers, commit hashes, names GitHub restricts to
+# letters, digits, `-`, `_` and `.`, and runner paths (flagship slice 2d.2e).
+_SHELL_SAFE_EXPRESSIONS = frozenset({
+    "github.sha", "github.run_id", "github.run_number", "github.run_attempt", "github.repository",
+    "github.repository_owner", "github.repository_id", "github.workspace", "github.job", "github.server_url",
+    "github.api_url", "runner.temp", "runner.os", "runner.arch", "runner.tool_cache", "github.event.number",
+    "github.event.workflow_run.id", "github.event.workflow_run.head_sha", "github.event.workflow_run.run_number",
+    "github.event.pull_request.number", "github.event.release.id",
+})
+
+
+def _expressions_for_shell(script: str) -> str:
+    """A script as bash will read it, as far as the checker can tell (flagship slice 2d.2e). GitHub puts
+    an expression's value into the script before the shell reads it, so a value can add shell syntax:
+    a text written in the expression (`${{ '|| true' }}`) is put in as it is, an expression whose value
+    cannot hold shell syntax becomes one plain word, and any other is marked as unknown, which ends what
+    the reader counts."""
+    def put(expression: str) -> str:
+        body = expression[3:-2].strip()
+        if "".join(body.split()).lower() in _SHELL_SAFE_EXPRESSIONS:
+            return "OBAAF_EXPRESSION"
+        text = re.fullmatch(r"'((?:[^']|'')*)'", body)
+        if text:
+            return text.group(1).replace("''", "'")
+        if re.fullmatch(r"[0-9]{1,9}|true|false", body, re.I):
+            return body.lower()
+        return UNKNOWN_EXPRESSION
+    return _sub_expressions(script, put)
+
+
+def _strip_comment_text(line: str) -> str:
+    from obaaf.checker.workflow import _strip_comment
+    return _strip_comment(line)
 
 
 # Actions that restore a GitHub Actions cache whatever their inputs, or that hand the cache service's
@@ -2532,8 +2561,9 @@ class WorkflowRules:
 
     def _failfast_shell(self, job: Job, step: Step) -> tuple[bool, bool] | None:
         """(errexit, pipefail) for the shell a `run` step's script runs in, or None when it is not a
-        POSIX shell the checker reads (PowerShell, cmd, Python, an expression, or the default shell of a
-        runner that may be Windows, which is PowerShell)."""
+        POSIX shell the checker reads: PowerShell, cmd, Python, an expression, a login or interactive
+        shell (it reads files an earlier step can write), an option it does not know, or the default
+        shell of a runner it cannot show is Linux or macOS (on Windows the default is PowerShell)."""
         shell = step.raw.get("shell")
         for scope in (job.raw, self.wf.raw):
             if shell is not None:
@@ -2543,8 +2573,15 @@ class WorkflowRules:
             shell = run.get("shell") if isinstance(run, dict) else None
         if shell is None:
             sets = job.runner_label_sets()
-            if sets is None or any("windows" in str(label).lower() for labels in sets for label in labels):
+            if not sets:
                 return None
+            for labels in sets:
+                names = [str(label).strip().lower() for label in labels]
+                if any("windows" in name for name in names):
+                    return None
+                if not (all(is_hosted_label(name) for name in names)
+                        or any(name in ("linux", "macos") for name in names)):
+                    return None
             return (True, False)
         if not isinstance(shell, str) or "${{" in shell:
             return None
@@ -2555,11 +2592,27 @@ class WorkflowRules:
         if len(words) < 2 or words[-1] != "{0}" or words[0].rsplit("/", 1)[-1] not in ("bash", "sh"):
             return None
         errexit = pipefail = False
-        for i, word in enumerate(words[1:-1], 1):
-            if word.startswith("-") and not word.startswith("--"):
-                errexit = errexit or "e" in word[1:]
-                if "o" in word[1:] and words[i + 1] == "pipefail":
-                    pipefail = True
+        options = words[1:-1]
+        i = 0
+        while i < len(options):
+            word = options[i]
+            if word in ("--noprofile", "--norc"):
+                i += 1
+                continue
+            if not re.fullmatch(r"[-+][a-zA-Z]+", word) or set(word[1:]) & set("ilsc"):
+                return None
+            on = word[0] == "-"
+            if "e" in word[1:]:
+                errexit = on
+            if "o" in word[1:]:
+                if i + 1 >= len(options) or options[i + 1] not in ("errexit", "pipefail", "nounset", "xtrace"):
+                    return None
+                if options[i + 1] == "errexit":
+                    errexit = on
+                elif options[i + 1] == "pipefail":
+                    pipefail = on
+                i += 1
+            i += 1
         return (errexit, pipefail)
 
     @staticmethod
@@ -2583,7 +2636,7 @@ class WorkflowRules:
         shell = self._failfast_shell(job, step)
         if shell is None or self._bash_env(job, step):
             return []
-        commands, _complete = binding_commands(_expressions_as_words(step.run), *shell)
+        commands, _complete = binding_commands(_expressions_for_shell(step.run), *shell)
         out = []
         for words in commands:
             joined = " ".join(words)
@@ -2592,12 +2645,20 @@ class WorkflowRules:
         return out
 
     def _bash_env(self, job: Job, step: Step) -> bool:
-        """Whether `BASH_ENV` may be set for the step: in its own, the job's or the workflow's `env`, or
-        named by an earlier step of the job (which can write it to GITHUB_ENV)."""
-        for env in (step.env, job.env, self.wf.env):
-            if any(str(key).strip().upper() == "BASH_ENV" for key in env):
+        """Whether the shell's start or what a name runs may have been changed for the step: `BASH_ENV` in
+        its own, the job's or the workflow's `env`, an `env` written as one expression (it may set
+        anything), or an earlier step of the job whose script names `BASH_ENV`, `BASH_FUNC` or
+        `GITHUB_PATH` (it can write them for the steps after it). What an action used earlier does is not
+        read."""
+        for scope in (step.raw, job.raw, self.wf.raw):
+            env = scope.get("env") if isinstance(scope, dict) else None
+            if isinstance(env, str):
                 return True
-        return any("BASH_ENV" in s.scripts() + " " + str(s.raw.get("env", "")) for s in job.steps[: step.index])
+            if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
+                                             or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
+                return True
+        return any(re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", s.scripts() + " " + str(s.raw.get("env", "")))
+                   for s in job.steps[: step.index])
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
@@ -3000,7 +3061,43 @@ class WorkflowRules:
         action = (step.action or "").lower()
         return (step.uses_action("actions/checkout") or step.uses_action("actions/download-artifact")
                 or step.uses_action("dawidd6/action-download-artifact") or action.startswith("actions/setup-")
-                or action.endswith("/actions/setup-obaaf"))
+                or bool(re.fullmatch(r"[^/]+/obaaf/actions/setup-obaaf", action))
+                or (step.uses or "").rstrip("/") == "./actions/setup-obaaf")
+
+    # Commands that only read or prepare, which may come in a step beside the checks of an effect job
+    # (flagship slice 2d.2e): any other command in that step may apply, and the step's checks do not count.
+    _PREPARING = frozenset({"set", "cd", "echo", "printf", "mkdir", "test", "[", "[[", "true", ":", "read", "export",
+                            "for", "in", "do", "done", "while", "if", "then", "else", "elif", "fi", "sha256sum",
+                            "shasum", "jq", "cat", "ls", "pwd", "grep", "wc", "head", "tail", "sort", "tr", "cut",
+                            "basename", "dirname", "mapfile", "readarray", "obaaf"})
+
+    def _only_prepares_and_checks(self, step: Step) -> bool:
+        """Whether every command of a `run` step, where a command starts, is one of `_PREPARING` (the
+        contents of an array assigned with `NAME=(...)` are no commands)."""
+        assignment = re.compile(r"[A-Za-z_]\w*(\[[^\]]*\])?\+?=")
+        for line in re.sub(r"\\\n", " ", step.run).split("\n"):
+            tokens = _script_tokens(_strip_comment_text(line))
+            if tokens is None:
+                return False
+            expecting, i = True, 0
+            while i < len(tokens):
+                word, quoted = tokens[i]
+                if expecting and assignment.match(word):
+                    if word.endswith("=") and i + 1 < len(tokens) and tokens[i + 1][0] == "(":
+                        while i < len(tokens) and tokens[i][0] != ")":
+                            i += 1
+                    i += 1
+                    continue
+                if not quoted and word in (";", "&&", "||", "|", "&", "|&", ";;"):
+                    expecting = True
+                    i += 1
+                    continue
+                if expecting and (quoted or word not in self._PREPARING and word not in ("(", ")", "{", "}", "!")):
+                    return False
+                expecting = word in (";", "&&", "||", "|", "&", "(", "{", "!", "then", "do", "else", "elif", "if",
+                                     "while", "until")
+                i += 1
+        return True
 
     def effect_rules(self, job: Job) -> None:
         if not job.in_lane("effect"):
@@ -3016,7 +3113,7 @@ class WorkflowRules:
             applying = False
             for step in j.steps:
                 hit = set()
-                if not applying:
+                if not applying and self._only_prepares_and_checks(step):
                     if self._binding_matches(j, step, verify_patterns):
                         hit.add("record")
                     if self._binding_matches(j, step, proposal_patterns):
@@ -3057,7 +3154,8 @@ class WorkflowRules:
         runs on success, or a `run` step with a provenance command that stops the job when it fails.
         An attestation of an SBOM only (`sbom-path` with no `predicate-type`, `cosign attest --type` of an
         SBOM format) is not provenance, and a job no trigger reaches signs nothing."""
-        if not job.triggers() or "".join(as_text(job.raw.get("if", "")).split()).lower() in ("false", "${{false}}"):
+        if not job.triggers() or "".join(as_text(job.raw.get("if", "")).split()).lower() in ("false", "${{false}}") \
+                or _continues_on_error(job.raw):
             return False
         actions = self.detection.get("provenance_actions", [])
         commands = self.detection.get("provenance_commands", [])

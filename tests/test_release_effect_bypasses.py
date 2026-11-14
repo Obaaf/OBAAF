@@ -8,6 +8,7 @@ Every way past that the checker did not already report is a test here; the recor
 including the ones that held, is docs/bypass-attempts.md.
 """
 
+import json
 import unittest
 
 from helpers import TempDir
@@ -83,7 +84,57 @@ class BindingReaderTest(unittest.TestCase):
         "shadowing function": f"obaaf() {{ :; }}\n{VERIFY}",
         "help": "obaaf verify release --help",
         "quoted separator": f"echo \";\" {VERIFY}",
+        # The review of slice 2d.2e.
+        "exit inside an if": f"if [ \"${{GITHUB_REF:-}}\" != refs/tags/v1 ]; then exit 0; fi\n{VERIFY}",
+        "exit in a case": f"case x in\n  *) exit 0 ;;\nesac\n{VERIFY}",
+        "exit in a group": f"{{ exit 0; }}\n{VERIFY}",
+        "exit in a loop": f"while true; do exit 0; done\n{VERIFY}",
+        "a function that exits": f"skip() {{ exit 0; }}\nskip\n{VERIFY}",
+        "inside an if that never runs": f"if false; then\n  {VERIFY}\nfi",
+        "after a quoted fi": f"if false; then\n\"fi\"\n{VERIFY}\nfi",
+        "after an escaped fi": f"if false; then\n\\fi\n{VERIFY}\nfi",
+        "case hiding the check": f"case x in never) echo esac\n{VERIFY}\n;; esac",
+        "ansi-c quoting": f"echo $'\\''\n{VERIFY}\n'",
+        "partly quoted here-document": f"cat <<E\"O\"F\nE\n{VERIFY}\nEOF",
+        "exit 256": f"{VERIFY} || exit 256",
+        "exit 00": f"{VERIFY} || exit 00",
+        "exit -0": f"{VERIFY} || exit -0",
+        "false or true": f"{VERIFY} || false || true",
+        "exit piped": f"{VERIFY} || exit 1 | cat",
+        "exit in the background": f"{VERIFY} || exit 1 &",
+        "group in the background": f"{VERIFY} || {{ exit 1 & }}",
+        "group with a list": f"{VERIFY} || {{ true || exit 1; }}",
+        "group with a pipe": f"{VERIFY} || {{ exit 1 | cat; }}",
+        "false redefined": f"false() {{ true; }}\n{VERIFY} || false",
+        "exec first": f"exec true\n{VERIFY}",
+        "builtin exit": f"builtin exit 0\n{VERIFY}",
+        "eval exit": f"eval exit 0\n{VERIFY}",
+        "source": f"source /dev/stdin <<< 'exit 0'\n{VERIFY}",
+        "builtin set": f"builtin set +e\n{VERIFY}\necho after",
+        "eval set": f"eval 'set +e'\n{VERIFY}\necho after",
+        "set from a variable": f"E=e; set +$E\n{VERIFY}\necho after",
+        "set from a whole variable": f"F=+e; set $F\n{VERIFY}\necho after",
+        "dot of a substitution": f". <(echo 'set +e')\n{VERIFY}\necho after",
+        "eval of a function": f"eval 'obaaf() {{ :; }}'\n{VERIFY}",
+        "hash": f"hash -p /bin/true obaaf\n{VERIFY}",
+        "path": f'PATH="$PWD/f:$PATH"\n{VERIFY}',
+        "env --version": f"env --version {VERIFY}",
+        "timeout --help": f"timeout --help {VERIFY}",
+        "expression with shell syntax after": VERIFY + " ${{ '|| true' }}",
+        "expression with shell syntax before": "${{ 'exit 0' }}\n" + VERIFY,
+        "expression the checker cannot read": "${{ inputs.prepare }}\n" + VERIFY,
     }
+
+    BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",
+              "next line": "\x85", "line separator": "\u2028"}
+
+    def test_a_line_break_bash_does_not_see_hides_nothing(self):
+        with TempDir() as tmp:
+            for label, char in self.BREAKS.items():
+                with self.subTest(label):
+                    script = "echo skip" + char + VERIFY
+                    step = "      - name: Verify\n        run: " + json.dumps(script) + "\n"
+                    self.assertEqual(kinds(check(tmp, release(step + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
 
     def test_a_check_whose_failure_does_not_stop_the_job_does_not_count(self):
         with TempDir() as tmp:
@@ -100,7 +151,10 @@ class BindingReaderTest(unittest.TestCase):
         "set +e after it": f"{VERIFY}\nset +e",
         "after a loop": f"for n in a b; do\n  echo $n\ndone\n{VERIFY}",
         "env prefix": f"GH_TOKEN=x {VERIFY}",
-        "an expression in an argument": VERIFY + " --source-revision ${{ github.sha || 'x' }}",
+        "an expression whose value cannot hold shell syntax": VERIFY + " --source-revision ${{ github.sha }}",
+        "group after a plain loop": f"for n in a b; do\n  echo $n\ndone\n{VERIFY} || {{ echo failed; exit 1; }}",
+        "a quoted assignment before it": f'B="$RUNNER_TEMP/x"\nGH_TOKEN="$T" {VERIFY}',
+        "redirections": f"{VERIFY} > log 2>&1",
     }
 
     def test_a_check_that_stops_the_job_counts(self):
@@ -118,7 +172,8 @@ class BindingReaderTest(unittest.TestCase):
 
     def test_the_shell_is_read(self):
         with TempDir() as tmp:
-            for shell in ("bash {0}", "cmd", "python", "pwsh", "powershell", "${{ inputs.shell }}"):
+            for shell in ("bash {0}", "cmd", "python", "pwsh", "powershell", "${{ inputs.shell }}", "bash -e +e {0}",
+                          "bash -eo pipefail +o errexit {0}", "bash -el {0}", "bash -e --login {0}", "bash -ie {0}"):
                 with self.subTest(shell):
                     step = run(VERIFY, "Verify", f"        shell: {shell}\n")
                     self.assertEqual(kinds(check(tmp, release(step + UPLOAD)), "OBAAF-GHA-016"),
@@ -127,8 +182,12 @@ class BindingReaderTest(unittest.TestCase):
                                job_extra="    environment: release\n    cache-mode: none\n"
                                          "    defaults:\n      run:\n        shell: bash {0}\n")
             self.assertEqual(kinds(check(tmp, defaults), "OBAAF-GHA-016"), [("high", "unchecked")])
-            windows = release(run(VERIFY, "Verify") + UPLOAD).replace("ubuntu-latest", "windows-latest")
-            self.assertEqual(kinds(check(tmp, windows), "OBAAF-GHA-016"), [("high", "unchecked")])
+            for runner in ("windows-latest", "self-hosted", "[self-hosted, build]", "{group: g}", "${{ inputs.runner }}"):
+                with self.subTest(runner):
+                    text = release(run(VERIFY, "Verify") + UPLOAD).replace("ubuntu-latest", runner)
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), [("high", "unchecked")])
+            linux = release(run(VERIFY, "Verify") + UPLOAD).replace("ubuntu-latest", "[self-hosted, linux]")
+            self.assertEqual(of(check(tmp, linux), "OBAAF-GHA-016"), [])
             for shell in ("bash -e {0}", "sh -e {0}", "bash --noprofile --norc -eo pipefail {0}", "sh"):
                 with self.subTest(shell):
                     step = run(VERIFY, "Verify", f"        shell: {shell}\n")
@@ -140,8 +199,13 @@ class BindingReaderTest(unittest.TestCase):
         with TempDir() as tmp:
             in_env = run(VERIFY, "Verify", "        env:\n          BASH_ENV: /tmp/x\n")
             self.assertEqual(kinds(check(tmp, release(in_env + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
-            written = run('echo "BASH_ENV=/tmp/x" >> "$GITHUB_ENV"', "Prepare") + run(VERIFY, "Verify")
-            self.assertEqual(kinds(check(tmp, release(written + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+            for script in ('echo "BASH_ENV=/tmp/x" >> "$GITHUB_ENV"', 'echo "$PWD/fake" >> "$GITHUB_PATH"',
+                           "echo 'BASH_FUNC_obaaf%%=() { :; }' >> \"$GITHUB_ENV\""):
+                with self.subTest(script):
+                    written = run(script, "Prepare") + run(VERIFY, "Verify")
+                    self.assertEqual(kinds(check(tmp, release(written + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
+            as_expression = run(VERIFY, "Verify", "        env: ${{ fromJSON(vars.E) }}\n")
+            self.assertEqual(kinds(check(tmp, release(as_expression + UPLOAD)), "OBAAF-GHA-016"), [("high", "unchecked")])
 
     def test_a_github_script_check_does_not_count(self):
         with TempDir() as tmp:
@@ -164,9 +228,12 @@ class BindingReaderTest(unittest.TestCase):
 
     def test_the_reader_reports_what_it_could_not_read(self):
         from obaaf.checker.workflow import binding_commands
-        self.assertEqual(binding_commands("echo 'unclosed", True, False), ([], False))
-        self.assertEqual(binding_commands("cat <<EOF\nnever closed", True, False)[1], False)
-        self.assertEqual(binding_commands("trap '' ERR\nobaaf verify release", True, False), ([], False))
+        for script in ("echo 'unclosed", "cat <<EOF\nnever closed", "trap '' ERR\nobaaf verify release",
+                       "echo $'x'\nobaaf verify release"):
+            with self.subTest(script):
+                found, complete = binding_commands(script, True, False)
+                self.assertFalse(complete)
+                self.assertNotIn("obaaf", [words[0] for words in found])
 
 
 class EveryUploadTest(unittest.TestCase):
@@ -284,6 +351,20 @@ class EffectOrderTest(unittest.TestCase):
                        f"      - uses: actions/setup-python@{SHA}\n")
             self.assertEqual(of(check(tmp, self.effect(prepare + self.CHECKS + self.APPLY)), "OBAAF-GHA-021"), [])
 
+    def test_a_step_that_applies_before_its_checks_is_unchecked(self):
+        with TempDir() as tmp:
+            one = run("git apply d/patch\ngit push origin HEAD\nobaaf verify agent-run --policy p\n"
+                      "obaaf proposal check d --repo .", "All in one")
+            self.assertEqual(kinds(check(tmp, self.effect(one)), "OBAAF-GHA-021"), [("high", "unchecked")])
+
+    def test_only_a_setup_obaaf_from_a_repository_named_obaaf_prepares(self):
+        with TempDir() as tmp:
+            other = f"      - uses: attacker/anything/actions/setup-obaaf@{SHA}\n"
+            self.assertEqual(kinds(check(tmp, self.effect(other + self.CHECKS + self.APPLY)), "OBAAF-GHA-021"),
+                             [("high", "unchecked")])
+            ours = f"      - uses: Obaaf/obaaf/actions/setup-obaaf@{SHA}\n"
+            self.assertEqual(of(check(tmp, self.effect(ours + self.CHECKS + self.APPLY)), "OBAAF-GHA-021"), [])
+
     def test_gh_attestation_verify_is_not_a_record_check(self):
         with TempDir() as tmp:
             steps = (run("obaaf proposal check x --repo .", "Proposal") +
@@ -336,7 +417,7 @@ class PublishingTheListsMissedTest(unittest.TestCase):
                 "oras push r/x:1 f", "podman push img", "crane push img r/x", "gh -R o/r release upload v1 f",
                 "npx semantic-release", "npx changeset publish", "bun publish", "maturin publish", "pdm publish",
                 "pod trunk push", "goreleaser release --clean", "aws s3api put-object --bucket b --key k",
-                "rclone copy dist remote:bucket", "curl --data-binary @f https://uploads.github.com/repos/o/r/x"]
+"curl --data-binary @f https://uploads.github.com/repos/o/r/x"]
 
     def test_each_is_an_upload(self):
         with TempDir() as tmp:
@@ -344,6 +425,23 @@ class PublishingTheListsMissedTest(unittest.TestCase):
                 with self.subTest(command):
                     text = f"on: push\npermissions: {{}}\njobs:\n  r:\n    runs-on: ubuntu-latest\n    steps:\n{run(command)}"
                     self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-014"), [("medium", "")])
+
+    NOT_PUBLISHING = ["./gradlew build publishToMavenLocal", "goreleaser release --snapshot --clean",
+                      "npx semantic-release --dry-run", "npm publish --dry-run", "cargo publish --dry-run",
+                      "rclone copy :http,url=https://example.com/:fixtures ./fixtures",
+                      "skopeo copy docker://docker.io/library/alpine oci-archive:alpine.tar",
+                      "mvn -B deploy -DaltDeploymentRepository=local::file:./target/staging-deploy",
+                      "helm push chart.tgz oci://localhost:5000/charts"]
+
+    def test_dry_runs_and_local_targets_are_not_uploads(self):
+        with TempDir() as tmp:
+            for command in self.NOT_PUBLISHING:
+                with self.subTest(command):
+                    text = (f"on: [push, pull_request]\npermissions: {{}}\njobs:\n  ci:\n    runs-on: ubuntu-latest\n"
+                            f"    steps:\n{run(command)}")
+                    found = [f.rule for f in check(tmp, text).findings if f.rule in (
+                        "OBAAF-GHA-006", "OBAAF-GHA-014", "OBAAF-GHA-015", "OBAAF-GHA-016", "OBAAF-GHA-017")]
+                    self.assertEqual(found, [])
 
     def test_an_image_build_that_pushes_is_an_upload(self):
         with TempDir() as tmp:
@@ -475,8 +573,10 @@ class ProvenanceTest(unittest.TestCase):
             for label, steps in cases.items():
                 with self.subTest(label):
                     self.assertEqual(len(of(check(tmp, self.workflow(steps)), "OBAAF-GHA-017")), 1)
-            self.assertEqual(len(of(check(tmp, self.workflow(attest, attest_job_extra="    if: false\n")),
-                                    "OBAAF-GHA-017")), 1)
+            for extra in ("    if: false\n", "    continue-on-error: true\n"):
+                with self.subTest(extra):
+                    self.assertEqual(len(of(check(tmp, self.workflow(attest, attest_job_extra=extra)),
+                                            "OBAAF-GHA-017")), 1)
             self.assertEqual(of(check(tmp, self.workflow(attest)), "OBAAF-GHA-017"), [])
 
     def test_verifying_elsewhere_counts_only_before_the_upload(self):

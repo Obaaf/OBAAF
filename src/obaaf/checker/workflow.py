@@ -651,344 +651,258 @@ def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set
     return found, skip
 
 
-# Flagship slice 2d.2e: which commands of a script stop it when they fail.
-_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([^\s'\"<>;&|()]+)\2")
+# Flagship slice 2d.2e: which commands of a script stop it when they fail. The reader is strict and
+# fails closed: it does not try to follow what bash would do with anything unusual, it stops counting.
 _ASSIGN_WORD_RE = re.compile(r"[A-Za-z_]\w*(\[[^\]]*\])?\+?=")
-_PIPELINE_ENDS = frozenset({";", "&&", "||", "&", ";;", "\n"})
-_CONTINUES = frozenset({"&&", "||", "|", "|&"})
-# Commands that run the command after them and return its status, with their options that take a value.
-_PASS_THROUGH = {"command": set(), "exec": {"-a"}, "time": {"-f", "-o"}, "nice": {"-n"}, "nohup": set(),
-                 "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-D"}, "env": {"-u", "-C", "-S"},
-                 "timeout": {"-s", "-k"}}
-
-
-def _strip_prefix(words: list[str]) -> list[str]:
-    """A command's words from its name on: without `NAME=value` words before it and without a
-    command that runs it and returns its status (`env X=1`, `sudo -u u`, `timeout 300`, `command`)."""
-    i = 0
-    while i < len(words):
-        word = words[i]
-        if _ASSIGN_WORD_RE.match(word):
-            i += 1
-            continue
-        if word in _PASS_THROUGH:
-            options, i = _PASS_THROUGH[word], i + 1
-            while i < len(words) and (words[i].startswith("-") or (word == "env" and _ASSIGN_WORD_RE.match(words[i]))):
-                i += 2 if words[i] in options else 1
-            if word == "timeout" and i < len(words) and words[i][:1].isdigit():
-                i += 1
-            continue
-        break
-    return words[i:]
-
-
-def _errexit_change(words: list[str]) -> tuple[bool | None, bool | None]:
-    """What a `set` command does to errexit and pipefail: (True, ...) turns one on, (False, ...) off,
-    None leaves it."""
-    errexit = pipefail = None
-    for i, word in enumerate(words[1:], 1):
-        if not word or word[0] not in "+-" or word in ("-", "--", "+"):
-            break
-        on = word[0] == "-"
-        letters = word[1:]
-        if "e" in letters:
-            errexit = on
-        if "o" in letters and i + 1 < len(words):
-            name = words[i + 1]
-            if name == "errexit":
-                errexit = on
-            elif name == "pipefail":
-                pipefail = on
-    return errexit, pipefail
-
-
-_MASK = dict(zip(";&|()<>", "\ue001\ue002\ue003\ue004\ue005\ue006\ue007"))
-_UNMASK = {v: k for k, v in _MASK.items()}
 _OPERATORS = ("<<<", "<<-", "&&", "||", ";;", "|&", ">>", "<<", ">&", "<&", "&>", ";", "&", "|", "(", ")", "<", ">")
+_REDIRECTS = frozenset({">", ">>", "<", ">&", "<&", "&>", "<<<"})
+_MASK = dict(zip(";&|()<>", ""))
+_UNMASK = {v: k for k, v in _MASK.items()}
+# What may not come before a check, anywhere in the script, outside quotes: a way to leave the script,
+# to run text as commands, to change what a name runs, or to turn errexit off.
+_DENIED_RE = re.compile(r"(?<![\w./-])(exit|return|eval|exec|trap|builtin|command|source|shopt|alias|unalias|hash|"
+                        r"enable|unset|declare|typeset|readonly|coproc|function|case|esac|logout)(?![\w./-])")
+_DOT_COMMAND_RE = re.compile(r"(^|[;&|(){}!]|\b(?:then|do|else|elif)\b)\s*\.(\s|$)")
+_FUNCTION_RE = re.compile(r"[^\s;&|(){}=]+\s*\(\s*\)")
+_EXPANDED_NAME_RE = re.compile(r"(^|[;&|(){}!]|\b(?:then|do|else|elif|if|while|until)\b)\s*"
+                               r"(?:[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=[^\s(]*\s+)*[\"']?[$`\\]")
+_SHELL_STATE_RE = re.compile(r"(?<![\w])(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH)\+?=")
+_ODD_CHARS_RE = re.compile("[\r\v\f\x00-\x08\x0e-\x1f\x7f\x85  ]")
+_SET_OPTIONS = frozenset({"errexit", "pipefail", "nounset", "xtrace"})
+_EXIT_CODE_RE = re.compile(r"(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])")
+_OPENERS = frozenset({"if", "while", "until", "for", "select", "{"})
+_CLOSERS = frozenset({"fi", "done", "}"})
+_COMMAND_STARTERS = frozenset({";", "&&", "||", "|", "|&", "&", "!", "(", "{", "then", "do", "else", "elif", "if",
+                               "while", "until"})
+UNKNOWN_EXPRESSION = "OBAAF_UNKNOWN_EXPRESSION"
 
 
-def _script_tokens(line: str) -> list[str] | None:
-    """A line split as a POSIX shell splits it, each operator a word of its own. An operator character
-    inside quotes or after a backslash is part of a word, never an operator. None when the line cannot
-    be split (an unclosed quote)."""
-    masked, quote, escaped = [], "", False
+def _script_tokens(line: str) -> list[tuple[str, bool]] | None:
+    """A line split as a POSIX shell splits it, each operator a word of its own, with whether any part
+    of the word was quoted or escaped (a quoted `fi` is no keyword, a quoted `;` no operator). None
+    when the line cannot be split (an unclosed quote)."""
+    masked, marks, quote, escaped = [], [], "", False
     for ch in line:
         if escaped:
             masked.append(_MASK.get(ch, ch))
+            marks.append(True)
             escaped = False
             continue
         if ch == "\\" and quote != "'":
             escaped = True
             masked.append(ch)
+            marks.append(True)
             continue
         if quote:
             if ch == quote:
                 quote = ""
             masked.append(_MASK.get(ch, ch) if ch != quote else ch)
+            marks.append(True)
             continue
         if ch in "'\"":
             quote = ch
+            masked.append(ch)
+            marks.append(True)
+            continue
         masked.append(ch)
+        marks.append(False)
     if quote:
         return None
-    words = _shell_words("".join(masked))
-    if words is None:
+    try:
+        lex = shlex.shlex("".join(masked), posix=True, punctuation_chars=";&|()<>")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        words = list(lex)
+    except ValueError:
         return None
-    out = []
+    # Whether a word was quoted: it holds a mask character, or its text differs from the raw line's
+    # characters (quotes or a backslash were taken out). Found by searching the raw text in order.
+    out: list[tuple[str, bool]] = []
+    raw = "".join(masked)
+    at = 0
     for word in words:
         if word and all(ch in ";&|()<>" for ch in word):
+            at = raw.find(word, at) + len(word) if raw.find(word, at) >= 0 else at
             while word:
                 op = next(o for o in _OPERATORS if word.startswith(o))
-                out.append(op)
+                out.append((op, False))
                 word = word[len(op):]
-        else:
-            text = "".join(_UNMASK.get(ch, ch) for ch in word)
-            # A quoted operator (`";"`) is a word, kept with its quotes so it is never read as one.
-            out.append(f"'{text}'" if text != word and text in _OPERATORS else text)
+            continue
+        found = raw.find(word, at)
+        quoted = found < 0 or any(marks[found:found + len(word)])
+        if found >= 0:
+            at = found + len(word)
+        text = "".join(_UNMASK.get(ch, ch) for ch in word)
+        out.append((text, quoted or text != word))
     return out
+
+
+def _unquoted(line: str) -> str:
+    """The line with every quoted part blanked out, for searching what the shell reads as words."""
+    out, quote, escaped = [], "", False
+    for ch in line:
+        if escaped:
+            out.append(" ")
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            out.append(" ")
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = ""
+            out.append(" ")
+        elif ch in "'\"":
+            quote = ch
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _plain_line(line: str, tokens: list[tuple[str, bool]]) -> bool:
+    """Whether a line may come before a check: nothing in it can leave the script, run text as commands,
+    change what a name runs or turn errexit off (see `binding_commands`)."""
+    bare = _unquoted(line)
+    if (_DENIED_RE.search(bare) or _DOT_COMMAND_RE.search(bare) or _FUNCTION_RE.search(bare)
+            or _EXPANDED_NAME_RE.search(line) or _SHELL_STATE_RE.search(line) or re.search(r"(?<!<)<<(?!<)", line)
+            or UNKNOWN_EXPRESSION in line):
+        return False
+    words = [w for w, _q in tokens]
+    for i, word in enumerate(words):
+        if word == "set" and (i == 0 or words[i - 1] in _COMMAND_STARTERS):
+            j = i + 1
+            while j < len(words) and words[j] not in _COMMAND_STARTERS and words[j] not in _REDIRECTS:
+                option = words[j]
+                if not re.fullmatch(r"-[a-zA-Z]+", option):
+                    return False
+                if "o" in option:
+                    if j + 1 >= len(words) or words[j + 1] not in _SET_OPTIONS:
+                        return False
+                    j += 1
+                j += 1
+    return True
+
+
+def _set_change(words: list[str]) -> tuple[bool | None, bool | None]:
+    """What a `set` command that `_plain_line` allows turns on: (errexit, pipefail), None for unchanged."""
+    errexit = pipefail = None
+    for i, word in enumerate(words[1:], 1):
+        if not word.startswith("-"):
+            continue
+        if "e" in word[1:]:
+            errexit = True
+        if "o" in word[1:] and i + 1 < len(words):
+            if words[i + 1] == "errexit":
+                errexit = True
+            elif words[i + 1] == "pipefail":
+                pipefail = True
+    return errexit, pipefail
+
+
+def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | None:
+    """The command's words if a whole line is one command whose failure ends the script with a failure:
+    `[NAME=value ...] NAME args [redirections]`, optionally followed by `|| exit N` (N from 1 to 255),
+    `|| exit`, or `|| { plain; commands; exit N; }`, or, under pipefail, piped into plain commands."""
+    words = [w for w, _q in tokens]
+    i = 0
+    while i < len(words) and _ASSIGN_WORD_RE.match(words[i]):
+        i += 1
+    if i >= len(words) or tokens[i][1] or not re.fullmatch(r"[A-Za-z0-9_][\w.+-]*", words[i]):
+        return None
+    start = i
+    while i < len(words) and (words[i] not in _OPERATORS or words[i] in _REDIRECTS or tokens[i][1]):
+        i += 1
+    command = words[start:i]
+    rest = tokens[i:]
+    if UNKNOWN_EXPRESSION in " ".join(command):
+        return None
+    if not rest:
+        return command
+    ops = [w for w, q in rest if not q and w in _OPERATORS]
+    if ops[0] == "||":
+        tail = [w for w, _q in rest[1:]]
+        if tail == ["exit"] or (len(tail) == 2 and tail[0] == "exit" and _EXIT_CODE_RE.fullmatch(tail[1])):
+            return command
+        if tail[:1] == ["{"] and tail[-1:] == ["}"]:
+            body = tail[1:-1]
+            if body and body[-1] == ";":
+                body = body[:-1]
+            parts, current = [], []
+            for word in body:
+                if word == ";":
+                    parts.append(current)
+                    current = []
+                elif word in _OPERATORS and word not in _REDIRECTS or word in ("{", "}", "!"):
+                    return None
+                else:
+                    current.append(word)
+            parts.append(current)
+            last = parts[-1]
+            if len(last) == 2 and last[0] == "exit" and _EXIT_CODE_RE.fullmatch(last[1]) and all(
+                    p and not _DENIED_RE.search(" ".join(p)) for p in parts[:-1]):
+                return command
+        return None
+    if pipefail and all(op in ("|",) or op in _REDIRECTS for op in ops):
+        return command
+    return None
 
 
 def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[list[str]], bool]:
     """The commands of a POSIX shell script whose failure ends the script with a failure, each as its
     words from the command's name on (flagship slice 2d.2e), and whether the whole script was read.
 
-    The reader is strict: a command counts only when it is a pipeline of its own at the top level of
-    the script (not inside `if`, `while`, `for`, `case`, a function, a `{ }` group, a subshell or a
-    substitution), begins a line or follows `;`, is not negated with `!`, is not sent to the background,
-    and is not part of an `&&` or `||` list, except `CMD || exit [N]`, `CMD || false` and
-    `CMD || { ...; exit N; }`. A pipeline counts only under pipefail. Errexit must be on: from the shell
-    (`errexit`) or turned on by `set -e` at the top level; `set +e` in any spelling, anywhere, turns it
-    off for what follows. After a `trap`, a `shopt` that names errexit, an `exit` or `return` at the top
-    level, or a line that cannot be split, nothing more counts. Here-document bodies are skipped. A
-    command whose name is a function or an alias the script defines is not counted."""
-    lines = script_lines(text)
-    tokens: list[str] = []
-    complete = True
-    pending: list[tuple[str, bool]] = []
+    The reader is strict and fails closed. A command counts only when its line is that one command
+    (`|| exit N` and `|| { ...; exit N; }` allowed after it, and a pipe under pipefail), the line is
+    at the top level of the script (not inside `if`, `while`, `for`, `{ }` or `( )`), errexit is on
+    (from the shell, or `set -e` before it), and every line before it is plain: outside quotes it
+    holds no way to leave the script (`exit`, `return`, `exec`, `break`), to run text as commands
+    (`eval`, `source`, `.`, a command named by an expansion), to change what a name runs (a function,
+    `alias`, `hash`, `builtin`, `command`, `PATH=`, `BASH_ENV=`, `GITHUB_PATH`), to turn errexit off
+    (`set` with anything but `-` options, `trap`, `shopt`), no `case`, here-document or expression whose
+    value the checker does not know. Reading stops at the first line that is not plain. A script with a
+    line break other than a line feed (a carriage return, a form feed, U+2028) or with `$'...'` is not
+    read at all."""
+    if _ODD_CHARS_RE.search(text) or "$'" in text or '$"' in text:
+        return [], False
+    lines = re.sub(r"\\\n", " ", text).split("\n")
+    out: list[list[str]] = []
+    depth = 0
     for raw_line in lines:
-        if pending:
-            delimiter, tabs = pending[0]
-            if (raw_line.lstrip("\t") if tabs else raw_line) == delimiter:
-                pending.pop(0)
-            continue
         line = _strip_comment(raw_line)
         if not line.strip():
             continue
-        for match in _HEREDOC_RE.finditer(line):
-            pending.append((match.group(3), match.group(1) == "-"))
-        words = _script_tokens(line)
-        if words is None:
-            complete = False
-            break
-        tokens += words + ["\n"]
-    if pending:
-        complete = False
-
-    out: list[tuple[list[str], int]] = []   # (words, index of the pipeline)
-    defined: set[str] = set()
-    pipelines: list[dict] = []
-    depth = 0
-    i = 0
-    stopped = False
-    current: dict | None = None
-    command: list[str] = []
-    before = ";"
-
-    def end_command() -> None:
-        nonlocal command
-        if current is not None and command:
-            current["commands"].append(command)
-        command = []
-
-    def end_pipeline(after: str) -> None:
-        nonlocal current, before
-        end_command()
-        if current is not None and current["commands"]:
-            current["after"] = after
-            pipelines.append(current)
-        current = None
-        before = after if after != "\n" else ";"
-
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == "\n":
-            if command or (current and current["commands"]):
-                previous = tokens[i - 1] if i else ""
-                if previous not in _CONTINUES:
-                    end_pipeline(";")
-            i += 1
-            continue
-        if tok in _PIPELINE_ENDS:
-            if tok in ("&&", "||") and current is None and not command:
-                before = tok          # after a compound command (`fi && x`)
-            else:
-                end_pipeline(tok)
-            i += 1
-            continue
-        if tok in ("|", "|&"):
-            end_command()
-            if current is not None:
-                current["piped"] = True
-            i += 1
-            continue
-        at_start = not command
-        if at_start and current is None:
-            current = {"before": before, "depth": depth, "negated": False, "piped": False, "commands": [],
-                       "start": i}
-        if at_start:
-            if tok == "!":
-                current["negated"] = True
-                i += 1
+        tokens = _script_tokens(line)
+        if tokens is None:
+            return out, False
+        if depth == 0 and errexit:
+            command = _check_line(tokens, pipefail)
+            if command is not None:
+                out.append(command)
+        if not _plain_line(line, tokens):
+            return out, False
+        # Depth: unquoted keywords and braces where a command starts.
+        words = [w for w, _q in tokens]
+        expecting = True
+        for word, quoted in tokens:
+            if quoted:
+                expecting = False
                 continue
-            if tok in ("if", "while", "until", "{", "("):
-                depth += 1
-                current["depth"] = max(current["depth"], depth)
-                i += 1
-                continue
-            if tok in ("then", "do", "else", "elif"):
-                i += 1
-                continue
-            if tok in ("fi", "done", "}", ")"):
+            if word == "(":
+                depth += 1          # a subshell, a substitution or an array: each closed by its `)`
+            elif word == ")":
                 depth = max(0, depth - 1)
-                current = None if current and not current["commands"] else current
-                i += 1
-                # Redirections and the like after a compound command belong to it.
-                while i < len(tokens) and tokens[i] not in _PIPELINE_ENDS and tokens[i] not in ("|", "|&"):
-                    i += 1
-                continue
-            if tok in ("for", "select", "case"):
-                closer = "done" if tok != "case" else "esac"
-                if tok != "case":
-                    depth += 1
-                    current = None
-                    while i < len(tokens) and tokens[i] != "do":
-                        i += 1
-                    i += 1
-                    continue
-                # A `case` is skipped whole: its patterns end with `)`.
-                nested = 0
-                i += 1
-                while i < len(tokens):
-                    if tokens[i] == "case":
-                        nested += 1
-                    elif tokens[i] == closer:
-                        if nested == 0:
-                            break
-                        nested -= 1
-                    i += 1
-                current = None
-                i += 1
-                while i < len(tokens) and tokens[i] not in _PIPELINE_ENDS:
-                    i += 1
-                continue
-            if tok == "function" and i + 1 < len(tokens):
-                defined.add(tokens[i + 1])
-                current = None
-                i += 2
-                continue
-            if tok == "alias":
-                for word in tokens[i + 1:]:
-                    if word in _PIPELINE_ENDS:
-                        break
-                    defined.add(word.split("=", 1)[0])
-        if tok == "(":
-            # Not at the start of a command: a substitution `$(...)`, an array `a=(...)` or a function
-            # definition `name()`. Its content is skipped; a definition's name is remembered.
-            if command and i + 1 < len(tokens) and tokens[i + 1] == ")" and len(command) == 1:
-                defined.add(command[0])
-                command = []
-                current = None
-                i += 2
-                continue
-            nested = 0
-            while i < len(tokens):
-                if tokens[i] == "(":
-                    nested += 1
-                elif tokens[i] == ")":
-                    nested -= 1
-                    if nested == 0:
-                        break
-                i += 1
-            command.append("$(…)")
-            i += 1
-            continue
-        command.append(tok)
-        i += 1
-    end_pipeline(";")
-
-    state_errexit, state_pipefail = errexit, pipefail
-    results: list[list[str]] = []
-    for n, pipe in enumerate(pipelines):
-        words_of = [_strip_prefix(c) for c in pipe["commands"]]
-        names = [w[0] if w else "" for w in words_of]
-        for words in words_of:
-            if not words:
-                continue
-            if words[0] == "set":
-                on_e, on_pipe = _errexit_change(words)
-                if on_e is False or (on_e and pipe["depth"] == 0):
-                    state_errexit = on_e
-                if on_pipe is False or (on_pipe and pipe["depth"] == 0):
-                    state_pipefail = on_pipe
-            if words[0] in ("trap",) or (words[0] == "shopt" and "errexit" in words) or "BASH_ENV" in " ".join(words):
-                stopped = True
-        if stopped:
-            break
-        if pipe["depth"] == 0 and names and names[0] in ("exit", "return", "exec") and len(names) == 1:
-            if names[0] != "exec":
-                break
-        if pipe["depth"] or pipe["negated"] or pipe["before"] not in (";",) or not state_errexit:
-            continue
-        if pipe["piped"] and len(words_of) > 1 and not state_pipefail:
-            continue
-        after = pipe.get("after", ";")
-        if after in ("&", "&&"):
-            continue
-        if after == "||":
-            following = pipelines[n + 1] if n + 1 < len(pipelines) else None
-            if not _stops_with_failure(following, tokens):
-                continue
-        for words in words_of:
-            if words and words[0] not in defined:
-                results.append(words)
-    return results, complete and not stopped
-
-
-def _stops_with_failure(pipe: dict | None, tokens: list[str]) -> bool:
-    """Whether the pipeline after `CMD ||` ends the script with a failure: `exit`, `exit N` with N not
-    0, `false`, or a `{ ...; }` group that runs one of them at its own top level."""
-    if pipe is None:
-        return False
-    words = _strip_prefix(pipe["commands"][0]) if pipe["commands"] else []
-    if pipe["depth"] == 0 and words:
-        return _failing_exit(words)
-    # A group: read its tokens from where the pipeline started.
-    i = pipe.get("start", 0)
-    if i >= len(tokens) or tokens[i] != "{":
-        return False
-    depth, j, command = 0, i, []
-    while j < len(tokens):
-        tok = tokens[j]
-        if tok == "{":
-            depth += 1
-        elif tok == "}":
-            depth -= 1
-            if depth == 0:
-                return bool(command) and _failing_exit(command)
-        elif tok in _PIPELINE_ENDS:
-            if depth == 1 and command and _failing_exit(command):
-                return True
-            command = []
-        elif depth == 1:
-            command.append(tok)
-        j += 1
-    return False
-
-
-def _failing_exit(words: list[str]) -> bool:
-    if words[0] == "false" and len(words) == 1:
-        return True
-    return words[0] == "exit" and (len(words) == 1 or (words[1] != "0" and words[1].lstrip("-").isdigit()))
+            elif expecting and word in _OPENERS:
+                depth += 1
+            elif expecting and word in _CLOSERS:
+                depth = max(0, depth - 1)
+            expecting = word in _COMMAND_STARTERS or (expecting and _ASSIGN_WORD_RE.match(word) is not None)
+        if depth == 0:
+            first = words[0] if words else ""
+            if first == "set":
+                on_e, on_pipe = _set_change(words)
+                errexit = errexit or bool(on_e)
+                pipefail = pipefail or bool(on_pipe)
+    return out, True
 
 
 def _remote(words: list[str]) -> tuple[str, str] | None:
