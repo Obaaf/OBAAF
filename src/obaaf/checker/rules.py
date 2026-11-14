@@ -567,13 +567,14 @@ class WorkflowRules:
     @staticmethod
     def _commit_field(field: str) -> bool:
         """Whether a field reached is, or may be, a commit's text: under `head_commit`, `commits`,
-        `merge_group`, `check_suite` or a `status` event's `commit`, or a whole object or computed path
-        that can hold one (`toJSON(github)`, `toJSON(github.event.workflow_run)`, `github.event[...]`)."""
+        `merge_group`, `check_suite` or a `status` event's `commit`, a run's `display_title` (the head
+        commit's message for a run after a push), or a whole object or computed path that can hold one
+        (`toJSON(github)`, `toJSON(github.event.workflow_run)`, `github.event[...]`)."""
         lowered = field.lower()
         whole = ("github", "github.event", "github.event.workflow_run", "github.event.commit", "github.event.check_run")
         return (lowered in whole or "*" in lowered or "[" in lowered or "tojson(" in lowered
                 or any(part in lowered for part in ("head_commit", "commits", "merge_group", "check_suite",
-                                                    "event.commit.")))
+                                                    "event.commit.", "workflow_run.display_title")))
 
     def _script_texts(self, job: Job, step: Step) -> list:
         """What a step runs as a script or a command line: its `run`, a github-script script, the
@@ -612,23 +613,24 @@ class WorkflowRules:
 
     def _legacy_injection(self, job: Job, step: Step) -> str:
         """The message the checker wrote for this step before slice 2d.2d (the first field of the first
-        expression of `run` or a github-script script), so that a v0.1 baseline entry still names it."""
+        expression of `run` or a github-script script, read as it was read then), as a template for
+        `add`, so that a v0.1 baseline entry still names the finding. Empty where that reading found
+        nothing or wrote the same message."""
+        def literal(text) -> str:
+            return str(text).replace("{", "{{").replace("}", "}}")
         view = None
         for body in expressions(step.text()):
             found = self._untrusted_text(body)
             if found:
-                return f"Step '{step.name}' expands {found} inside its script."
+                return "Step '{step}' expands " + literal(found) + " inside its script."
             if view is None:
-                view = self._indirect(job, step)
-            through = self._untrusted_indirectly(body, view)
+                view = self._v1_indirect(job, step)
+            through = self._v1_untrusted_indirectly(body, view)
             if through:
-                how, reference, held = through[0]
-                held = min(held)
-                if how == "through-env":
-                    return f"Step '{step.name}' expands {reference}, which holds {held}, inside its script."
-                if how == "through-matrix":
-                    return f"Step '{step.name}' expands {reference}, from a matrix that holds {held}, inside its script."
-                return ""
+                how, reference, held = through
+                held_text = "which holds" if how == "through-env" else "from a matrix that holds"
+                return ("Step '{step}' expands " + literal(reference) + ", " + held_text + " " + literal(held)
+                        + ", inside its script.")
         return ""
 
     def _untrusted_fields(self, body: str, objects: bool = False) -> frozenset:
@@ -676,34 +678,54 @@ class WorkflowRules:
         """Job id (lower case) -> {output name (lower case) or "*": the outsider-written fields it holds},
         for job outputs written in the file (`outputs: {title: ${{ github.event.issue.title }}}`),
         directly, through another job's output, or through the job's env or matrix. Outputs set by a
-        step while the job runs (`steps.x.outputs.y`) are not followed."""
+        step while the job runs (`steps.x.outputs.y`) are not followed.
+
+        Worked out once per file, with a work list: a job's outputs are read again only when an output
+        of a job it reads (in its outputs, env, matrix or the workflow's env) gains a field, so a chain of
+        jobs costs about one reading per job, in any order. The views of jobs built while it runs are
+        dropped at the end, because they were built from outputs not yet complete."""
         cached = self.__dict__.get("_outputs")
         if cached is not None:
             return cached
         self.__dict__["_outputs"] = taint = {}      # an output reading an output: read as not yet held
-        for _round in range(len(self.wf.jobs) + 1):
+        views = self.__dict__.setdefault("_job_views", {})
+        jobs = {str(job.id).lower(): job for job in self.wf.jobs.values() if job.raw.get("outputs") is not None}
+        readers: dict = {}                          # job id or "*" -> ids of jobs with outputs that read it
+        for name, job in jobs.items():
+            for value in (job.raw.get("outputs"), job.raw.get("env"), job.raw.get("strategy"), self.wf.raw.get("env")):
+                for body in expressions(value):
+                    for path in expr_mod.paths(body):
+                        if path[0].kind != expr_mod.NAME or path[0].value.lower() != "needs":
+                            continue
+                        target = path[1].value.lower() if len(path) > 1 and path[1].kind == expr_mod.NAME else "*"
+                        readers.setdefault(target, set()).add(name)
+        queue = list(jobs)
+        waiting = set(queue)
+        while queue:
+            name = queue.pop(0)
+            waiting.discard(name)
+            job = jobs[name]
+            outputs = job.raw.get("outputs")
+            pairs = [("*", outputs)] if isinstance(outputs, str) else \
+                [(str(k).lower(), v) for k, v in outputs.items()] if isinstance(outputs, dict) else []
+            views.pop(job.id, None)                 # read the job's env and matrix with the outputs as they are now
+            view = self._job_view(job)
+            own = taint.setdefault(name, {})
             changed = False
-            for job in self.wf.jobs.values():
-                outputs = job.raw.get("outputs")
-                own = taint.setdefault(str(job.id).lower(), {})
-                if isinstance(outputs, str):
-                    pairs = [("*", outputs)]
-                elif isinstance(outputs, dict):
-                    pairs = [(str(k).lower(), v) for k, v in outputs.items()]
-                else:
-                    continue
-                view = None
-                for name, value in pairs:
-                    held = set(self._held(value, objects=True))
-                    view = view or self._job_view(job)
-                    for body in expressions(value):
-                        for _how, _reference, fields in self._untrusted_indirectly(body, view):
-                            held |= fields
-                    if held and not held <= own.get(name, frozenset()):
-                        own[name] = frozenset(held | own.get(name, frozenset()))
-                        changed = True
-            if not changed:
-                break
+            for output, value in pairs:
+                held = set(self._held(value, objects=True))
+                for body in expressions(value):
+                    for _how, _reference, fields in self._untrusted_indirectly(body, view):
+                        held |= fields
+                if held and not held <= own.get(output, frozenset()):
+                    own[output] = frozenset(held | own.get(output, frozenset()))
+                    changed = True
+            if changed:
+                for reader in readers.get(name, set()) | readers.get("*", set()):
+                    if reader not in waiting:
+                        queue.append(reader)
+                        waiting.add(reader)
+        views.clear()
         return taint
 
     def _output_held(self, path: tuple) -> frozenset:
@@ -807,6 +829,7 @@ class WorkflowRules:
         """What a step's script can reach through the env and matrix contexts: env names that hold
         outsider-written text (lower case), the fields the job's matrix holds, and those an `env:`
         written as one expression (so its names cannot be read) holds."""
+        self._output_taint()                        # first, so no view is built from outputs not yet complete
         self._job_view(job)
         job_taint, matrix, whole = self.__dict__["_job_views"][job.id]
         if isinstance(step.raw.get("env"), str):
@@ -844,6 +867,105 @@ class WorkflowRules:
                 if held:
                     out.append(("through-output", expr_mod.dotted(path), held))
         return out
+
+    # How the checker read OBAAF-GHA-010 before slice 2d.2d, kept only to write the message 0.3.0 wrote
+    # for a finding (`legacy`), so that a v0.1 baseline entry still names it. Nothing else uses these.
+    def _v1_held(self, value, objects: bool = False) -> str | None:
+        """The outsider-written field a workflow value holds, if any. With `objects`, a value that
+        is the object containing such a field counts too (a matrix entry can be a whole object,
+        whose fields the script then reads)."""
+        for body in expressions(value):
+            held = self._untrusted_text(body)
+            if held:
+                return held
+            if objects:
+                for ref in expr_mod.refs(body):
+                    if any(expr_mod.reaches(ref.path, pattern, True) for pattern in UNTRUSTED_PATHS):
+                        return expr_mod.dotted(ref.path)
+        return None
+
+    def _v1_env_taint(self, scopes: list[dict], base: dict, matrix: str | None = None) -> dict:
+        """Env name -> the outsider-written field its value holds, directly, through other env
+        values (`B: ${{ env.A }}`), or through the job's matrix when that holds one (`matrix`).
+        Later scopes override earlier ones key for key. `base` is taint from the enclosing scopes,
+        which these values can read but do not replace."""
+        entries: dict = {}
+        for scope in scopes:
+            entries.update(scope)
+        tainted: dict = {}
+        readers: dict = {}          # lower-case name -> keys whose value reads env.<name>
+        read_all: list = []         # keys whose value reads the whole env context
+        for key, value in entries.items():
+            held = self._v1_held(key) or self._v1_held(value)
+            if not held and matrix and any(path[0].value.lower() == "matrix"
+                                           for body in expressions(value) for path in expr_mod.paths(body)):
+                held = matrix
+            if held:
+                tainted[key] = held
+                continue
+            names, everything = self._env_refs(value)
+            if everything:
+                read_all.append(key)
+            for name in names:
+                readers.setdefault(name, []).append(key)
+        inherited = {str(k).lower(): v for k, v in base.items()}
+        queue = [(str(k).lower(), v) for k, v in tainted.items()] + list(inherited.items())
+        seen_all = False
+        while queue:
+            name, held = queue.pop()
+            dependants = readers.pop(name, [])
+            if not seen_all:
+                dependants = dependants + read_all
+                seen_all = True
+            for key in dependants:
+                if key not in tainted:
+                    tainted[key] = held
+                    queue.append((str(key).lower(), held))
+        return tainted
+
+    def _v1_indirect(self, job: Job, step: Step) -> dict:
+        """What a step's script can reach through the env and matrix contexts: env names that hold
+        outsider-written text (lower case), whether the job's matrix does, and whether an `env:`
+        written as one expression (so its names cannot be read) does."""
+        cache = self.__dict__.setdefault("_v1_views", {})
+        if job.id not in cache:
+            matrix = self._v1_held(job.raw.get("strategy"), objects=True)
+            whole = next((held for held in (self._v1_held(raw.get("env"), objects=True)
+                                            for raw in (self.wf.raw, job.raw)
+                                            if isinstance(raw.get("env"), str)) if held), None)
+            cache[job.id] = (self._v1_env_taint([self.wf.env, job.env], {}, matrix), matrix, whole)
+        job_taint, matrix, whole = cache[job.id]
+        if isinstance(step.raw.get("env"), str):
+            whole = whole or self._v1_held(step.raw.get("env"), objects=True)
+        step_taint = self._v1_env_taint([step.env], job_taint, matrix) if step.env else {}
+        env: dict = {}
+        for key, held in job_taint.items():
+            if key not in step.env:             # a step value of the same name replaces the job's
+                env.setdefault(str(key).lower(), held)
+        for key, held in step_taint.items():
+            env.setdefault(str(key).lower(), held)
+        return {"env": env, "matrix": matrix, "env_whole": whole}
+
+    @staticmethod
+    def _v1_untrusted_indirectly(body: str, view: dict) -> tuple[str, str, str] | None:
+        """`${{ env.TITLE }}` or `${{ matrix.title }}` in a script is expanded before the shell runs,
+        like any expression. If TITLE is set from an outsider-written field, the script expands that
+        field. (`"$TITLE"`, which the shell reads, is the safe form.) Returns how the field is
+        reached (`through-env` or `through-matrix`), the reference in the script, and the field."""
+        for path in expr_mod.paths(body):
+            root = path[0].value.lower()
+            if root == "env" and (view["env"] or view["env_whole"]):
+                if len(path) > 1 and path[1].kind == expr_mod.NAME:
+                    held = view["env"].get(path[1].value.lower())
+                else:
+                    held = next(iter(view["env"].values()), None)
+                held = held or view["env_whole"]
+                if held:
+                    return "through-env", expr_mod.dotted(path), held
+            elif root == "matrix" and view["matrix"]:
+                return "through-matrix", expr_mod.dotted(path), view["matrix"]
+        return None
+
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
     def agent_rules(self, job: Job) -> None:
@@ -2222,7 +2344,7 @@ class WorkflowRules:
         fails closed on what the job can do instead."""
         triggers = job.triggers()
         bad = triggers & UNTRUSTED_TRIGGERS
-        if not bad or job.reusable:
+        if not bad:
             return
         capabilities = []
         # `id-token: write` alone is not counted: OBAAF's own templates use it to sign and attest, which
@@ -2267,7 +2389,7 @@ class WorkflowRules:
             # reviewer, and a run from a fork on a pull request event gets no secrets and a read-only token.
             # The steps that make it a release job are facts too, so an acceptance written for a job that
             # pushes to a registry inside the job does not cover one that later publishes to npm.
-            releasing = [f"{s.name} ({s.uses or 'run'})" for s in job.upload_steps(self.detection)]
+            releasing = [f"{s.name} ({s.action or s.uses or 'run'})" for s in job.upload_steps(self.detection)]
             values = {"triggers": sorted(bad), "reason": job.reason_for("release"),
                       "environment": Fact(value_identity(self._environment_written(job)), ""),
                       "steps": Fact(releasing, ""),

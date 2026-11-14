@@ -7,6 +7,7 @@ start). Every way past that the checker did not already report is a test here; t
 attempt, including the ones that held, is docs/bypass-attempts.md.
 """
 
+import time
 import unittest
 
 from helpers import TempDir
@@ -404,6 +405,84 @@ class ReleaseCapabilityTest(unittest.TestCase):
 
     def test_a_trusted_trigger_is_not_reported(self):
         self.assertEqual(self.finding(on="push", job_extra="    permissions: {packages: write}\n"), [])
+
+
+class ReviewOfTheSliceTest(unittest.TestCase):
+    """What the review of slice 2d.2d found in its first version."""
+
+    def test_a_step_name_with_braces_is_reported_and_keeps_its_old_message(self):
+        for name in ("Say {0}", "Say {hello}", "Say }", "Greet on ${{ matrix.os }}"):
+            with self.subTest(name=name), TempDir() as tmp:
+                text = run_step('echo "${{ github.event.issue.title }}"').replace("name: s", f"name: '{name}'")
+                found = of(check(tmp, text), "OBAAF-GHA-010")
+                self.assertEqual([f.step for f in found], [name])
+                self.assertEqual(found[0].legacy, "")       # the message is the one 0.3.0 wrote
+
+    def test_the_old_message_names_the_first_field_as_written(self):
+        env = "        env:\n          T: ${{ github.event.issue.title }} ${{ github.event.issue.body }}\n"
+        with TempDir() as tmp:
+            found = of(check(tmp, run_step('echo "${{ env.T }}"', step_extra=env)), "OBAAF-GHA-010")[0]
+            self.assertIn("which holds", found.message)
+            self.assertEqual(found.legacy or found.message,
+                             "Step 's' expands env.t, which holds github.event.issue.title, inside its script.")
+
+    def test_outputs_are_followed_in_any_order_of_jobs(self):
+        # The consumer is listed first, and an earlier harmless `needs` reference starts the reading.
+        text = ("on: issues\npermissions: {}\njobs:\n"
+                "  c:\n    needs: [a, b]\n    runs-on: ubuntu-latest\n    outputs:\n      z: ${{ env.X }}\n"
+                "    env:\n      X: ${{ needs.b.outputs.y }}\n    steps:\n      - run: echo \"${{ needs.a.result }} ${{ env.X }}\"\n"
+                "  b:\n    needs: a\n    runs-on: ubuntu-latest\n    outputs:\n      y: ${{ needs.a.outputs.t }}\n"
+                "    steps:\n      - run: 'true'\n"
+                "  a:\n    runs-on: ubuntu-latest\n    outputs:\n      t: ${{ github.event.issue.title }}\n"
+                "    steps:\n      - run: 'true'\n")
+        with TempDir() as tmp:
+            self.assertEqual([f.job for f in of(check(tmp, text), "OBAAF-GHA-010")], ["c"])
+
+    def test_a_long_chain_of_outputs_is_read_quickly(self):
+        jobs = []
+        for i in range(150):
+            refs = " ".join(f"${{{{ needs.j{i + 1}.outputs.o }}}}" for _ in range(20))
+            jobs.append(f"  j{i}:\n    needs: j{i + 1}\n    runs-on: ubuntu-latest\n    outputs:\n      o: {refs}\n"
+                        "    steps:\n      - run: 'true'\n")
+        jobs.append("  j150:\n    runs-on: ubuntu-latest\n    outputs:\n      o: ${{ github.event.issue.title }}\n"
+                    "    steps:\n      - run: 'true'\n")
+        jobs.append("  z:\n    needs: j0\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ needs.j0.outputs.o }}\"\n")
+        text = "on: issues\npermissions: {}\njobs:\n" + "".join(jobs)
+        with TempDir() as tmp:
+            started = time.monotonic()
+            found = of(check(tmp, text), "OBAAF-GHA-010")
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertEqual([f.job for f in found], ["z"])
+
+    def test_names_of_production_still_say_release(self):
+        for name in ("euproduction", "awsproduction", "prodeu", "PRODEU", "prodcluster", "prodv2", "appdeployment",
+                     "appstoreconnect", "myappreleases", "deployer", "publisher"):
+            with self.subTest(name=name):
+                self.assertTrue(release_environment(name))
+        for name in ("keystore", "datastore", "firestore"):
+            with self.subTest(name=name):
+                self.assertFalse(release_environment(name))
+
+    def test_a_runs_display_title_after_a_push_is_high(self):
+        text = ("on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\npermissions: {}\njobs:\n  j:\n"
+                "    if: github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: echo \"${{ github.event.workflow_run.display_title }}\"\n")
+        with TempDir() as tmp:
+            self.assertEqual([f.severity for f in of(check(tmp, text), "OBAAF-GHA-010")], ["high"])
+
+    def test_a_new_pin_of_the_publishing_action_is_the_same_finding(self):
+        def key(ref):
+            with TempDir() as tmp:
+                step = f"      - name: Publish\n        uses: pypa/gh-action-pypi-publish@{ref}\n"
+                return baseline.key(of(check(tmp, release_job(step)), "OBAAF-GHA-015")[0])
+        self.assertEqual(key(SHA), key("2" * 40))
+
+    def test_a_job_that_calls_a_workflow_with_a_publishing_grant(self):
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  call:\n    permissions: {packages: write}\n"
+                "    uses: example/shared/.github/workflows/build.yml@" + SHA + "\n")
+        with TempDir() as tmp:
+            self.assertEqual([(f.severity, f.kind) for f in of(check(tmp, text), "OBAAF-GHA-015")],
+                             [("medium", "capability")])
 
 
 if __name__ == "__main__":

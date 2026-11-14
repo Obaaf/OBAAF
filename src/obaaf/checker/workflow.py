@@ -2226,38 +2226,26 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     return list(dict.fromkeys(out))
 
 
-# An environment whose name says where releases go (flagship slice 2d.2d). The name is split into words
-# at anything that is not a letter or a digit and where a lower-case letter meets a capital (`AppProd`),
-# and a word counts when it is one of RELEASE_ENVIRONMENT_WORDS or ends in one of RELEASE_ENVIRONMENT_ENDS
-# (`awsprod`, `appstore`). Before 2d.2d any name that held `prod`, `store` or `itch` anywhere counted, so
-# `kitchen`, `restore-drill` and `reproducibility` were release environments and `live` and `pypi` were
-# not. A name that says it is not production, or comes before it, is taken at its word.
-RELEASE_ENVIRONMENT_WORDS = frozenset({
-    "release", "releases", "releasing", "prod", "production", "prd", "publish", "publishing", "store",
-    "appstore", "playstore", "steam", "itch", "itchio", "deploy", "deployment", "deployments", "live",
-    "pypi", "npm", "crates", "rubygems", "nuget", "pages", "cd", "testflight",
-})
-RELEASE_ENVIRONMENT_ENDS = ("prod", "release", "publish", "deploy", "store")
-NOT_RELEASE_WORDS = frozenset({"restore", "product", "products", "prodigy"})
+# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod, app-store,
+# euproduction), as before slice 2d.2d, with two changes from its reviewers: words that only hold those
+# letters (`kitchen`, `switch`, `restore`, `keystore`, `reproducible`, `product`) are taken out first, and
+# a few short names are added as whole words (`live`, `prd`, `cd`, `pypi`, `npm`, `crates`, `pages`).
+# A name that says it is not production, or comes before it, is taken at its word.
+RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
+NOT_RELEASE_RE = re.compile(r"restor|datastore|keystore|firestore|filestore|objectstore|kitchen|switch|stitch|pitch|"
+                            r"glitch|twitch|witch|hitch|reproduc|product(?!ion)|prodigy")
+RELEASE_WORD_RE = re.compile(r"(?<![a-z0-9])(live|prd|cd|pypi|testpypi|npm|crates|rubygems|nuget|pages|testflight)"
+                             r"(?![a-z0-9])")
 NOT_PRODUCTION_RE = re.compile(r"(?<![a-z])(non|pre)[-_. ]?prod")     # not the end of `canon-prod`
 
 
 def release_environment(name) -> bool:
-    original = str(name or "")
-    # What says "not production" is found in the name in lower case, as before 2d.2d (`AppNonProd` is
-    # taken for production, `PreProduction` is not), and blanked out of the name as written, which is
-    # then split into words.
-    lowered = "".join(c.lower() if c.isascii() else c for c in original)
-    for match in NOT_PRODUCTION_RE.finditer(lowered):
-        original = original[:match.start()] + " " * (match.end() - match.start()) + original[match.end():]
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", original).lower()
-    for word in re.split(r"[^a-z0-9]+", text):
-        bare = word.rstrip("0123456789")
-        if not bare or bare in NOT_RELEASE_WORDS:
-            continue
-        if bare in RELEASE_ENVIRONMENT_WORDS or bare.endswith(RELEASE_ENVIRONMENT_ENDS):
-            return True
-    return False
+    text = NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())
+    if RELEASE_ENVIRONMENT_RE.search(NOT_RELEASE_RE.sub(" ", text)):
+        return True
+    # Whole words, with a capital after a lower-case letter starting one (`AppLive`).
+    words = NOT_PRODUCTION_RE.sub(" ", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(name or "")).lower())
+    return bool(RELEASE_WORD_RE.search(words))
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
