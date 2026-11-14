@@ -140,7 +140,8 @@ def main():
     if output == SOURCE or output == SOURCE.parent:
         parser.error('output must be a dedicated build directory')
     output.mkdir(parents=True, exist_ok=True)
-    for name in ('index.html', 'styles.css', 'main.js'):
+    for name in ('index.html', 'quickstart.html', 'rules.html', 'comparison.html',
+                 'case-study.html', 'papers.html', 'styles.css', 'main.js'):
         (output / name).write_bytes((SOURCE / name).read_bytes())
     assessment = render.form_html(link_base='https://github.com/Obaaf/OBAAF/blob/main/')
     assessment = assessment.replace('<header>',

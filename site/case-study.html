@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Expectrail is a project of one of OBAAF&#x27;s authors. The case study of 2026-11-13, with what that page says worked, what it says did not, and what is newer than the page.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Expectrail, the first adopter</title>
+  <link rel="canonical" href="https://obaaf.github.io/OBAAF/case-study.html">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<p class="draft"><span class="draft-dot"></span>THIS CHECKOUT IS 0.4.0.dev0 AT a583a7b. A SENTENCE ABOUT RELEASE 0.3.0 SAYS SO.</p>
+<header class="header wrap">
+  <a class="brand" href="index.html">OBAAF</a>
+  <nav aria-label="Pages"><a href="index.html">Home</a> <a href="quickstart.html">Quickstart</a> <a href="rules.html">Rules</a> <a href="comparison.html">Comparison</a> <a href="case-study.html" aria-current="page">Case study</a> <a href="papers.html">Papers</a></nav>
+</header>
+<main id="main" class="section wrap">
+
+<p class="section-label">Written 2026-11-13</p>
+<h1>Expectrail, the first adopter, is one author's own project.</h1>
+<p class="large">Sean Keluo-Udeke maintains Expectrail with Timothy Itodo. This page is no evidence that a team with no tie to OBAAF finds it useful. Results from outside teams are still to come, and none has been reported.</p>
+<p>The source is <a href="https://github.com/Obaaf/OBAAF/blob/a583a7bbba0531ffd9e9565fb21e1fe89a20d815/docs/expectrail-case-study.md">the case study</a> at <code>a583a7b</code>. The numbers below are that document's. This session did not recompute them against Expectrail's repository.</p>
+<h2>What that document says worked</h2>
+<ul>
+<li>Expectrail declared its agent jobs, and the checker then asked what each could reach. Without the declaration file, the document says OBAAF recognises 2 of 19 as agent jobs.</li>
+<li>Jobs that use a model key name one environment, <code>main-only</code>, limited to <code>main</code>.</li>
+<li>The gate on <code>main</code>, from Expectrail's #223 at 17:36 UTC on 2026-11-10, pinned OBAAF to <code>d014b63</code>. It caught an agent job that reached <code>main</code> without baseline entries. The document says <code>main</code> went red about three hours later. Nothing was undone: the findings were accepted.</li>
+</ul>
+<h2>What it says did not</h2>
+<ul>
+<li>Each finding the gate raised was answered by accepting it. The baseline went from 32 to 38 entries in 21 hours. Every entry was <code>OBAAF-GHA-005</code> or <code>OBAAF-GHA-020</code>, and the document says OBAAF itself offered no fix for either at the pin Expectrail runs.</li>
+<li>The six incidents the work began from were, as reported, in GitHub's settings, which that pin did not read. The list of six came from the brief, and the document says where the public record supports each one.</li>
+<li>Nothing OBAAF ran restricted a job at run time. It reported.</li>
+</ul>
+<h2>What is newer than that page</h2>
+<p>The case study says an egress control exists and the checker does not credit it yet. That sentence is the page as written on 2026-11-13. In later commits already contained in <code>a583a7b</code>, the development checker can clear <code>OBAAF-GHA-020</code> for GitHub's native egress firewall in enforce mode. OBAAF's own action stays "cannot tell" until a released commit is listed, and none is listed. <code>OBAAF-GHA-005</code> still cannot be cleared. None of that is in release 0.3.0.</p>
+<p>Expectrail, as the case study records it, still runs the OBAAF of 2026-11-10, commit <code>d014b63</code>. The later work does not apply to it until that pin moves.</p>
+<p class="caption">Phase A is dated 2026-10-30 in that document. The gate command it quotes is <code>obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes</code>.</p>
+
+</main>
+<footer class="wrap">
+  <div><strong>OBAAF</strong><p>Sean led the research. Ofonna handled implementation, testing, and GitHub integration, with Sean contributing across the project.</p></div>
+  <div><p>Code is Apache-2.0. Documentation is CC BY 4.0. This checkout also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/a583a7bbba0531ffd9e9565fb21e1fe89a20d815/LICENSING.md">Licensing</a>.</p></div>
+</footer>
+</body>
+</html>
