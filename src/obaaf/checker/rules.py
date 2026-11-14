@@ -2389,7 +2389,10 @@ class WorkflowRules:
             # reviewer, and a run from a fork on a pull request event gets no secrets and a read-only token.
             # The steps that make it a release job are facts too, so an acceptance written for a job that
             # pushes to a registry inside the job does not cover one that later publishes to npm.
-            releasing = [f"{s.name} ({s.action or s.uses or 'run'})" for s in job.upload_steps(self.detection)]
+            # A step is named here by the name or id written for it, not by the default name (its `uses`
+            # with the ref), so a new pin of the same action is the same finding.
+            releasing = [f"{as_text(s.raw.get('name') or s.raw.get('id') or '')} ({s.action or s.uses or 'run'})"
+                         for s in job.upload_steps(self.detection)]
             values = {"triggers": sorted(bad), "reason": job.reason_for("release"),
                       "environment": Fact(value_identity(self._environment_written(job)), ""),
                       "steps": Fact(releasing, ""),

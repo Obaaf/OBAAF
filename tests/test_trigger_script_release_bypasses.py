@@ -321,11 +321,11 @@ class ReleaseRecognisedTest(unittest.TestCase):
                 self.assertEqual(self.severities(release_job(step)), [("high", "")])
 
     def test_environment_names_read_word_by_word(self):
-        for name in ("live", "prd", "pypi", "npm", "crates", "gh-pages", "github-pages", "AppProd", "awsprod"):
+        for name in ("live", "prd", "pypi", "npm", "crates", "gh-pages", "github-pages", "AppProd", "awsprod", "switch",
+                     "nintendo-switch"):
             with self.subTest(name=name):
                 self.assertTrue(release_environment(name))
-        for name in ("kitchen", "restore-drill", "reproducibility", "product-docs-preview", "switch-matrix",
-                     "staging", "preprod", "ci"):
+        for name in ("kitchen", "restore-drill", "reproducibility", "product-docs-preview", "staging", "preprod", "ci"):
             with self.subTest(name=name):
                 self.assertFalse(release_environment(name))
 
@@ -474,6 +474,13 @@ class ReviewOfTheSliceTest(unittest.TestCase):
         def key(ref):
             with TempDir() as tmp:
                 step = f"      - name: Publish\n        uses: pypa/gh-action-pypi-publish@{ref}\n"
+                return baseline.key(of(check(tmp, release_job(step)), "OBAAF-GHA-015")[0])
+        self.assertEqual(key(SHA), key("2" * 40))
+
+    def test_a_new_pin_of_an_unnamed_publishing_step_is_the_same_finding(self):
+        def key(ref):
+            with TempDir() as tmp:
+                step = f"      - uses: pypa/gh-action-pypi-publish@{ref}\n"
                 return baseline.key(of(check(tmp, release_job(step)), "OBAAF-GHA-015")[0])
         self.assertEqual(key(SHA), key("2" * 40))
 

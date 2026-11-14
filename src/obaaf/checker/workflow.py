@@ -2228,12 +2228,14 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
 
 # An environment whose name says where releases go, anywhere in the name (AppProd, awsprod, app-store,
 # euproduction), as before slice 2d.2d, with two changes from its reviewers: words that only hold those
-# letters (`kitchen`, `switch`, `restore`, `keystore`, `reproducible`, `product`) are taken out first, and
-# a few short names are added as whole words (`live`, `prd`, `cd`, `pypi`, `npm`, `crates`, `pages`).
+# letters (`kitchen`, `restore`, `keystore`, `reproducible`, `product`) are taken out first, and a few
+# short names are added as whole words (`live`, `prd`, `cd`, `pypi`, `testpypi`, `npm`, `crates`,
+# `rubygems`, `nuget`, `pages`, `testflight`). `switch` still counts: it is a game console a studio
+# releases to.
 # A name that says it is not production, or comes before it, is taken at its word.
 RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
-NOT_RELEASE_RE = re.compile(r"restor|datastore|keystore|firestore|filestore|objectstore|kitchen|switch|stitch|pitch|"
-                            r"glitch|twitch|witch|hitch|reproduc|product(?!ion)|prodigy")
+NOT_RELEASE_RE = re.compile(r"restor|datastore|keystore|firestore|filestore|objectstore|kitchen|stitch|pitch|"
+                            r"glitch|twitch|(?<!s)witch|hitch|reproduc|product(?!ion)|prodigy")
 RELEASE_WORD_RE = re.compile(r"(?<![a-z0-9])(live|prd|cd|pypi|testpypi|npm|crates|rubygems|nuget|pages|testflight)"
                              r"(?![a-z0-9])")
 NOT_PRODUCTION_RE = re.compile(r"(?<![a-z])(non|pre)[-_. ]?prod")     # not the end of `canon-prod`

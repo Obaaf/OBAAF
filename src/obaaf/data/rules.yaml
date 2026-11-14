@@ -395,8 +395,9 @@ rules:
       steps, with continued lines joined and quotes taken out) or that uses an environment whose name,
       or one of the names an expression or matrix gives it, says releases go there: `release`, `prod`,
       `publish`, `store`, `steam`, `itch` or `deploy` anywhere in it (`AppProd`, `euproduction`), once
-      words that only hold those letters are taken out (`kitchen`, `switch`, `restore`, `keystore`,
-      `reproducible`, `product`), or `live`, `prd`, `cd`, `pypi`, `npm`, `crates` or `pages` as a word;
+      words that only hold those letters are taken out (`kitchen`, `restore`, `keystore`, `reproducible`,
+      `product`), or `live`, `prd`, `cd`, `pypi`, `testpypi`, `npm`, `crates`, `rubygems`, `nuget`, `pages`
+      or `testflight` as a word;
       not `preprod` or `non-prod`. It is medium when
       the only outside events are `pull_request`, `pull_request_review` and `pull_request_review_comment`
       (a run from a fork gets no secrets and a read-only token) and when the job names an environment in
