@@ -29,16 +29,16 @@ agent_actions:
 # expressions, matched against each line. Options may come before the
 # prompt flag or subcommand (claude --model x -p ...).
 agent_commands:
-  - '(^|[\s;&|(])claude\s+([^\n;&|]*\s)?(-p|--print)\b'
+  - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
   - '@anthropic-ai/claude-code'
-  - '(^|[\s;&|(])gemini\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+  - '(^|[\s;&|(/"''`])gemini["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '@google/gemini-cli'
-  - '(^|[\s;&|(])codex\s+([^\n;&|]*\s)?exec\b'
+  - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
   - '@openai/codex'
-  - '(^|[\s;&|(])aider\s'
-  - '(^|[\s;&|(])opencode\s+([^\n;&|]*\s)?run\b'
-  - '(^|[\s;&|(])copilot\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '(^|[\s;&|(])cline\s'
+  - '(^|[\s;&|(/"''`])aider["''`]?\s'
+  - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
+  - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+  - '(^|[\s;&|(/"''`])cline["''`]?\s'
 
 # Packages that install an agent's CLI, with the command each installs (flagship slice 2c.8). The
 # patterns above match their names, so a step that installs one is taken for running an agent. Before

@@ -45,9 +45,27 @@ rules:
     requirements: [G3.1, G9.1]
     supports: [FR3]
     description: >-
-      A pull_request_target, workflow_run or comment-triggered workflow checks out or fetches the code
-      of a pull request. These workflows run with the base repository's token, secrets and cache scope,
-      so building or running that code hands them to its author (a "pwn request").
+      A pull_request_target, workflow_run or comment-triggered workflow checks out or fetches the code of
+      a pull request. These workflows run with the base repository's token, secrets and cache scope, so
+      building or running that code hands them to its author (a "pwn request"). An actions/checkout step's
+      `ref` and `repository` are read as expressions, in any letter case, with index syntax, through
+      `format`, `join`, `fromJSON` and `toJSON`, and through `env` set on the step, job or workflow: the
+      head commit, branch or repository (with or without a `ref`), the merge commit, the pull request's
+      number (from which `refs/pull/N/...` is built) and `refs/pull/` written out are the pull request's
+      code. A `ref` or `repository` taken from anything else the checker cannot read to a value (a step's
+      or job's output, an input, a variable, an `env` name set nowhere in the file, inputs written as one
+      expression) is reported at medium as "cannot tell". Scripts (`run`, a github-script script, a
+      `docker://` step's `entrypoint` and `args`, the command OBAAF's egress action runs) are read line by
+      line: a command that brings code in (git after any global options, by path, quoted or as an argument
+      list, with fetch, pull, clone, checkout, switch, reset, worktree, merge, rebase, cherry-pick, show,
+      apply and others; `gh pr checkout`; `gh repo clone`; `gh api`, curl or wget of an archive, contents
+      or a diff; the github-script calls for those) on a line that names the pull request's code is
+      reported: directly, through `env`, through a variable set earlier in the same step, from the event
+      file, `gh pr view` or `gh pr diff`, or by its number. Such a line with a step's or job's output is
+      "cannot tell". The job's and step's `if:` are part of the finding. Not followed: values passed
+      between steps through `GITHUB_ENV`, `GITHUB_OUTPUT` or files; actions other than actions/checkout
+      that check out code (local, composite or marketplace actions); a reusable workflow called from such
+      a workflow, whose checkout is read with its own triggers; and commands the list above does not name.
     fix: >-
       Build pull-request code in a pull_request workflow, which runs with a read-only token and no
       secrets. If a privileged step must follow, pass results through artifacts and treat them as
@@ -249,7 +267,15 @@ rules:
     supports: [FR7]
     description: >-
       In an agent job or a job started by untrusted input, actions/checkout persists the job token for
-      later git commands. Any code or agent that runs later in the job can read it.
+      later git commands. Any code or agent that runs later in the job can read it. A job counts when it
+      runs an agent or when any event that starts it is one an outsider can cause (a pull request
+      included), whatever else also starts it. actions/checkout keeps the token unless
+      `persist-credentials` is written as something other than `true` in any case; an expression counts as
+      written only when it is a constant (`${{ false }}`), and otherwise is taken to keep it. The
+      finding's facts are the triggers, whether the job runs an agent and what the token can write, so an
+      acceptance for a read-only pull_request job does not cover a job that can write. Not followed:
+      credentials kept by other means (`gh auth setup-git`, a `git config` a script writes, another
+      action), reusable workflows and composite actions.
     fix: >-
       Add `persist-credentials: false` to the checkout step.
 
@@ -261,9 +287,15 @@ rules:
     agent_controls: [R5]
     supports: [FR9]
     description: >-
-      The agent job checks out the pull request's version of the repository, so instruction files,
-      rules files and MCP configuration come from the change being reviewed. The change can then
-      rewrite what the agent obeys during its own run.
+      The agent job checks out the pull request's version of the repository, so instruction files, rules
+      files and MCP configuration come from the change being reviewed. The change can then rewrite what
+      the agent obeys during its own run. The checkout's `ref` and `repository` and the job's scripts are
+      read as for OBAAF-GHA-002; a value that also names the base (`head.sha || base.sha`) is the head. On
+      pull_request, pull_request_review and pull_request_review_comment, a checkout with no `ref`, or with
+      `github.sha`, `github.ref` or `github.ref_name`, takes the merge commit, which holds the pull
+      request's files. A `ref` the checker cannot read to a value is reported at medium where an
+      outsider's event can start the job. Not followed: what the agent itself fetches while it runs,
+      values passed between steps, other checkout actions, reusable workflows and composite actions.
     fix: >-
       Check out the protected base branch for instruction files (for example `ref: ${{
       github.event.pull_request.base.sha }}`), and give the agent the pull request's changes only as
@@ -381,7 +413,9 @@ rules:
     supports: [FR3]
     description: >-
       actions/checkout is told to check out fork pull-request code in a pull_request_target or
-      workflow_run workflow with `allow-unsafe-pr-checkout: true`.
+      workflow_run workflow with `allow-unsafe-pr-checkout: true`. Any value but a plainly false one
+      (`false`, `0`, `no`, or a constant expression of one) counts, an expression included, because GitHub
+      hands the action what the expression evaluates to.
     fix: >-
       Remove `allow-unsafe-pr-checkout` and build pull-request code in a pull_request workflow.
 

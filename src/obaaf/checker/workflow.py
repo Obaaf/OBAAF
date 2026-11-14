@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
@@ -152,16 +152,278 @@ UNTRUSTED_PATHS = [
     ({"github"}, {"head_ref"}),
 ]
 
-# References to a pull request's code (OBAAF-GHA-002, OBAAF-GHA-012).
-PR_HEAD_REF_RE = re.compile(
-    r"github\.event\.pull_request\.head\.(sha|ref)\b|github\.head_ref\b|"
-    r"github\.event\.workflow_run\.head_(sha|branch)\b|github\.event\.workflow_run\.head_repository\b|"
-    r"refs/pull/|github\.event\.issue\.pull_request|github\.event\.pull_request\.merge_commit_sha"
-)
-PR_FETCH_CMD_RE = re.compile(
-    r"(^|[\s;&|(])gh\s+pr\s+checkout\b|git\s+fetch\b[^\n]*\bpull/|git\s+fetch\b[^\n]*refs/pull/|"
-    r"git\s+(checkout|switch)\b[^\n]*\$\{\{\s*github\.event\.pull_request\.head"
-)
+# A pull request's code (OBAAF-GHA-002, OBAAF-GHA-012), as context references (flagship slice 2d.2c).
+# Each is read with the expression reader, so letter case, index syntax, `format`, `join`, `fromJSON` and
+# `toJSON` do not hide it, and a value given through `env` is followed to where it is set.
+#
+# What names the pull request's head commit, branch or repository. Under `head.repo` and
+# `head_repository` everything but the few fields below names the fork (its name, owner, clone URLs).
+_HEAD_REPO_FLAGS = {"fork", "private", "id", "node_id", "visibility", "archived", "disabled", "is_template"}
+# What names a pull request by number (from which `refs/pull/N/head` is built) or its patch.
+_PR_NUMBER_PATHS = [
+    ("github", "event", "number"), ("github", "event", "pull_request", "number"),
+    ("github", "event", "issue", "number"), ("github", "event", "pull_request", "patch_url"),
+    ("github", "event", "pull_request", "diff_url"), ("github", "event", "pull_request", "url"),
+    ("github", "event", "pull_request", "html_url"),
+]
+# References that name the base repository's own code, never the pull request's, in the events
+# OBAAF-GHA-002 is about: on pull_request_target, workflow_run and the comment and review events,
+# `github.sha` and `github.ref` are the base branch's (on pull_request they are the merge commit,
+# which OBAAF-GHA-012 treats separately).
+BASE_CODE_REFS = frozenset({
+    "github.sha", "github.ref", "github.ref_name", "github.base_ref", "github.repository", "github.workflow_sha",
+    "github.repository_owner", "github.event.repository.full_name", "github.event.repository.name",
+    "github.event.repository.default_branch", "github.event.pull_request.base.sha",
+    "github.event.pull_request.base.ref", "github.event.pull_request.base.repo.full_name",
+})
+# The references that are the merge commit when the event is a pull request's own (OBAAF-GHA-012).
+MERGE_COMMIT_REFS = frozenset({"github.sha", "github.ref", "github.ref_name"})
+# Events whose default checkout, and whose `github.sha` and `github.ref`, are the pull request's
+# merge commit (refs/pull/N/merge).
+MERGE_REF_EVENTS = frozenset({"pull_request", "pull_request_review", "pull_request_review_comment"})
+# Text in a value or a script that names a pull request's code without an expression.
+PR_CODE_TEXT_RE = re.compile(
+    r"refs/pull/|(?<![\w-])pull/[^\s/'\"]+/(head|merge)\b|/pull/[^\s/'\"]+\.(patch|diff)\b", re.I)
+# The same in a script: pull request fields read from the event file, the GitHub CLI or the API, and
+# the runner's own variable for the head branch.
+PR_CODE_SCRIPT_RE = re.compile(
+    r"pull_request\s*\.\s*head\b|pull_request['\"]?\s*\]\s*\[\s*['\"]head|\.head\s*\.\s*(sha|ref)\b|"
+    r"\bhead[_.]?(sha|ref)\b|\bheadRef(Oid|Name)\b|\bheadRepository(Owner)?\b|\bGITHUB_HEAD_REF\b|"
+    r"\bmerge_commit_sha\b|(?<![\w.-])gh['\"]?[\s,'\"]+pr[\s,'\"]+(?:-[^\n|;&]*?[\s,'\"]+)?diff\b",
+    re.I)
+_SEP = r"[\s,'\"\[\(]+"
+_OPTION = r"(?:-[A-Za-z]|--[\w-]+)(?:[=\s]+(?!-)[^\s,'\"\]\)]+)?" + _SEP
+# Commands that bring code into the workspace or run it from a ref: git (after any global options,
+# by its base name, quoted or as an argument list), the GitHub CLI's `pr checkout`, `repo clone` and
+# `api` calls for archives, contents and diffs, curl and wget of those, and the REST calls an
+# `actions/github-script` script makes for them.
+GIT_CODE_RE = re.compile(
+    r"(?<![\w.-])git(?:\.exe)?['\"]?" + _SEP + r"(?:" + _OPTION + r")*"
+    r"(fetch|pull|clone|checkout|switch|reset|worktree|merge|rebase|cherry-pick|show|apply|am|restore|"
+    r"read-tree|archive|submodule)\b", re.I)
+GH_CODE_RE = re.compile(
+    r"(?<![\w.-])gh(?:\.exe)?['\"]?" + _SEP + r"(?:" + _OPTION + r")*"
+    r"(pr" + _SEP + r"(?:" + _OPTION + r")*(?:checkout|co)\b|repo" + _SEP + r"(?:" + _OPTION + r")*clone\b)",
+    re.I)
+_FETCHED_RE = re.compile(r"tarball|zipball|/contents/|codeload\.|raw\.githubusercontent|\.(diff|patch)\b|"
+                         r"vnd\.github(\.v3)?\.(diff|patch|raw)|/git/(blobs|trees)", re.I)
+_DOWNLOAD_RE = re.compile(r"(?<![\w.-])(gh['\"]?" + _SEP + r"api|curl|wget|Invoke-WebRequest|iwr)\b", re.I)
+_SCRIPT_API_RE = re.compile(r"\b(getContent|downloadTarballArchive|downloadZipballArchive|getArchive)\b|"
+                            r"format\s*:\s*['\"](diff|patch)['\"]", re.I)
+
+
+def _names_pr_code(path: tuple, extracted: bool, numbers: bool) -> bool:
+    """Whether a context reference names a pull request's code: its head commit, branch or
+    repository, its merge commit, or (with `numbers`) its number or patch. A reference to an object
+    that holds one of these counts when something can turn the object into text (`extracted`, a
+    wildcard or a computed index); so does a wildcard or computed segment where a name is expected."""
+    names = [s.value.lower() if s.kind == expr_mod.NAME else None for s in path]
+    loose = extracted or any(n is None for n in names)
+
+    def at(i: int, *accepted: str) -> bool:
+        return i < len(names) and (names[i] is None or names[i] in accepted)
+
+    def shorter(i: int) -> bool:          # the reference stops before position i: an object
+        return len(names) <= i and loose
+
+    if not at(0, "github"):
+        return False
+    if len(names) == 1:
+        return loose
+    if at(1, "head_ref"):
+        return True
+    if not at(1, "event"):
+        return False
+    if shorter(2):
+        return True
+    if at(2, "pull_request"):
+        if shorter(3):
+            return True
+        if at(3, "merge_commit_sha"):
+            return True
+        if at(3, "head"):
+            if shorter(4) or at(4, "sha", "ref", "label"):
+                return True
+            if at(4, "repo"):
+                return shorter(5) or (len(names) > 5 and (names[5] is None or names[5] not in _HEAD_REPO_FLAGS))
+            return False
+    if at(2, "workflow_run"):
+        if shorter(3) or at(3, "head_sha", "head_branch", "head_commit", "pull_requests"):
+            return True
+        if at(3, "head_repository"):
+            return shorter(4) or (len(names) > 4 and (names[4] is None or names[4] not in _HEAD_REPO_FLAGS))
+    if at(2, "issue") and (shorter(3) or at(3, "pull_request")):
+        return True
+    if numbers:
+        for wanted in _PR_NUMBER_PATHS:
+            if len(names) == len(wanted) and all(n is None or n == w for n, w in zip(names, wanted)):
+                return True
+    return False
+
+
+@dataclass
+class PrCode:
+    """What a value says about a pull request's code: "head" when it names it, "unresolved" when it
+    is an expression the checker cannot read to a value (a step's or job's output, an input, a
+    variable, an `env` name set nowhere in the file, a reference to anything else), "base" when it
+    names only the base repository's code or nothing computed at all. `reads` are the references
+    behind the answer (for "base", the base references read)."""
+
+    state: str
+    reads: list[str] = field(default_factory=list)
+
+
+_HEAD, _UNRESOLVED, _BASE = "head", "unresolved", "base"
+
+
+def pr_code(value: Any, env: "Callable[[str], Any] | None" = None, numbers: bool = True,
+            runtime_only: bool = False, _depth: int = 0) -> PrCode:
+    """Read a value (a checkout's `ref` or `repository`, or a line of a script) for a pull request's
+    code. `env` looks up a name in the env the value can read (None: the value cannot read env).
+    With `runtime_only`, only references to step and job outputs are unresolved, and other
+    references the checker cannot read count as nothing (used for scripts, which read many values
+    that name no code)."""
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    base: set[str] = set()
+    text = value if isinstance(value, str) else ""
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return PrCode(_UNRESOLVED, ["a value that is not text"])
+    if PR_CODE_TEXT_RE.search(text):
+        head.add("refs/pull/")
+    try:
+        bodies = list(expressions(text))
+    except expr_mod.TooComplex:
+        return PrCode(_UNRESOLVED, ["an expression too complex to read"])
+    for body in bodies:
+        try:
+            found = expr_mod.refs(body)
+        except (expr_mod.TooComplex, RecursionError):
+            unresolved.add("an expression too complex to read")
+            continue
+        if PR_CODE_TEXT_RE.search(body):
+            head.add("refs/pull/")
+        for ref in found:
+            shown = expr_mod.dotted(ref.path)
+            first = ref.path[0].value.lower() if ref.path[0].kind == expr_mod.NAME else ""
+            if _names_pr_code(ref.path, ref.extracted, numbers):
+                head.add(shown)
+            elif first == "env" and len(ref.path) > 1 and ref.path[1].kind == expr_mod.NAME and env is not None:
+                given = env(ref.path[1].value)
+                if given is _UNSET or _depth >= 8:
+                    if not runtime_only:
+                        unresolved.add(shown)
+                    continue
+                inner = pr_code(given, env, numbers, runtime_only, _depth + 1)
+                target = head if inner.state == _HEAD else unresolved if inner.state == _UNRESOLVED else base
+                target.update(inner.reads or [shown])
+            elif shown in BASE_CODE_REFS:
+                base.add(shown)
+            elif runtime_only:
+                if first in ("steps", "needs"):
+                    unresolved.add(shown)
+            else:
+                unresolved.add(shown)
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE, sorted(base))
+
+
+_UNSET = object()
+
+
+def env_lookup(*scopes: Any) -> "Callable[[str], Any]":
+    """Look a name up in env mappings, the first (innermost) scope that sets it winning. Names are
+    matched without regard to case, as `${{ env.NAME }}` is read."""
+    def look(name: str) -> Any:
+        wanted = name.lower()
+        for scope in scopes:
+            if isinstance(scope, dict):
+                for key, given in scope.items():
+                    if str(key).lower() == wanted:
+                        return given
+        return _UNSET
+    look.names = sorted({str(key) for scope in scopes if isinstance(scope, dict) for key in scope})
+    return look
+
+
+def script_lines(text: str) -> list[str]:
+    """A script's logical lines: a line ended by a backslash (or, for PowerShell, a backquote) is
+    joined to the next."""
+    joined = re.sub(r"[\\`][ \t]*\r?\n", " ", text)
+    return joined.splitlines()
+
+
+_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}")
+# `git switch -c NAME` or `git checkout -b NAME` with no start point: a new branch at the current commit, which
+# brings no code in whatever NAME is.
+_CREATE_ONLY_RE = re.compile(r"\b(switch|checkout)\s+(-[cCbB]|--create|--force-create|--orphan)\s+[^\s;&|]+\s*(;|&&|\|\||$)")
+_ASSIGN_RE = re.compile(r"^\s*(?:export\s+|local\s+|readonly\s+|declare\s+(?:-\w+\s+)*|const\s+|let\s+|var\s+|set\s+)?"
+                        r"\$?([A-Za-z_]\w*)\s*:?=\s*(.*)$")
+
+
+def pr_fetch(step: "Step", env: "Callable[[str], Any]") -> PrCode:
+    """Whether a step's scripts bring a pull request's code into the workspace.
+
+    "head": a line with a command that brings code in (see GIT_CODE_RE and the patterns after it)
+    and something that names the pull request's code: an expression or an env value that does, a
+    field read from the event file, the CLI or the API, `refs/pull/...`, `gh pr diff`, the pull
+    request's number, or a shell or script variable set earlier in the step from any of these.
+    `gh pr checkout` and `gh repo clone` need nothing more. "unresolved": such a line that reads a
+    step's or job's output, directly, through env or through such a variable. Values set while the
+    job runs in other steps (GITHUB_ENV, files) are not followed."""
+    text = step.scripts()
+    if not text:
+        return PrCode(_BASE)
+    names = list(getattr(env, "names", ()))
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    tainted: dict[str, PrCode] = {}
+
+    def read(fragment: str) -> PrCode:
+        hits, open_ = set(), set()
+        found = pr_code(fragment, env, numbers=True, runtime_only=True)
+        (hits if found.state == _HEAD else open_ if found.state == _UNRESOLVED else set()).update(found.reads)
+        marker = PR_CODE_SCRIPT_RE.search(fragment)
+        if marker:
+            hits.add(one_line(marker.group(0), 60))
+        for name in names + list(tainted):
+            if not re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", fragment, re.I):
+                continue
+            inner = tainted.get(name) or pr_code(env(name), env, numbers=True, runtime_only=True)
+            (hits if inner.state == _HEAD else open_ if inner.state == _UNRESOLVED else set()).update(inner.reads)
+        if hits:
+            return PrCode(_HEAD, sorted(hits))
+        return PrCode(_UNRESOLVED, sorted(open_)) if open_ else PrCode(_BASE)
+
+    for line in script_lines(text):
+        # The commands are matched with each `${{ }}` as one word, so an option's value written as an
+        # expression (`--repo ${{ github.repository }}`) is read as one value.
+        masked = _EXPRESSION_RE.sub("EXPR", line)
+        gh = GH_CODE_RE.search(masked)
+        if gh:
+            head.add(one_line(gh.group(0), 60))
+            continue
+        tool = GIT_CODE_RE.search(masked) or _SCRIPT_API_RE.search(masked) or (
+            _DOWNLOAD_RE.search(masked) and _FETCHED_RE.search(line))
+        if tool:
+            found = read(line)
+            if found.state == _HEAD:
+                head.update(found.reads)
+            elif found.state == _UNRESOLVED and not _CREATE_ONLY_RE.search(masked):
+                unresolved.update(found.reads)
+        assigned = _ASSIGN_RE.match(line)
+        if assigned:
+            found = read(assigned.group(2))
+            if found.state != _BASE:
+                tainted[assigned.group(1)] = found
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE)
 
 
 def _balanced(toks: list) -> bool:
@@ -563,6 +825,18 @@ class Step:
         input as a command with the network limited. A local copy (`./actions/egress`) is any
         repository's own action and is not taken for it."""
         return (self.action or "").lower() == EGRESS_ACTION
+
+    def scripts(self) -> str:
+        """Everything a step runs as a command line: `agent_text()` (the run script, a github-script
+        script and the command OBAAF's egress action runs) and a `docker://` step's `entrypoint` and
+        `args`, which GitHub hands to the container as its command."""
+        parts = [self.agent_text()]
+        if self.uses and self.uses.strip().lower().startswith("docker://"):
+            for key in ("entrypoint", "args"):
+                given = self.with_.get(key)
+                if isinstance(given, str):
+                    parts.append(given)
+        return "\n".join(p for p in parts if p)
 
     def agent_text(self) -> str:
         """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,
