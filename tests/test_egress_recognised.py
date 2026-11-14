@@ -514,7 +514,7 @@ def keyed(model_keys="ANTHROPIC_API_KEY", env_input=None, step_env=None, run="cl
 def secret_control(result):
     found = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
     assert len(found) == 1, [(f.rule, f.kind, f.message) for f in result.findings]
-    return next(c for c in found[0].controls if c.id == "egress-enforced")
+    return next(c for c in found[0].controls if c.id == "key-out-of-reach")
 
 
 class ModelKeysTest(unittest.TestCase):
@@ -1081,6 +1081,261 @@ def reading(spec):
     tree = ast.parse(text)
     return [ast.dump(node) for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name in ("parse_env_names", "parse_model_keys")]
+
+
+
+def secret_finding(result):
+    found = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
+    assert len(found) == 1, [(f.rule, f.kind, f.message) for f in result.findings]
+    return found[0]
+
+
+def key_control(result):
+    return next(c for c in secret_finding(result).controls if c.id == "key-out-of-reach")
+
+
+class KeyOutOfReachTest(unittest.TestCase):
+    """OBAAF-GHA-005's fifth control (flagship slice 2c.7): whether the agent's command can read the
+    job's secrets. A key the agent can read can leave in the job's log or an artifact whatever the
+    network allows, so only a key the command cannot read is out of that reach. Today the checker can
+    establish that for one arrangement only: OBAAF's egress action, at a listed commit, on the runner
+    it was tested on, with every secret of the job set in its step's env and named in `model-keys`
+    (or in neither input)."""
+
+    def key(self, steps, cat=None, config=None, **kw):
+        return key_control(run_check(workflow(steps, **kw), cat=cat, config=config))
+
+    def test_a_model_key_given_to_the_proxy_at_a_listed_commit_is_out_of_reach(self):
+        control = self.key(CHECKOUT + "\n" + keyed())
+        self.assertEqual(control.verdict, VERIFIED)
+        self.assertIn("the command can use a key the proxy holds and cannot read it", control.detail)
+        self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy", control.detail)
+        # What is still true of a key behind the proxy is said beside the verdict.
+        self.assertIn("The step's own process holds each key outside the sandbox", control.detail)
+        self.assertIn("by the words in their scripts", control.detail)
+        self.assertIn("what an accepted install's own scripts do", control.detail)
+        self.assertIn("make the provider act for it", control.detail)
+
+    def test_no_listed_commit_or_a_tag_is_cannot_tell(self):
+        control = self.key(keyed(), cat=checker.load())
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (none listed)", control.detail)
+        self.assertIn("goes to AWF's API proxy", control.detail)     # where the key goes, whatever the verdict
+        control = self.key(keyed(ref="v1"))
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("'v1', not a commit", control.detail)
+
+    def test_a_key_passed_to_the_command_is_not_met(self):
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        cases = {
+            "under env": keyed(model_keys=None, env_input="REVIEW_KEY", step_env=env),
+            "written into run": keyed(run="claude -p 'review' --key '${{ secrets.ANTHROPIC_API_KEY }}'"),
+            "written into run through env": keyed(run="claude -p 'review'\necho '${{ env.ANTHROPIC_API_KEY }}'"),
+        }
+        for name, steps in cases.items():
+            control = self.key(steps)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, NOT_MET)
+                self.assertIn("so the agent can read it", control.detail)
+                self.assertIn("log or an artifact whatever the network allows", control.detail)
+        # The egress control itself is still verified for the first: the network is limited (D-052).
+        f = egress(run_check(workflow(cases["under env"])))
+        self.assertEqual(verdict(f), VERIFIED)
+
+    def test_githubs_native_firewall_holds_no_key(self):
+        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
+        secret = secret_finding(result)
+        verdicts = {c.id: c.verdict for c in secret.controls}
+        self.assertEqual((verdicts["egress-enforced"], verdicts["key-out-of-reach"]), (VERIFIED, NOT_MET))
+        self.assertIn("GitHub's native egress firewall limits the network and holds no key",
+                      key_control(result).detail)
+        self.assertEqual(secret.state, "new")
+
+    def test_a_job_with_no_confined_command_is_not_met(self):
+        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        control = self.key(steps)
+        self.assertEqual(control.verdict, NOT_MET)
+        self.assertIn("no step of the job runs the agent's command behind a proxy", control.detail)
+        self.assertNotIn("native", control.detail)
+
+    def test_a_secret_anywhere_else_in_the_job_is_not_met(self):
+        cases = {
+            "another step": CHECKOUT + "\n      - run: ./deploy.sh\n        env: {T: '${{ secrets.DEPLOY_TOKEN }}'}\n"
+                            + keyed(),
+            "the job's env": dict(steps=keyed(step_env={}),
+                                  job_extra="    env: {ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}'}"),
+            "the workflow's env": dict(steps=keyed(step_env={}),
+                                       top="env: {ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}'}"),
+            "the job's if": dict(steps=keyed(), job_extra="    if: secrets.OTHER != ''"),
+        }
+        for name, case in cases.items():
+            control = self.key(**case) if isinstance(case, dict) else self.key(case)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, NOT_MET)
+                self.assertIn("outside the command the egress action confines", control.detail)
+
+    def test_a_secret_set_in_the_step_and_named_in_neither_input_is_out_of_reach(self):
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        control = self.key(keyed(model_keys=None, step_env=env))
+        self.assertEqual(control.verdict, VERIFIED)
+        self.assertIn("REVIEW_KEY (secrets.REVIEW_KEY) is named under neither env nor model-keys", control.detail)
+
+    def test_what_the_step_that_holds_the_key_could_load_is_cannot_tell(self):
+        """The action's own steps hold the key outside the sandbox. A BASH_ENV would be loaded by its
+        bash steps there (issue #139), and a process an earlier step leaves running runs as the same
+        user; the checker reads neither to the end."""
+        cases = {
+            "BASH_ENV in the job's env": dict(steps=keyed(), job_extra="    env: {BASH_ENV: ./setup.sh}"),
+            "bash_env in the step's env": dict(steps=keyed(step_env={
+                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "bash_env": "./x"})),
+            "BASH_ENV written by an earlier step": dict(
+                steps="      - run: echo \"BASH_ENV=$PWD/x\" >> \"$GITHUB_ENV\"\n" + keyed()),
+            "the job's env computed": dict(steps=keyed(), job_extra="    env: ${{ fromJSON(vars.ENV) }}"),
+            "a process left running": dict(steps="      - run: nohup ./server.sh\n" + keyed()),
+        }
+        for name, case in cases.items():
+            control = self.key(**case)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+        self.assertIn("issue #139", self.key(**cases["BASH_ENV in the job's env"]).detail)
+        self.assertIn("may leave a process running (nohup) as the same user",
+                      self.key(**cases["a process left running"]).detail)
+
+    def test_runners_the_proxy_was_not_tried_on_are_cannot_tell(self):
+        for kw in ({"runs_on": "ubuntu-latest"}, {"job_extra": "    container: node:20"}):
+            with self.subTest(**kw):
+                self.assertEqual(self.key(keyed(), **kw).verdict, CANNOT_TELL)
+
+    def test_awf_from_a_script_and_a_reusable_workflow_are_cannot_tell(self):
+        steps = ("      - run: sudo awf --allow-domains api.example.com -- claude -p review\n"
+                 "        env: {ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}'}")
+        self.assertEqual(self.key(steps).verdict, CANNOT_TELL)
+        text = ("on: workflow_dispatch\npermissions: {}\njobs:\n  agent:\n"
+                "    uses: ./.github/workflows/called.yml\n    secrets: {KEY: '${{ secrets.MODEL_API_KEY }}'}\n")
+        control = key_control(run_check(text))
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("reusable workflow", control.detail)
+
+    def test_a_name_the_action_refuses_is_not_met(self):
+        self.assertEqual(self.key(keyed(model_keys=None, env_input="ANTHROPIC_API_KEY")).verdict, NOT_MET)
+
+    def test_with_every_control_the_checker_reads_in_place_only_the_setting_is_left(self):
+        """The fifth control does not make OBAAF-GHA-005 clearable on its own: the environment's settings
+        are still not read by `obaaf check`, so the best it can be is "cannot tell"."""
+        config = {"lanes": {".github/workflows/agent.yml#agent": "agent"},
+                  "protected_secrets": {"*_API_KEY": "main-only"}}
+        result = run_check(workflow(CHECKOUT + "\n" + keyed(), job_extra="    environment: main-only"),
+                           config=config)
+        secret = secret_finding(result)
+        self.assertEqual({c.id: c.verdict for c in secret.controls},
+                         {"secrets-protected": VERIFIED, "environment-restricted": CANNOT_TELL,
+                          "no-outsider-input": VERIFIED, "egress-enforced": VERIFIED, "key-out-of-reach": VERIFIED})
+        self.assertEqual(secret.state, "cannot-tell")
+        self.assertIn("(it is cleared when all 5 are verified):", report.to_text(result))
+
+    def test_moving_a_key_behind_the_proxy_keeps_its_acceptance(self):
+        """Controls are not part of what a finding is, so a baseline entry that accepts OBAAF-GHA-005 on a
+        job matches before and after the job moves its key from the command to the proxy, and before and
+        after this control existed."""
+        env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"}
+        passed = secret_finding(run_check(workflow(keyed(model_keys=None, env_input=None, step_env=env,
+                                                        run="claude -p '${{ secrets.ANTHROPIC_API_KEY }}'"))))
+        proxied = secret_finding(run_check(workflow(keyed())))
+        self.assertEqual(baseline.key(passed), baseline.key(proxied))
+        self.assertNotIn("controls", baseline.identity(proxied))
+
+
+class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
+    """What can run before or beside the step that holds the key (found by the first review of 2c.7).
+    That step's own bash steps run outside the sandbox with the key in their environment, so an agent
+    outside the sandbox before it, a process left running, a parallel step, a service container or a
+    write to GITHUB_ENV or GITHUB_PATH could reach the key there."""
+
+    def key(self, steps, **kw):
+        return key_control(run_check(workflow(steps, **kw)))
+
+    def test_an_agent_outside_the_sandbox_before_or_beside_it_is_not_met(self):
+        cases = {
+            "an agent CLI before": "      - run: claude -p 'plan the change' > plan.txt\n" + keyed(run="cat plan.txt"),
+            "an agent action before": (f"      - uses: anthropics/claude-code-action@{SHA}\n        with: {{prompt: plan}}\n"
+                                       + keyed()),
+            "an agent in a parallel step": ("      - parallel:\n"
+                                            "          - run: claude -p 'review'\n"
+                                            + "\n".join("    " + line for line in keyed().splitlines())),
+        }
+        for name, steps in cases.items():
+            control = self.key(steps)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, NOT_MET, control.detail)
+                self.assertIn("outside the sandbox, before or beside the step that holds the key", control.detail)
+
+    def test_a_credential_any_step_could_use_is_not_met(self):
+        steps = "      - run: gh api user\n        env: {GH_TOKEN: '${{ github.token }}'}\n" + keyed()
+        self.assertEqual(self.key(steps).verdict, NOT_MET)
+        self.assertEqual(self.key(keyed(), permissions="{contents: read, models: read}").verdict, NOT_MET)
+        self.assertEqual(self.key(keyed(), permissions="{contents: read, id-token: write}").verdict, NOT_MET)
+        undeclared = workflow(keyed(), permissions=None).replace("permissions: {}\n", "")
+        self.assertEqual(key_control(run_check(undeclared)).verdict, CANNOT_TELL)
+
+    def test_an_unknown_agent_before_a_key_that_reaches_nothing_is_cannot_tell(self):
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        steps = "      - run: python agents/fix.py\n" + keyed(model_keys=None, step_env=env, run="make lint")
+        control = self.key(steps)
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("cannot tell where the agent runs", control.detail)
+
+    def test_what_runs_before_or_beside_it_is_read_for_each_step_that_holds_a_key(self):
+        decoy = action(run="true", step_id="decoy")
+        cases = {
+            "a process left running after a decoy use of the action": (
+                decoy + "\n      - run: nohup ./watch.sh &\n" + keyed()),
+            "the action at a branch before it": action(run="true", ref="main", step_id="decoy") + "\n" + keyed(),
+            "a parallel sibling": ("      - parallel:\n          - run: ./watch.sh\n"
+                                   + "\n".join("    " + line for line in keyed().splitlines())),
+            "a background step before it": "      - run: ./watch.sh\n        background: true\n" + keyed(),
+            "a step after one that runs in the background": (
+                keyed().replace("      - id: agent\n", "      - id: agent\n        background: true\n")
+                + "\n      - run: ./watch.sh"),
+            "GITHUB_PATH before it": "      - run: echo \"$HOME/bin\" >> \"$GITHUB_PATH\"\n" + keyed(),
+            "GITHUB_ENV before it": "      - run: echo \"LD_PRELOAD=$PWD/x.so\" >> \"$GITHUB_ENV\"\n" + keyed(),
+            "core.exportVariable before it": (f"      - uses: actions/github-script@{SHA}\n"
+                                              "        with: {script: \"core.exportVariable('X', '1')\"}\n" + keyed()),
+            "LD_PRELOAD in the job's env": dict(steps=keyed(), job_extra="    env: {LD_PRELOAD: ./x.so}"),
+            "PATH in the step's env": keyed(step_env={"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+                                                       "PATH": "./bin:/usr/bin"}),
+            "a service container with options": dict(
+                steps=keyed(), job_extra="    services:\n      helper:\n        image: someone/tool:latest\n"
+                                         "        options: --privileged --pid=host"),
+        }
+        for name, case in cases.items():
+            control = self.key(**case) if isinstance(case, dict) else self.key(case)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+
+    def test_an_accepted_install_does_not_count_as_an_agent_seen(self):
+        """Found by the second review: an install step that 2c.8 accepts switched the "no evidence" rule off."""
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        steps = (CHECKOUT + "\n      - run: sudo npm install -g @anthropic-ai/claude-code\n"
+                 "      - run: python agents/fix.py\n" + keyed(model_keys=None, step_env=env, run="make lint"))
+        control = self.key(steps)
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("cannot tell where the agent runs", control.detail)
+
+    def test_unsecure_workflow_commands_are_cannot_tell(self):
+        """Found by the second review: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step prints
+        (`::set-env name=BASH_ENV::...`) sets a variable for the step that holds the key."""
+        before = "      - run: gh issue view 1\n"
+        for kw in ({"steps": before + keyed(), "job_extra": "    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"},
+                   {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()}):
+            with self.subTest(**kw):
+                self.assertEqual(self.key(**kw).verdict, CANNOT_TELL)
+
+    def test_steps_after_it_cannot_reach_the_key(self):
+        """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
+        steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
+                          "      - run: nohup ./later.sh &"
+        self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
 
 
 if __name__ == "__main__":

@@ -91,7 +91,11 @@ class PinningSeverityTest(unittest.TestCase):
 class RunnerSelectorTest(unittest.TestCase):
     """OBAAF-GHA-013 is informational only for a mixed hosted/self-hosted runtime selector."""
 
-    MIXED = "${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}"
+    # Flagship slice 2d.2d: the selector that tests `head.repo.full_name` is the recognised form. The one
+    # issue #19 used, `head.repo.fork && 'ubuntu-latest' || 'self-hosted'`, sends a pull request whose fork
+    # was deleted (`head.repo` null) to the self-hosted runner, so it is now a medium "cannot tell".
+    MIXED = "${{ github.event.pull_request.head.repo.full_name == github.repository && 'self-hosted' || 'ubuntu-latest' }}"
+    FORK_TEST = "${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}"
 
     def _gha013(self, workflow):
         with TempDir() as tmp:
@@ -99,6 +103,9 @@ class RunnerSelectorTest(unittest.TestCase):
 
     def test_mixed_selector_on_untrusted_trigger_is_info(self):
         self.assertEqual(self._gha013(_job("pull_request", "{}", step=PINNED, runs_on=self.MIXED)), ["info"])
+
+    def test_the_fork_test_form_is_medium(self):
+        self.assertEqual(self._gha013(_job("pull_request", "{}", step=PINNED, runs_on=self.FORK_TEST)), ["medium"])
 
     def test_info_is_never_gated(self):
         with TempDir() as tmp:

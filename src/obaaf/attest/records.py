@@ -158,7 +158,7 @@ def approval_predicate(proposal_dir: str | Path, approvals: list[dict], environm
 
 
 # ------------------------------------------------------------------ build record
-HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[A-Za-z0-9.-]+$")
+HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[A-Za-z0-9.-]+\Z")     # `\Z`: `$` matches before a final line break
 
 
 def isolation_from_workflow(workflow_file: str | Path, job_id: str, declared_tier: str | None = None) -> dict:

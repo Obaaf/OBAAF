@@ -1,0 +1,13 @@
+# OBAAF's configuration for checking this repository with `obaaf check .`.
+# See docs/checker-configuration.md.
+ignore:
+  # The escape tests make a second checkout with actions/checkout's default on purpose: it is the
+  # fixture for the egress action's refusal of a workspace that keeps a token. The job's token can
+  # only read (`permissions: contents: read`), and the steps after it are the repository's own
+  # commands (accepted under plan slice 2d.2c, decision D-060).
+  - rule: OBAAF-GHA-011
+    path: .github/workflows/egress-escape-tests.yml
+    job: behaviour
+    owner: "@seanudeke"
+    reason: The kept token is the fixture for the egress action's refusal test; the token can only read, and only this repository's own steps follow it
+    until: 2027-05-14
