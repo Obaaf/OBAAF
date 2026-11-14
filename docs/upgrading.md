@@ -48,10 +48,12 @@ Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit 
 | A job that can read every secret (`secrets: inherit`, `toJSON(secrets)`, a computed name) | A new OBAAF-GHA-018, case `any-secret` (medium, high in a release job) | Pass only the secrets the job needs, by name |
 | An accepted OBAAF-GHA-001, 005 or 018 about secrets, on a job that declares an environment | The environment is now part of the finding, so the acceptance no longer names it | Accept it again; `obaaf baseline migrate` is not needed for this |
 | A `pull_request_target` job behind an environment named by an expression | OBAAF-GHA-001 is high, case `privileged`, where it was medium | Name the environment in plain text, with required reviewers |
+| A `CODEOWNERS` file, or an agent instruction file that is not a link, that cannot be read | An error for the file, exit status 1; `obaaf check` ended in a traceback, `--lanes` ended 0, and an unreadable instruction file was skipped (slice 2d.8) | Make the file readable, or remove it |
+| A step that runs `obaaf check --lanes` with an option `obaaf check` refuses (`--fail-on` with an unknown value, a missing `--baseline`, `--owner` without `--write-baseline`), or with `--write-baseline` or `--output` | Exit status 2 | Correct or drop the option |
 
 `obaaf audit` is in no release, so nothing about it can change for someone on 0.3.0. If you run it from a commit after 0.3.0: it now applies rules and ends with status 1 on a finding at medium or above (`--fail-on never` gives the old status), and `--format json` prints a report with the snapshot under `snapshot`, where it printed the snapshot; with `--expected`, the comparison is under `drift` in that report, where it printed a document of its own, `obaaf-settings-drift/v0.1` ([the settings audit](settings-audit.md)).
 
-The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycle of a finding", "A lane declaration that does nothing is a finding", "Controls", "Egress control", "Which events can start a job", "Inputs in any case", "The first run says what it did not read" and "What a job can reach: six rules attacked".
+The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycle of a finding", "A lane declaration that does nothing is a finding", "Controls", "Egress control", "Which events can start a job", "Inputs in any case", "The first run says what it did not read", "What a job can reach: six rules attacked" and "Files the checker could not read".
 
 ### What a script that reads the output will notice
 

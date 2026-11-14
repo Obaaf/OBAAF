@@ -2205,10 +2205,27 @@ def _line_digests(text: str, hidden: list) -> list[str]:
 
 
 # ------------------------------------------------------------------- repository
-def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> list[Finding]:
+def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, errors: list | None = None,
+                  notes: list | None = None) -> list[Finding]:
+    """The repository rules. A CODEOWNERS or instruction file that is there and cannot be read is
+    an error in `errors` (the check fails), never taken for missing or clean; a directory that
+    cannot be listed is a note in `notes`, because git cannot make a checked-out directory
+    unreadable, so only a local run meets one."""
     findings: list[Finding] = []
-    codeowners_path, rules = repo_checks.read_codeowners(root)
-    instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []))
+    errors = errors if errors is not None else []
+    unlisted: list = []
+    try:
+        codeowners_path, rules = repo_checks.read_codeowners(root)
+        unread = False
+    except repo_checks.UnreadableFile as exc:
+        errors.append(str(exc))
+        codeowners_path, rules, unread = exc.rel, [], True
+    instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []),
+                                                           unlisted)
+    if notes is not None and unlisted:
+        shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
+        notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
+                     "them were not looked for.")
 
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
         message, facts = compose(rule, kind, template, None, None, values)
@@ -2218,7 +2235,9 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
         """The message names the first five files and counts them all; every one is part of the finding."""
         return {"count": Note(str(len(paths))), "files": Fact(sorted(paths), ", ".join(paths[:5]))}
 
-    if codeowners_path is None:
+    if unread:
+        pass        # the error stands for both rules: who owns what cannot be read
+    elif codeowners_path is None:
         add("OBAAF-REPO-001", ".github/CODEOWNERS", 1, "The repository has no CODEOWNERS file.", kind="no-codeowners")
         if instruction_files:
             add("OBAAF-REPO-002", instruction_files[0], 1,
@@ -2237,7 +2256,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
     for rel in instruction_files:
         try:
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
+            errors.append(str(repo_checks.UnreadableFile(rel, exc)))
             continue
         hidden = repo_checks.scan_hidden(text)
         if hidden:
