@@ -257,7 +257,12 @@ rules:
       cannot tell whether they are self-hosted. An unresolved runtime expression explicitly
       mentioning both a standard hosted label and self-hosted alternatives is informational:
       it needs review, but does not prove an unsafe runner was selected. Literal matrices that
-      include a self-hosted pool still produce a high finding. If you verify the selector and
+      include a self-hosted pool still produce a high finding. `runs-on` written as one expression,
+      `matrix.x` or `matrix.x || 'label'`, is resolved from a matrix written out in the file, the
+      default counting wherever a row may lack the value; values of `x`, an `include` or an `include`
+      entry computed when the job runs, a key written in another case, a key that is not plain ASCII
+      text, a value YAML 1.2 could read as other than text, a merge key (`<<`) in the file, or any other
+      expression is not resolved. If you verify the selector and
       runner lifecycle, record the evidence in a job-scoped, expiring `ignore` entry (see the
       checker configuration guide). A declaration is not verification of runtime isolation.
     fix: >-

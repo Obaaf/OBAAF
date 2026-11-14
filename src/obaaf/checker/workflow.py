@@ -51,7 +51,14 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
 # Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
-HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
+# `\Z`, not `$`, which also matches before a line break at the end (found by the review of 2d.7).
+HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+\Z")
+# A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
+# reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
+_YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+                               r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+                               r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+                               r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)")
 # Step forms that hold no run or uses of their own (background steps, NGA features on GitHub.com).
 CONTROL_STEP_KEYS = {"wait", "wait-all", "cancel"}
 
@@ -556,32 +563,87 @@ class Job:
         return any(label == "self-hosted" or label.startswith("group:") for label in labels)
 
     def runner_label_sets(self) -> list[list[str]] | None:
-        """Each set of labels the job can run on, with `${{ matrix.x }}` resolved from a literal
-        matrix; None when a label comes from an expression that cannot be resolved."""
+        """Each set of labels the job can run on, with `${{ matrix.x }}` and `${{ matrix.x || 'label' }}`
+        resolved from a matrix written out in the file; None when a label comes from an expression that
+        cannot be resolved.
+
+        The expression is read from its tokens (flagship slice 2d.7, issue #141). For `matrix.x ||
+        'label'` the default is one of the labels wherever a row may lack `x` or give it a value that
+        is false to GitHub (an empty text): unless `x` is a key of the matrix with a list of values and
+        every `include` entry sets it, a row may lack it, because an `include` entry that cannot be added
+        to any combination makes a row of its own. So the sets can be more than the job runs on, never
+        fewer. The values of `x` computed when the job runs, an `include` or an `include` entry computed
+        when the job runs, a key written in another case (GitHub compares property names without
+        regard to case), a key that is not plain ASCII text with no expression, a value YAML 1.2 could
+        read as other than text, a YAML merge key (`<<`) anywhere in the file, or any other expression
+        leaves the labels unresolved."""
         labels = self.runs_on
         expr = [label for label in labels if "${{" in label]
         if not expr:
             return [labels] if labels else None
         if len(labels) != 1:
             return None
-        match = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}", labels[0].strip())
+        text = labels[0].strip()
+        if not (text.startswith(expr_mod.OPEN) and text.endswith("}}")):
+            return None
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or len(expr_mod.OPEN) + len(found[0]) + 2 != len(text):
+            return None
+        body = found[0]
+        toks = expr_mod.tokens(body)
+        if len(toks) < 3 or toks[0] != ("id", "matrix") or toks[1] != ("op", ".") or toks[2][0] != "id":
+            return None
+        name, rest = toks[2][1], toks[3:]
+        default = None
+        if rest:
+            # `|| 'label'`, and nothing else: the two bars written together, a closed string after them.
+            if (len(rest) != 3 or rest[:2] != [("op", "|"), ("op", "|")] or rest[2][0] != "str"
+                    or "||" not in body or not body.rstrip().endswith("'")):
+                return None
+            default = rest[2][1]
+        if self.workflow.has_merge_key:
+            return None         # a matrix read two ways (found by the second review of 2d.7)
         strategy = self.raw.get("strategy")
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-        if not match or not isinstance(matrix, dict):
+        if not isinstance(matrix, dict):
             return None
-        values = matrix.get(match.group(1))
-        include = matrix.get("include") if isinstance(matrix.get("include"), list) else []
-        extra = [i.get(match.group(1)) for i in include if isinstance(i, dict) and match.group(1) in i]
-        if not isinstance(values, list) and not extra:
+        include = matrix.get("include", [])
+        if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
             return None
-        out = []
-        for value in (values if isinstance(values, list) else []) + extra:
+        # Every key must be plain ASCII text with no expression, so that the checker's comparison is
+        # GitHub's: a key YAML reads as true or a number, one computed when the job runs, or one with a
+        # letter outside ASCII (whose case GitHub may fold otherwise) leaves the labels unresolved
+        # (found by the review of 2d.7).
+        keys = list(matrix) + [key for entry in include for key in entry]
+        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
+                                     for key in keys):
+            return None
+        if any(key != name and key.lower() == name.lower() for key in keys):
+            return None
+        if name in matrix and not isinstance(matrix[name], list):
+            return None
+        values = list(matrix.get(name) or [])
+        extra = [entry[name] for entry in include if name in entry]
+        if not values and not extra and default is None:
+            return None
+        out: list[list[str]] = []
+        falsy = False
+        for value in values + extra:
+            if isinstance(value, str) and _YAML12_SCALAR_RE.fullmatch(value):
+                return None     # text to this reader, and maybe a number or false to GitHub's (YAML 1.2)
             if isinstance(value, str) and "${{" not in value:
-                out.append([value])
+                if value == "" and default is not None:
+                    falsy = True        # `'' || 'label'` is the label
+                else:
+                    out.append([value])
             elif isinstance(value, list) and all(isinstance(v, str) and "${{" not in v for v in value):
                 out.append([str(v) for v in value])
             else:
                 return None
+        if default is not None:
+            may_lack = not (name in matrix and values and all(name in entry for entry in include))
+            if may_lack or falsy:
+                out.append([default])
         return out or None
 
     @property
@@ -724,6 +786,21 @@ class Workflow:
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list = field(default_factory=list)  # IdleDeclaration: declarations in the file that do nothing
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
+
+    @property
+    def has_merge_key(self) -> bool:
+        """Whether the file has a YAML merge key (`<<`) anywhere: this reader (YAML 1.1) merges it away,
+        and a YAML 1.2 reader takes it for a key of that name, so what a mapping holds is read two ways.
+        Read once, from the composed nodes; a file that cannot be composed counts as having one."""
+        cached = self.__dict__.get("_has_merge_key")
+        if cached is None:
+            from obaaf.checker.egress import _has_merge_key
+            try:
+                cached = _has_merge_key(self.text)
+            except Exception:       # a file the reader cannot compose: say yes, so nothing is resolved from it
+                cached = True
+            self.__dict__["_has_merge_key"] = cached
+        return cached
 
     @property
     def triggers(self) -> dict[str, Any]:
