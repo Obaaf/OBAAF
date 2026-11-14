@@ -192,6 +192,7 @@ magic = b"DOTNET_IPC_V1\0"
 # id and command line, and changes nothing.
 request = magic + struct.pack("<HBBH", 20, 0x04, 0x00, 0)
 answered = total = 0
+names = []
 for path in glob.glob("/tmp/dotnet-diagnostic-*"):
     total += 1
     try:
@@ -199,15 +200,29 @@ for path in glob.glob("/tmp/dotnet-diagnostic-*"):
         s.settimeout(3)
         s.connect(path)
         s.sendall(request)
-        if s.recv(64).startswith(magic):
-            answered += 1
+        reply = b""
+        while len(reply) < 4096:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            reply += chunk
+            if len(reply) >= 20 and len(reply) >= struct.unpack_from("<H", reply, 14)[0]:
+                break
         s.close()
-    except OSError:
+        if reply.startswith(magic):
+            answered += 1
+            # The payload: process id (8 bytes), runtime cookie (16), then the
+            # command line as a length (4, in UTF-16 units) and UTF-16 text.
+            # Only the program's name is kept, for the record.
+            units = struct.unpack_from("<I", reply, 20 + 24)[0]
+            line = reply[48:48 + 2 * units].decode("utf-16-le", errors="replace").rstrip("\0")
+            names.append((line.split() or ["?"])[0].rsplit("/", 1)[-1][:40])
+    except (OSError, struct.error):
         pass
-print(answered, total)
+print(answered, total, ",".join(sorted(names)) or "-")
 PY
 )"
-note "RESULT dotnet-diagnostics ${diag:-? ?}"
+note "RESULT dotnet-diagnostics ${diag:-? ? -}"
 
 # --- must not reach a later step: links, pipes and sockets in the copy (slice 2c.6) --
 # A later step reads or uploads the scratch directory with the runner's full

@@ -386,6 +386,8 @@ def judge(args: argparse.Namespace) -> int:
             ", ".join(planted_ok) or "none",
         "entries the action deleted from the scratch directory (its removed output)":
             args.removed or "none",
+        "programs whose .NET diagnostic socket answered outside the sandbox (answered, total, names)":
+            " ".join(out_results.get("dotnet-diagnostics", ["not run"])),
     }
 
     facts = []
