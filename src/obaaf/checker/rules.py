@@ -888,7 +888,13 @@ class WorkflowRules:
                 found = self._credentials(value)
                 if not found:
                     continue
-                name = str(name)
+                if not isinstance(name, str):
+                    # `true:` or `1:` is not text to this reader; what GitHub names the variable is not
+                    # established. Found by the second review: `true` was compared as "True".
+                    place.unsure.append(f"{where} sets a variable whose name is not written as text "
+                                        f"({one_line(str(name), 40)}) to {self._names(found)}, and what GitHub "
+                                        "names it is not established")
+                    continue
                 held[name] = found
                 same = folded[name.upper()]
                 if len(same) > 1 and name.upper() not in said:
@@ -902,9 +908,9 @@ class WorkflowRules:
                 place.unsure.append(f"{where} computes its env when the job runs, with {self._names(found)}, so the "
                                     "checker cannot tell which variables hold them")
         # The inputs. Only `run` reaches the command, as its text, with what it writes in from `secrets`,
-        # `github.token` or the step's env (the env context's names are not case sensitive); a
-        # credential in any other input is not placed (an allow-list or a list of names computed from
-        # one is reported above).
+        # `github.token` or the step's env (names matched without regard to case, which covers an exact
+        # match however GitHub compares them); a credential in any other input is not placed. An
+        # allow-list or a list of names computed from one is reported above as computed.
         through_run: set = set()
         if isinstance(given, dict):
             for name, value in given.items():
@@ -920,7 +926,8 @@ class WorkflowRules:
                     if everything and held:
                         place.unsure.append(f"{where} writes the whole env context, or a part of it the checker "
                                             "cannot name, into its run input")
-                elif found or via:
+                elif (found or via) and not (input_name(name) in ("allow", "env", "model-keys")
+                                             and isinstance(value, str) and expr_mod.OPEN in value):
                     shown = found + [f"env.{env}" for env in via]
                     place.unsure.append(f"{where} gives {self._names(shown)} in its {one_line(name, 40)} input, "
                                         "which the action does not pass on as a variable")
@@ -990,14 +997,14 @@ class WorkflowRules:
         reads as more: the listed hosts and what they can be made to do, names under them, the provider
         behind each model key, and the job's log and artifacts."""
         passed = [cred for place in placements for _how, found in place.command for cred in found]
-        keys = sorted({name for place in placements for name, _found in place.proxy})
         hosts = sorted({host for place in placements for host in place.hosts})
+        keys = sorted(name for name, host in egress_mod.MODEL_KEYS.items() if host in hosts)
         parts = ["anything the confined command sends to a listed host"
                  + (f", the credentials passed to it included ({self._names(passed)}), with which a listed host "
                     "can be made to act for it" if passed else ""),
                  "data in a name under a listed name, which leaves the runner in a DNS query to that name's DNS servers"]
         if hosts:
-            given = f"with {', '.join(keys)} given to AWF's API proxy" if keys else "through AWF's API proxy"
+            given = f"with {', '.join(keys)} given to AWF's API proxy"
             parts.append(f"{given}: anything the command sends {' or '.join(hosts)} through the proxy, and whatever "
                          "the provider is asked to fetch or connect to for it (remote MCP servers, URLs); the proxy "
                          "refuses the providers' hosted web search and fetch tools, in the requests it can read, and "

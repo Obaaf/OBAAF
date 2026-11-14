@@ -596,6 +596,19 @@ class ModelKeysTest(unittest.TestCase):
         control = secret_control(run_check(workflow(keyed(model_keys="GEMINI_API_KEY"))))
         self.assertIn("the action would refuse to run", control.detail)
 
+    def test_a_name_not_written_as_text_is_cannot_tell(self):
+        """Found by the second review: `true:` was read as a boolean and compared as "True"."""
+        steps = keyed(model_keys=None, step_env={}, env_input="'true'").replace(
+            "        with:", "        env:\n          true: ${{ secrets.X }}\n        with:")
+        f = self.check(steps)
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("not written as text", detail(f))
+
+    def test_a_key_written_into_run_is_still_named_beside_the_provider(self):
+        run = "claude -p 'review'\necho '${{ env.ANTHROPIC_API_KEY }}'"
+        f = self.check(keyed(run=run))
+        self.assertIn("with ANTHROPIC_API_KEY given to AWF's API proxy", detail(f))
+
     def test_long_lists_say_how_many_more(self):
         env = {f"K{n}": f"${{{{ secrets.K{n} }}}}" for n in range(5)}
         f = self.check(keyed(model_keys=None, step_env=env, env_input=",".join(env)))
@@ -926,7 +939,31 @@ def lists_differ(sha):
             return f"its {name} is not the checker's"
     if getattr(getattr(module, "_NAME_RE", None), "pattern", None) != egress_mod.NAME_RE.pattern:
         return "its _NAME_RE is not the checker's"
+    # How it reads the two inputs, and which inputs it has, against the floor: a change there means the
+    # checker must be looked at again before the commit is listed (found by the second review).
+    for what, mine, floor in ((f"{sha}:actions/egress/egress.py", None, f"{FLOOR}:actions/egress/egress.py"),
+                              (f"{sha}:actions/egress/action.yml", None, f"{FLOOR}:actions/egress/action.yml")):
+        if reading(what) != reading(floor):
+            return f"{what.split(':', 1)[1]} reads its inputs differently from the floor's"
     return ""
+
+
+def reading(spec):
+    """What decides how the action reads `env` and `model-keys` in one file at one commit: the two
+    parsing functions of egress.py, as syntax trees, or the input names of action.yml."""
+    import ast
+    import subprocess
+    import yaml
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shown = subprocess.run(["git", "-C", root, "show", spec], capture_output=True, timeout=30)
+    if shown.returncode != 0:
+        return None
+    text = shown.stdout.decode("utf-8")
+    if spec.endswith(".yml"):
+        return sorted((yaml.safe_load(text) or {}).get("inputs", {}))
+    tree = ast.parse(text)
+    return [ast.dump(node) for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in ("parse_env_names", "parse_model_keys")]
 
 
 if __name__ == "__main__":
