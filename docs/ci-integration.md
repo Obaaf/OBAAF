@@ -25,7 +25,7 @@ Decide pass or fail from the exit status, not from the report's wording, which c
 | 1 | A finding at or above `--fail-on` is not accepted; or a baseline entry at or above it no longer matches a finding; or a file could not be read (whatever `--fail-on` says, `never` included) |
 | 2 | The command could not run: an option, the configuration or a baseline is wrong, or there is nothing to check |
 
-[From a report to a gate](from-report-to-gate.md) gives the full table and the path from reading the report to failing a build. `obaaf check . --lanes` is the exception: it lists and judges nothing.
+[From a report to a gate](from-report-to-gate.md) gives the full table and the path from reading the report to failing a build. `obaaf check . --lanes` is the exception: it lists and judges nothing, so a finding never changes its status, but a file `obaaf check` would report as an error is still 1 and a path with no workflow or Jenkinsfile is still 2.
 
 Choose the format with `--format`, after `check` (`obaaf --format json` is a usage error, status 2), and write the report to a file with `--output FILE`:
 
