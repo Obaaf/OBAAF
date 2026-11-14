@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install obaaf 0.3.0 and check one workflow file. A recorded low finding, then a pin, with exits 1 and 0. A local exit does not set a merge gate.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Try OBAAF 0.3.0</title>
+  <link rel="canonical" href="https://obaaf.github.io/OBAAF/quickstart.html">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<p class="draft"><span class="draft-dot"></span>THIS CHECKOUT IS 0.4.0.dev0 AT a583a7b. A SENTENCE ABOUT RELEASE 0.3.0 SAYS SO.</p>
+<header class="header wrap">
+  <a class="brand" href="index.html">OBAAF</a>
+  <nav aria-label="Pages"><a href="index.html">Home</a> <a href="quickstart.html" aria-current="page">Quickstart</a> <a href="rules.html">Rules</a> <a href="comparison.html">Comparison</a> <a href="case-study.html">Case study</a> <a href="papers.html">Papers</a></nav>
+</header>
+<main id="main" class="section wrap">
+
+<p class="section-label">Try release 0.3.0</p>
+<h1>Install it, then check one file.</h1>
+<p class="large">Python 3.10 or later. Installation downloads packages. The check reads a file on the machine and does not edit it. No action is run. Nothing here is a claim about how long a person takes.</p>
+<pre><code>python -m pip install obaaf==0.3.0
+obaaf --version
+obaaf check unpinned.yml --fail-on low
+obaaf check pinned.yml --fail-on low</code></pre>
+<p>Checked on 2026-11-14 at 04:24 UTC using the obaaf 0.3.0 installed from PyPI earlier in this session. <code>obaaf --version</code> printed <code>obaaf 0.3.0</code>. The first command exited 1. The second exited 0. This session did not re-run the check at a medium threshold. The website truth table records that a medium threshold would not fail this low finding.</p>
+<h2>The finding</h2>
+<pre><code>unpinned.yml
+     9  LOW    OBAAF-GHA-008  Action or container not pinned to a full digest  [job build]
+        Action 'actions/checkout@v6.0.0' is pinned to 'v6.0.0', not a full commit SHA.
+        Requirement: G2.1, R6
+        Fix: Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot propose updates to the pin.
+
+1 workflow file(s) checked.
+Authority findings: 0 high, 0 medium, 0 low.
+Hygiene findings: 0 high, 0 medium, 1 low.</code></pre>
+<p>The pinned file, the same workflow with <code>actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3</code> in place of the tag, printed no findings. Pinning selects a revision. It does not prove that revision is safe. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. This session did not resolve the tag. The SHA is the one recorded for that example.</p>
+<h2>The two files</h2>
+<div class="section-grid">
+<pre><code>name: pin
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.0
+        with:
+          persist-credentials: false</code></pre>
+<pre><code>name: pin
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          persist-credentials: false</code></pre>
+</div>
+<p class="caption">Written for this check to the shape recorded in the website truth table: <code>on: push</code>, top-level <code>contents: read</code>, <code>persist-credentials: false</code>, and one action. They are not a byte copy of an earlier session's unpublished files. The finding was on line 9.</p>
+<h2>A gate is a repository setting</h2>
+<p>The exit status does not configure a merge gate. A person can require a status check. That is a setting in the repository, and this page did not create one. A local exit is not a hosted run. Prepared YAML is not a workflow that GitHub executed.</p>
+<p>There is no <code>obaaf init</code> in release 0.3.0, and this page does not invent one. Companion scanners are named on the <a href="comparison.html">comparison</a> page. Setting them up is separate work.</p>
+<p>The same two files, read by obaaf 0.4.0.dev0 at <code>a583a7b</code>, also exited 1 and then 0. That report adds lines the 0.3.0 report does not have, including "Accepted risk: none" and a count of other findings. Those lines are not part of release 0.3.0. An acceptance with an owner, a reason and an expiry is development only.</p>
+<p>An older hosted demonstration, using OBAAF 0.1, rated this class of finding medium. Those runs were not fetched again. <a href="https://github.com/Obaaf/OBAAF/blob/a583a7bbba0531ffd9e9565fb21e1fe89a20d815/docs/checker-demonstration.md">The demonstration record</a>.</p>
+
+</main>
+<footer class="wrap">
+  <div><strong>OBAAF</strong><p>Sean led the research. Ofonna handled implementation, testing, and GitHub integration, with Sean contributing across the project.</p></div>
+  <div><p>Code is Apache-2.0. Documentation is CC BY 4.0. This checkout also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/a583a7bbba0531ffd9e9565fb21e1fe89a20d815/LICENSING.md">Licensing</a>.</p></div>
+</footer>
+</body>
+</html>
