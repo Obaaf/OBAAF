@@ -526,15 +526,16 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         findings.extend(result.findings)
         agent_lane_present = agent_lane_present or result.agent_present
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
+    repo_notes: list[str] = []
     if is_repo:
-        findings.extend(rules_mod.repo_findings(root, rels, catalog))
+        findings.extend(rules_mod.repo_findings(root, rels, catalog, errors, repo_notes))
     # A lane declaration that does nothing is a finding like any other: it can fail the check, be
     # fixed by correcting it, or be accepted by an ignore or baseline entry.
     findings.extend(declared.findings(catalog))
     today = today or date.today()
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
-    notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+    notes = repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -846,5 +847,9 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                 notes.append(f"{wf_mod.one_line(rel, 120)}: part of the pipeline was not analyzed, so a stage in "
                              f"it may be missing from this list ({wf_mod.one_line('; '.join(general))})")
         out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
+    if is_repo:
+        # A CODEOWNERS or instruction file `check` could not read is an error there, so it is here too
+        # (slice 2d.8); the repository rules are run only to find it.
+        rules_mod.repo_findings(root, [], catalog, errors, notes)
     notes.extend(declared.notes(catalog))
     return out

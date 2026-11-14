@@ -107,29 +107,6 @@ def cmd_check(args) -> int:
     if not target.exists():
         print(f"error: {target} not found", file=sys.stderr)
         return EXIT_USAGE
-    if args.lanes:
-        # The command a team runs to confirm every agent job is seen: a file it could not read, or a
-        # path with nothing to list, must not end 0 in silence (slice 3.2a).
-        from obaaf.checker.workflow import one_line
-        notes: list[str] = []
-        errors: list[str] = []
-        seen: list[str] = []
-        rows = checker.lanes(target, config, platform=args.platform, notes=notes, errors=errors, seen=seen)
-        if not seen:
-            print(_nothing_checked(target, args.platform), file=sys.stderr)
-            return EXIT_USAGE
-        for wf, job, lane, reason in rows:
-            # One line per job, whatever a job or step is called.
-            print(f"{one_line(wf)}#{one_line(job)}: {lane} ({one_line(reason)})")
-        for note in notes:
-            print(f"note: {note}", file=sys.stderr)
-        for error in errors:
-            print(f"error: {one_line(error)}", file=sys.stderr)
-        if errors:
-            print(f"error: {len(errors)} problem(s) above, on which obaaf check fails too; a file that could not be "
-                  "read or parsed has none of its jobs listed.", file=sys.stderr)
-            return EXIT_FAIL
-        return EXIT_OK
     try:
         checker.parse_fail_on(args.fail_on)
     except ValueError as exc:
@@ -151,6 +128,31 @@ def cmd_check(args) -> int:
     except baseline_mod.BaselineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.lanes:
+        # The command a team runs to confirm every agent job is seen: a file it could not read, or a
+        # path with nothing to list, must not end 0 in silence (slice 3.2a). The gate's options are
+        # checked first, as `obaaf check` checks them, so a step that passes them does not end 0 on
+        # one `obaaf check` refuses (slice 2d.8).
+        from obaaf.checker.workflow import one_line
+        notes: list[str] = []
+        errors: list[str] = []
+        seen: list[str] = []
+        rows = checker.lanes(target, config, platform=args.platform, notes=notes, errors=errors, seen=seen)
+        if not seen:
+            print(_nothing_checked(target, args.platform), file=sys.stderr)
+            return EXIT_USAGE
+        for wf, job, lane, reason in rows:
+            # One line per job, whatever a job or step is called.
+            print(f"{one_line(wf)}#{one_line(job)}: {lane} ({one_line(reason)})")
+        for note in notes:
+            print(f"note: {note}", file=sys.stderr)
+        for error in errors:
+            print(f"error: {one_line(error)}", file=sys.stderr)
+        if errors:
+            print(f"error: {len(errors)} problem(s) above, on which obaaf check fails too; a file that could not be "
+                  "read or parsed has none of its jobs listed.", file=sys.stderr)
+            return EXIT_FAIL
+        return EXIT_OK
     if args.write_baseline and Path(args.write_baseline).is_file():
         # Entries of the file being replaced that are still valid keep their own owner, reason
         # and expiry date; writing a baseline never renews an acceptance behind its owner's back.
