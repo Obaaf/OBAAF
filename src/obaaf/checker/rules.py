@@ -18,7 +18,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    scalar_environment_match, shown_value, upload_readings, value_identity,
+    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -183,6 +183,53 @@ TOJSON_UNTRUSTED_RE = re.compile(rf"tojson\s*\(\s*(github|github\.event|github\.
 def _bypasses_failure(raw) -> bool:
     """Whether an `if:` lets a step or job run after an earlier failure."""
     return isinstance(raw, dict) and runs_after_failure(raw.get("if", ""))
+
+
+def _continues_on_error(raw) -> bool:
+    """Whether a job's or step's `continue-on-error` may be true: anything but absent or false."""
+    value = raw.get("continue-on-error") if isinstance(raw, dict) else None
+    return value not in (None, False) and "".join(as_text(value).split()).lower() not in ("false", "${{false}}")
+
+
+# Expressions whose value cannot hold shell syntax: numbers, commit hashes, names GitHub restricts to
+# letters, digits, `-`, `_` and `.`, and runner paths (flagship slice 2d.2e).
+_SHELL_SAFE_EXPRESSIONS = frozenset({
+    "github.sha", "github.run_id", "github.run_number", "github.run_attempt", "github.repository",
+    "github.repository_owner", "github.repository_id", "github.workspace", "github.job", "github.server_url",
+    "github.api_url", "runner.temp", "runner.os", "runner.arch", "runner.tool_cache", "github.event.number",
+    "github.event.workflow_run.id", "github.event.workflow_run.head_sha", "github.event.workflow_run.run_number",
+    "github.event.pull_request.number", "github.event.release.id",
+})
+
+
+def _expressions_for_shell(script: str) -> str:
+    """A script as bash will read it, as far as the checker can tell (flagship slice 2d.2e). GitHub puts
+    an expression's value into the script before the shell reads it, so a value can add shell syntax:
+    a text written in the expression (`${{ '|| true' }}`) is put in as it is, an expression whose value
+    cannot hold shell syntax becomes one plain word, and any other is marked as unknown, which ends what
+    the reader counts."""
+    def put(expression: str) -> str:
+        body = expression[3:-2].strip()
+        if "".join(body.split()).lower() in _SHELL_SAFE_EXPRESSIONS:
+            return "OBAAF_EXPRESSION"
+        text = re.fullmatch(r"'((?:[^']|'')*)'", body)
+        if text:
+            return text.group(1).replace("''", "'")
+        if re.fullmatch(r"[0-9]{1,9}|true|false", body, re.I):
+            return body.lower()
+        return UNKNOWN_EXPRESSION
+    return _sub_expressions(script, put)
+
+
+def _strip_comment_text(line: str) -> str:
+    from obaaf.checker.workflow import _strip_comment
+    return _strip_comment(line)
+
+
+# Actions that restore a GitHub Actions cache whatever their inputs, or that hand the cache service's
+# token to the steps after them (flagship slice 2d.2e).
+_ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
+                  "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
 
 class WorkflowRules:
@@ -2355,6 +2402,24 @@ class WorkflowRules:
         written = job.raw.get("environment")
         return written.get("name") if isinstance(written, dict) else written
 
+    def _publishing_capabilities(self, job: Job) -> list[str]:
+        """What a job holds that publishing needs: `packages: write`, a step that uses an action listed
+        under `publishing_actions`, a secret whose name says it publishes. `id-token: write` alone is not
+        counted: OBAAF's own templates use it to sign and attest, which is what a repository should do,
+        and OBAAF-GHA-004 reports it for an agent job."""
+        capabilities = []
+        permissions = job.permissions
+        if permissions is not None and permissions.level("packages") == "write":
+            capabilities.append("packages: write")
+        for step in job.steps:
+            action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
+            if action:
+                capabilities.append(f"uses {step.action}")
+        patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
+        capabilities += [f"secret {name}" for name in sorted(job.secret_names())
+                         if not name.startswith("*") and any(rx.search(name) for rx in patterns)]
+        return capabilities
+
     def release_capability(self, job: Job) -> None:
         """OBAAF-GHA-015 for a job nothing marks a release job, but that untrusted input can start and
         that holds what publishing needs: `packages: write`, a secret whose name says it publishes, an
@@ -2367,19 +2432,7 @@ class WorkflowRules:
         bad = triggers & UNTRUSTED_TRIGGERS
         if not bad:
             return
-        capabilities = []
-        # `id-token: write` alone is not counted: OBAAF's own templates use it to sign and attest, which
-        # is what a repository should do, and OBAAF-GHA-004 reports it for an agent job.
-        permissions = job.permissions
-        if permissions is not None and permissions.level("packages") == "write":
-            capabilities.append("packages: write")
-        for step in job.steps:
-            action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
-            if action:
-                capabilities.append(f"uses {step.action}")
-        patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
-        capabilities += [f"secret {name}" for name in sorted(job.secret_names())
-                         if not name.startswith("*") and any(rx.search(name) for rx in patterns)]
+        capabilities = self._publishing_capabilities(job)
         kind_, _written = job.environment_reading
         if kind_ in ("expression", "scalar", "unreadable") and not job.environment_candidates()[1]:
             capabilities.append("an environment whose name the checker cannot read")
@@ -2433,84 +2486,289 @@ class WorkflowRules:
                          "Release job '{job}' can be started by {triggers}; it is a release job because it "
                          "{reason}.", job, **values)
 
+        # Flagship slice 2d.2e. What decides a cache finding: the steps that may restore one, named by
+        # their written name and what restores (the action without its ref, or the command), and the
+        # cache-mode as written. A cache-mode forbids restores only when it is exactly `none` or
+        # `write-only`; a value in another case, an expression or a null at the job is read as not set.
         cache_steps = [s for s in job.steps if self._restores_cache(s)]
         mode = job.cache_mode
+        forbids = mode in ("none", "write-only")
         hosted_note = (" This job also runs on a self-hosted runner, where local caches (such as an engine's "
                        "derived-data cache) are outside what this check can see.") if job.self_hosted else ""
         runner = "-self-hosted" if job.self_hosted else ""
-        if cache_steps and mode not in ("none", "write-only"):
+        if cache_steps and not forbids:
             names = ", ".join(f"'{s.name}'" for s in cache_steps)
             self.add("OBAAF-GHA-006", cache_steps[0].line,
                      "Release job '{job}' restores caches in {steps} and its cache-mode is "
                      "{mode}." + hosted_note, job, cache_steps[0], kind="restores" + runner,
-                     steps=Fact([s.name for s in cache_steps], names), mode=Fact(mode or "", mode or 'not set'))
-        elif not cache_steps and mode != "none":
+                     steps=Fact([self._cache_step(s) for s in cache_steps], names),
+                     mode=Fact(mode or "", mode or 'not set'))
+        elif not cache_steps and not forbids:
             self.add("OBAAF-GHA-006", job.line,
                      "Release job '{job}' does not set cache-mode: none, so a cache step added later would "
                      "read caches other workflows wrote." + hosted_note, job, severity="low",
                      kind="no-cache-mode" + runner)
+        feeding = self._jobs_feeding(job)
+        if feeding:
+            self.add("OBAAF-GHA-006", job.line,
+                     "Release job '{job}' downloads artifacts and needs {jobs}, which restore caches and whose "
+                     "cache-mode does not forbid it, so a poisoned cache entry can reach what it releases.",
+                     job, kind="needed-job-restores", jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
 
         uploads = job.upload_steps(self.detection)
+        releasing = Fact([self._release_step(s) for s in uploads], "")
+        state = self._environment_state(job)
+        # Flagship slice 2d.2e: a release job with no upload the lists know is reported when it holds what
+        # publishing needs, so a publish the lists miss (`mvn deploy`, a script) is still held to this rule.
+        holds = [] if uploads else self._publishing_capabilities(job)
+        if state != "set" and (uploads or holds):
+            first = uploads[0] if uploads else None
+            line = first.line if first else job.line
+            extra = {} if uploads else {"capabilities": holds, "reason": job.reason_for("release")}
+            doing = ("uploads in '{step}'" if uploads else
+                     "holds what publishing needs ({capabilities}; in the release lane: {reason})")
+            if state == "none":
+                self.add("OBAAF-GHA-014", line, "Release job '{job}' " + doing + " without a protected environment.",
+                         job, first, kind="" if uploads else "capability", steps=releasing, **extra)
+            else:
+                said = {"blank": "a name that is blank", "open": "an expression that can be blank or name an "
+                        "environment the checker cannot list", "unreadable": "a value that is not a name"}[state]
+                self.add("OBAAF-GHA-014", line,
+                         "Release job '{job}' " + doing + ", and its environment is written as " + said + ", so the "
+                         "checker cannot tell whether a protected environment holds it back.",
+                         job, first, kind=state + ("" if uploads else "-capability"), steps=releasing,
+                         environment=Fact(value_identity(self._environment_written(job)), ""), **extra)
+
         if uploads:
-            if not job.environment:
-                self.add("OBAAF-GHA-014", job.line,
-                         "Release job '{job}' uploads in '{step}' without a protected environment.",
-                         job, uploads[0])
-            first = uploads[0]
-            kinds = set()
-            if not _bypasses_failure(first.raw):
-                kinds |= {self._verify_kind(s) for s in job.steps[: first.index]
-                          if not (s.group is None and s.background) and not (s.group and s.group == first.group)}
-            kinds |= self._needs_gate(job, lambda dep: {self._verify_kind(s) for s in dep.steps})
-            kinds.discard(None)
-            if "full" not in kinds:
-                if "provenance" in kinds:
-                    self.add("OBAAF-GHA-016", first.line,
-                             "Step '{step}' uploads after a provenance check only; approvals and agent "
-                             "records are not checked (use obaaf verify release).", job, first, severity="medium",
-                             kind="provenance-only")
-                else:
-                    self.add("OBAAF-GHA-016", first.line,
-                             "Step '{step}' uploads without an earlier check that stops it when "
-                             "verification fails.", job, first, kind="unchecked")
+            checked = self._upload_checks(job, uploads)
+            unchecked = [s for s, k in checked if k is None]
+            partial = [s for s, k in checked if k == "provenance"]
+            unvouched = self._unvouched_checks(job, unchecked[0]) if unchecked else []
+            if unchecked and unvouched:
+                self.add("OBAAF-GHA-016", unchecked[0].line,
+                         "Step '{step}' uploads after a check the checker cannot vouch for: {checks} names "
+                         "`obaaf verify release` or another check, but not on a line of its own in a bash step "
+                         "that stops when it fails, or after a line the checker does not read. Write the check "
+                         "that way, or accept this finding and say why the check stops the upload.", job,
+                         unchecked[0], kind="cannot-tell", steps=Fact([self._release_step(s) for s in unchecked], ""),
+                         checks=Fact(unvouched, ", ".join(f"'{c}'" for c in unvouched[:3])))
+            elif unchecked:
+                self.add("OBAAF-GHA-016", unchecked[0].line,
+                         "Step '{step}' uploads without an earlier check that stops it when "
+                         "verification fails.", job, unchecked[0], kind="unchecked",
+                         steps=Fact([self._release_step(s) for s in unchecked], ""))
+            elif partial:
+                self.add("OBAAF-GHA-016", partial[0].line,
+                         "Step '{step}' uploads after a provenance check only; approvals and agent "
+                         "records are not checked (use obaaf verify release).", job, partial[0], severity="medium",
+                         kind="provenance-only", steps=Fact([self._release_step(s) for s in partial], ""))
+
+    # Flagship slice 2d.2e: which checks stop a step when they fail.
+    _GITHUB_SHELLS = {"bash": (True, True), "sh": (True, False), "bash -e {0}": (True, False),
+                      "bash --noprofile --norc -eo pipefail {0}": (True, True), "sh -e {0}": (True, False)}
+    _NOT_A_CHECK = frozenset({"-h", "--help", "--version"})
+
+    def _failfast_shell(self, job: Job, step: Step) -> tuple[bool, bool] | None:
+        """(errexit, pipefail) for the shell a `run` step's script runs in, or None when it is not a
+        POSIX shell the checker reads: PowerShell, cmd, Python, an expression, a login or interactive
+        shell (it reads files an earlier step can write), an option it does not know, or the default
+        shell of a runner it cannot show is Linux or macOS (on Windows the default is PowerShell)."""
+        shell = step.raw.get("shell")
+        for scope in (job.raw, self.wf.raw):
+            if shell is not None:
+                break
+            defaults = scope.get("defaults")
+            run = defaults.get("run") if isinstance(defaults, dict) else None
+            shell = run.get("shell") if isinstance(run, dict) else None
+        if shell is None:
+            sets = job.runner_label_sets()
+            if not sets:
+                return None
+            for labels in sets:
+                names = [str(label).strip().lower() for label in labels]
+                if any("windows" in name for name in names):
+                    return None
+                if not (all(is_hosted_label(name) for name in names)
+                        or any(name in ("linux", "macos") for name in names)):
+                    return None
+            return (True, False)
+        if not isinstance(shell, str) or "${{" in shell:
+            return None
+        text = " ".join(shell.split())
+        if text in self._GITHUB_SHELLS:
+            return self._GITHUB_SHELLS[text]
+        words = text.split()
+        if len(words) < 2 or words[-1] != "{0}" or words[0].rsplit("/", 1)[-1] not in ("bash", "sh"):
+            return None
+        errexit = pipefail = False
+        options = words[1:-1]
+        i = 0
+        while i < len(options):
+            word = options[i]
+            if word in ("--noprofile", "--norc"):
+                i += 1
+                continue
+            # Only options known to change nothing but errexit, pipefail, unset variables and tracing.
+            if not re.fullmatch(r"-[euxo]+", word):
+                return None
+            on = word[0] == "-"
+            if "e" in word[1:]:
+                errexit = on
+            if "o" in word[1:]:
+                if i + 1 >= len(options) or options[i + 1] not in ("errexit", "pipefail", "nounset", "xtrace"):
+                    return None
+                if options[i + 1] == "errexit":
+                    errexit = on
+                elif options[i + 1] == "pipefail":
+                    pipefail = on
+                i += 1
+            i += 1
+        return (errexit, pipefail)
 
     @staticmethod
-    def _binding_matches(step: Step, patterns: list[str]) -> list[re.Match]:
-        """Matches of `patterns` in the step's script that stop the job when the command fails: not
-        ignored with `|| …`, sent to the background, `set +e`, `continue-on-error` or a condition."""
+    def _step_runs_on_success(step: Step) -> bool:
+        """Whether a step runs exactly when the steps before it succeeded, and fails the job when it
+        fails: no `continue-on-error` that may be true, and no `if:` other than `success()` or `true`."""
         coe = step.raw.get("continue-on-error")
-        if coe not in (None, False) and str(coe).strip().lower() != "false":
+        if coe not in (None, False) and "".join(as_text(coe).split()).lower() not in ("false", "${{false}}"):
+            return False
+        cond = "".join(as_text(step.raw.get("if", "")).split()).lower()
+        return cond in ("", "success()", "${{success()}}", "true", "${{true}}")
+
+    def _binding_matches(self, job: Job, step: Step, patterns: list[str]) -> list[list[str]]:
+        """The commands of a `run` step that match one of `patterns` at their start and whose failure
+        stops the job (flagship slice 2d.2e): the step runs on success only, its shell stops on a failing
+        command, `BASH_ENV` is not set, and the command is one `binding_commands` counts. A command given
+        `--help` or `--version` is not a check. Before 2d.2e the step's text was searched for the pattern,
+        so a comment, an `echo`, an `if` condition or an `&&` list counted."""
+        if step.uses or not step.run or not self._step_runs_on_success(step):
             return []
-        cond = str(step.raw.get("if", "")).strip()
-        if cond and cond not in ("success()", "${{ success() }}"):
+        shell = self._failfast_shell(job, step)
+        if shell is None or self._bash_env(job, step):
             return []
-        text = step.text()
-        if not text or re.search(r"(^|[\n;&])\s*set\s+\+e\b", text):
-            return []
+        commands, _complete = binding_commands(_expressions_for_shell(step.run), *shell)
         out = []
-        for pattern in patterns:
-            for match in re.finditer(pattern, text, re.M):
-                line_end = text.find("\n", match.end())
-                rest = text[match.end(): None if line_end == -1 else line_end]
-                if "||" in rest or re.search(r"(?<![&])&\s*$", rest):
-                    continue
-                out.append(match)
+        for words in commands:
+            joined = " ".join(words)
+            if any(re.match(p, joined) for p in patterns) and not self._NOT_A_CHECK & set(words):
+                out.append(words)
         return out
 
-    def _verify_kind(self, step: Step) -> str | None:
+    def _bash_env(self, job: Job, step: Step) -> bool:
+        """Whether the shell's start or what a name runs may have been changed for the step: `BASH_ENV` in
+        its own, the job's or the workflow's `env`, an `env` written as one expression (it may set
+        anything), or an earlier step of the job whose script names `BASH_ENV`, `BASH_FUNC` or
+        `GITHUB_PATH` (it can write them for the steps after it). What an action used earlier does is not
+        read."""
+        for scope in (step.raw, job.raw, self.wf.raw):
+            env = scope.get("env") if isinstance(scope, dict) else None
+            if isinstance(env, str):
+                return True
+            if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
+                                             or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
+                return True
+        return any(re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", s.scripts() + " " + str(s.raw.get("env", "")))
+                   for s in job.steps[: step.index])
+
+    def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
-        provenance-only one, None otherwise (including checks whose failure is ignored)."""
+        provenance-only one (`gh attestation verify`, or `obaaf verify release --pre-approval`, which
+        skips the approvals), None otherwise (including checks whose failure is ignored)."""
         kind = None
-        text = step.text()
-        for match in self._binding_matches(step, self.detection.get("verify_commands", [])):
-            if any(re.match(p, text[match.start():]) for p in self.detection.get("release_verify_commands", [])):
+        for words in self._binding_matches(job, step, self.detection.get("verify_commands", [])):
+            joined = " ".join(words)
+            if any(re.match(p, joined) for p in self.detection.get("release_verify_commands", [])) \
+                    and "--pre-approval" not in words:
                 return "full"
             kind = "provenance"
         return kind
 
+    def _upload_checks(self, job: Job, uploads: list[Step]) -> list[tuple[Step, str | None]]:
+        """Each upload step with the strongest check that stops it: 'full', 'provenance' or None. A
+        check counts for an upload when it is an earlier step of the job that does not run beside it and
+        the upload does not run after a failure, or when it is in a job this one needs (flagship slice
+        2d.2e: every upload, where before only the first was looked at)."""
+        gate = self._needs_gate(job, lambda dep: {self._verify_kind(dep, s) for s in dep.steps})
+        out = []
+        for up in uploads:
+            kinds = set(gate)
+            if not _bypasses_failure(up.raw):
+                kinds |= {self._verify_kind(job, s) for s in job.steps[: up.index]
+                          if not (s.group is None and s.background) and not (s.group and s.group == up.group)}
+            kinds.discard(None)
+            out.append((up, "full" if "full" in kinds else "provenance" if kinds else None))
+        return out
+
+    def _unvouched_checks(self, job: Job, upload: Step) -> list[str]:
+        """Earlier steps of the job, and steps of the jobs it needs, whose script names a release check that
+        `_binding_matches` could not vouch for (flagship slice 2d.2e): the finding then says the checker
+        cannot tell, not that there is no check."""
+        patterns = [re.compile(p) for p in self.detection.get("verify_commands", [])]
+        steps = [(job, s) for s in job.steps[: upload.index]]
+        for name in self._needed_jobs(job):
+            steps += [(self.wf.jobs[name], s) for s in self.wf.jobs[name].steps]
+        return [f"{j.id}: {s.name}" for j, s in steps
+                if s.text() and any(p.search(s.text()) for p in patterns) and self._verify_kind(j, s) is None]
+
+    def _needed_jobs(self, job: Job) -> list[str]:
+        out, todo = [], list(job.needs)
+        while todo:
+            name = todo.pop(0)
+            if name in out or name not in self.wf.jobs or name == job.id:
+                continue
+            out.append(name)
+            todo += self.wf.jobs[name].needs
+        return out
+
+    def _environment_state(self, job: Job) -> str:
+        """Whether a job's environment is established (flagship slice 2d.2e): 'set' for a name written
+        as text, or an expression whose every value the checker can list and none blank; 'none' when it
+        has none; 'blank' for a name that is only space; 'open' for an expression that may be blank or
+        name something the checker cannot list; 'unreadable' for a number, true or false, a list or a
+        mapping. Whether the environment named has required reviewers is not read here (`obaaf audit`
+        reads it)."""
+        kind, _written = job.environment_reading
+        raw = job.raw.get("environment")
+        named = raw.get("name") if isinstance(raw, dict) else raw
+        if kind == "none":
+            return "blank" if isinstance(named, str) and named and not named.strip() else "none"
+        if kind == "literal":
+            return "set"
+        if kind == "expression":
+            names, complete = job.environment_candidates()
+            return "set" if complete and names and all(n.strip() for n in names) else "open"
+        return "unreadable"
+
+    def _jobs_feeding(self, job: Job) -> list[str]:
+        """The jobs a release job needs, followed transitively, that restore a cache while their
+        cache-mode does not forbid it, when the release job downloads artifacts: what they built can
+        carry a poisoned cache entry into the release (Clinejection). Outputs are not followed."""
+        if not any(s.uses_action("actions/download-artifact") for s in job.steps):
+            return []
+        out, seen, todo = [], {job.id}, list(job.needs)
+        while todo:
+            name = todo.pop(0)
+            if name in seen or name not in self.wf.jobs:
+                continue
+            seen.add(name)
+            dep = self.wf.jobs[name]
+            if dep.cache_mode not in ("none", "write-only") and any(self._restores_cache(s) for s in dep.steps):
+                out.append(name)
+            todo += dep.needs
+        return sorted(out)
+
+    @staticmethod
+    def _cache_step(step: Step) -> str:
+        """A cache step as one of OBAAF-GHA-006's facts: its written name or id and what restores."""
+        name = as_text(step.raw.get("name") or step.raw.get("id") or "")
+        what = step.action or (step.uses or "").split("@", 1)[0] or "run"
+        return f"{name} ({what})" if name else what
+
     def _needs_gate(self, job: Job, found, seen: set | None = None) -> set:
         """What `found(dep)` returns for the jobs this one needs, followed transitively, stopping at a
-        job whose `if:` lets it run after a failure (it would run even if the gate failed)."""
+        job whose `if:` lets it run after a failure (it would run even if the gate failed). A needed job
+        with a `continue-on-error` that may be true is no gate itself (its failure does not stop the jobs
+        that need it), but the jobs it needs still are (flagship slice 2d.2e)."""
         if seen is None:
             seen = set()
         if _bypasses_failure(job.raw):
@@ -2521,43 +2779,107 @@ class WorkflowRules:
                 continue
             seen.add(name)
             dep = self.wf.jobs[name]
-            out |= set(found(dep)) | self._needs_gate(dep, found, seen)
+            if not _continues_on_error(dep.raw):
+                out |= set(found(dep))
+            out |= self._needs_gate(dep, found, seen)
         return out
 
     @staticmethod
     def _restores_cache(step: Step) -> bool:
+        """Whether a step may restore a GitHub Actions cache. An input written as an expression is read
+        as the value that restores, and so are inputs written as one expression (flagship slice 2d.2e).
+        A local action is not read (slice 2d.4) and is taken to restore. A `docker://` step is not
+        counted."""
         w = step.with_
+
+        def expr(key: str) -> bool:
+            return "${{" in as_text(w.get(key, ""))
+
+        def on(key: str, default: str) -> bool:
+            return expr(key) or _truthy(w.get(key, default))
+
+        def not_off(key: str, default: str) -> bool:
+            return expr(key) or not _falsy(w.get(key, default))
+
+        if isinstance(step.raw.get("with"), str):
+            return bool(step.action)
+        if (step.uses or "").startswith("./"):
+            return True
+        if step.uses_action("actions/cache/save"):
+            return False
         if step.uses_action("actions/cache") or step.uses_action("actions/cache/restore"):
-            return not step.uses_action("actions/cache/save")
+            return not (_truthy(w.get("lookup-only", "false")) and not expr("lookup-only"))
         if step.uses_action("actions/setup-node"):
-            return bool(w.get("cache")) or not _falsy(w.get("package-manager-cache", "true"))
+            return bool(w.get("cache")) or not_off("package-manager-cache", "true")
         if step.uses_action("actions/setup-go"):
-            return not _falsy(w.get("cache", "true"))
+            return not_off("cache", "true")
         if step.uses_action("actions/setup-python") or step.uses_action("actions/setup-java"):
             return bool(w.get("cache"))
         if step.uses_action("actions/setup-dotnet"):
-            return _truthy(w.get("cache", "false"))
+            return on("cache", "false")
         if step.uses_action("gradle/actions/setup-gradle") or step.uses_action("gradle/gradle-build-action"):
-            return not (_truthy(w.get("cache-disabled", "false")) or _truthy(w.get("cache-write-only", "false")))
-        if step.uses_action("Swatinem/rust-cache"):
+            return expr("cache-disabled") or expr("cache-write-only") or not (
+                _truthy(w.get("cache-disabled", "false")) or _truthy(w.get("cache-write-only", "false")))
+        if any(step.uses_action(a) for a in _ALWAYS_CACHES):
             return True
+        if step.uses_action("actions-rust-lang/setup-rust-toolchain") or step.uses_action("jdx/mise-action") \
+                or step.uses_action("mlugg/setup-zig"):
+            return not_off("cache", "true")
+        if step.uses_action("oven-sh/setup-bun"):
+            return expr("no-cache") or not _truthy(w.get("no-cache", "false"))
+        if step.uses_action("pnpm/action-setup"):
+            return on("cache", "false")
         if step.uses_action("ruby/setup-ruby"):
-            return _truthy(w.get("bundler-cache", "false"))
+            return on("bundler-cache", "false")
         if step.uses_action("astral-sh/setup-uv"):
-            return not _falsy(w.get("enable-cache", "auto"))
-        if step.uses_action("docker/build-push-action"):
-            return "type=gha" in str(w.get("cache-from", ""))
-        return False
+            return not_off("enable-cache", "auto")
+        if step.uses_action("docker/build-push-action") or step.uses_action("docker/bake-action"):
+            given = (as_text(w.get("cache-from", "")) + as_text(w.get("set", ""))).replace(" ", "")
+            return "type=gha" in given or "${{" in given
+        if step.uses_action("actions/github-script"):
+            return bool(re.search(r"@actions/cache|restoreCache", as_text(w.get("script", ""))))
+        return bool(step.run and re.search(r"type\s*=\s*gha\b", step.run))
 
     # -------------------------------------------------------------- GHA-007
+    _CACHE_MODES = ("none", "read", "write", "write-only")
+
     def cache_write_low_trust(self, job: Job) -> None:
-        mode = job.cache_mode
+        """A job outsiders can start that declares a cache-mode that can write. The value is read the
+        widest way (flagship slice 2d.2e): a value that is not exactly one of the four GitHub documents
+        (another case, an expression, a number, a block scalar) may write, a null at the job does not hide
+        the workflow's value, and a key written in another spelling is read as the key."""
         privileged = job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS
-        if mode in ("write", "write-only") and privileged:
-            line = job.raw.line_of("cache-mode") if "cache-mode" in job.raw else self.wf.raw.line_of("cache-mode")
+        if not privileged:
+            return
+        found = None
+        for scope in (job.raw, self.wf.raw):
+            exact = scope.get("cache-mode") if isinstance(scope, dict) else None
+            variants = [k for k in scope if isinstance(k, str) and k != "cache-mode"
+                        and k.strip().lower() == "cache-mode"] if isinstance(scope, dict) else []
+            if variants:
+                found = (scope, variants[0], scope.get(variants[0]), "unreadable")
+                break
+            if exact is not None:
+                text = as_text(exact) if isinstance(exact, str) else None
+                if text in ("write", "write-only"):
+                    found = (scope, "cache-mode", text, "")
+                elif text not in ("none", "read"):
+                    found = (scope, "cache-mode", exact, "unreadable")
+                break
+        if found is None:
+            return
+        scope, key, value, kind = found
+        line = scope.line_of(key) if hasattr(scope, "line_of") else job.line
+        if kind:
+            self.add("OBAAF-GHA-007", line,
+                     "Job '{job}' can be started by {triggers} and declares a cache-mode the checker cannot read "
+                     "({mode}); GitHub documents none, read, write and write-only, and a value that can write "
+                     "lets an outsider's run write the default branch's cache.", job, kind=kind,
+                     triggers=sorted(privileged), mode=Fact(value_identity(value), shown_value(f"{key}: {value}")))
+        else:
             self.add("OBAAF-GHA-007", line,
                      "Job '{job}' can be started by {triggers} and declares "
-                     "cache-mode: {mode}.", job, triggers=sorted(privileged), mode=mode)
+                     "cache-mode: {mode}.", job, triggers=sorted(privileged), mode=value)
 
     # -------------------------------------------------------------- GHA-008
     def unpinned(self, job: Job) -> None:
@@ -2763,6 +3085,52 @@ class WorkflowRules:
         return Fact(value_identity(written), f" in environment {shown_value(written)}")
 
     # -------------------------------------------------------------- GHA-021/022
+    @staticmethod
+    def _inert(step: Step) -> bool:
+        """A step that only prepares what an effect job applies: a checkout, a download of artifacts, a
+        setup action (GitHub's or OBAAF's). Anything else may apply (flagship slice 2d.2e)."""
+        action = (step.action or "").lower()
+        return (step.uses_action("actions/checkout") or step.uses_action("actions/download-artifact")
+                or step.uses_action("dawidd6/action-download-artifact") or action.startswith("actions/setup-")
+                or bool(re.fullmatch(r"[^/]+/obaaf/actions/setup-obaaf", action)))
+
+    # Commands that only read or prepare, which may come in a step beside the checks of an effect job
+    # (flagship slice 2d.2e): any other command in that step may apply, and the step's checks do not count.
+    _PREPARING = frozenset({"set", "cd", "echo", "printf", "mkdir", "test", "[", "[[", "true", ":", "read", "export",
+                            "for", "in", "do", "done", "while", "if", "then", "else", "elif", "fi", "sha256sum",
+                            "shasum", "jq", "cat", "ls", "pwd", "grep", "wc", "head", "tail", "sort", "tr", "cut",
+                            "basename", "dirname", "mapfile", "readarray", "obaaf"})
+
+    def _only_prepares_and_checks(self, step: Step) -> bool:
+        """Whether every command of a `run` step, where a command starts, is one of `_PREPARING` (the
+        contents of an array assigned with `NAME=(...)` are no commands)."""
+        assignment = re.compile(r"[A-Za-z_]\w*(\[[^\]]*\])?\+?=")
+        if "`" in step.run or "$(" in step.run or "<(" in step.run or ">(" in step.run:
+            return False        # a substitution runs commands, quoted or not
+        for line in re.sub(r"\\\n", " ", step.run).split("\n"):
+            tokens = _script_tokens(_strip_comment_text(line))
+            if tokens is None:
+                return False
+            expecting, i = True, 0
+            while i < len(tokens):
+                word, quoted = tokens[i]
+                if expecting and assignment.match(word):
+                    if word.endswith("=") and i + 1 < len(tokens) and tokens[i + 1][0] == "(":
+                        while i < len(tokens) and tokens[i][0] != ")":
+                            i += 1
+                    i += 1
+                    continue
+                if not quoted and word in (";", "&&", "||", "|", "&", "|&", ";;"):
+                    expecting = True
+                    i += 1
+                    continue
+                if expecting and (quoted or word not in self._PREPARING and word not in ("(", ")", "{", "}", "!")):
+                    return False
+                expecting = word in (";", "&&", "||", "|", "&", "(", "{", "!", "then", "do", "else", "elif", "if",
+                                     "while", "until")
+                i += 1
+        return True
+
     def effect_rules(self, job: Job) -> None:
         if not job.in_lane("effect"):
             return
@@ -2770,47 +3138,84 @@ class WorkflowRules:
         proposal_patterns = self.detection.get("proposal_check_commands", [])
 
         def checks(j: Job) -> set:
-            found = set()
+            """The checks that come before any step of `j` that may apply, each binding (flagship slice
+            2d.2e: before, any check anywhere in the job counted, after the step that applies included).
+            None count when a step after them that may apply runs after a failure."""
+            found: set = set()
+            applying = False
             for step in j.steps:
-                if self._binding_matches(step, verify_patterns):
-                    found.add("record")
-                if self._binding_matches(step, proposal_patterns):
-                    found.add("proposal")
+                hit = set()
+                if not applying and self._only_prepares_and_checks(step):
+                    if self._binding_matches(j, step, verify_patterns):
+                        hit.add("record")
+                    if self._binding_matches(j, step, proposal_patterns):
+                        hit.add("proposal")
+                found |= hit
+                if hit or self._inert(step):
+                    continue
+                applying = True
+                if _bypasses_failure(step.raw) or step.background:
+                    return set()
             return found
 
         def gated(j: Job) -> set:
-            return {True} if j.environment else set()
+            return {True} if self._environment_state(j) == "set" else set()
 
+        writes = Fact(sorted(job.permissions.write_scopes()) if job.permissions else ["(not declared)"], "")
         # The checks and the approval may happen in a job this one needs, as long as this job cannot
         # run when that job fails.
         done = checks(job) | self._needs_gate(job, checks)
         if not done:
             self.add("OBAAF-GHA-021", job.line,
                      "Job '{job}' applies another run's output without verifying the agent-run record or "
-                     "checking the proposal.", job, kind="unchecked")
+                     "checking the proposal.", job, kind="unchecked", writes=writes)
         elif done != {"record", "proposal"}:
             missing = "verify the agent-run record" if "record" not in done else "check the proposal"
             self.add("OBAAF-GHA-021", job.line,
                      "Job '{job}' applies another run's output but does not " + missing + " before applying it.",
-                     job, severity="medium", kind="no-record" if "record" not in done else "no-proposal")
+                     job, severity="medium", kind="no-record" if "record" not in done else "no-proposal",
+                     writes=writes)
         if not (gated(job) or self._needs_gate(job, gated)):
             self.add("OBAAF-GHA-022", job.line,
                      "Job '{job}' applies another run's output with write access but has no approval "
-                     "environment.", job)
+                     "environment.", job, writes=writes, environment=Fact(self._environment_state(job), ""))
 
     # -------------------------------------------------------------- GHA-017
+    def _signs_provenance(self, job: Job) -> bool:
+        """Whether a job signs provenance (flagship slice 2d.2e): a step that uses a provenance action and
+        runs on success, or a `run` step with a provenance command that stops the job when it fails.
+        An attestation of an SBOM only (`sbom-path` with no `predicate-type`, `cosign attest --type` of an
+        SBOM format) is not provenance, and a job no trigger reaches signs nothing."""
+        if not job.triggers() or "".join(as_text(job.raw.get("if", "")).split()).lower() in ("false", "${{false}}") \
+                or _continues_on_error(job.raw):
+            return False
+        actions = self.detection.get("provenance_actions", [])
+        commands = self.detection.get("provenance_commands", [])
+        for step in job.steps:
+            if any(step.uses_action(a) for a in actions) and self._step_runs_on_success(step):
+                w = step.with_
+                if step.uses_action("actions/attest") and not step.uses_action("actions/attest-build-provenance") \
+                        and w.get("sbom-path") and not w.get("predicate-type"):
+                    continue
+                return True
+            for words in self._binding_matches(job, step, commands):
+                kind = next((words[i + 1] for i, w in enumerate(words[:-1]) if w == "--type"), "")
+                kind = kind or next((w.split("=", 1)[1] for w in words if w.startswith("--type=")), "")
+                if not re.match(r"(spdx|cyclonedx|vuln)", kind, re.I):
+                    return True
+        return False
+
     def provenance_missing(self) -> None:
         uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
-        actions = self.detection.get("provenance_actions", [])
-        commands = self.detection.get("provenance_commands", [])
-        if any(j.matching_steps(actions, commands) for j in self.wf.jobs.values()):
+        if any(self._signs_provenance(j) for j in self.wf.jobs.values()):
             return
-        # Provenance signed by another workflow counts when the upload is gated on verifying it.
+        # Provenance signed by another workflow counts when every upload is gated on verifying it, by a
+        # check that comes before it and stops it (flagship slice 2d.2e: before, any verify text anywhere
+        # in the job counted, after the upload or in an `echo` included).
         unverified = [j for j in uploading
-                      if not ({self._verify_kind(s) for s in j.steps} | self._needs_gate(
-                          j, lambda dep: {self._verify_kind(s) for s in dep.steps})) - {None}]
+                      if any(kind is None for _s, kind in self._upload_checks(j, j.upload_steps(self.detection)))]
         if not unverified:
             return
         # One finding for the workflow. It is reported on the first publishing job that is a release
