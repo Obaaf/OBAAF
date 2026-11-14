@@ -277,15 +277,16 @@ def judge(args: argparse.Namespace) -> int:
         rows.append((attempt, control, verdict, status))
 
     # The capture must have seen the run at all: the listed host was reached
-    # from inside (asserted below), so traffic to it, or a lookup of it, must
-    # be in the inside capture. Without it, an empty capture would judge every
-    # attempt blocked.
+    # from inside (asserted below), so packets to or from one of its addresses
+    # must be in the inside capture. Without it, an empty capture would judge
+    # every attempt blocked. (A lookup of the name is not enough: the action's
+    # resolver asks for it once before AWF starts.)
     api_addresses = set(resolved.get("api.github.com", []))
     api_addresses |= _answers(in_headers, ["api.github.com"])["api.github.com"]
     api_addresses |= _answers(out_headers, ["api.github.com"])["api.github.com"]
-    if not (api_addresses & in_seen) and not re.search(r"\? api\.github\.com\. ", in_headers):
-        failures.append("the capture taken while the attempts ran inside shows no traffic to the listed host "
-                        "api.github.com and no lookup of it, so it may have captured nothing")
+    if not (api_addresses & in_seen):
+        failures.append("the capture taken while the attempts ran inside shows no packet to or from the listed "
+                        "host api.github.com, so it may have captured nothing")
 
     # Links, pipes, sockets and device files in the scratch directory (slice 2c.6).
     special_left: list[str] = []

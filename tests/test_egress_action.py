@@ -324,8 +324,8 @@ class AfterTheRun(unittest.TestCase):
 
     def test_removed_entries_are_relative_and_plain_text(self):
         root = Path("/tmp/obaaf-egress.abc")
-        data = b"/tmp/obaaf-egress.abc/workspace/a\0/tmp/obaaf-egress.abc/home/b c\n$(x)\0"
-        self.assertEqual(egress.split_null_list(data, root), ["workspace/a", "home/b?c?$(x)"])
+        data = b"/tmp/obaaf-egress.abc/workspace/a-1.txt\0/tmp/obaaf-egress.abc/home/b c\n$(x)`y`![z](w)\0"
+        self.assertEqual(egress.split_null_list(data, root), ["workspace/a-1.txt", "home/b?c???x??y???z??w?"])
 
     def test_refused_hosts_come_from_the_request_and_are_plain_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -366,6 +366,19 @@ class GitCredentials(unittest.TestCase):
         self.assertIn("includes another file", egress.git_credentials(root))
         root = self.tree({".git/config": "[Include]\n\tpath = x\n"})
         self.assertIn("includes another file", egress.git_credentials(root))
+
+    def test_a_token_in_a_remote_url_or_a_worktree_configuration(self):
+        root = self.tree({".git/config": '[remote "origin"]\n\turl = https://x-access-token:ghs_abc@github.com/o/r\n'})
+        self.assertIn("remote URL", egress.git_credentials(root))
+        root = self.tree({".git/config": "[core]\n", ".git/worktrees/w/config.worktree": "[http]\n\textraheader = x\n"})
+        self.assertIn("config.worktree", egress.git_credentials(root))
+        root = self.tree({".git/config": '[remote "origin"]\n\turl = git@github.com:o/r.git\n'})
+        self.assertIsNone(egress.git_credentials(root))
+
+    def test_the_refusal_says_why(self):
+        error = egress.UsageError("x", reason="credential")
+        self.assertEqual(error.reason, "credential")
+        self.assertEqual(egress.UsageError("x").reason, "input")
 
     def test_a_second_checkout_or_a_submodule(self):
         for name in ("other/.git/config", ".git/modules/sub/config"):

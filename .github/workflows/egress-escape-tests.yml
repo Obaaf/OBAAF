@@ -331,6 +331,7 @@ jobs:
         env:
           KEPTOKEN_OUTCOME: ${{ steps.keptoken.outcome }}
           KEPTOKEN_CONFINED: ${{ steps.keptoken.outputs.confined }}
+          KEPTOKEN_REFUSED: ${{ steps.keptoken.outputs.refused }}
           FAILS_OUTCOME: ${{ steps.fails.outcome }}
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
@@ -355,7 +356,7 @@ jobs:
           if [ "$ADDRESS_OUTCOME" = failure ]; then ok "an address is refused"; else bad "an address was accepted"; fi
           if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
           if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
-          if [ "$KEPTOKEN_OUTCOME" = failure ] && [ -z "$KEPTOKEN_CONFINED" ]; then ok "a workspace with a checkout that kept its token is refused before the command runs"; else bad "a kept token: outcome $KEPTOKEN_OUTCOME, confined '$KEPTOKEN_CONFINED'"; fi
+          if [ "$KEPTOKEN_OUTCOME" = failure ] && [ "$KEPTOKEN_REFUSED" = credential ] && [ -z "$KEPTOKEN_CONFINED" ]; then ok "a workspace with a checkout that kept its token is refused, for that reason, before the command runs"; else bad "a kept token: outcome $KEPTOKEN_OUTCOME, refused '$KEPTOKEN_REFUSED', confined '$KEPTOKEN_CONFINED'"; fi
           if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
           if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"

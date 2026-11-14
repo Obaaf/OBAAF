@@ -189,7 +189,14 @@ PROBE_HOSTS = ("example.com", "example.net", "example.org")
 
 
 class UsageError(Exception):
-    """A problem with the step's inputs. Reported as an error; exit 2."""
+    """A problem with the step's inputs. Reported as an error; exit 2.
+
+    ``reason`` goes to the step's ``refused`` output, so a workflow (and the
+    escape tests) can tell a refusal from another failure."""
+
+    def __init__(self, message: str, reason: str = "input"):
+        super().__init__(message)
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +903,9 @@ def _summary(environ: dict[str, str], text: str) -> None:
 # ---------------------------------------------------------------------------
 
 _INCLUDE_RE = re.compile(r"^\s*\[\s*include(?:if)?\b", re.IGNORECASE | re.MULTILINE)
+# A remote URL with a user and a password: https://x-access-token:<token>@host/...
+_URL_CREDENTIAL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]*:[^\s/@]+@", re.IGNORECASE)
+_GIT_CONFIG_NAMES = ("config", "config.worktree")
 
 
 def git_credentials(workspace: Path) -> str | None:
@@ -912,19 +922,24 @@ def git_credentials(workspace: Path) -> str | None:
     """
     for dirpath, _dirnames, filenames in os.walk(workspace):
         parts = Path(dirpath).relative_to(workspace).parts
-        if ".git" not in parts or "config" not in filenames:
+        if ".git" not in parts:
             continue
-        config = Path(dirpath) / "config"
-        try:
-            with config.open("rb") as handle:
-                text = handle.read(1 << 20).decode("utf-8", errors="replace")
-        except OSError as error:
-            return f"{config.relative_to(workspace)} could not be read ({error.strerror})"
-        name = config.relative_to(workspace)
-        if "extraheader" in text.lower():
-            return f"{name} holds a credential (an extraheader)"
-        if _INCLUDE_RE.search(text):
-            return f"{name} includes another file, which is where actions/checkout v6 and later keep the token"
+        for filename in _GIT_CONFIG_NAMES:
+            if filename not in filenames:
+                continue
+            config = Path(dirpath) / filename
+            name = config.relative_to(workspace)
+            try:
+                with config.open("rb") as handle:
+                    text = handle.read(1 << 20).decode("utf-8", errors="replace")
+            except OSError as error:
+                return f"{name} could not be read ({error.strerror})"
+            if "extraheader" in text.lower():
+                return f"{name} holds a credential (an extraheader)"
+            if _INCLUDE_RE.search(text):
+                return f"{name} includes another file, which is where actions/checkout v6 and later keep the token"
+            if _URL_CREDENTIAL_RE.search(text):
+                return f"{name} holds a credential in a remote URL"
     return None
 
 
@@ -945,7 +960,9 @@ def split_null_list(data: bytes, root: Path) -> list[str]:
         prefix = str(root).rstrip("/") + "/"
         if text.startswith(prefix):
             text = text[len(prefix):]
-        names.append(re.sub(r"[^\x21-\x7e]", "?", text)[:200])
+        # The command chose these names, and a later step may paste the output
+        # into a script: only the characters of a plain path are kept.
+        names.append(re.sub(r"[^A-Za-z0-9._/+=@%-]", "?", text)[:200])
     return names
 
 
@@ -1088,7 +1105,8 @@ def run(environ: dict[str, str]) -> int:
     credential = git_credentials(workspace)
     if credential:
         shutil.rmtree(scratch, ignore_errors=True)
-        raise UsageError(f"the workspace's {credential}: check out with persist-credentials: false, so the copy the command works on carries no token")
+        raise UsageError(f"the workspace's {credential}: check out with persist-credentials: false, so the copy the command works on carries no token",
+                         reason="credential")
     copy = scratch / "workspace"
     shutil.copytree(workspace, copy, symlinks=True, dirs_exist_ok=True)
 
@@ -1187,9 +1205,6 @@ def run(environ: dict[str, str]) -> int:
     try:
         completed = subprocess.run(argv, env=child_env, cwd=str(copy), stdin=subprocess.DEVNULL, check=False)
         status = completed.returncode
-    except BaseException:
-        unlock_endpoints(locked)
-        raise
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
@@ -1200,16 +1215,25 @@ def run(environ: dict[str, str]) -> int:
     dns_refused = _dns_refused(dns_log)
     # A container AWF left running could still write to the scratch
     # directory after the clean-up below, so none may be left.
-    stray = sorted((running_containers(private) or set()) - (containers_before or set()))
+    # If Docker does not answer, nothing shows that no container is left, and
+    # the endpoints stay unwritable for the rest of the job (which harms
+    # nothing) and the step fails. The same if an exception ends the run
+    # above: AWF may not have stopped its containers.
+    containers_after = running_containers(private)
+    stray = sorted((containers_after or set()) - (containers_before or set()))
     if stray:
         _quiet(["docker", "rm", "-f", *stray], {"HOME": str(private)})
-        now = running_containers(private)
-        stray = sorted(set(stray) & now) if now is not None else stray
-        if stray:
-            print(f"::error::obaaf-egress: containers started for the run are still running ({', '.join(c[:12] for c in stray)}); the step fails")
-    # Only now, with nothing of the run left running, may the endpoints be
-    # writable again.
-    unlock_endpoints(locked)
+        containers_after = running_containers(private)
+        stray = sorted(set(stray) & containers_after) if containers_after is not None else stray
+    if containers_after is None:
+        print("::error::obaaf-egress: Docker did not list its containers after the run, so it is not known that none is left; the step fails")
+        stray = stray or ["unknown"]
+    elif stray:
+        print(f"::error::obaaf-egress: containers started for the run are still running ({', '.join(c[:12] for c in stray)}); the step fails")
+    else:
+        # Only now, with nothing of the run left running, may the endpoints
+        # be writable again.
+        unlock_endpoints(locked)
     removed, special_problem = remove_special_files(scratch)
     if special_problem:
         print(f"::error::obaaf-egress: {special_problem}; the step fails")
@@ -1311,6 +1335,7 @@ def main(argv: list[str]) -> int:
         return run(dict(os.environ))
     except UsageError as error:
         print(f"::error::{error}")
+        _set_output(dict(os.environ), "refused", error.reason)
         return 2
 
 

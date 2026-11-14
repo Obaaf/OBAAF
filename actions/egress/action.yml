@@ -73,6 +73,12 @@ outputs:
       later step that reads or uploads it cannot be pointed at the runner's
       own files.
     value: ${{ steps.run.outputs.removed }}
+  refused:
+    description: >-
+      Set when the action refused to run anything: "credential" when a
+      checkout in the workspace kept its token, "input" for any other input
+      it refused.
+    value: ${{ steps.run.outputs.refused }}
   exit-code:
     description: >-
       AWF's exit status, which is the command's own unless AWF itself failed
