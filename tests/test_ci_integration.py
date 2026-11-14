@@ -4,12 +4,16 @@ import io
 import json
 from pathlib import Path
 import re
+import os
 import shlex
+import shutil
+import subprocess
 import unittest
 
 import yaml
 
 from helpers import ROOT, TempDir, cli, run_cli
+from obaaf.checker import CONFIG_LOCATIONS, parse_fail_on
 
 PAGE = ROOT / "docs/ci-integration.md"
 TEMPLATE = ROOT / "templates/github-actions/workflows/obaaf-pipeline-check.yml"
@@ -63,8 +67,13 @@ class CiReportContractTest(unittest.TestCase):
         with TempDir() as directory:
             status, _, err = run_cli("check", str(directory))
             self.assertEqual(status, 2, err)
-        status, _, _ = run_cli("--format", "json")
-        self.assertEqual(status, 2)
+            self.assertIn("nothing was checked", err)
+            (directory / "ci.yml").write_text("on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                                              "    steps:\n      - run: echo hi\n", encoding="utf-8")
+            status, out, err = run_cli("check", str(directory / "ci.yml"), "--format", "json", "--fail-on", "never")
+            self.assertEqual(status, 0, out + err)
+            status, _, err = run_cli("--format", "json", "check", str(directory / "ci.yml"), "--fail-on", "never")
+            self.assertEqual(status, 2, err)
 
 
 class ThePageTest(unittest.TestCase):
@@ -101,22 +110,112 @@ class ThePageTest(unittest.TestCase):
         self.assertIs(hook["pass_filenames"], False)
         self.assertIs(hook["always_run"], True)
 
+    def commands(self) -> list:
+        """Every obaaf command the page tells a reader to run, wherever it is written."""
+        page = PAGE.read_text(encoding="utf-8")
+        found = [line.strip() for block in blocks("bash") for line in block.splitlines()
+                 if line.strip().startswith("obaaf ")]
+        workflow = next(b for b in blocks("yaml") if "jobs:" in b)
+        found += [line.strip().replace(' "${config[@]}"', "") for line in workflow.splitlines()
+                  if line.strip().startswith("obaaf ")]
+        hook = next(b for b in blocks("yaml") if "repos:" in b)
+        found.append(yaml.safe_load(hook)["repos"][0]["hooks"][0]["entry"])
+        # Inline commands in the prose, less the ones the page gives as output or as a mistake.
+        found += [c for c in re.findall(r"`(obaaf [^`]*)`", page)
+                  if c not in ("obaaf 0.4.0.dev0", "obaaf --format json")]
+        return found
+
     def test_every_obaaf_command_on_the_page_is_one_the_command_line_accepts(self):
         parser = cli.build_parser()
-        commands = [line.strip() for block in blocks("bash") for line in block.splitlines()
-                    if line.strip().startswith("obaaf ")]
-        commands.append(next(b for b in blocks("yaml") if "repos:" in b).split("entry: ", 1)[1].splitlines()[0])
-        self.assertGreaterEqual(len(commands), 5, commands)
+        commands = self.commands()
+        self.assertGreaterEqual(len(commands), 9, commands)
         for command in commands:
             with self.subTest(command=command):
+                words = shlex.split(command)
                 try:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        parser.parse_args(shlex.split(command)[1:])
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        parser.parse_args(words[1:])
                 except SystemExit as exc:      # --version and --help exit 0 on purpose
-                    if exc.code == 0 and command.split()[1:] in (["--version"], ["--help"]):
-                        continue
-                    self.fail(f"`{command}` is not a command the tool accepts ({exc.code})")
+                    if not (exc.code == 0 and words[1:] in (["--version"], ["--help"])):
+                        self.fail(f"`{command}` is not a command the tool accepts ({exc.code})")
+                for i, word in enumerate(words):   # argparse does not check these values; the checker does
+                    if word == "--fail-on":
+                        parse_fail_on(words[i + 1])
 
+    def test_the_failing_example_on_the_page_fails_as_it_says(self):
+        page = PAGE.read_text(encoding="utf-8")
+        examples = [c for c in self.commands() if "tests/fixtures/" in c]
+        self.assertEqual(len(examples), 1, examples)
+        words = shlex.split(examples[0])
+        path = next(w for w in words if w.startswith("tests/fixtures/"))
+        words[words.index(path)] = str(ROOT / path)
+        status, out, err = run_cli(*words[1:])
+        self.assertEqual(status, 1, err)
+        found = {(f["rule"], f["line"]) for f in json.loads(out)["findings"]}
+        self.assertEqual(found, {("OBAAF-GHA-001", 10), ("OBAAF-CFG-001", 14)})
+        self.assertIn("Status 1. Both formats report `OBAAF-GHA-001` at line 10 and `OBAAF-CFG-001` at line 14", page)
+
+
+@unittest.skipUnless(shutil.which("bash"), "needs bash")
+class TheTemplateStepTest(unittest.TestCase):
+    """The template's check step, run with bash and a stand-in for obaaf that keeps what it is given."""
+
+    def run_step(self, event: str, base: dict, workspace: dict | None = None) -> tuple[list, str | None, bool]:
+        workflow = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+        script = next(s["run"] for s in workflow["jobs"]["check"]["steps"] if "obaaf check" in s.get("run", ""))
+        with TempDir() as directory:
+            work, temp, bin_ = directory / "work", directory / "temp", directory / "bin"
+            for folder in (work, temp, bin_):
+                folder.mkdir()
+            for name, text in {**{f".obaaf-base/{k}": v for k, v in base.items()}, **(workspace or {})}.items():
+                (work / name).parent.mkdir(parents=True, exist_ok=True)
+                (work / name).write_text(text, encoding="utf-8")
+            log = directory / "calls"
+            stub = bin_ / "obaaf"
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$OBAAF_CALLS"\n'
+                            'for a; do if [ "$prev" = --config ]; then cat "$a" > "$OBAAF_CALLS.config"; fi; prev="$a"; done\n',
+                            encoding="utf-8")
+            stub.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
+                   "GITHUB_EVENT_NAME": event, "OBAAF_CALLS": str(log)}
+            done = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            config = Path(f"{log}.config")
+            return calls, config.read_text(encoding="utf-8") if config.exists() else None, (work / ".obaaf-base").exists()
+
+    def test_a_pull_request_reads_the_target_branch_configuration_under_each_name_the_checker_reads(self):
+        for name in CONFIG_LOCATIONS:
+            with self.subTest(name=name):
+                calls, config, left = self.run_step("pull_request", {name: f"# from {name}\n"})
+                self.assertEqual(len(calls), 2, calls)
+                self.assertTrue(all("--config" in c for c in calls), calls)
+                self.assertEqual(config, f"# from {name}\n")
+                self.assertFalse(left)
+
+    def test_the_first_name_wins_as_in_the_checker(self):
+        base = {name: f"# from {name}\n" for name in CONFIG_LOCATIONS}
+        _, config, _ = self.run_step("pull_request", base)
+        self.assertEqual(config, f"# from {CONFIG_LOCATIONS[0]}\n")
+
+    def test_a_pull_request_with_no_configuration_on_the_target_branch_gets_none(self):
+        _, config, _ = self.run_step("pull_request", {})
+        self.assertEqual(config, "{}\n")
+
+    def test_a_push_reads_its_own_configuration_even_with_a_directory_of_that_name(self):
+        calls, config, _ = self.run_step("push", {".github/obaaf.yml": "# planted\n"})
+        self.assertEqual(len(calls), 2, calls)
+        self.assertFalse(any("--config" in c for c in calls), calls)
+        self.assertIsNone(config)
+
+    def test_a_directory_the_pull_request_brings_is_removed_before_the_target_branch_is_checked_out(self):
+        steps = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["jobs"]["check"]["steps"]
+        removal = next(i for i, s in enumerate(steps) if s.get("run", "").strip() == "rm -rf .obaaf-base")
+        checkout = next(i for i, s in enumerate(steps) if s.get("with", {}).get("path") == ".obaaf-base")
+        self.assertLess(removal, checkout)
+        self.assertEqual(steps[removal]["if"], steps[checkout]["if"])
+        patterns = steps[checkout]["with"]["sparse-checkout"].split()
+        self.assertEqual(patterns, ["/" + name for name in CONFIG_LOCATIONS])
 
 if __name__ == "__main__":
     unittest.main()

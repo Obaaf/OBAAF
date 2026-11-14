@@ -29,6 +29,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # A pull request cannot bring a directory of its own for the step below to read.
+      - name: Remove any .obaaf-base the pull request brings
+        if: github.event_name == 'pull_request'
+        run: rm -rf .obaaf-base
+
+      # Every name the checker reads its configuration from, in its order.
       - name: Check out the checker configuration from the target branch
         if: github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +42,10 @@ jobs:
           ref: ${{ github.base_ref }}
           path: .obaaf-base
           persist-credentials: false
-          sparse-checkout: .github/obaaf.yml
+          sparse-checkout: |
+            /.github/obaaf.yml
+            /.github/obaaf.yaml
+            /obaaf.yml
           sparse-checkout-cone-mode: false
 
       - name: Set up OBAAF
@@ -46,12 +55,15 @@ jobs:
         run: |
           set -euo pipefail
           config=()
-          if [ -d .obaaf-base ]; then
-            if [ -f .obaaf-base/.github/obaaf.yml ]; then
-              cp .obaaf-base/.github/obaaf.yml "$RUNNER_TEMP/obaaf.yml"
-            else
-              echo '{}' > "$RUNNER_TEMP/obaaf.yml"
-            fi
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The first that exists on the target branch, as the checker would choose; none is {}.
+            echo '{}' > "$RUNNER_TEMP/obaaf.yml"
+            for name in .github/obaaf.yml .github/obaaf.yaml obaaf.yml; do
+              if [ -f ".obaaf-base/$name" ]; then
+                cp ".obaaf-base/$name" "$RUNNER_TEMP/obaaf.yml"
+                break
+              fi
+            done
             rm -rf .obaaf-base
             config=(--config "$RUNNER_TEMP/obaaf.yml")
           fi
