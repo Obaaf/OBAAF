@@ -123,6 +123,7 @@ The settings audit (2b) is new code in its own module, so it is not marked core;
 
 | Slice | Needs | Issue |
 | --- | --- | --- |
+| 3.4 CI integration | 2a.3 (done) | #85 |
 | 3.1 Measure the adoption path that exists | nothing | #82, done (#140) |
 | 4.1 Website: content and truth table | 1.4 | #90, done (#129) |
 | H1 Dependency lock for the three Dependabot pull requests | nothing | done (#113); the Dependabot pull requests and #97 are closed (F-91) |
