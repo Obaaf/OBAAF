@@ -29,16 +29,27 @@ agent_actions:
 # expressions, matched against each line. Options may come before the
 # prompt flag or subcommand (claude --model x -p ...).
 agent_commands:
-  - '(^|[\s;&|(])claude\s+([^\n;&|]*\s)?(-p|--print)\b'
+  - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
   - '@anthropic-ai/claude-code'
-  - '(^|[\s;&|(])gemini\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+  - '(^|[\s;&|(/"''`])gemini["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '@google/gemini-cli'
-  - '(^|[\s;&|(])codex\s+([^\n;&|]*\s)?exec\b'
+  - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
   - '@openai/codex'
   - '(^|[\s;&|(])aider\s'
-  - '(^|[\s;&|(])opencode\s+([^\n;&|]*\s)?run\b'
-  - '(^|[\s;&|(])copilot\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+  - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
+  - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
   - '(^|[\s;&|(])cline\s'
+
+# Packages that install an agent's CLI, with the command each installs (flagship slice 2c.8). The
+# patterns above match their names, so a step that installs one is taken for running an agent. Before
+# OBAAF's egress action, a step whose script does nothing but install these packages globally (and
+# print the CLI's version) is not taken for running the agent outside the confined command; one that
+# names them in any other way is "cannot tell", unless it also runs an agent. The exact forms are in
+# docs/checker-configuration.md. (`agent_packages`, below, is the Jenkins analyser's list.)
+agent_installs:
+  "@anthropic-ai/claude-code": claude
+  "@openai/codex": codex
+  "@google/gemini-cli": gemini
 
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.
@@ -83,6 +94,11 @@ upload_actions:
   - manleydev/butler-publish-itchio-action
   - yeslayla/butler-publish-itchio-action
   - Apple-Actions/upload-testflight-build
+  # Added by flagship slice 2d.2d: actions whose only job is to publish a package.
+  - pypa/gh-action-pypi-publish
+  - js-devtools/npm-publish
+  - goreleaser/goreleaser-action
+  - rubygems/release-gem
 upload_commands:
   - '(^|[\s;&|(])steamcmd\b.*\+run_app_build'
   - '(^|[\s;&|(])butler\s+push\b'
@@ -98,7 +114,22 @@ upload_commands:
   - '(^|[\s;&|(])cargo\s+publish\b'
   - '(^|[\s;&|(])dotnet\s+nuget\s+push\b'
   - '(^|[\s;&|(])docker\s+push\b'
-  - '(^|[\s;&|(]|\./)scripts?/publish'
+  - '(^|[\s;&|(]|\./)scripts?/(publish|release|deploy)'
+  # Added by flagship slice 2d.2d, from a reviewer's attempts on OBAAF-GHA-015. Each is matched in the
+  # script as written, with continued lines joined, and with quotes taken out.
+  - '(^|[\s;&|(])gh\s+release\s+edit\b'
+  - '(^|[\s;&|(])gh\s+api\b[^\n]*/releases\b'
+  - '(^|[\s;&|(])git\s+push\b[^\n]*\s--(tags|follow-tags)\b'
+  - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3\s+(cp|sync|mv)\b'
+  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]*\s--push\b'
+  - '(^|[\s;&|(])docker\s+(image|manifest)\s+push\b'
+  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+(-\S+\s+)*(npm\s+)?publish\b'
+  - '(^|[\s;&|(])cargo\s+(\+\S+\s+)?publish\b'
+  - '(^|[\s;&|(])(uv|poetry|hatch|flit)\s+publish\b'
+  - '(^|[\s;&|(])gem\s+push\b'
+  - '(^|[\s;&|(])(firebase\s+deploy|wrangler\s+(deploy|publish)|netlify\s+deploy\b[^\n]*--prod|vercel\b[^\n]*--prod)\b'
+  - '(^|[\s;&|(])curl\b[^\n]*\s(-T|--upload-file)\s'
+  - '\b(createRelease|uploadReleaseAsset|updateRelease)\s*\('
 
 # Jenkins only (advisory): Pipeline steps and commands that publish outside Jenkins. The
 # commands extend upload_commands for Jenkinsfiles; they are kept separate so adding them
@@ -181,14 +212,79 @@ signing_secret_patterns:
   - 'CERTIFICATE_?(P12|PFX|BASE64)'
   - 'DEVELOPER_?ID_?CERT'
   - 'MATCH_?PASSWORD'
-# Commands that load a key file into the build environment.
+  - 'KEY_?STORE'
+  - '(^|_)CSC_(LINK|KEY_PASSWORD)($|_)'
+  - '(^|_)(MACOS|APPLE|WINDOWS|WIN|MAC)_?(CODESIGN_?)?CERT(IFICATE)?($|_)'
+# Commands that load a key file into the build environment. A command continued on the next line
+# with a backslash is joined before these are matched.
 signing_commands:
   - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key\s+(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
   - 'signtool(\.exe)?\s+sign\b.*\s/f\s'
-  - '(^|[\s;&|(])gpg\s+(--batch\s+)?--import\b'
-  - '(^|[\s;&|(])security\s+import\b.*\.p12'
+  - '(^|[\s;&|(/`])gpg2?(\.exe)?([ \t]+--?\w[\w-]*(=\S+|[ \t]+("[^"\n]*"|''[^''\n]*''|(?!["''-])[^\s;&|]+))?)*[ \t]+--import(?![\w-])'
+  - '(^|[\s;&|(])security\s+import\b.*\.(?i:p12|pfx)\b'
   - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
   - '(^|[\s;&|(])apksigner\s+sign\b.*--ks\b'
+  - '(?i:\bImport-PfxCertificate\b)'
+# Actions that load a signing key or certificate into the runner. Matched as a prefix of the
+# `uses:` value, before the `@`.
+signing_actions:
+  - crazy-max/ghaction-import-gpg
+  - apple-actions/import-codesign-certs
+
+# Inputs that an action runs as a shell command or a script (OBAAF-GHA-010, flagship slice 2d.2d). An
+# expression written in one is expanded before the action runs it, as in a step's `run`. Matched by the
+# action's name in any letter case; an action not listed here is not read.
+script_inputs:
+  actions/github-script: [script]
+  azure/cli: [inlineScript]
+  azure/powershell: [inlineScript]
+  appleboy/ssh-action: [script]
+  garygrossgarten/github-action-ssh: [command]
+  google-github-actions/ssh-compute: [command, script]
+  nick-fields/retry: [command, on_retry_command]
+  nick-invision/retry: [command, on_retry_command]
+  wandalen/wretry.action: [command]
+  addnab/docker-run-action: [run]
+  uraimo/run-on-arch-action: [run, install]
+  cypress-io/github-action: [build, start, command]
+
+# Secret names that hold a credential for publishing a release: a package registry, an app store, a
+# game store, a container registry (OBAAF-GHA-015, flagship slice 2d.2d). Matched without regard to
+# letter case. A job that holds one and that untrusted input can start is reported even when nothing
+# else marks it a release job.
+publishing_secret_patterns:
+  - '(^|_)NPM_?(TOKEN|AUTH|PUBLISH)'
+  - 'PYPI'
+  - 'TWINE_(PASSWORD|TOKEN)'
+  - 'CARGO_REGISTRY_TOKEN|CRATES_IO'
+  - 'RUBYGEMS|GEM_HOST_API_KEY'
+  - 'NUGET_?(API_?)?KEY'
+  - 'OSSRH|SONATYPE|MAVEN_(CENTRAL_)?(PASSWORD|TOKEN)'
+  - 'DOCKER_?(HUB)?_?(ACCESS_)?(TOKEN|PASSWORD|PAT)'
+  - '(^|_)(GHCR|REGISTRY|QUAY)_?(TOKEN|PASSWORD|PAT)'
+  - 'HEX_API_KEY|COCOAPODS_TRUNK_TOKEN|PUB_DEV|VSCE_PAT|OVSX_PAT'
+  - 'APP_?STORE_?CONNECT|ASC_(KEY|API)|APPLE_(API|ID)_?(KEY|PASSWORD)'
+  - 'GOOGLE_PLAY|PLAY_STORE|PLAY_SERVICE_ACCOUNT'
+  - 'STEAM_?(USERNAME|PASSWORD|CONFIG|TOTP)|STEAMWORKS'
+  - 'BUTLER_API_KEY|ITCH_?IO'
+  - 'CHROME_WEBSTORE|AMO_(JWT|API)|FIREFOX_ADDONS'
+  - '(^|_)(RELEASE|PUBLISH)_?(TOKEN|KEY|PAT)'
+
+# Actions that publish or deploy and are not among upload_actions (OBAAF-GHA-015, flagship slice 2d.2d).
+# They do not put a job in the release lane, which would bring the other release rules; a job that uses
+# one and that untrusted input can start is reported by OBAAF-GHA-015 as one that may release.
+publishing_actions:
+  - docker/build-push-action
+  - actions/deploy-pages
+  - peaceiris/actions-gh-pages
+  - jamesives/github-pages-deploy-action
+  - cloudflare/wrangler-action
+  - cloudflare/pages-action
+  - amondnet/vercel-action
+  - aws-actions/amazon-ecs-deploy-task-definition
+  - azure/webapps-deploy
+  - google-github-actions/deploy-cloudrun
+  - changesets/action
 
 # Evidence of an egress restriction for agent jobs (R7, FR7).
 egress_actions:
@@ -279,4 +375,14 @@ harden_runner_releases:
 # Commits of OBAAF's egress action (actions/egress, slice 2c.2) that OBAAF lists as released: each
 # one a commit the escape tests passed on, listed by a maintainer. OBAAF-GHA-020 credits the action
 # only at one of these. None is listed yet, so the action is "cannot tell" at best.
+#
+# Only a commit at or after `egress_action_floor` may be listed. The floor was the merge of slice 2c.4
+# (#128): the checker reads the action's `model-keys` and `env` inputs as the action reads them from
+# there, and the text beside a cleared finding describes the action's own resolver, which exists from
+# there (slice 2c.5, decision D-052). Since slice 2c.6 it is the last commit of that slice's change to
+# the action: before it, a command in the sandbox could reach the runner's own programs through their
+# sockets in /tmp, and a link it left in the copy reached a later step (decision D-054). A test refuses
+# a listed commit that does not have the floor as an ancestor in this repository's history. A later
+# commit that reads its inputs another way must not be listed until the checker reads it that way too.
+egress_action_floor: 7c1bded84f32a86135f89dde30396a32f44de9e0
 egress_action_releases: []

@@ -5,7 +5,10 @@
 | [Adoption guide](adoption-guide.md) | Studios | Tier by tier, what to do and which template or guide helps |
 | [Guides F1–F9](guides/) | Studios | How to fix each self-assessment item, by control family |
 | [From a report to a gate](from-report-to-gate.md) | Build engineers | Moving `obaaf check` from something you read to something that fails a build, step by step, with the exit status of each step |
+| [CI integration](ci-integration.md) | Build engineers | `obaaf check` as a required check, in code scanning and before each commit: the workflow to copy, the exit status and what the JSON and SARIF reports carry |
 | [Upgrading](upgrading.md) | Build engineers | What to pin, how to move to a newer OBAAF, and what changes between 0.3.0 and the code after it |
+| [Bypass attempts, rule by rule](bypass-attempts.md) | Security engineers, maintainers | Every attempt to get past OBAAF's security rules: what was tried, what got through, what changed, and what each rule still does not follow |
+| [The adoption path, measured](adoption-path-measured.md) | Maintainers | One run of the released 0.3.0 from `pip install` to a gate file, on two small layouts, timed as summed command time (not a person's time), with every command, its exit status and where the documentation led astray |
 | [GitHub settings](github-settings.md) | Build engineers | Repository settings the templates depend on, and plan limits |
 | [Templates](../templates/github-actions/README.md) | Build engineers | Installing and adapting the GitHub Actions workflows |
 | [Settings audit](settings-audit.md) | Build engineers | `obaaf audit`: what it reads of a repository's GitHub settings, the fifteen rules it applies to them and to the workflow files, what it needs to read each setting, and how it says what it could not tell |

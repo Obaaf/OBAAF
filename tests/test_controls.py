@@ -63,12 +63,14 @@ def control(finding, ident):
 
 
 class SecretInAgentJobTest(unittest.TestCase):
-    """OBAAF-GHA-005 carries four controls, and all four are needed to clear it."""
+    """OBAAF-GHA-005 carries five controls, and all five are needed to clear it (four since slice 2a.2;
+    the fifth, whether the agent's command can read the job's secrets, since slice 2c.7)."""
 
     def test_the_first_adopters_shape_is_two_verified_one_setting_and_no_egress(self):
         f = one(check(agent_workflow()), "OBAAF-GHA-005")
         self.assertEqual(verdicts(f), {"secrets-protected": VERIFIED, "environment-restricted": CANNOT_TELL,
-                                       "no-outsider-input": VERIFIED, "egress-enforced": NOT_MET})
+                                       "no-outsider-input": VERIFIED, "egress-enforced": NOT_MET,
+                                       "key-out-of-reach": NOT_MET})
         self.assertEqual(f.state, "new")       # one control is known to be missing
         self.assertIn("MODEL_API_KEY in environment 'main-only'", control(f, "secrets-protected").detail)
         self.assertIn("started only by workflow_dispatch", control(f, "no-outsider-input").detail)
@@ -87,17 +89,20 @@ class SecretInAgentJobTest(unittest.TestCase):
                 self.assertNotEqual(control(f, "environment-restricted").verdict, VERIFIED)
                 self.assertNotEqual(control(f, "egress-enforced").verdict, VERIFIED)
 
-    def test_with_a_monitor_and_everything_else_in_place_it_is_cannot_tell(self):
+    def test_with_a_monitor_and_everything_else_in_place_the_key_in_the_agents_hands_is_missing(self):
+        """Until slice 2c.7 this was "cannot tell": nothing asked whether the agent could read the key. A
+        monitor limits the network, and the agent, which holds the key, can still print it to the log."""
         steps = (f"      - uses: step-security/harden-runner@{SHA}\n"
                  "        with: {egress-policy: block, disable-sudo-and-containers: true}\n"
                  f"      - uses: actions/checkout@{SHA}")
         result = check(agent_workflow(steps=steps))
         f = one(result, "OBAAF-GHA-005")
-        self.assertEqual(f.state, "cannot-tell")
-        self.assertIn(f, result.gating("high", checker.load()))    # it still fails a gate
+        self.assertEqual((control(f, "egress-enforced").verdict, control(f, "key-out-of-reach").verdict),
+                         (CANNOT_TELL, NOT_MET))
+        self.assertEqual(f.state, "new")
+        self.assertIn(f, result.gating("high", checker.load()))    # it fails a gate, as it did
         text = report.to_text(result)
-        self.assertIn("Cannot tell: no control that would clear this finding is known to be missing", text)
-        self.assertIn("(it is cleared when all 4 are verified):", text)
+        self.assertIn("(it is cleared when all 5 are verified):", text)
         self.assertIn("          cannot tell  the secrets are stored only in that environment", text)
 
     def test_a_secret_that_is_not_protected_is_not_met(self):
@@ -490,14 +495,15 @@ class OutputTest(unittest.TestCase):
         data = json.loads(report.to_json(check(agent_workflow())))
         finding = next(f for f in data["findings"] if f["rule"] == "OBAAF-GHA-005")
         self.assertEqual([c["id"] for c in finding["controls"]],
-                         ["secrets-protected", "environment-restricted", "no-outsider-input", "egress-enforced"])
+                         ["secrets-protected", "environment-restricted", "no-outsider-input", "egress-enforced",
+                          "key-out-of-reach"])
         self.assertEqual({c["verdict"] for c in finding["controls"]}, {"verified", "cannot tell", "not met"})
         self.assertTrue(all(set(c) == {"id", "name", "verdict", "detail"} for c in finding["controls"]))
         self.assertEqual(data["summary"]["fixed"], 0)
 
     def test_text_lists_the_controls_one_to_a_line(self):
         text = report.to_text(check(agent_workflow()))
-        self.assertIn("        Controls (it is cleared when all 4 are verified):\n          verified     each of the "
+        self.assertIn("        Controls (it is cleared when all 5 are verified):\n          verified     each of the "
                       "job's secrets is listed in protected_secrets", text)
         self.assertIn("          not met      a control the checker recognises limits the job's network access", text)
         self.assertIn("        Controls (it is cleared when this is verified):", text)
@@ -652,7 +658,7 @@ class NothingElseChangedTest(unittest.TestCase):
                 encoding="utf-8")
             code, out, _ = run_cli("check", tmp, "--fail-on", "low")
             self.assertEqual(code, 1)
-            self.assertIn("Controls (it is cleared when all 4 are verified):", out)
+            self.assertIn("Controls (it is cleared when all 5 are verified):", out)
             code, out, _ = run_cli("check", tmp, "--fail-on", "never", "--format", "json")
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out)["summary"]["new"], 3)

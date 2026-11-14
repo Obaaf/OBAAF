@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,9 +14,11 @@ from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
-    FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, expressions, input_name, one_line,
-    runs_after_failure,
+    FULL_SHA_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
+    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
+    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
+    digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
+    scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -61,6 +64,10 @@ class Finding:
     facts: dict | None = None
     controls: list = field(default_factory=list)   # Control: what would clear the finding, and what was established
     acceptance: object | None = None               # acceptance.Acceptance: the entry that matched, valid or not
+    # The message 0.3.0 wrote for this finding, where a later version words it differently, so that a
+    # v0.1 baseline entry (identified by its message) still names it and `obaaf baseline migrate` carries
+    # it over. Empty where the message is unchanged. It is never shown and is not part of a v0.2 identity.
+    legacy: str = ""
 
     def sort_key(self) -> tuple:
         order = {"high": 0, "medium": 1, "low": 2}
@@ -134,11 +141,25 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
 
 
 def _truthy(value) -> bool:
-    return str(value).strip().lower() in ("true", "1", "yes")
+    return as_text(value).strip().lower() in ("true", "1", "yes")
 
 
 def _falsy(value) -> bool:
-    return str(value).strip().lower() in ("false", "0", "no")
+    return as_text(value).strip().lower() in ("false", "0", "no")
+
+
+_CONSTANT_RE = re.compile(r"\s*\$\{\{\s*(true|false|'[^']*'|[0-9]{1,9})\s*\}\}\s*", re.I)
+
+
+def _constant(value):
+    """An input written as one expression that is a constant (`${{ false }}`, `${{ 'true' }}`) as
+    the text GitHub hands the action; anything else as it is."""
+    if isinstance(value, str):
+        match = _CONSTANT_RE.fullmatch(value)
+        if match:
+            literal = match.group(1)
+            return literal[1:-1].replace("''", "'") if literal.startswith("'") else literal.lower()
+    return value
 
 
 def normalize_expression(expr: str) -> str:
@@ -180,12 +201,18 @@ class WorkflowRules:
         self.findings: list[Finding] = []
 
     def add(self, rule: str, line: int, template: str, job: Job | None = None, step: Step | None = None,
-            severity: str | None = None, *, kind: str = "", controls: list | None = None, **values) -> None:
+            severity: str | None = None, *, kind: str = "", controls: list | None = None, legacy: str = "",
+            **values) -> None:
         """Report a finding. `template` is the message, with `{job}`, `{step}` and one `{name}` for
         each of `values`; `kind` tells a rule's cases apart (see `compose`). `controls` are the
         controls that would clear the finding, each with what the checker established about it."""
         job_id, step_name = (job.id if job else None), (step.name if step else None)
         message, facts = compose(rule, kind, template, job_id, step_name, values)
+        if legacy:
+            legacy = legacy.format(job=job_id or "", step=step_name or "", **{
+                name: (value.shown if isinstance(value, Fact) else ", ".join(str(v) for v in value)
+                       if isinstance(value, (list, tuple, set, frozenset)) else str(value))
+                for name, value in values.items()})
         self.findings.append(Finding(
             rule=rule,
             severity=severity or self.catalog.rules[rule]["severity"],
@@ -197,6 +224,7 @@ class WorkflowRules:
             kind=kind,
             facts=facts,
             controls=list(controls or []),
+            legacy=legacy if legacy != message else "",
         ))
 
     def run(self) -> list[Finding]:
@@ -231,7 +259,8 @@ class WorkflowRules:
         if job.permissions is None:
             self.add("OBAAF-GHA-009", job.line,
                      "Job '{job}' does not declare permissions, and neither does the workflow, so its token "
-                     "gets the repository default.", job)
+                     "gets the repository default (or, when another workflow calls this one, what the calling "
+                     "job grants).", job)
 
     # -------------------------------------------------------------- GHA-001
     def secrets_untrusted(self, job: Job) -> None:
@@ -243,7 +272,11 @@ class WorkflowRules:
                                  for n in names))
         secrets = Fact(sorted(names), shown)
         privileged = triggers & PRIVILEGED_UNTRUSTED_TRIGGERS
-        if privileged and job.environment:
+        # Only an environment named in plain text lowers the finding: it may require a reviewer. A
+        # name with an expression in it can be one GitHub creates on first use, with no protection
+        # rules, or one the event's author picks; a name that is not text cannot be checked at all.
+        reviewed = job.environment_reading[0] == "literal"
+        if privileged and reviewed:
             self.add("OBAAF-GHA-001", job.line,
                      "Job '{job}' receives {secrets} and can be started by {triggers}. It references environment "
                      "'{environment}'; confirm that environment requires reviewers.",
@@ -251,13 +284,14 @@ class WorkflowRules:
                      triggers=sorted(privileged), environment=job.environment)
         elif privileged:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and can be started by {triggers}.",
-                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged))
+                     "Job '{job}' receives {secrets}{environment} and can be started by {triggers}.",
+                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged),
+                     environment=self._environment_fact(job))
         elif triggers & PR_TRIGGERS:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and runs on pull requests. Forks get no secrets, but "
-                     "branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
-                     secrets=secrets)
+                     "Job '{job}' receives {secrets}{environment} and runs on pull requests. Forks get no secrets, "
+                     "but branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
+                     secrets=secrets, environment=self._environment_fact(job))
 
     # -------------------------------------------------------------- GHA-024
     def protected_secrets(self, job: Job) -> None:
@@ -265,11 +299,10 @@ class WorkflowRules:
             return
         names = job.secret_names()
         caller = bool(job.reusable)
-        # A reusable-workflow call with `secrets: inherit` passes repository and organization secrets
-        # only, never an environment's, and the caller cannot declare an environment. Whether a
-        # protected secret still has such a copy is a settings question, not a workflow one.
-        if caller:
-            names = names - {"*inherit"}
+        # A reusable-workflow call passes repository and organization secrets only, never an
+        # environment's, and the caller cannot declare an environment. `secrets: inherit` passes all
+        # of them, so it passes a protected secret's repository or organization copy wherever one
+        # exists, as naming the secret does; whether one exists is a setting `obaaf audit` reads.
         takes_all = "*" in names or "*inherit" in names
         # Every protected entry a secret matches applies, so an overlapping, looser pattern can never
         # relax a stricter one.
@@ -283,19 +316,23 @@ class WorkflowRules:
                     hits.append((name.upper(), pattern, env))
         if not hits:
             return
-        declared = job.environment
-        dynamic = bool(declared and "${{" in declared)
-        via = " (it can take every secret)" if takes_all else ""
+        state, declared = job.environment_reading
+        via = (" (it passes every secret: secrets: inherit)" if "*inherit" in names
+               else " (it can take every secret)" if takes_all else "")
+        every = sorted(n for n in names if n.startswith("*"))
+        found = job.environment_source() if state == "scalar" else None
+        source = found[0] if found else None
         reported: set[tuple] = set()
         for name, pattern, wanted in hits:
-            ok = declared and not dynamic and (wanted is None or declared.casefold() == wanted.casefold())
-            if ok:
+            match = (environment_match(declared, wanted) if state == "literal"
+                     else scalar_environment_match(declared, wanted, source) if state == "scalar" else None)
+            if not caller and match == "same":
                 continue
             # One finding for each secret and the environment it needs, however many entries ask for it.
             if (name, wanted) in reported:
                 continue
             reported.add((name, wanted))
-            values = {"secret": name, "via": Fact(takes_all, via),
+            values = {"secret": name, "via": Fact(every, via),
                       "need": Fact(wanted or "", f"environment '{wanted}'" if wanted else "an environment")}
             if caller:
                 self.add("OBAAF-GHA-024", job.line,
@@ -303,15 +340,31 @@ class WorkflowRules:
                          "{workflow}. A calling job cannot declare an environment, so the secret can only "
                          "come from the repository or organization; pass none, and declare {need} in the called "
                          "workflow's job instead.", job, kind="caller", workflow=job.reusable, **values)
-            elif dynamic:
+            elif state == "expression":
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} with environment '{declared}', an "
                          "expression the checker cannot confirm is {need}.", job, severity="medium",
                          kind="environment-expression", declared=declared, **values)
-            elif declared:
+            elif match == "unsure":
+                self.add("OBAAF-GHA-024", job.line,
+                         "Job '{job}' uses protected secret {secret}{via} with environment {declared}, which the "
+                         "checker cannot tell GitHub reads as {need}: it is a number or true or false, whose text "
+                         "YAML readers do not agree on, or it differs from that name only in the case of letters "
+                         "outside ASCII.", job, severity="medium", kind="environment-unsure",
+                         declared=Fact(value_identity(source if source is not None else declared),
+                                       shown_value(source if source is not None else declared)), **values)
+            elif state == "unreadable":
+                self.add("OBAAF-GHA-024", job.line,
+                         "Job '{job}' uses protected secret {secret}{via} with an environment written as {declared}, "
+                         "which is not a name, so it is not {need}.", job, kind="environment-not-a-name",
+                         declared=Fact(value_identity(declared), shown_value(declared)), **values)
+            elif state in ("literal", "scalar"):
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} in environment '{declared}', not {need}.",
-                         job, kind="other-environment", declared=declared, **values)
+                         job, kind="other-environment", declared=(
+                             declared if state == "literal" else source if source is not None
+                             else as_text(declared).lower() if isinstance(declared, bool) else as_text(declared)),
+                         **values)
             else:
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} without declaring {need}, so it "
@@ -319,51 +372,280 @@ class WorkflowRules:
                          "read it.", job, kind="no-environment", **values)
 
     # -------------------------------------------------------------- GHA-002, GHA-019
+    def _env_for(self, job: Job, step: Step | None = None):
+        """The env a step's values can read: its own, its job's and its workflow's."""
+        return env_lookup(step.env if step else None, job.env, self.wf.env)
+
+    def _checkout_reading(self, job: Job, step: Step) -> tuple[PrCode, PrCode]:
+        """What an actions/checkout step's `ref` and `repository` say about a pull request's code.
+        Inputs written as one expression are unresolved: the checker cannot tell what they hold."""
+        given = step.raw.get("with")
+        if given is not None and not isinstance(given, dict):
+            unread = PrCode("unresolved", ["inputs written as one expression"])
+            return unread, unread
+        look = self._env_for(job, step)
+        return pr_code(step.with_.get("ref") or "", look), pr_code(step.with_.get("repository") or "", look)
+
+    @staticmethod
+    def _combined(*readings: PrCode) -> PrCode:
+        for state in ("head", "unresolved"):
+            reads = sorted({r for reading in readings if reading.state == state for r in reading.reads})
+            if any(reading.state == state for reading in readings):
+                return PrCode(state, reads)
+        return PrCode("base", sorted({r for reading in readings for r in reading.reads}))
+
+    @staticmethod
+    def _condition(job: Job, step: Step | None) -> Fact:
+        """The `if:` of a job and a step, as part of what a finding is: a guard is what makes one
+        checkout of a pull request's code safe and another not, so an acceptance of a guarded step
+        does not cover the same step without its guard."""
+        values, shown = [], []
+        for where, raw in (("job", job.raw.get("if")), ("step", step.raw.get("if") if step else None)):
+            if raw is not None and as_text(raw).strip():
+                values.append(f"{where}: {value_identity(raw)}")
+                shown.append(f"the {where}'s if: {shown_value(raw)}")
+        return Fact(values, f" (it runs only where {' and '.join(shown)} holds)" if shown else "")
+
+    def _sources(self, job: Job, step: Step, reads: list) -> Fact:
+        """For a value the checker cannot read, everything in the file it can depend on, as part of
+        what the finding is: the workflow's and the job's env, the job's strategy, the job's steps
+        before this one (which can write GITHUB_ENV or outputs), and each job a `needs` output comes
+        from; as one digest of how they are written. An acceptance of a "cannot tell" finding is an
+        acceptance of all of that, so changing any of it (a producing step that now gives the head
+        instead of the base, a matrix, an env value) makes the finding new."""
+        if not reads:
+            return Fact([], "")
+        needed = sorted({read.split(".")[1] for read in reads if read.startswith("needs.") and "." in read[6:]})
+        upstream = {
+            "workflow-env": self.wf.raw.get("env"), "job-env": job.raw.get("env"),
+            "strategy": job.raw.get("strategy"), "steps": [s.raw for s in job.steps[:step.index]],
+            "needs": {name: other.raw for name, other in self.wf.jobs.items() if str(name).lower() in needed},
+        }
+        return Fact([f"upstream: {digest_of(upstream)}"], "")
+
+    def _shell(self, job: Job, step: Step) -> str:
+        """The shell a step's `run` is given to: its own, else the job's or the workflow's default."""
+        for raw in (step.raw, (job.raw.get("defaults") or {}).get("run") if isinstance(job.raw.get("defaults"), dict) else None,
+                    (self.wf.raw.get("defaults") or {}).get("run") if isinstance(self.wf.raw.get("defaults"), dict) else None):
+            if isinstance(raw, dict) and raw.get("shell"):
+                return as_text(raw.get("shell"))
+        return ""
+
+    @staticmethod
+    def _unsafe_checkout_allowed(step: Step) -> bool:
+        """Whether a checkout step opts in to checking out a fork's pull request. Anything but a
+        plainly false value counts, an expression included: GitHub hands the action what it
+        evaluates to."""
+        if "allow-unsafe-pr-checkout" not in step.with_:
+            return False
+        return not _falsy(_constant(step.with_.get("allow-unsafe-pr-checkout")))
+
     def untrusted_checkout(self, job: Job) -> None:
         privileged = job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS
         for step in job.steps:
             if step.uses_action("actions/checkout"):
-                if _truthy(step.with_.get("allow-unsafe-pr-checkout", "false")):
+                if self._unsafe_checkout_allowed(step):
                     self.add("OBAAF-GHA-019", step.line,
-                             "Step '{step}' sets allow-unsafe-pr-checkout: true.", job, step)
+                             "Step '{step}' sets allow-unsafe-pr-checkout to {value}.", job, step,
+                             legacy="Step '{step}' sets allow-unsafe-pr-checkout: true.",
+                             triggers=Fact(sorted(job.triggers()), ""),
+                             value=Fact(value_identity(step.with_.get("allow-unsafe-pr-checkout")),
+                                        shown_value(step.with_.get("allow-unsafe-pr-checkout"))))
                 if not privileged:
                     continue
-                target = f"{step.with_.get('ref', '')} {step.with_.get('repository', '')}"
-                if PR_HEAD_REF_RE.search(target):
+                reading = self._combined(*self._checkout_reading(job, step))
+                if reading.state == "head":
                     self.add("OBAAF-GHA-002", step.line,
-                             "Step '{step}' checks out pull-request code in a workflow started by "
-                             "{triggers}.", job, step, kind="checkout", triggers=sorted(privileged))
-            elif privileged and PR_FETCH_CMD_RE.search(step.text()):
-                self.add("OBAAF-GHA-002", step.line,
-                         "Step '{step}' fetches pull-request code in a workflow started by "
-                         "{triggers}.", job, step, kind="fetch", triggers=sorted(privileged))
+                             "Step '{step}' checks out pull-request code ({reads}) in a workflow started by "
+                             "{triggers}{condition}.", job, step, kind="checkout", triggers=sorted(privileged),
+                             reads=reading.reads, condition=self._condition(job, step),
+                             legacy="Step '{step}' checks out pull-request code in a workflow started by {triggers}.")
+                elif reading.state == "unresolved":
+                    self.add("OBAAF-GHA-002", step.line,
+                             "Step '{step}' checks out a ref or repository taken from {reads} in a workflow started "
+                             "by {triggers}{condition}. The checker cannot tell whether that is a pull request's "
+                             "code; if it is not, accept this finding and say why.", job, step, severity="medium",
+                             kind="checkout-unresolved", triggers=sorted(privileged), reads=reading.reads,
+                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads))
+            elif privileged:
+                reading = pr_fetch(step, self._env_for(job, step), self._shell(job, step))
+                if reading.state == "head":
+                    self.add("OBAAF-GHA-002", step.line,
+                             "Step '{step}' fetches pull-request code ({reads}) in a workflow started by "
+                             "{triggers}{condition}.", job, step, kind="fetch", triggers=sorted(privileged),
+                             reads=reading.reads, condition=self._condition(job, step),
+                             legacy="Step '{step}' fetches pull-request code in a workflow started by {triggers}.")
+                elif reading.state == "unresolved":
+                    self.add("OBAAF-GHA-002", step.line,
+                             "Step '{step}' runs a command that fetches or checks out code, with a value taken from "
+                             "{reads}, in a workflow started by {triggers}{condition}. The checker cannot tell "
+                             "whether that is a pull request's code; if it is not, accept this finding and say why.",
+                             job, step, severity="medium", kind="fetch-unresolved", triggers=sorted(privileged),
+                             reads=reading.reads, condition=self._condition(job, step),
+                             sources=self._sources(job, step, reading.reads))
 
     # -------------------------------------------------------------- GHA-010
+    # Events outsiders can cause that UNTRUSTED_TRIGGERS does not list, for this rule's severity only
+    # (flagship slice 2d.2d): anyone who can read a public repository can comment on its commits.
+    # `check_suite`, `check_run` and `status` carry a commit and a branch that may be a fork's (not
+    # verified), so they count too.
+    _INJECTION_UNTRUSTED = frozenset(UNTRUSTED_TRIGGERS | {"commit_comment", "check_suite", "check_run", "status"})
+    # Events on which a commit's message, author, committer and file names can be an outsider's: a
+    # merged pull request's title and branch name are in its merge commit's message, and a commit keeps
+    # the author its writer gave it.
+    _COMMITS_PUSHED = frozenset({"push", "merge_group", TRUSTED_WORKFLOW_RUN})
+
     def script_injection(self, job: Job) -> None:
-        untrusted = bool(job.triggers() & UNTRUSTED_TRIGGERS)
+        """Every outsider-written field a step expands in what it runs (flagship slice 2d.2d). The
+        fields, the references that reach them, the expressions that hold those references and the
+        job's triggers are the finding's facts, so an accepted step that later expands one more field,
+        expands it another way, or that a new trigger can start, is a new finding."""
+        triggers = job.triggers()
+        # A workflow another workflow calls gets the caller's event, which the checker does not read,
+        # so it is taken as one an outsider may have caused.
+        untrusted = bool(triggers & self._INJECTION_UNTRUSTED) or "workflow_call" in triggers
+        commits_pushed = bool(triggers & self._COMMITS_PUSHED)
         for step in job.steps:
-            text = step.text()
-            if not text:
+            texts = self._script_texts(job, step)
+            if not texts:
                 continue
             view = None
-            for body in expressions(text):
-                severity = "high" if untrusted else "medium"
-                found = self._untrusted_text(body)
-                if found:
-                    self.add("OBAAF-GHA-010", step.line,
-                             "Step '{step}' expands {field} inside its script.", job, step,
-                             severity=severity, field=found)
+            fields: set = set()
+            references: set = set()
+            written: set = set()        # the expressions that reach a field, as the finding's facts
+            ways: set = set()           # how the indirect references reach their field
+            for text in texts:
+                for body in expressions(text):
+                    direct = self._untrusted_fields(body)
+                    reached = bool(direct)
+                    fields |= direct
+                    references |= direct
+                    if view is None:
+                        view = self._indirect(job, step)
+                    for how, reference, held in self._untrusted_indirectly(body, view):
+                        fields |= held
+                        references.add(reference)
+                        ways.add(how)
+                        reached = True
+                    if reached:
+                        written.add(self._expression_identity(body))
+            if not fields:
+                continue
+            commit_text = any(self._commit_field(f) for f in fields)
+            severity = "high" if untrusted or (commits_pushed and commit_text) else "medium"
+            values = {"fields": sorted(fields), "triggers": Fact(sorted(triggers), ""),
+                      "expressions": Fact(sorted(written), ""), "legacy": self._legacy_injection(job, step)}
+            if not ways:
+                self.add("OBAAF-GHA-010", step.line,
+                         "Step '{step}' expands {fields} inside its script.", job, step, severity=severity, **values)
+            elif len(references) == 1 and ways == {"through-env"}:
+                self.add("OBAAF-GHA-010", step.line,
+                         "Step '{step}' expands {reference}, which holds {fields}, inside its script.", job, step,
+                         severity=severity, kind="through-env", reference=next(iter(references)), **values)
+            elif len(references) == 1 and ways == {"through-matrix"}:
+                self.add("OBAAF-GHA-010", step.line,
+                         "Step '{step}' expands {reference}, from a matrix that holds {fields}, inside its script.",
+                         job, step, severity=severity, kind="through-matrix", reference=next(iter(references)),
+                         **values)
+            else:
+                self.add("OBAAF-GHA-010", step.line,
+                         "Step '{step}' expands {references}, which reach {fields}, inside its script.", job, step,
+                         severity=severity, kind="indirect", references=sorted(references), **values)
+
+    @staticmethod
+    def _expression_identity(body: str) -> str:
+        """An expression as part of a finding: its text with runs of space made one, or, beyond 200
+        characters, its length and digest. The checker does not work out whether an expression gives
+        text or only true or false (`contains(github.event.issue.title, 'bug')`), so it reports both;
+        naming the expression keeps an acceptance of the harmless one from covering a later edit that
+        expands the field itself."""
+        text = " ".join(body.split())
+        if len(text) <= 200:
+            return text
+        return f"{len(text)} characters, sha256 {hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()}"
+
+    @staticmethod
+    def _commit_field(field: str) -> bool:
+        """Whether a field reached is, or may be, a commit's text: under `head_commit`, `commits`,
+        `merge_group`, `check_suite` or a `status` event's `commit`, a run's `display_title` (the head
+        commit's message for a run after a push), or a whole object or computed path that can hold one
+        (`toJSON(github)`, `toJSON(github.event.workflow_run)`, `github.event[...]`)."""
+        lowered = field.lower()
+        whole = ("github", "github.event", "github.event.workflow_run", "github.event.commit", "github.event.check_run")
+        return (lowered in whole or "*" in lowered or "[" in lowered or "tojson(" in lowered
+                or any(part in lowered for part in ("head_commit", "commits", "merge_group", "check_suite",
+                                                    "event.commit.", "workflow_run.display_title")))
+
+    def _script_texts(self, job: Job, step: Step) -> list:
+        """What a step runs as a script or a command line: its `run`, a github-script script, the
+        command OBAAF's egress action runs (also under a spelling of its path that `confines` does not
+        take for the action), a `docker://` step's `entrypoint` and `args`, the inputs of the actions
+        listed under `script_inputs` in the detection data, and the `shell` that runs `run` (the
+        step's, the job's or the workflow's `defaults.run.shell`), which is the command line the runner
+        starts. A value that is not text (a mapping, a list) is read as the text of everything in it."""
+        texts = [step.scripts()]
+        for action, names in (self.detection.get("script_inputs") or {}).items():
+            if step.uses_action(action):
+                for name in names:
+                    given = step.with_.get(str(name).lower())     # `with_` folds input names to lower case
+                    if given is not None:
+                        texts.append(str(given))
+        if not step.confines and self._spelled_egress(step) and step.with_.get("run") is not None:
+            texts.append(str(step.with_.get("run")))
+        if step.run:
+            for raw in (step.raw, job.raw.get("defaults"), self.wf.raw.get("defaults")):
+                shell = raw.get("shell") if raw is step.raw else (
+                    raw.get("run", {}).get("shell") if isinstance(raw, dict) and isinstance(raw.get("run"), dict)
+                    else None)
+                if shell is not None:
+                    texts.append(str(shell))
                     break
-                if view is None:
-                    view = self._indirect(job, step)
-                through = self._untrusted_indirectly(body, view)
-                if through:
-                    how, reference, found = through
-                    held = "which holds" if how == "through-env" else "from a matrix that holds"
-                    self.add("OBAAF-GHA-010", step.line,
-                             "Step '{step}' expands {reference}, " + held + " {field}, inside its script.", job, step,
-                             severity=severity, kind=how, reference=reference, field=found)
-                    break
+        return [text for text in texts if text]
+
+    @staticmethod
+    def _spelled_egress(step: Step) -> bool:
+        """Whether a step's `uses` names OBAAF's egress action with extra slashes or dots in its path
+        (`actions/egress/`, `actions/./egress`, `obaaf//actions/egress`). Whether GitHub runs the action
+        for such a path is not verified; its `run` input is read as a script either way."""
+        action = (step.action or "").lower()
+        parts = [part for part in action.split("/") if part not in ("", ".")]
+        return "/".join(parts) == EGRESS_ACTION
+
+    def _legacy_injection(self, job: Job, step: Step) -> str:
+        """The message the checker wrote for this step before slice 2d.2d (the first field of the first
+        expression of `run` or a github-script script, read as it was read then), as a template for
+        `add`, so that a v0.1 baseline entry still names the finding. Empty where that reading found
+        nothing or wrote the same message."""
+        def literal(text) -> str:
+            return str(text).replace("{", "{{").replace("}", "}}")
+        view = None
+        for body in expressions(step.text()):
+            found = self._untrusted_text(body)
+            if found:
+                return "Step '{step}' expands " + literal(found) + " inside its script."
+            if view is None:
+                view = self._v1_indirect(job, step)
+            through = self._v1_untrusted_indirectly(body, view)
+            if through:
+                how, reference, held = through
+                held_text = "which holds" if how == "through-env" else "from a matrix that holds"
+                return ("Step '{step}' expands " + literal(reference) + ", " + held_text + " " + literal(held)
+                        + ", inside its script.")
+        return ""
+
+    def _untrusted_fields(self, body: str, objects: bool = False) -> frozenset:
+        """Every outsider-written field an expression expands, as dotted names. With `objects`, an
+        object that contains such a field counts too (a matrix entry or an output can be a whole
+        object, whose fields a script then reads)."""
+        out = set()
+        for ref in expr_mod.refs(body):
+            if any(expr_mod.reaches(ref.path, pattern, ref.extracted or objects) for pattern in UNTRUSTED_PATHS):
+                out.add(expr_mod.dotted(ref.path))
+        if not out:
+            found = self._untrusted_text(body)
+            if found:
+                out.add(found)
+        return frozenset(out)
 
     @staticmethod
     def _untrusted_text(body: str) -> str | None:
@@ -380,19 +662,90 @@ class WorkflowRules:
                 return expr_mod.dotted(ref.path)
         return None
 
-    def _held(self, value, objects: bool = False) -> str | None:
-        """The outsider-written field a workflow value holds, if any. With `objects`, a value that
-        is the object containing such a field counts too (a matrix entry can be a whole object,
-        whose fields the script then reads)."""
+    def _held(self, value, objects: bool = False) -> frozenset:
+        """Every outsider-written field a workflow value holds (empty when none). With `objects`, a
+        value that is the object containing such a field counts too (a matrix entry can be a whole
+        object, whose fields the script then reads). An output of another job that holds one counts
+        too (`needs.a.outputs.title`, flagship slice 2d.2d)."""
+        out: set = set()
         for body in expressions(value):
-            held = self._untrusted_text(body)
-            if held:
-                return held
-            if objects:
-                for ref in expr_mod.refs(body):
-                    if any(expr_mod.reaches(ref.path, pattern, True) for pattern in UNTRUSTED_PATHS):
-                        return expr_mod.dotted(ref.path)
-        return None
+            out |= self._untrusted_fields(body, objects)
+            for path in expr_mod.paths(body):
+                out |= self._output_held(path)
+        return frozenset(out)
+
+    def _output_taint(self) -> dict:
+        """Job id (lower case) -> {output name (lower case) or "*": the outsider-written fields it holds},
+        for job outputs written in the file (`outputs: {title: ${{ github.event.issue.title }}}`),
+        directly, through another job's output, or through the job's env or matrix. Outputs set by a
+        step while the job runs (`steps.x.outputs.y`) are not followed.
+
+        Worked out once per file, with a work list: a job's outputs are read again only when an output
+        of a job it reads (in its outputs, env, matrix or the workflow's env) gains a field, so a chain of
+        jobs costs about one reading per job, in any order. The views of jobs built while it runs are
+        dropped at the end, because they were built from outputs not yet complete."""
+        cached = self.__dict__.get("_outputs")
+        if cached is not None:
+            return cached
+        self.__dict__["_outputs"] = taint = {}      # an output reading an output: read as not yet held
+        views = self.__dict__.setdefault("_job_views", {})
+        jobs = {str(job.id).lower(): job for job in self.wf.jobs.values() if job.raw.get("outputs") is not None}
+        readers: dict = {}                          # job id or "*" -> ids of jobs with outputs that read it
+        for name, job in jobs.items():
+            for value in (job.raw.get("outputs"), job.raw.get("env"), job.raw.get("strategy"), self.wf.raw.get("env")):
+                for body in expressions(value):
+                    for path in expr_mod.paths(body):
+                        if path[0].kind != expr_mod.NAME or path[0].value.lower() != "needs":
+                            continue
+                        target = path[1].value.lower() if len(path) > 1 and path[1].kind == expr_mod.NAME else "*"
+                        readers.setdefault(target, set()).add(name)
+        queue = list(jobs)
+        waiting = set(queue)
+        while queue:
+            name = queue.pop(0)
+            waiting.discard(name)
+            job = jobs[name]
+            outputs = job.raw.get("outputs")
+            pairs = [("*", outputs)] if isinstance(outputs, str) else \
+                [(str(k).lower(), v) for k, v in outputs.items()] if isinstance(outputs, dict) else []
+            views.pop(job.id, None)                 # read the job's env and matrix with the outputs as they are now
+            view = self._job_view(job)
+            own = taint.setdefault(name, {})
+            changed = False
+            for output, value in pairs:
+                held = set(self._held(value, objects=True))
+                for body in expressions(value):
+                    for _how, _reference, fields in self._untrusted_indirectly(body, view):
+                        held |= fields
+                if held and not held <= own.get(output, frozenset()):
+                    own[output] = frozenset(held | own.get(output, frozenset()))
+                    changed = True
+            if changed:
+                for reader in readers.get(name, set()) | readers.get("*", set()):
+                    if reader not in waiting:
+                        queue.append(reader)
+                        waiting.add(reader)
+        views.clear()
+        return taint
+
+    def _output_held(self, path: tuple) -> frozenset:
+        """The fields a `needs.<job>.outputs.<name>` reference reaches, if that output holds any. A
+        reference that names no single job or output (`needs.*`, `needs[x]`, `toJSON(needs)`) reaches
+        every output that holds one."""
+        if not path or path[0].kind != expr_mod.NAME or path[0].value.lower() != "needs":
+            return frozenset()
+        taint = self._output_taint()
+        exact = (len(path) >= 4 and all(s.kind == expr_mod.NAME for s in path[:4])
+                 and path[2].value.lower() == "outputs")
+        if exact:
+            own = taint.get(path[1].value.lower(), {})
+            return own.get(path[3].value.lower(), frozenset()) | own.get("*", frozenset())
+        if len(path) >= 3 and path[1].kind == expr_mod.NAME and path[2].kind == expr_mod.NAME \
+                and path[2].value.lower() != "outputs":
+            return frozenset()                  # needs.<job>.result and the like
+        if len(path) >= 2 and path[1].kind == expr_mod.NAME:
+            return frozenset().union(*taint.get(path[1].value.lower(), {}).values())
+        return frozenset().union(*(held for own in taint.values() for held in own.values()))
 
     @staticmethod
     def _env_refs(value) -> tuple[set, bool]:
@@ -408,7 +761,130 @@ class WorkflowRules:
                     everything = True
         return names, everything
 
-    def _env_taint(self, scopes: list[dict], base: dict, matrix: str | None = None) -> dict:
+    def _env_taint(self, scopes: list[dict], base: dict, matrix: frozenset = frozenset()) -> dict:
+        """Env name -> the outsider-written fields its value holds, directly, through other env
+        values (`B: ${{ env.A }}`), or through the job's matrix when that holds one (`matrix`).
+        Later scopes override earlier ones key for key. `base` is taint from the enclosing scopes,
+        which these values can read but do not replace."""
+        entries: dict = {}
+        for scope in scopes:
+            entries.update(scope)
+        tainted: dict = {}
+        readers: dict = {}          # lower-case name -> keys whose value reads env.<name>
+        read_all: list = []         # keys whose value reads the whole env context
+        for key, value in entries.items():
+            held = set(self._held(key) | self._held(value))
+            if matrix and any(path[0].value.lower() == "matrix"
+                              for body in expressions(value) for path in expr_mod.paths(body)):
+                held |= matrix
+            if held:
+                tainted[key] = frozenset(held)
+            names, everything = self._env_refs(value)
+            if everything:
+                read_all.append(key)
+            for name in names:
+                readers.setdefault(name, []).append(key)
+        inherited = {str(k).lower(): v for k, v in base.items()}
+        queue = [(str(k).lower(), v) for k, v in tainted.items()] + list(inherited.items())
+        while queue:
+            name, held = queue.pop()
+            for key in readers.get(name, []) + read_all:
+                if not held <= tainted.get(key, frozenset()):
+                    tainted[key] = tainted.get(key, frozenset()) | held
+                    queue.append((str(key).lower(), tainted[key]))
+        return tainted
+
+    def _whole_env(self, value, matrix: frozenset, env: dict) -> frozenset:
+        """The fields an `env:` written as one expression can hold: those it reads directly or through
+        another job's output, the matrix's when it reads the matrix, and those of the env values it
+        can read (flagship slice 2d.2d)."""
+        held = set(self._held(value, objects=True))
+        for body in expressions(value):
+            for path in expr_mod.paths(body):
+                root = path[0].value.lower() if path[0].kind == expr_mod.NAME else ""
+                if root == "matrix":
+                    held |= matrix
+                if root == "env":
+                    held |= frozenset().union(*env.values()) if env else frozenset()
+        return frozenset(held)
+
+    def _job_view(self, job: Job) -> dict:
+        """What any step of a job can reach through the env and matrix contexts: env names that hold
+        outsider-written text (lower case), the fields the job's matrix holds, and those an `env:`
+        written as one expression (so its names cannot be read) holds."""
+        cache = self.__dict__.setdefault("_job_views", {})
+        if job.id not in cache:
+            matrix = self._held(job.raw.get("strategy"), objects=True)
+            whole = frozenset()
+            if isinstance(self.wf.raw.get("env"), str):
+                whole = self._whole_env(self.wf.raw.get("env"), frozenset(), {})
+            taint = self._env_taint([self.wf.env, job.env], {}, matrix)
+            if isinstance(job.raw.get("env"), str):
+                whole = whole | self._whole_env(job.raw.get("env"), matrix, taint)
+            cache[job.id] = (taint, matrix, whole)
+        taint, matrix, whole = cache[job.id]
+        return {"env": {str(k).lower(): v for k, v in taint.items()}, "matrix": matrix, "env_whole": whole}
+
+    def _indirect(self, job: Job, step: Step) -> dict:
+        """What a step's script can reach through the env and matrix contexts: env names that hold
+        outsider-written text (lower case), the fields the job's matrix holds, and those an `env:`
+        written as one expression (so its names cannot be read) holds."""
+        self._output_taint()                        # first, so no view is built from outputs not yet complete
+        self._job_view(job)
+        job_taint, matrix, whole = self.__dict__["_job_views"][job.id]
+        if isinstance(step.raw.get("env"), str):
+            whole = whole | self._whole_env(step.raw.get("env"), matrix, job_taint)
+        step_taint = self._env_taint([step.env], job_taint, matrix) if step.env else {}
+        env: dict = {}
+        for key, held in job_taint.items():
+            if key not in step.env:             # a step value of the same name replaces the job's
+                env.setdefault(str(key).lower(), held)
+        for key, held in step_taint.items():
+            env.setdefault(str(key).lower(), held)
+        return {"env": env, "matrix": matrix, "env_whole": whole}
+
+    def _untrusted_indirectly(self, body: str, view: dict) -> list:
+        """`${{ env.TITLE }}` or `${{ matrix.title }}` in a script is expanded before the shell runs,
+        like any expression. If TITLE is set from an outsider-written field, the script expands that
+        field. (`"$TITLE"`, which the shell reads, is the safe form.) Returns every reference that
+        reaches such a field, as (how: `through-env`, `through-matrix` or `through-output`, the
+        reference in the script, the fields it reaches)."""
+        out = []
+        for path in expr_mod.paths(body):
+            root = path[0].value.lower()
+            if root == "env" and (view["env"] or view["env_whole"]):
+                if len(path) > 1 and path[1].kind == expr_mod.NAME:
+                    held = view["env"].get(path[1].value.lower(), frozenset())
+                else:
+                    held = frozenset().union(*view["env"].values()) if view["env"] else frozenset()
+                held = held | view["env_whole"]
+                if held:
+                    out.append(("through-env", expr_mod.dotted(path), held))
+            elif root == "matrix" and view["matrix"]:
+                out.append(("through-matrix", expr_mod.dotted(path), view["matrix"]))
+            elif root == "needs":
+                held = self._output_held(path)
+                if held:
+                    out.append(("through-output", expr_mod.dotted(path), held))
+        return out
+
+    # How the checker read OBAAF-GHA-010 before slice 2d.2d, kept only to write the message 0.3.0 wrote
+    # for a finding (`legacy`), so that a v0.1 baseline entry still names it. Nothing else uses these.
+    def _v1_held(self, value, objects: bool = False) -> str | None:
+        """The outsider-written field a workflow value holds, if any. With `objects`, a value that
+        is the object containing such a field counts too (a matrix entry can be a whole object,
+        whose fields the script then reads)."""
+        for body in expressions(value):
+            held = self._untrusted_text(body)
+            if held:
+                return held
+            if objects:
+                for ref in expr_mod.refs(body):
+                    if any(expr_mod.reaches(ref.path, pattern, True) for pattern in UNTRUSTED_PATHS):
+                        return expr_mod.dotted(ref.path)
+        return None
+
+    def _v1_env_taint(self, scopes: list[dict], base: dict, matrix: str | None = None) -> dict:
         """Env name -> the outsider-written field its value holds, directly, through other env
         values (`B: ${{ env.A }}`), or through the job's matrix when that holds one (`matrix`).
         Later scopes override earlier ones key for key. `base` is taint from the enclosing scopes,
@@ -420,7 +896,7 @@ class WorkflowRules:
         readers: dict = {}          # lower-case name -> keys whose value reads env.<name>
         read_all: list = []         # keys whose value reads the whole env context
         for key, value in entries.items():
-            held = self._held(key) or self._held(value)
+            held = self._v1_held(key) or self._v1_held(value)
             if not held and matrix and any(path[0].value.lower() == "matrix"
                                            for body in expressions(value) for path in expr_mod.paths(body)):
                 held = matrix
@@ -447,21 +923,21 @@ class WorkflowRules:
                     queue.append((str(key).lower(), held))
         return tainted
 
-    def _indirect(self, job: Job, step: Step) -> dict:
+    def _v1_indirect(self, job: Job, step: Step) -> dict:
         """What a step's script can reach through the env and matrix contexts: env names that hold
         outsider-written text (lower case), whether the job's matrix does, and whether an `env:`
         written as one expression (so its names cannot be read) does."""
-        cache = self.__dict__.setdefault("_job_views", {})
+        cache = self.__dict__.setdefault("_v1_views", {})
         if job.id not in cache:
-            matrix = self._held(job.raw.get("strategy"), objects=True)
-            whole = next((held for held in (self._held(raw.get("env"), objects=True)
+            matrix = self._v1_held(job.raw.get("strategy"), objects=True)
+            whole = next((held for held in (self._v1_held(raw.get("env"), objects=True)
                                             for raw in (self.wf.raw, job.raw)
                                             if isinstance(raw.get("env"), str)) if held), None)
-            cache[job.id] = (self._env_taint([self.wf.env, job.env], {}, matrix), matrix, whole)
+            cache[job.id] = (self._v1_env_taint([self.wf.env, job.env], {}, matrix), matrix, whole)
         job_taint, matrix, whole = cache[job.id]
         if isinstance(step.raw.get("env"), str):
-            whole = whole or self._held(step.raw.get("env"), objects=True)
-        step_taint = self._env_taint([step.env], job_taint, matrix) if step.env else {}
+            whole = whole or self._v1_held(step.raw.get("env"), objects=True)
+        step_taint = self._v1_env_taint([step.env], job_taint, matrix) if step.env else {}
         env: dict = {}
         for key, held in job_taint.items():
             if key not in step.env:             # a step value of the same name replaces the job's
@@ -471,7 +947,7 @@ class WorkflowRules:
         return {"env": env, "matrix": matrix, "env_whole": whole}
 
     @staticmethod
-    def _untrusted_indirectly(body: str, view: dict) -> tuple[str, str, str] | None:
+    def _v1_untrusted_indirectly(body: str, view: dict) -> tuple[str, str, str] | None:
         """`${{ env.TITLE }}` or `${{ matrix.title }}` in a script is expanded before the shell runs,
         like any expression. If TITLE is set from an outsider-written field, the script expands that
         field. (`"$TITLE"`, which the shell reads, is the safe form.) Returns how the field is
@@ -490,6 +966,7 @@ class WorkflowRules:
                 return "through-matrix", expr_mod.dotted(path), view["matrix"]
         return None
 
+
     # -------------------------------------------------------------- GHA-003/004/005/012/020
     def agent_rules(self, job: Job) -> None:
         if not job.in_lane("agent"):
@@ -501,7 +978,14 @@ class WorkflowRules:
         # of the same name, any agent in a declared job), and rewording it changes the finding;
         # both end when agents are named data.
         why = job.reason_for('agent')
-        if perms is None:
+        if perms is None and self.wf.callable:
+            # A called workflow's job holds what the calling job grants (it can only be narrowed), so
+            # what it holds is not read from this file at all.
+            self.add("OBAAF-GHA-003", job.line,
+                     "Agent job '{job}' ({why}) does not declare permissions, and its workflow can be called "
+                     "by another (workflow_call), so it holds whatever the calling job grants, write access "
+                     "included.", job, kind="inherited", why=why)
+        elif perms is None:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, so it may inherit "
                      "write access.", job, kind="undeclared", why=why)
@@ -512,14 +996,22 @@ class WorkflowRules:
         if perms is not None and perms.oidc:
             self.add("OBAAF-GHA-004", job.line,
                      "Agent job '{job}' can request OIDC tokens (id-token: write).", job)
+        elif perms is None and self.wf.callable:
+            self.add("OBAAF-GHA-004", job.line,
+                     "Agent job '{job}' does not declare permissions, and its workflow can be called by another "
+                     "(workflow_call), so it can request OIDC tokens whenever the calling job grants "
+                     "id-token: write.", job, kind="inherited")
         names = job.secret_names()
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
                                      for n in names))
+            # Where each key given to OBAAF's egress action goes is the fifth control's detail (2c.7): a model
+            # key under model-keys is out of the command's reach, one passed in env is not.
             egress = self._egress(job)[0]
-            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}.", job, kind="secrets",
-                     secrets=Fact(sorted(names), shown),
-                     controls=[*self._secret_controls(job, names), self._input_control(job), egress])
+            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{environment}.", job,
+                     kind="secrets", secrets=Fact(sorted(names), shown), environment=self._environment_fact(job),
+                     controls=[*self._secret_controls(job, names), self._input_control(job), egress,
+                               self._key_control(job)])
         elif job.environment:
             self.add("OBAAF-GHA-005", job.line,
                      "Agent job '{job}' uses environment '{environment}', whose secrets it receives "
@@ -527,22 +1019,48 @@ class WorkflowRules:
 
         # GHA-012: instructions from the change under review.
         triggers = job.triggers()
+        outside = sorted(triggers & UNTRUSTED_TRIGGERS)
+        merge_events = sorted(triggers & MERGE_REF_EVENTS)
         for step in job.steps:
             if step.uses_action("actions/checkout"):
-                ref = str(step.with_.get("ref", ""))
-                if PR_HEAD_REF_RE.search(ref) and "base" not in ref:
+                ref, repository = self._checkout_reading(job, step)
+                reading = self._combined(ref, repository)
+                if reading.state == "head":
                     self.add("OBAAF-GHA-012", step.line,
-                             "Agent job '{job}' checks out the pull request's code in step '{step}', so "
-                             "instruction files come from the change under review.", job, step, kind="head")
-                elif "pull_request" in triggers and not ref:
+                             "Agent job '{job}' checks out the pull request's code ({reads}) in step '{step}', so "
+                             "instruction files come from the change under review.", job, step, kind="head",
+                             reads=reading.reads, triggers=outside, condition=self._condition(job, step),
+                             legacy="Agent job '{job}' checks out the pull request's code in step '{step}', so "
+                                    "instruction files come from the change under review.")
+                elif reading.state == "unresolved" and outside:
                     self.add("OBAAF-GHA-012", step.line,
-                             "Agent job '{job}' runs on pull_request and step '{step}' checks out the "
+                             "Agent job '{job}' can be started by {triggers} and step '{step}' checks out a ref or "
+                             "repository taken from {reads}. The checker cannot tell whether that is the pull "
+                             "request's code, whose instruction files the agent would then read.", job, step,
+                             severity="medium", kind="unresolved", reads=reading.reads, triggers=outside,
+                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads))
+                elif merge_events and self._merge_commit(step, ref, repository):
+                    self.add("OBAAF-GHA-012", step.line,
+                             "Agent job '{job}' runs on {triggers} and step '{step}' checks out the "
                              "merge commit, which includes the pull request's instruction files.", job, step,
-                             kind="merge-commit")
-            elif PR_FETCH_CMD_RE.search(step.text()):
-                self.add("OBAAF-GHA-012", step.line,
-                         "Agent job '{job}' fetches the pull request's code in step '{step}'.", job, step,
-                         kind="fetch")
+                             kind="merge-commit", triggers=merge_events, condition=self._condition(job, step),
+                             legacy="Agent job '{job}' runs on pull_request and step '{step}' checks out the merge "
+                                    "commit, which includes the pull request's instruction files."
+                             if "pull_request" in merge_events else "")
+            else:
+                reading = pr_fetch(step, self._env_for(job, step), self._shell(job, step))
+                if reading.state == "head":
+                    self.add("OBAAF-GHA-012", step.line,
+                             "Agent job '{job}' fetches the pull request's code ({reads}) in step '{step}'.", job, step,
+                             kind="fetch", reads=reading.reads, triggers=outside, condition=self._condition(job, step),
+                             legacy="Agent job '{job}' fetches the pull request's code in step '{step}'.")
+                elif reading.state == "unresolved" and outside:
+                    self.add("OBAAF-GHA-012", step.line,
+                             "Agent job '{job}' can be started by {triggers} and step '{step}' fetches or checks out "
+                             "code with a value taken from {reads}. The checker cannot tell whether that is the pull "
+                             "request's code.", job, step, severity="medium", kind="fetch-unresolved",
+                             reads=reading.reads, triggers=outside, condition=self._condition(job, step),
+                             sources=self._sources(job, step, reading.reads))
 
         # GHA-020: egress restriction. The finding is always there for an agent job; what was
         # established about the one control that clears it decides where the finding stands.
@@ -573,10 +1091,6 @@ class WorkflowRules:
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
-    # After a cleared GHA-020: what the control does not stop, so the report never reads as more.
-    _LEAKS = ("Not blocked: anything the confined command sends to a listed host, and data in a host name "
-              "asked of the proxy, which leaves the runner in a DNS query even when the proxy refuses it "
-              "(until slice 2c.4)")
 
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
@@ -687,8 +1201,8 @@ class WorkflowRules:
             listed = ", ".join(policy.allow) or "nothing"
             listed += " and nothing else" if policy.no_defaults else " and GitHub's default endpoints"
             detail = (f"the job runs on {firewall} and {egress_mod.FIREWALL_POLICY} sets mode: enforce, allowing "
-                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host "
-                      "is not blocked")
+                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host, "
+                      "printed to the job's log or saved as an artifact is not blocked")
         else:
             detail = egress_mod.joined(problems or unsure)
         return egress_mod.Reading(verdict, detail, "firewall-runner",
@@ -772,6 +1286,103 @@ class WorkflowRules:
 
     _OUTPUTS = frozenset({"workspace", "scratch"})
 
+    # A command that installs packages with a JavaScript package manager, with `sudo` and its short
+    # options before it (slice 2c.8). What follows it is read token by token in `_installs_only`.
+    _INSTALL_RE = re.compile(r"(?:sudo(?:[ \t]+-[EHn]+)*[ \t]+)?"
+                             r"(npm[ \t]+(?:install|i|add)|pnpm[ \t]+(?:add|install|i)|yarn[ \t]+global[ \t]+add"
+                             r"|bun[ \t]+(?:add|install|i))((?:[ \t]+[^ \t]+)+)")
+    # Options that take no value and run nothing (found by the review of 2c.8: `--script-shell`,
+    # `--userconfig` and `--prefix` take a path, and a value can be a listed package's name).
+    _INSTALL_OPTIONS = frozenset({"-g", "--global", "--no-fund", "--no-audit", "--ignore-scripts", "--silent"})
+    # Commands that fetch a package and run it.
+    _PACKAGE_RUNNER_RE = re.compile(r"\b(?:npx|bunx)\b|\bnpm[ \t]+(?:exec|x)\b|\bpnpm[ \t]+(?:dlx|exec)\b"
+                                    r"|\byarn[ \t]+dlx\b|\bbun[ \t]+x\b")
+    # Characters that let a shell line do more than its words say: substitutions, pipes, redirections,
+    # groups, background jobs, quotes, globs, escapes and comments after a command. A script that has
+    # any of them is not read as installs only.
+    _SHELL_MORE_RE = re.compile(r"[`$|<>(){}&'\"\\*?!#\[\]]")
+
+    def _installs_only(self, job: Job, step: Step) -> bool:
+        """Whether a step does nothing but install agents' packages (`agent_installs` in detection.yaml) and print their
+        CLIs' versions, read from its shell script (slice 2c.8): `sudo npm install -g
+        @anthropic-ai/claude-code` and then `claude --version`, for one. Each line, and each command
+        on it separated by `&&` or `;`, must be one of those two and nothing else; comment lines are
+        skipped. Anything else makes it False, as does a script in another shell, an action, or a
+        key of the step beyond the plain ones, so that a step running an agent in a form the patterns
+        miss is not read as an install from its words alone (the limits are below). Each install must be global and name a listed package, with only
+        options that take no value, and `sudo` only with `-E`, `-H` or `-n`. The step may have no `env`
+        or `working-directory`, and neither the job nor the workflow may set any `env` or
+        `defaults.run`: each can make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`,
+        `PATH`, `npm_config_*`, a shell of the author's choosing). Found by the review of 2c.8. Not read,
+        and not readable from the workflow: what earlier steps put in the environment (`GITHUB_ENV`,
+        `GITHUB_PATH`, files in the home directory) and package-manager configuration in the working
+        directory, which `pnpm`, `yarn` and `bun` may read."""
+        packages = self.detection.get("agent_installs") or {}
+        if not packages or step.uses is not None or not isinstance(step.raw.get("run"), str):
+            return False
+        if set(step.raw) - {"name", "id", "run", "shell", "if", "timeout-minutes", "continue-on-error"}:
+            return False
+        for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
+            if defaults is not None and not (isinstance(defaults, dict) and "run" not in defaults):
+                return False
+        for env in (job.raw.get("env"), self.wf.raw.get("env")):
+            if env is not None and env != {}:
+                return False    # the step inherits it (second review of 2c.8)
+        shell = step.raw.get("shell")
+        if shell is not None and shell not in ("bash", "sh"):
+            return False
+        clis = {str(cli) for cli in packages.values()}
+        names = {str(name) for name in packages}
+        version_re = re.compile(rf"(?:{'|'.join(re.escape(cli) for cli in sorted(clis))})[ \t]+--version")
+        installed = False
+        for line in step.run.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            commands = [part.strip() for part in re.split(r"&&|;", line)]
+            for command in commands:
+                if not command or self._SHELL_MORE_RE.search(command):
+                    return False
+                if version_re.fullmatch(command):
+                    continue
+                found = self._INSTALL_RE.fullmatch(command)
+                if not found:
+                    return False
+                tokens = found.group(2).split()
+                if not found.group(1).startswith("yarn") and not {"-g", "--global"} & set(tokens):
+                    return False        # a local install brings in the whole project's packages and scripts
+                named = False
+                for token in tokens:
+                    if token in self._INSTALL_OPTIONS:
+                        continue
+                    if token.startswith("@"):
+                        rest, at, version = token[1:].partition("@")
+                        name = "@" + rest
+                    else:
+                        name, at, version = token.partition("@")
+                    if name not in names or (at and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.^~_-]*", version)):
+                        return False
+                    named = True
+                if not named:
+                    return False        # options alone install the project, and run its scripts
+                installed = True
+        return installed
+
+    def _package_mention_only(self, step: Step) -> bool:
+        """Whether the only thing that makes the checker take a step for running an agent is the name of
+        a package in `agent_installs`, with no command that fetches and runs a package (`npx`, `npm
+        exec`, `pnpm dlx`, `yarn dlx`, `bunx`) and no other agent pattern. Such a step, when it is not
+        read as an install, is "cannot tell" rather than an agent outside (slice 2c.8)."""
+        packages = {str(name) for name in (self.detection.get("agent_installs") or {})}
+        text = step.agent_text()
+        if not packages or not text or self._PACKAGE_RUNNER_RE.search(text):
+            return False
+        if any(f"{name}/" in text for name in packages):
+            return False        # a path into the package (`…/claude-code/cli.js`) runs it
+        patterns = list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())
+        others = [re.compile(p, re.M) for p in patterns if p not in packages]
+        return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
+
     def _reads_output(self, step: Step, ids: set) -> list[str]:
         """Where a step refers to what a confined command could write: an `outputs.workspace` or
         `outputs.scratch` of a confined step (also through `steps.*`, a computed index or `toJSON`),
@@ -813,6 +1424,203 @@ class WorkflowRules:
         walk("", step.raw)
         return where
 
+    @staticmethod
+    def _env_keys(value) -> set | None:
+        """The variable names an `env` mapping sets, or None when it is computed when the job runs."""
+        if value is None:
+            return set()
+        return {str(key) for key in value} if isinstance(value, dict) else None
+
+    def _placement(self, job: Job, step: Step) -> egress_mod.Placement:
+        """Where each credential given to a step that uses OBAAF's egress action goes (slice 2c.5),
+        read as the action reads its inputs: `model-keys` names variables of the step's environment for
+        AWF's API proxy, `env` names variables for the command, and the `run` input is the command's
+        text. A credential anywhere else in the step, or inputs or an `env` computed when the job runs,
+        cannot be placed. A name the action refuses makes it refuse to run."""
+        cache = self.__dict__.setdefault("_placement_cache", {})
+        key = (job.id, step.index)
+        if key in cache:
+            return cache[key]
+        where = f"step '{one_line(step.name, 80)}'"
+        place = egress_mod.Placement(where)
+        cache[key] = place
+        given = step.raw.get("with")
+        names: dict = {"env": None, "model-keys": None}     # None: not readable (the caller says why for `with`)
+        if isinstance(given, dict):
+            for label in names:
+                value = step.with_.get(label)
+                if value is None:
+                    names[label] = []
+                elif not isinstance(value, str):
+                    kind = ("a list" if isinstance(value, list) else "a mapping" if isinstance(value, dict)
+                            else "true or false" if isinstance(value, bool) else "a number")
+                    place.unsure.append(f"{where} gives its {label} input as {kind}, not as text, and how GitHub "
+                                        "turns that into the text the action reads is not established")
+                elif expr_mod.OPEN in value:
+                    place.unsure.append(f"{where} computes its {label} input when the job runs ({one_line(value, 80)})")
+                else:
+                    names[label] = egress_mod.split_list(value)
+        env_names, key_names = names["env"], names["model-keys"]
+        for name in env_names or []:
+            if not egress_mod.NAME_RE.match(name):
+                place.problems.append(f"{where} names {one_line(name, 60)!r} under env, which is not a variable name, "
+                                      "so the action refuses to run")
+            elif name in egress_mod.WITHHELD_BY_AWF:
+                place.problems.append(f"{where} names {name} under env, a name AWF withholds from the command, so "
+                                      "the action refuses to run (a model key goes under model-keys)")
+        step_env = step.raw.get("env")
+        here = self._env_keys(step_env)
+        beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
+        for name in key_names or []:
+            if name not in egress_mod.MODEL_KEYS:
+                place.problems.append(f"{where} names {one_line(name, 60)!r} under model-keys, which takes only "
+                                      f"{', '.join(sorted(egress_mod.MODEL_KEYS))}, so the action refuses to run")
+                continue
+            host = egress_mod.MODEL_KEYS[name]
+            if host not in place.hosts:
+                place.hosts.append(host)
+            unset = all(keys is not None and name not in keys for keys in [here, *beyond])
+            if unset:
+                place.problems.append(f"{where} names {name} under model-keys and no env of the step, the job or "
+                                      "the workflow sets it, so the action refuses to run")
+        # The step's environment, which the action reads names from, and which GitHub also puts in the
+        # `env` context its inputs are written with: `${{ env.KEY }}` in `run` hands the command the
+        # value whatever `model-keys` says.
+        held: dict = {}          # step env name -> the credentials its value holds
+        folded: dict = {}        # step env name in upper case -> the names written
+        if isinstance(step_env, dict):
+            for name in step_env:
+                folded.setdefault(str(name).upper(), []).append(str(name))
+            said: set = set()
+            for name, value in step_env.items():
+                found = self._credentials(value)
+                if not found:
+                    continue
+                if not isinstance(name, str):
+                    # `true:` or `1:` is not text to this reader; what GitHub names the variable is not
+                    # established. Found by the second review: `true` was compared as "True".
+                    place.unsure.append(f"{where} sets a variable whose name is not written as text "
+                                        f"({one_line(str(name), 40)}) to {self._names(found)}, and what GitHub "
+                                        "names it is not established")
+                    continue
+                held[name] = found
+                same = folded[name.upper()]
+                if len(same) > 1 and name.upper() not in said:
+                    said.add(name.upper())
+                    place.unsure.append(f"{where} sets {' and '.join(one_line(n, 60) for n in same)} in its env, "
+                                        "which differ only in case, and which of them the action reads is not "
+                                        "established")
+        elif step_env is not None:
+            found = self._credentials(step_env)
+            if found:
+                place.unsure.append(f"{where} computes its env when the job runs, with {self._names(found)}, so the "
+                                    "checker cannot tell which variables hold them")
+        # The inputs. Only `run` reaches the command, as its text, with what it writes in from `secrets`,
+        # `github.token` or the step's env (names matched without regard to case, which covers an exact
+        # match however GitHub compares them); a credential in any other input is not placed. An
+        # allow-list or a list of names computed from one is reported above as computed.
+        through_run: set = set()
+        if isinstance(given, dict):
+            for name, value in given.items():
+                found = self._credentials(value)
+                refs, everything = self._env_refs(value)
+                via = [env for env in held if everything or env.lower() in refs]
+                if input_name(name) == "run":
+                    if found:
+                        place.command.append(("in its run input", found))
+                    for env in via:
+                        through_run.add(env)
+                        place.command.append((f"in its run input, through env.{env}", held[env]))
+                    if everything and held:
+                        place.unsure.append(f"{where} writes the whole env context, or a part of it the checker "
+                                            "cannot name, into its run input")
+                elif (found or via) and not (input_name(name) in ("allow", "env", "model-keys")
+                                             and isinstance(value, str) and expr_mod.OPEN in value):
+                    shown = found + [f"env.{env}" for env in via]
+                    place.unsure.append(f"{where} gives {self._names(shown)} in its {one_line(name, 40)} input, "
+                                        "which the action does not pass on as a variable")
+        elif given is not None:
+            found = self._credentials(given)
+            if found:
+                place.unsure.append(f"{where} computes its inputs when the job runs, with {self._names(found)}")
+        # Each credential of the step's env, by the name it is set under.
+        for name, found in held.items():
+            if len(folded[name.upper()]) > 1 or name in through_run:
+                continue        # said above
+            if env_names is None or key_names is None:
+                continue        # said above: an input is not readable
+            if name in key_names and name in egress_mod.MODEL_KEYS and name not in env_names:
+                place.proxy.append((name, found))
+            elif name in env_names:
+                if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name):
+                    continue    # the action refuses to run, which `problems` says
+                place.command.append((f"as {name}", found))
+            else:
+                place.neither.append((name, found))
+        rest = {name: value for name, value in step.raw.items() if name not in ("with", "env")}
+        found = self._credentials(rest)
+        if found:
+            place.unsure.append(f"{where} is given {self._names(found)} outside its env and its inputs, where the "
+                                "checker does not place it")
+        return place
+
+    @staticmethod
+    def _names(items: list, limit: int = 3) -> str:
+        """Names joined for a report, saying how many more there are rather than cutting them off."""
+        items = list(dict.fromkeys(items))
+        more = f" and {len(items) - limit} more" if len(items) > limit else ""
+        return ", ".join(items[:limit]) + more
+
+    def _key_routes(self, job: Job) -> str:
+        """Where the credentials given to the job's steps that use OBAAF's egress action go, in words,
+        for OBAAF-GHA-005's controls, with what the checker could not place and what makes the action
+        refuse to run; empty when there is none of these."""
+        if job.reusable:
+            return ""
+        parts: list[str] = []
+        for step in job.steps:
+            if not step.confines:
+                continue
+            place = self._placement(job, step)
+            bits: list[str] = []
+            for name, found in place.proxy:
+                bits.append(f"{name} ({self._names(found)}) goes to AWF's API proxy, which the command can use and "
+                            f"cannot read, and which reaches {egress_mod.MODEL_KEYS[name]} whatever the allow-list says")
+            for how, found in place.command:
+                bits.append(f"{self._names(found)} is passed to the command {how}, which can send it to a listed host "
+                            "or print it to the job's log")
+            for name, found in place.neither:
+                bits.append(f"{name} ({self._names(found)}) is named under neither env nor model-keys and written "
+                            "nowhere in the inputs, so the action passes it to neither")
+            if place.unsure:
+                bits.append("the checker could not place: " + egress_mod.joined(place.unsure, 3))
+            if place.problems:
+                bits.append("the action would refuse to run: " + egress_mod.joined(place.problems, 3))
+            if bits:
+                parts.append(f"in {place.step}, " + "; ".join(bits))
+        return "; ".join(parts)
+
+    def _leaks(self, placements: list) -> str:
+        """What a cleared OBAAF-GHA-020 under OBAAF's egress action does not stop, so the report never
+        reads as more: the listed hosts and what they can be made to do, names under them, the provider
+        behind each model key, and the job's log and artifacts."""
+        passed = [cred for place in placements for _how, found in place.command for cred in found]
+        hosts = sorted({host for place in placements for host in place.hosts})
+        keys = sorted(name for name, host in egress_mod.MODEL_KEYS.items() if host in hosts)
+        parts = ["anything the confined command sends to a listed host"
+                 + (f", the credentials passed to it included ({self._names(passed)}), with which a listed host "
+                    "can be made to act for it" if passed else ""),
+                 "data in a name under a listed name, which leaves the runner in a DNS query to that name's DNS servers"]
+        if hosts:
+            given = f"with {', '.join(keys)} given to AWF's API proxy"
+            parts.append(f"{given}: anything the command sends {' or '.join(hosts)} through the proxy, and whatever "
+                         "the provider is asked to fetch or connect to for it (remote MCP servers, URLs); the proxy "
+                         "refuses the providers' hosted web search and fetch tools, in the requests it can read, and "
+                         "nothing else of that kind")
+        parts.append("and anything the command prints to the job's log or leaves for a later actions/upload-artifact "
+                     "step to save")
+        return "Not blocked: " + "; ".join(parts)
+
     def _egress_action(self, job: Job) -> egress_mod.Reading | None:
         """OBAAF's egress action confines one command: its `run` input. The control holds for the job
         only when every condition below can be read and holds (decision D-050):
@@ -821,11 +1629,16 @@ class WorkflowRules:
         - its allow-list is written out, every entry a host name the action accepts and none a public
           suffix (a listed name covers the names under it);
         - the agent is the confined command: no other step, and no `env` of the job or workflow, is
-          given a credential, and no other step runs an agent the checker recognises. A job whose
-          steps get no credential at all is "cannot tell" unless the checker recognises the agent in
-          the confined command itself, because an agent that needs no key could run in any step;
-        - no credential reaches the confined command either: the action refuses model-key names, and
-          a key under another name could leave through a listed host or the proxy's DNS (slice 2c.4);
+          given a credential, and no other step runs an agent the checker recognises. A job in which
+          no credential reaches the confined command or AWF's API proxy is "cannot tell" unless the
+          checker recognises the agent in the confined command itself, because an agent that needs no
+          key could run in any step;
+        - every credential given to the confined step is placed (`_placement`, slice 2c.5, decision
+          D-052): a model key named in `model-keys` goes to AWF's API proxy, which the command can use
+          and cannot read, and which reaches the provider's API host whatever the allow-list says, so
+          that host is shown with the allow-list; one passed to the command can be sent to a listed
+          host. Both limit the network as the allow-list says, and both are said beside a cleared
+          finding. A credential the checker cannot place is "cannot tell";
         - no step that can run after or beside it reads its `workspace` or `scratch` output or the
           scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
           any other use is "cannot tell", because the checker cannot tell reading from running."""
@@ -909,30 +1722,48 @@ class WorkflowRules:
             outside.append("the job's token can call GitHub Models (models permission), and every action is given "
                            "that token")
         unread_token = perms is None
+        # Which steps can run after (or beside) the confined command: read here, and below for what
+        # they could run of what the command wrote.
+        first = min(step.index for step in confined)
+        groups = {step.group for step in confined if step.group is not None}
+        concurrent = any(step.background for step in confined)
         agents_outside = []
         for step in others:
             why = self._agent_step(step, step.agent_text())
+            before = (step.index < first and not step.background and not concurrent
+                      and (step.group is None or step.group not in groups))
+            if why == "runs an agent CLI" and before and step.index not in job.agent_script_steps:
+                if self._installs_only(job, step):
+                    continue    # it installs the agent's CLI, which the confined command then runs (2c.8)
+                if self._package_mention_only(step):
+                    unsure.append(f"step '{one_line(step.name, 80)}', before it, names an agent's package in a "
+                                  "script the checker reads as neither an install it can vouch for nor a run")
+                    continue
             if why or step.index in job.agent_script_steps:
                 agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
-        inside = []
-        for step in confined:
-            inside.extend(self._credentials(step.raw))
+        # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
+        # makes it refuse to run; a credential that reaches the command or AWF's API proxy is the
+        # evidence that the agent is the confined command.
+        placements = [self._placement(job, step) for step in confined]
+        for place in placements:
+            problems.extend(place.problems)
+            unsure.extend(place.unsure)
+            for host in place.hosts:
+                shown = f"{host} (through AWF's API proxy)"
+                if shown not in allow_shown:
+                    allow_shown.append(shown)
         if agents_outside:
             problems.append(f"{egress_mod.joined(agents_outside, 3)}, outside the confined command")
         if outside:
             problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
                             "(the checker tells where an agent runs by where its key goes)")
-        elif inside:
-            unsure.append(f"the confined command can be given {', '.join(sorted(set(inside))[:3])}; the action "
-                          "refuses model-key names, and a key under another name could leave through a listed "
-                          "host or the proxy's DNS (slice 2c.4)")
-        elif not agents_outside:
+        elif not agents_outside and not any(place.reaches for place in placements):
             recognised = [step for step in confined if self._agent_step(step, step.agent_text())
                           or step.index in job.agent_script_steps]
             if not recognised:
-                unsure.append("no step of the job is given a credential and the checker recognises no agent in the "
-                              "confined command, so it cannot tell where the agent runs: an agent that needs no key "
-                              "could run in any step")
+                unsure.append("no credential reaches the confined command or AWF's API proxy, no other step is given "
+                              "one, and the checker recognises no agent in the confined command, so it cannot tell "
+                              "where the agent runs: an agent that needs no key could run in any step")
         if unread_token and not outside:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
@@ -941,9 +1772,6 @@ class WorkflowRules:
         # the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.
-        first = min(step.index for step in confined)
-        groups = {step.group for step in confined if step.group is not None}
-        concurrent = any(step.background for step in confined)
         ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
         defaults = job.raw.get("defaults")
         if defaults is not None and self._reads_output(Step(index=-1, raw={"defaults": defaults}, line=0), ids):
@@ -981,8 +1809,8 @@ class WorkflowRules:
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 160)}, and nothing but actions/upload-artifact "
-                      f"runs after it. {self._LEAKS}")
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and nothing but actions/upload-artifact "
+                      f"runs after it. {self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
@@ -1180,7 +2008,7 @@ class WorkflowRules:
 
     # Events that only someone with write access can cause, and whose payload outsiders do not write.
     _WRITE_ACCESS_EVENTS = frozenset({"push", "workflow_dispatch", "schedule", "release"})
-    # More ways a script names a pull request's code than PR_FETCH_CMD_RE has. Used for the control
+    # More ways a script names a pull request's code than `pr_fetch` reads. Used for the control
     # only: a script can always be written so that no pattern finds it, and the control's name
     # claims nothing about scripts.
     _PR_CODE_IN_SCRIPT_RE = re.compile(r"\bpr\s+(checkout|diff)\b|\bpull/[^\s/]+/(head|merge)\b|refs/pull/|/pull/\d+\.(patch|diff)\b")
@@ -1218,7 +2046,8 @@ class WorkflowRules:
                                   "it checks out")
                     continue
                 ref, repository = str(step.with_.get("ref") or ""), str(step.with_.get("repository") or "")
-                if PR_HEAD_REF_RE.search(f"{ref} {repository}") or self._PR_CODE_IN_SCRIPT_RE.search(ref.lower()):
+                if self._combined(*self._checkout_reading(job, step)).state == "head" \
+                        or self._PR_CODE_IN_SCRIPT_RE.search(ref.lower()):
                     return Control(name, NOT_MET, f"{where} checks out a pull request's code", ident)
                 if repository:
                     unsure.append(f"{where} checks out another repository ({one_line(repository, 120)})")
@@ -1229,7 +2058,8 @@ class WorkflowRules:
                     fixed += 1
                 else:
                     default += 1
-            elif PR_FETCH_CMD_RE.search(step.text()) or self._PR_CODE_IN_SCRIPT_RE.search(step.text()):
+            elif pr_fetch(step, self._env_for(job, step), self._shell(job, step)).state == "head" \
+                    or self._PR_CODE_IN_SCRIPT_RE.search(step.text()):
                 return Control(name, NOT_MET, f"{where} fetches a pull request's code", ident)
         # An `if:` is an expression with or without `${{ }}`, so a condition written without them
         # is read as well as every `${{ }}` in the job.
@@ -1250,15 +2080,358 @@ class WorkflowRules:
             (fixed, f"{fixed} checkout step(s) take a ref written in the workflow")) if count) or "no checkout step"
         return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
 
+    # Variables bash or the dynamic loader act on, which the action's own bash steps would obey outside
+    # the sandbox, where the key is held (issue #139, and the review of 2c.7).
+    # ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step prints set them (`::set-env::`, `::add-path::`;
+    # found by the second review of 2c.7).
+    _LOADED_BY_BASH = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD",
+                                 "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+                                 "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
+    # A step that sets variables or the PATH for the steps after it, the action's own included.
+    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|GITHUB_PATH|BASH_ENV|exportVariable|addPath", re.I)
+
+    KEY_NAME = ("the agent's command cannot read any of the job's secrets: each goes only to a proxy that holds it "
+                "for the command, or to nothing the command runs")
+    KEY_ID = "key-out-of-reach"
+
+    @staticmethod
+    def _secret_refs(found: list) -> list:
+        """The credentials `_credentials` found that are secrets OBAAF-GHA-005 is about: every named
+        secret but GITHUB_TOKEN, and every secret where the name is computed. The job's own token is
+        OBAAF-GHA-003's, as it is for `secret_names`."""
+        return [cred for cred in found if cred == "all secrets"
+                or (cred.startswith("secrets.") and cred[len("secrets."):].upper() != "GITHUB_TOKEN")]
+
+    def _key_control(self, job: Job) -> Control:
+        """Whether the agent's command can read the job's secrets (flagship slice 2c.7). A key the
+        agent can read can leave in the job's log or an artifact whatever the network allows, so a
+        limit on the network protects it less than it protects data, and only a key the command cannot
+        read is out of that reach. The one way the checker can establish that today is OBAAF's egress
+        action with the key named in `model-keys`: the action gives it to AWF's API proxy, which the
+        command can use and cannot read (2c.4, tested with made-up keys). So the control is verified
+        only when every secret the job receives is set in the `env` of steps that use the action, at a
+        commit OBAAF lists as released, on the runner it was tested on, and each goes to the proxy or
+        to nothing the command runs (`_placement`). A secret anywhere else in the job (another step, the
+        job's or the workflow's `env`) is where an agent outside the sandbox could read it, and the
+        checker tells where the agent runs by where its key goes, so that is "not met"; so is a secret
+        passed to the command. GitHub's native firewall holds no key. The step that uses the action
+        still holds the key in its own process, outside the sandbox: a `BASH_ENV` anywhere in the job
+        (issue #139) or a process an earlier step leaves running could reach it there, and either is
+        "cannot tell"."""
+        name, ident = self.KEY_NAME, self.KEY_ID
+        reach = "a key the agent can read can leave in the job's log or an artifact whatever the network allows"
+        if job.reusable:
+            return Control(name, CANNOT_TELL, "its steps are in the reusable workflow it calls, which the checker "
+                                              "does not read", ident)
+        confined = [step for step in job.steps if step.confines]
+        if not confined:
+            if self._awf(job) is not None:
+                return Control(name, CANNOT_TELL, "a step runs the Agent Workflow Firewall from a script, whose API "
+                                                  "proxy can hold a model key, and the checker does not read a shell "
+                                                  "command line well enough to tell which key it holds", ident)
+            native = self._native_firewall(job)
+            how = (" GitHub's native egress firewall limits the network and holds no key." if native is not None
+                   else "")
+            return Control(name, NOT_MET, "no step of the job runs the agent's command behind a proxy that holds its "
+                                          "keys, so the agent runs where the job's secrets are and can read them, or "
+                                          f"reach them through what it leaves for later steps.{how} "
+                                          f"{reach[0].upper()}{reach[1:]}",
+                           ident)
+        problems: list[str] = []
+        unsure: list[str] = []
+        # Where else in the job the secrets are: each place is one an agent outside the sandbox could
+        # read (registry credentials go to GitHub to pull images and to no step).
+        outside: list[str] = []
+        found = self._secret_refs(self._credentials(self.wf.raw.get("env")))
+        if found:
+            outside.append(f"the workflow's env holds {self._names(found)}, which every step is given")
+        rest = self._without_registry_credentials({key: value for key, value in job.raw.items() if key != "steps"})
+        found = self._secret_refs(self._credentials(rest))
+        if found:
+            outside.append(f"the job gives {self._names(found)} outside its steps")
+        for step in job.steps:
+            if step.confines:
+                continue
+            found = self._secret_refs(self._credentials(step.raw))
+            if found:
+                outside.append(f"step '{one_line(step.name, 80)}' is given {self._names(found)}")
+        if outside:
+            problems.append(f"{egress_mod.joined(outside, 3)}, outside the command the egress action confines, "
+                            "where an agent outside the sandbox could read it (the checker tells where an agent runs "
+                            f"by where its key goes); {reach}")
+        released = {str(sha).lower() for sha in self.detection.get("egress_action_releases", []) or []}
+        held: list[str] = []         # what goes to the proxy or to nothing the command runs, for the report
+        keyed: list = []             # the confined steps that hold a secret of the job
+        placements: list = []
+        for step in confined:
+            place = self._placement(job, step)
+            placements.append(place)
+            where = place.step
+            given = self._secret_refs(self._credentials(step.raw))
+            if not given:
+                continue
+            keyed.append(step)
+            problems.extend(place.problems)
+            unsure.extend(place.unsure)
+            passed = [(how, self._secret_refs(creds)) for how, creds in place.command]
+            passed = [(how, creds) for how, creds in passed if creds]
+            for how, creds in passed:
+                problems.append(f"{self._names(creds)} is passed to the command {how}, so the agent can read it; "
+                                f"{reach}")
+            placed: set = set()
+            for _how, creds in place.command:
+                placed.update(creds)
+            for variable, creds in place.proxy:
+                placed.update(creds)
+                held.append(f"{variable} ({self._names(creds)}) goes to AWF's API proxy in {where}")
+            for variable, creds in place.neither:
+                placed.update(creds)
+                held.append(f"{variable} ({self._names(creds)}) is set in {where}'s env and passed to neither the "
+                            "command nor the proxy")
+            unplaced = [cred for cred in given if cred not in placed]
+            if unplaced and not place.unsure and not place.problems:
+                unsure.append(f"{where} is given {self._names(unplaced)} where the checker does not place it")
+            uses = (step.uses or "").strip()
+            ref = uses.split("@", 1)[1] if "@" in uses else ""
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                unsure.append(f"{where} uses the action at '{one_line(ref, 60)}', not a commit, so what that version "
+                              "does with the key is not established")
+            elif ref not in released:
+                unsure.append(f"{where} uses the action at {ref[:12]}, which is not a commit OBAAF lists as released "
+                              f"({len(released) or 'none'} listed), so what that version does with the key is not "
+                              "established")
+        # The proxy and the sandbox that keeps the command from the key were tested on one runner.
+        sets = job.runner_label_sets()
+        if job.raw.get("container") is not None:
+            unsure.append("the job runs in a container, where the action and its API proxy have not been tried")
+        if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
+            unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
+                          "the action and its API proxy were tested only on GitHub-hosted ubuntu-24.04 runners")
+        # The step that uses the action holds the key in its own process, outside the sandbox, and its
+        # own bash steps run there with the key in their environment. What the job's env and the
+        # step's env set reaches them; so does anything a step before or beside it writes to
+        # GITHUB_ENV or GITHUB_PATH, leaves running, or is: an agent outside the sandbox can reach the
+        # key through any of those. Found by the review of 2c.7: an agent CLI in the step before, a
+        # decoy use of the action first, parallel steps and service containers all passed.
+        envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in keyed)]
+        loaded = [str(key) for env in envs if isinstance(env, dict) for key in env
+                  if str(key).upper() in self._LOADED_BY_BASH or str(key).upper().startswith("BASH_FUNC_")]
+        if loaded or any(env is not None and not isinstance(env, dict) for env in envs):
+            unsure.append(f"the job sets {self._names(sorted(set(loaded))) if loaded else 'an env computed when the job runs'}"
+                          ", which the action's own bash steps would load or obey outside the sandbox, where the key "
+                          "is held (issue #139)")
+        services = job.raw.get("services")
+        if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
+                                              for svc in services.values()):
+            unsure.append("the job's service containers are given volumes or options, and run beside the step that "
+                          "holds the key for the whole job")
+        perms = job.permissions
+        if perms is not None and perms.oidc:
+            problems.append("the job can request OIDC tokens (id-token: write), which any step can turn into a "
+                            "credential, so the agent may run outside the sandbox, before the step that holds the key")
+        if perms is not None and perms.level("models") in ("read", "write"):
+            problems.append("the job's token can call GitHub Models (models permission), and every action is given "
+                            "that token, so the agent may run outside the sandbox, before the step that holds the key")
+        if perms is None:
+            unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
+                          "which the checker does not read, and every action is given that token")
+        nearby: dict = {}            # step index -> the step, for every step that can run before or beside a key
+        for holder in keyed:
+            for step in job.steps:
+                if step is holder:
+                    continue
+                if (step.index < holder.index or holder.background
+                        or (holder.group is not None and step.group == holder.group)):
+                    nearby[step.index] = step
+        evidence = any(place.reaches for place in placements) or any(
+            self._agent_step(step, step.agent_text()) or step.index in job.agent_script_steps for step in confined)
+        first = min(holder.index for holder in keyed) if keyed else 0
+        agent_seen = False           # an agent recognised in a step before or beside a key, said as "not met"
+        for step in sorted(nearby.values(), key=lambda s: s.index):
+            where = f"step '{one_line(step.name, 80)}'"
+            if step.confines:
+                if step in keyed:
+                    continue        # read above as a step that holds a key
+                # Its env is not read for ACTIONS_ALLOW_UNSECURE_COMMANDS: the third review of 2c.7 found every
+                # line the action prints that the command can influence is under `::stop-commands::` or kept to
+                # the characters of a host name, path or DNS name, so none can start with `::`.
+                uses = (step.uses or "").strip()
+                ref = uses.split("@", 1)[1] if "@" in uses else ""
+                if not re.fullmatch(r"[0-9a-f]{40}", ref) or ref not in released:
+                    unsure.append(f"{where} uses the action at '{one_line(ref, 60)}', which is not a commit OBAAF "
+                                  "lists as released, before or beside the step that holds the key, and what that "
+                                  "version's own steps do outside the sandbox is not established")
+                continue
+            why = self._agent_step(step, step.agent_text())
+            plain_before = step.index < first and not step.background and step.group is None
+            if why == "runs an agent CLI" and plain_before and step.index not in job.agent_script_steps:
+                if self._installs_only(job, step):
+                    why = None      # it installs the agent's CLI, which the confined command runs (2c.8)
+                elif self._package_mention_only(step):
+                    unsure.append(f"{where}, before the step that holds the key, names an agent's package in a "
+                                  "script the checker reads as neither an install it can vouch for nor a run")
+                    why = None
+            if why or step.index in job.agent_script_steps:
+                agent_seen = True
+                problems.append(f"{where} {why or 'runs an agent in a script'}, outside the sandbox, before or beside "
+                                "the step that holds the key, as the same user, and can reach the key through what "
+                                "it leaves for that step (its environment, its PATH, a process left running)")
+                continue
+            given = self._credentials(step.raw)
+            if given and not self._secret_refs(given):      # a secret of the job is said above
+                problems.append(f"{where} is given {self._names(given)}, before or beside the step that holds the "
+                                "key, so the agent may be that step (the checker tells where an agent runs by where "
+                                "its key goes)")
+                continue
+            text = step.text()
+            beside = any((step.background and step.index < holder.index)
+                         or (holder.background and step.index > holder.index)
+                         or (holder.group is not None and step.group == holder.group) for holder in keyed)
+            if beside:
+                unsure.append(f"{where} runs beside the step that holds the key, as the same user, and could read it "
+                              "from that step's process")
+            elif egress_mod.leaves_process(text):
+                unsure.append(f"{where}, before the step that holds the key, may leave a process running "
+                              f"({egress_mod.leaves_process(text)}) as the same user, which could read the key "
+                              "from that step's process")
+            own_env = step.raw.get("env")
+            if isinstance(own_env, dict) and any(str(key).upper() == "ACTIONS_ALLOW_UNSECURE_COMMANDS" for key in own_env):
+                unsure.append(f"{where}, before or beside the step that holds the key, sets "
+                              "ACTIONS_ALLOW_UNSECURE_COMMANDS, so any line it prints can set a variable or the PATH "
+                              "for the steps after it")
+            if self._SETS_FOR_LATER_RE.search(text):
+                unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV or "
+                              "GITHUB_PATH, or names BASH_ENV, which can make the action's own steps, which hold the "
+                              "key, load or run something else (issue #139)")
+        if nearby and not evidence and not agent_seen:
+            unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
+                          "confined command, so it cannot tell where the agent runs: an agent that needs no key "
+                          "could run in a step before or beside the one that holds the key")
+        if not held and not problems and not unsure:
+            # Every secret of the job is in a confined step and none was placed: nothing to show.
+            unsure.append("no secret of the job is placed by the checker in a step that uses the action")
+        verdict = egress_mod.worst(problems, unsure)
+        # Where each credential given to a confined step goes, whatever the verdict (it was the egress
+        # control's detail from 2c.5 until this control existed).
+        routes = self._key_routes(job)
+        said = f" Where the confined step's credentials go: {routes}." if routes else ""
+        if verdict == VERIFIED:
+            detail = ("every secret of the job goes to AWF's API proxy, or to nothing the command runs, in steps that "
+                      "use OBAAF's egress action at a commit OBAAF lists as released, on the runner it was tested on: "
+                      f"the command can use a key the proxy holds and cannot read it.{said} The step's own process "
+                      "holds each key outside the sandbox. The steps that can run before or beside it were read for "
+                      "an agent, a credential, and, by the words in their scripts, a process left running and a write "
+                      "to GITHUB_ENV or GITHUB_PATH; what an action used before it does, what an accepted install's "
+                      "own scripts do, and what a script file a step runs writes, were not. Not stopped: "
+                      "the command can use the key through the proxy, so it can make the provider act for it (calls "
+                      "charged to the key, remote MCP servers, URLs the provider fetches)")
+        else:
+            detail = f"{egress_mod.joined(problems or unsure, 3)}.{said}".rstrip(".")
+        return Control(name, verdict, detail, ident)
+
+    def _release_step(self, step: Step) -> str:
+        """A release step as one of OBAAF-GHA-015's facts: its written name or id, if any, and what makes
+        it publish: `OBAAF_STEP: publish`, the action it uses without the ref, or the command matched, with
+        its runs of space made one."""
+        name = as_text(step.raw.get("name") or step.raw.get("id") or "")
+        if str(step.env.get("OBAAF_STEP", "")).lower() == "publish":
+            what = "OBAAF_STEP: publish"
+        elif any(step.uses_action(a) for a in self.detection.get("upload_actions", [])):
+            what = step.action or ""
+        else:
+            what = ""
+            for variant in upload_readings(step.scripts()):
+                for pattern in self.detection.get("upload_commands", []):
+                    match = re.search(pattern, variant, re.M)
+                    if match:
+                        what = " ".join(match.group(0).split())
+                        break
+                if what:
+                    break
+        return f"{name} ({what})" if name else what
+
+    @staticmethod
+    def _environment_written(job: Job):
+        written = job.raw.get("environment")
+        return written.get("name") if isinstance(written, dict) else written
+
+    def release_capability(self, job: Job) -> None:
+        """OBAAF-GHA-015 for a job nothing marks a release job, but that untrusted input can start and
+        that holds what publishing needs: `packages: write`, a secret whose name says it publishes, an
+        environment
+        named by an expression the checker cannot read, or a step that uses an action listed under
+        `publishing_actions` (flagship slice 2d.2d). Release jobs are
+        recognised by lists of actions and commands and by environment names, which miss many; this
+        fails closed on what the job can do instead."""
+        triggers = job.triggers()
+        bad = triggers & UNTRUSTED_TRIGGERS
+        if not bad:
+            return
+        capabilities = []
+        # `id-token: write` alone is not counted: OBAAF's own templates use it to sign and attest, which
+        # is what a repository should do, and OBAAF-GHA-004 reports it for an agent job.
+        permissions = job.permissions
+        if permissions is not None and permissions.level("packages") == "write":
+            capabilities.append("packages: write")
+        for step in job.steps:
+            action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
+            if action:
+                capabilities.append(f"uses {step.action}")
+        patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
+        capabilities += [f"secret {name}" for name in sorted(job.secret_names())
+                         if not name.startswith("*") and any(rx.search(name) for rx in patterns)]
+        kind_, _written = job.environment_reading
+        if kind_ in ("expression", "scalar", "unreadable") and not job.environment_candidates()[1]:
+            capabilities.append("an environment whose name the checker cannot read")
+        if not capabilities:
+            return
+        severity = "low" if not bad - self._FORK_SAFE_EVENTS else "medium"
+        self.add("OBAAF-GHA-015", job.line,
+                 "Job '{job}' can be started by {triggers} and holds what publishing needs ({capabilities}). The "
+                 "checker cannot tell whether it releases; if it does not, accept this finding and say why.", job,
+                 severity=severity, kind="capability", triggers=sorted(bad), capabilities=capabilities,
+                 environment=Fact(value_identity(self._environment_written(job)), ""))
+
     # -------------------------------------------------------------- GHA-006/014/015/016
+    # Events whose runs from a fork get a read-only token and no secrets (OBAAF-GHA-015 only; the
+    # review events still count as privileged for other rules, a false positive recorded in
+    # docs/bypass-attempts.md).
+    _FORK_SAFE_EVENTS = frozenset(PR_TRIGGERS | {"pull_request_review", "pull_request_review_comment"})
+
     def release_rules(self, job: Job) -> None:
         if not job.in_lane("release"):
+            self.release_capability(job)
             return
         triggers = job.triggers()
         bad = triggers & UNTRUSTED_TRIGGERS
         if bad:
-            self.add("OBAAF-GHA-015", job.line,
-                     "Release job '{job}' can be started by {triggers}.", job, triggers=sorted(bad))
+            # Flagship slice 2d.2d: why the job is a release job and its environment are facts, and the
+            # severity follows OBAAF-GHA-001's: an environment named in plain text may require a
+            # reviewer, and a run from a fork on a pull request event gets no secrets and a read-only token.
+            # The steps that make it a release job are facts too, so an acceptance written for a job that
+            # pushes to a registry inside the job does not cover one that later publishes to npm.
+            # A step is named here by the name or id written for it, not by the default name (its `uses`
+            # with the ref), and by what makes it publish (the action without its ref, or the command
+            # matched), so a new pin of the same action is the same finding and another command is not.
+            releasing = [self._release_step(s) for s in job.upload_steps(self.detection)]
+            values = {"triggers": sorted(bad), "reason": job.reason_for("release"),
+                      "environment": Fact(value_identity(self._environment_written(job)), ""),
+                      "steps": Fact(releasing, ""),
+                      "legacy": "Release job '{job}' can be started by {triggers}."}
+            if not bad - self._FORK_SAFE_EVENTS:
+                self.add("OBAAF-GHA-015", job.line,
+                         "Release job '{job}' can be started by {triggers}. A run from a fork gets no secrets and a "
+                         "read-only token, but a branch pushed by anyone with write access gets both; it is a "
+                         "release job because it {reason}.", job, severity="medium", kind="pull-request", **values)
+            elif job.environment_reading[0] == "literal":
+                self.add("OBAAF-GHA-015", job.line,
+                         "Release job '{job}' can be started by {triggers}; it is a release job because it {reason}. "
+                         "Confirm that its environment requires reviewers.", job, severity="medium",
+                         kind="environment", **values)
+            else:
+                self.add("OBAAF-GHA-015", job.line,
+                         "Release job '{job}' can be started by {triggers}; it is a release job because it "
+                         "{reason}.", job, **values)
 
         cache_steps = [s for s in job.steps if self._restores_cache(s)]
         mode = job.cache_mode
@@ -1431,17 +2604,74 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-011
     def persisted_credentials(self, job: Job) -> None:
-        exposed = (job.in_lane("agent") or job.in_lane("untrusted")
-                   or bool(job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS))
-        if not exposed:
+        outside = sorted(job.triggers() & UNTRUSTED_TRIGGERS)
+        agent = job.in_lane("agent")
+        if not (agent or outside or job.in_lane("untrusted")):
             return
+        perms = job.permissions
+        if perms is None:
+            scopes = Fact(["undeclared"], "its permissions are not declared")
+        elif perms.write_scopes():
+            scopes = Fact(perms.write_scopes(), "it can write " + ", ".join(perms.write_scopes()))
+        else:
+            scopes = Fact([], "it can only read")
+        exposure = " and ".join(part for part in (
+            "runs an agent" if agent else "",
+            f"can be started by {', '.join(outside)}" if outside else "",
+            "builds pull requests" if not agent and not outside else "") if part)
         for step in job.steps:
-            if step.uses_action("actions/checkout") and not _falsy(step.with_.get("persist-credentials", "true")):
+            if step.uses_action("actions/checkout") and self._keeps_token(step):
+                token, key = step.with_.get("token"), step.with_.get("ssh-key")
+                if key not in (None, ""):
+                    credential = Fact(f"ssh-key: {value_identity(key)}",
+                                      f"the SSH key given in its ssh-key input ({shown_value(key)})")
+                    given = Fact(scopes.value, "")
+                elif token not in (None, ""):
+                    credential = Fact(f"token: {value_identity(token)}",
+                                      f"the token given in its token input ({shown_value(token)})")
+                    given = Fact(scopes.value, "")
+                else:
+                    credential = Fact("job token", "the job token")
+                    given = Fact(scopes.value, f" ({scopes.shown})")
                 self.add("OBAAF-GHA-011", step.line,
-                         "Step '{step}' persists the job token for later steps.", job, step)
+                         "Step '{step}' persists {credential} for later steps{scopes}, in a job that {exposure}.",
+                         job, step, credential=credential, scopes=given, agent=agent, triggers=outside,
+                         exposure=Note(exposure), legacy="Step '{step}' persists the job token for later steps.")
+
+    @staticmethod
+    def _keeps_token(step: Step) -> bool:
+        """Whether an actions/checkout step keeps the job token. actions/checkout keeps it only when the
+        input, trimmed, is `true` in any case (`(getInput('persist-credentials') || 'false').toUpperCase()
+        === 'TRUE'`, read in its v3.5.0 source; later versions not read), and its default is `true`. So
+        a written value other than that keeps nothing; no value, an empty one and an expression the
+        checker cannot evaluate are taken to keep it."""
+        if "persist-credentials" not in step.with_:
+            return True
+        given = _constant(step.with_.get("persist-credentials"))
+        if not isinstance(given, (str, bool, int, float)) or isinstance(given, str) and "${{" in given:
+            return True
+        text = as_text(given).strip()
+        return not text or text.upper() == "TRUE"
+
+    @staticmethod
+    def _merge_commit(step: Step, ref: PrCode, repository: PrCode) -> bool:
+        """Whether a checkout step takes the merge commit of the pull request the event is about: no
+        `ref`, or one that is only `github.sha`, `github.ref` or `github.ref_name`, of this repository."""
+        written = as_text(step.with_.get("ref") or "").strip()
+        own = {"github.repository", "github.event.repository.full_name"}
+        if as_text(step.with_.get("repository") or "").strip() and not (
+                repository.state == "base" and repository.reads and set(repository.reads) <= own):
+            return False
+        if not written:
+            return True
+        return ref.state == "base" and bool(ref.reads) and set(ref.reads) <= MERGE_COMMIT_REFS
 
     # -------------------------------------------------------------- GHA-013
     def self_hosted(self, job: Job) -> None:
+        if job.reusable:
+            # A job that calls a reusable workflow has no runner of its own: the called workflow's
+            # jobs choose theirs, in their own file (flagship slice 2d.2d; it was "runs on no labels").
+            return
         kind = job.runner_kind
         if kind == "github-hosted":
             return
@@ -1452,18 +2682,29 @@ class WorkflowRules:
                 why, case, values = "can be started by {triggers}", "", {"triggers": sorted(untrusted)}
             else:
                 why, case, values = "runs an agent", "-agent", {}
-            labels = Fact(list(job.runs_on), ", ".join(job.runs_on) or "no labels")
+            # The labels as written and, where a matrix gives them, every set they resolve to, so that an
+            # acceptance written for one pool does not cover another (flagship slice 2d.2d).
+            sets = job.runner_label_sets()
+            written = list(job.runs_on) if sets is None or sets == [list(job.runs_on)] else \
+                list(job.runs_on) + ["resolved: " + " | ".join(", ".join(s) for s in sets)]
+            labels = Fact(written, ", ".join(job.runs_on) or "no labels")
             if kind == "self-hosted":
                 self.add("OBAAF-GHA-013", job.line,
                          "Job '{job}' runs on a self-hosted runner ({labels}) and " + why + ".",
                          job, kind="self-hosted" + case, labels=labels, **values)
             else:
-                if job.mixed_runner_expression:
+                # A selector that sends a fork's pull request to a hosted runner is informational only
+                # where every outside event that starts the job carries the pull request it tests,
+                # and the job runs no agent, which the selector would put on the other runner for a
+                # branch of this repository (flagship slice 2d.2d).
+                if (job.mixed_runner_expression and untrusted and untrusted <= PULL_REQUEST_PAYLOAD_EVENTS
+                        and not job.in_lane("agent")):
                     self.add("OBAAF-GHA-013", job.line,
                              "Job '{job}' selects between hosted and self-hosted runners at runtime and " + why + ". "
                              "The checker cannot prove which runner receives untrusted work. Review the selector "
                              "and pool isolation; this informational finding does not certify it as safe.",
-                             job, severity="info", kind="runtime-choice" + case, **values)
+                             job, severity="info", kind="runtime-choice" + case, selector=Fact(job.selector, ""),
+                             **values)
                 else:
                     self.add("OBAAF-GHA-013", job.line,
                              "Job '{job}' runs on {labels}, which are not standard GitHub-hosted labels, and "
@@ -1474,18 +2715,52 @@ class WorkflowRules:
     def signing_keys(self, job: Job) -> None:
         severity = "high" if job.in_lane("release") else "medium"
         patterns = [re.compile(p, re.I) for p in self.detection.get("signing_secret_patterns", [])]
-        keys = sorted(n for n in job.secret_names() if not n.startswith("*") and any(p.search(n) for p in patterns))
+        names = job.secret_names()
+        keys = sorted(n for n in names if not n.startswith("*") and any(p.search(n) for p in patterns))
+        environment = self._environment_fact(job)
         if keys:
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' loads signing material from secret(s): {secrets}.", job,
-                     severity=severity, kind="secrets", secrets=keys)
+                     "Job '{job}' loads signing material from secret(s): {secrets}{environment}.", job,
+                     severity=severity, kind="secrets", secrets=keys, environment=environment)
+        # A job that can read every secret (a computed name, toJSON(secrets), secrets: inherit) can read
+        # any signing key the repository or the job's environment holds; which secrets those are is
+        # not in the workflow, so the checker cannot tell that none is one.
+        every = sorted(n for n in names if n.startswith("*"))
+        if every:
+            shown = " and ".join("secrets: inherit" if n == "*inherit" else "a reference that is not one literal name"
+                                 for n in every)
+            self.add("OBAAF-GHA-018", job.line,
+                     "Job '{job}' can read every secret ({how}){environment}, so any signing key stored for it "
+                     "is available to what it runs.", job, severity=severity, kind="any-secret",
+                     how=Fact(every, shown), environment=environment)
         commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
+        actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
-            text = step.text()
-            if text and any(rx.search(text) for rx in commands):
+            # A command continued on the next line is one command to the shell: a backslash in sh and
+            # bash, a backtick in PowerShell, a caret in cmd.
+            # Both readings are matched, so joining never hides what a line alone shows (a later
+            # command on the joined line can stop a pattern that looks ahead, such as cosign's).
+            raw = step.text()
+            joined = re.sub(r"[\\`^][ \t]*\r?\n", " ", raw)
+            if any(step.uses_action(a) for a in actions):
+                self.add("OBAAF-GHA-018", step.line,
+                         "Step '{step}' loads a signing key into the build environment.", job, step,
+                         severity=severity, kind="action")
+            elif raw and any(rx.search(raw) or rx.search(joined) for rx in commands):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")
+
+    @staticmethod
+    def _environment_fact(job: Job) -> Fact | Note:
+        """The job's environment as part of a finding about its secrets: a secret of the same name is
+        another secret in another environment (an environment's secret takes precedence over the
+        repository's), so an acceptance written for one environment does not cover another."""
+        written = job.raw.get("environment")
+        written = written.get("name") if isinstance(written, dict) else written
+        if written is None:
+            return Note("")         # nothing shown and no fact, so a job with no environment is as before
+        return Fact(value_identity(written), f" in environment {shown_value(written)}")
 
     # -------------------------------------------------------------- GHA-021/022
     def effect_rules(self, job: Job) -> None:
@@ -1572,10 +2847,27 @@ def _line_digests(text: str, hidden: list) -> list[str]:
 
 
 # ------------------------------------------------------------------- repository
-def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> list[Finding]:
+def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, errors: list | None = None,
+                  notes: list | None = None) -> list[Finding]:
+    """The repository rules. A CODEOWNERS or instruction file that is there and cannot be read is
+    an error in `errors` (the check fails), never taken for missing or clean; a directory that
+    cannot be listed is a note in `notes`, because git cannot make a checked-out directory
+    unreadable, so only a local run meets one."""
     findings: list[Finding] = []
-    codeowners_path, rules = repo_checks.read_codeowners(root)
-    instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []))
+    errors = errors if errors is not None else []
+    unlisted: list = []
+    try:
+        codeowners_path, rules = repo_checks.read_codeowners(root)
+        unread = False
+    except repo_checks.UnreadableFile as exc:
+        errors.append(str(exc))
+        codeowners_path, rules, unread = exc.rel, [], True
+    instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []),
+                                                           unlisted)
+    if notes is not None and unlisted:
+        shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
+        notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
+                     "them were not looked for.")
 
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
         message, facts = compose(rule, kind, template, None, None, values)
@@ -1585,7 +2877,9 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
         """The message names the first five files and counts them all; every one is part of the finding."""
         return {"count": Note(str(len(paths))), "files": Fact(sorted(paths), ", ".join(paths[:5]))}
 
-    if codeowners_path is None:
+    if unread:
+        pass        # the error stands for both rules: who owns what cannot be read
+    elif codeowners_path is None:
         add("OBAAF-REPO-001", ".github/CODEOWNERS", 1, "The repository has no CODEOWNERS file.", kind="no-codeowners")
         if instruction_files:
             add("OBAAF-REPO-002", instruction_files[0], 1,
@@ -1604,7 +2898,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog) -> li
     for rel in instruction_files:
         try:
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
+            errors.append(str(repo_checks.UnreadableFile(rel, exc)))
             continue
         hidden = repo_checks.scan_hidden(text)
         if hidden:

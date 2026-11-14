@@ -53,7 +53,7 @@ jobs:
           python3 -I -c '
           import json, socket
           out = {}
-          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com"):
+          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com", "api.github.com"):
               out[host] = sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
           print(json.dumps(out, indent=1))
           ' > "$RUNNER_TEMP/resolved.json"
@@ -114,7 +114,11 @@ jobs:
           ACTION_EXIT: ${{ steps.inside.outputs.exit-code }}
           ACTION_CONFINED: ${{ steps.inside.outputs.confined }}
           INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
+          INSIDE_SCRATCH: ${{ steps.inside.outputs.scratch }}
+          REMOVED: ${{ steps.inside.outputs.removed }}
           LOG_DIR: ${{ steps.inside.outputs.log-dir }}
+          DNS_LOG: ${{ steps.inside.outputs.dns-log }}
+          DNS_REFUSED: ${{ steps.inside.outputs.dns-refused }}
         run: |
           set -euo pipefail
           # The background attempt fires 20 seconds after it starts; keep listening past that.
@@ -125,6 +129,7 @@ jobs:
           cp "$RUNNER_TEMP/outside-results.txt" "$RUNNER_TEMP/egress-results/" || true
           cp "$INSIDE_WORKSPACE/egress-results-inside.txt" "$RUNNER_TEMP/egress-results/" || true
           if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then sudo cp -r "$LOG_DIR" "$RUNNER_TEMP/egress-results/proxy-logs" && sudo chown -R "$(id -u)" "$RUNNER_TEMP/egress-results"; fi
+          if [ -n "$DNS_LOG" ] && [ -f "$DNS_LOG" ]; then cp "$DNS_LOG" "$RUNNER_TEMP/egress-results/dns.log"; fi
           python3 -I tests/egress/judge.py judge \
             --outside-pcap "$RUNNER_TEMP/outside.pcap" \
             --inside-pcap "$RUNNER_TEMP/inside.pcap" \
@@ -136,6 +141,9 @@ jobs:
             --action-exit "$ACTION_EXIT" \
             --action-confined "$ACTION_CONFINED" \
             --summary "$GITHUB_STEP_SUMMARY" \
+            --dns-refused "$DNS_REFUSED" \
+            --scratch "$INSIDE_SCRATCH" \
+            --removed "$REMOVED" \
             --json-out "$RUNNER_TEMP/egress-results/verdict.json"
 
       - name: Keep the results
@@ -218,8 +226,112 @@ jobs:
           env: ANTHROPIC_API_KEY
           run: "true"
 
+      - name: A model key the action has not tested is refused in model-keys
+        id: untestedkey
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          GEMINI_API_KEY: not-a-key
+        with:
+          allow: api.github.com
+          model-keys: GEMINI_API_KEY
+          run: "true"
+
+      - name: Made-up model keys (not secrets; each provider refuses them)
+        id: dummy
+        run: |
+          set -euo pipefail
+          mark="obaafdummy$(openssl rand -hex 8)"
+          {
+            echo "mark=$mark"
+            echo "anthropic=sk-ant-api03-$mark-$(openssl rand -hex 16)"
+            echo "openai=sk-proj-$mark-$(openssl rand -hex 16)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Model keys reach AWF's API proxy, never the command, and each provider answers
+        id: keys
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.dummy.outputs.anthropic }}
+          OPENAI_API_KEY: ${{ steps.dummy.outputs.openai }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+        with:
+          # Neither provider is listed: the API proxy reaches them whatever allow says.
+          allow: api.github.com
+          model-keys: ANTHROPIC_API_KEY OPENAI_API_KEY
+          env: KEY_MARK
+          run: bash tests/egress/model-keys.sh model-keys-results.txt
+
+      - name: Check the model keys
+        env:
+          KEYS_OUTCOME: ${{ steps.keys.outcome }}
+          KEYS_CONFINED: ${{ steps.keys.outputs.confined }}
+          KEYS_WORKSPACE: ${{ steps.keys.outputs.workspace }}
+          KEYS_LOG_DIR: ${{ steps.keys.outputs.log-dir }}
+          KEYS_DNS_LOG: ${{ steps.keys.outputs.dns-log }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+          UNTESTED_OUTCOME: ${{ steps.untestedkey.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          results="$KEYS_WORKSPACE/model-keys-results.txt"
+          cat "$results" || true
+          line() { grep -m1 "^$1 " "$results" | sed "s/^$1 //" || true; }
+          if [ "$UNTESTED_OUTCOME" = failure ]; then ok "an untested model key is refused"; else bad "an untested model key was accepted"; fi
+          if [ "$KEYS_OUTCOME" = success ] && [ "$KEYS_CONFINED" = true ]; then ok "the step ran the command in a sandbox that held"; else bad "outcome $KEYS_OUTCOME, confined '$KEYS_CONFINED'"; fi
+          if grep -q "holds-the-key" "$results"; then bad "a variable the command sees holds a key: $(grep holds-the-key "$results")"; else ok "no variable the command sees holds either key"; fi
+          if [ "$(line MARK_IN_ENV)" = 0 ]; then ok "neither key is in the command's environment"; else bad "a key is in the command's environment ($(line MARK_IN_ENV))"; fi
+          searched="$(line FILES_SEARCHED)"
+          # grep: 1 = no match; 2 = some files unreadable (expected); 0 = a match; 124 = timed out.
+          grep_status="$(line GREP_STATUS)"
+          case "$grep_status" in 1|2) ok "the search for the keys finished (grep status $grep_status)";; *) bad "the search for the keys did not finish cleanly (grep status '$grep_status')";; esac
+          if [ "${searched:-0}" -ge 100 ] && [ "$(line MARK_IN_FILES)" = none ]; then ok "neither key is in any of the $searched readable files the command searched (home, TMPDIR, the copy, /tmp, /home, /run, /etc, /var)"; else bad "files searched: '${searched}', key found in: $(line MARK_IN_FILES)"; fi
+          case "$(line 'VAR ANTHROPIC_BASE_URL')" in "= http://"*) ok "the command was given ANTHROPIC_BASE_URL, the API proxy";; *) bad "ANTHROPIC_BASE_URL: $(line 'VAR ANTHROPIC_BASE_URL')";; esac
+          case "$(line 'VAR OPENAI_BASE_URL')" in "= http://"*) ok "the command was given OPENAI_BASE_URL, the API proxy";; *) bad "OPENAI_BASE_URL: $(line 'VAR OPENAI_BASE_URL')";; esac
+          anthropic="$(line ANTHROPIC)"
+          case "$anthropic" in "0 401 "*authentication_error*) ok "Anthropic refused the made-up key itself: $anthropic";; *) bad "Anthropic through the API proxy: $anthropic";; esac
+          openai="$(line OPENAI)"
+          case "$openai" in "0 401 "*invalid_api_key*) ok "OpenAI refused the made-up key itself: $openai";; *) bad "OpenAI through the API proxy: $openai";; esac
+          hosted="$(line ANTHROPIC_HOSTED_WEB)"
+          case "$hosted" in "0 40"[03]" "*hosted_web*) ok "the API proxy refused a hosted web tool before the provider: $hosted";; *) bad "a hosted web tool: $hosted";; esac
+          direct="$(line DIRECT_ANTHROPIC)"
+          if [ -n "$direct" ] && [ "$direct" != 0 ]; then ok "the command could not reach api.anthropic.com itself (curl status $direct)"; else bad "the command reached api.anthropic.com directly (curl status '$direct')"; fi
+          # The proxy's access log, format firewall_detailed: time client:port host dest:port version method status ...
+          sidecar="$(line 'VAR ANTHROPIC_BASE_URL' | sed -E 's#^= http://([0-9.]+):.*#\1#')"
+          for host in api.anthropic.com api.openai.com; do
+            n="$( { sudo find "$KEYS_LOG_DIR" -name 'access*.log' -exec cat {} + 2>/dev/null || true; } | awk -v c="$sidecar:" -v h="$host:443" 'index($2, c) == 1 && $3 == h && $6 == "CONNECT" && $7 == "200"' | wc -l)"
+            if [ "$n" -ge 1 ]; then ok "the proxy's log shows the API proxy ($sidecar) let through to $host ($n CONNECT 200)"; else bad "the proxy's log shows no CONNECT 200 from the API proxy ($sidecar) to $host"; fi
+          done
+          if sudo grep -rq -- "$KEY_MARK" "$KEYS_LOG_DIR" "$KEYS_DNS_LOG" 2>/dev/null; then bad "a key is in the proxy's or the resolver's log"; else ok "neither key is in the proxy's or the resolver's log"; fi
+          if grep -q "^allowed 1 api.anthropic.com" "$KEYS_DNS_LOG" && grep -q "^allowed 1 api.openai.com" "$KEYS_DNS_LOG"; then ok "the action's resolver answered both providers' hosts"; else bad "the resolver did not answer both providers: $(grep -c . "$KEYS_DNS_LOG") lines"; fi
+          exit "$fail"
+
+      # Last, because it leaves a repository with a kept token in the workspace,
+      # which the action refuses from here on.
+      - name: A second checkout that keeps its token (actions/checkout's default)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: kept-token
+
+      - name: How that checkout kept its token (names only, no values)
+        run: git config --file kept-token/.git/config --name-only --list
+
+      - name: A workspace holding a kept token is refused before anything runs
+        id: keptoken
+        continue-on-error: true
+        uses: ./actions/egress
+        with:
+          allow: api.github.com
+          run: "true"
+
       - name: Check what happened
         env:
+          KEPTOKEN_OUTCOME: ${{ steps.keptoken.outcome }}
+          KEPTOKEN_CONFINED: ${{ steps.keptoken.outputs.confined }}
+          KEPTOKEN_REFUSED: ${{ steps.keptoken.outputs.refused }}
           FAILS_OUTCOME: ${{ steps.fails.outcome }}
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
@@ -244,8 +356,9 @@ jobs:
           if [ "$ADDRESS_OUTCOME" = failure ]; then ok "an address is refused"; else bad "an address was accepted"; fi
           if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
           if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
+          if [ "$KEPTOKEN_OUTCOME" = failure ] && [ "$KEPTOKEN_REFUSED" = credential ] && [ -z "$KEPTOKEN_CONFINED" ]; then ok "a workspace with a checkout that kept its token is refused, for that reason, before the command runs"; else bad "a kept token: outcome $KEPTOKEN_OUTCOME, refused '$KEPTOKEN_REFUSED', confined '$KEPTOKEN_CONFINED'"; fi
           if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
-          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]; then ok "only the proxy's log is left of the run's private directory"; else bad "the run's private directory holds more than the proxy's log"; fi
+          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"
           if [ -z "$found" ]; then ok "what the command wrote to its home and to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp"; else bad "left behind: $found"; fi
           exit "$fail"

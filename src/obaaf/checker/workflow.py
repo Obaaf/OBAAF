@@ -8,11 +8,13 @@ releases, and which caches can it read.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
@@ -50,8 +52,46 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
-# Standard GitHub-hosted runner labels (ubuntu-latest, ubuntu-24.04-arm, windows-2025, macos-15, ...).
-HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+$")
+# The shape of a GitHub-hosted runner label. Only used to find a hosted label written inside a
+# runtime selector; whether a label IS GitHub-hosted is decided by HOSTED_LABELS (flagship slice 2d.2d).
+# `\Z`, not `$`, which also matches before a line break at the end (found by the review of 2d.7).
+HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.-]+\Z")
+# The labels of GitHub's standard hosted runners and of its macOS larger runners, which GitHub names
+# itself. Any other label, `ubuntu-gpu` or `windows-builder` included, may be a self-hosted runner's
+# custom label or a larger runner's name (which the organization picks), so the checker cannot tell
+# what runs the job (flagship slice 2d.2d; before, any `ubuntu-*`, `windows-*` or `macos-*` label was
+# taken for GitHub-hosted). Written from GitHub's runner reference as the author knew it on
+# 2026-11-14; the page could not be read from the session that wrote this. A label missing here
+# gives a medium "cannot tell", never a missed self-hosted runner. Retired labels (ubuntu-20.04,
+# windows-2019, macos-12, macos-13) are left out: no hosted runner takes them any more.
+HOSTED_LABELS = frozenset({
+    "ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-slim", "ubuntu-24.04-arm", "ubuntu-22.04-arm",
+    "windows-latest", "windows-2025", "windows-2022", "windows-11-arm",
+    "macos-latest", "macos-26", "macos-15", "macos-14", "macos-15-intel",
+    "macos-latest-large", "macos-15-large", "macos-14-large",
+    "macos-latest-xlarge", "macos-26-xlarge", "macos-15-xlarge", "macos-14-xlarge",
+})
+# Events whose payload has `pull_request.head.repo`, which a fork-safe runner selector tests.
+PULL_REQUEST_PAYLOAD_EVENTS = frozenset({"pull_request", "pull_request_target", "pull_request_review",
+                                         "pull_request_review_comment"})
+
+
+def is_self_hosted_label(label) -> bool:
+    """Whether a runner label names a self-hosted runner: `self-hosted` in any letter case, with any
+    space around it, also as one word of a label written with spaces or commas in it, or a runner
+    group. Fails closed: a label GitHub might read differently is taken for the self-hosted one."""
+    text = str(label).strip().lower()
+    return text.startswith("group:") or "self-hosted" in re.split(r"[\s,]+", text)
+
+
+def is_hosted_label(label) -> bool:
+    return str(label).lower() in HOSTED_LABELS
+# A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
+# reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
+_YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+                               r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+                               r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+                               r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)")
 # Step forms that hold no run or uses of their own (background steps, NGA features on GitHub.com).
 CONTROL_STEP_KEYS = {"wait", "wait-all", "cancel"}
 
@@ -119,7 +159,7 @@ UNTRUSTED_FIELDS = [
     r"github\.event\.(head_commit|commits(\[[^\]]*\]|\.\*)?)\.(message|author\.(name|email)|committer\.(name|email))\b",
     r"github\.event\.workflow_run\.(head_branch|display_title)\b",
     r"github\.event\.workflow_run\.head_commit\.(message|author\.(name|email))\b",
-    r"github\.event\.pages(\[[^\]]*\]|\.\*)?\.page_name\b",
+    r"github\.event\.pages(\[[^\]]*\]|\.\*)?\.(page_name|title|summary)\b",
     r"github\.head_ref\b",
 ]
 UNTRUSTED_FIELDS_RE = re.compile("|".join(f"(?:{p})" for p in UNTRUSTED_FIELDS))
@@ -141,20 +181,702 @@ UNTRUSTED_PATHS = [
     ({"github"}, {"event"}, {"workflow_run"}, {"head_branch", "display_title"}),
     ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"message"}),
     ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"author"}, _IDENTITY),
-    ({"github"}, {"event"}, {"pages"}, None, {"page_name"}),
+    ({"github"}, {"event"}, {"pages"}, None, {"page_name", "title", "summary"}),
     ({"github"}, {"head_ref"}),
+    # Added by flagship slice 2d.2d, from a reviewer's attempts on OBAAF-GHA-010:
+    # what an `edited` event says the title, body or base branch was before (`changes.title.from`);
+    ({"github"}, {"event"}, {"changes"}, _TEXT, {"from"}),
+    # a review comment's file path and diff hunk, which the pull request's files decide;
+    ({"github"}, {"event"}, {"comment"}, {"path", "diff_hunk"}),
+    # the committer of a commit, which its author writes like the author's own name and e-mail;
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_commit"}, {"committer"}, _IDENTITY),
+    # the files a pushed commit adds, removes or changes, whose names its author picks;
+    ({"github"}, {"event"}, {"head_commit"}, {"added", "removed", "modified"}),
+    ({"github"}, {"event"}, {"head_commit"}, {"added", "removed", "modified"}, None),
+    ({"github"}, {"event"}, {"commits"}, None, {"added", "removed", "modified"}),
+    ({"github"}, {"event"}, {"commits"}, None, {"added", "removed", "modified"}, None),
+    # the answer that marked a discussion answered;
+    ({"github"}, {"event"}, {"answer"}, {"body"}),
+    # the fork a run came from (`workflow_run.head_repository`), and the branches of its pull requests.
+    ({"github"}, {"event"}, {"workflow_run"}, {"head_repository"},
+     {"name", "full_name", "description", "homepage", "default_branch"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"pull_requests"}, None, {"head"}, {"ref"}),
+    # From the second reviewer of 2d.2d: a merge group's commit (its message holds the queued pull
+    # requests' titles), an issue or discussion transferred here (`changes.new_issue`), the fork made
+    # by a `fork` event, the path of the workflow a run came from (a fork's pull request can add one),
+    # and the commits and branches `check_suite`, `check_run` and `status` events carry.
+    ({"github"}, {"event"}, {"merge_group"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"merge_group"}, {"head_commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"merge_group"}, {"head_ref"}),
+    ({"github"}, {"event"}, {"changes"}, {"new_issue", "new_discussion"}, _TEXT),
+    ({"github"}, {"event"}, {"forkee"}, {"name", "full_name", "description", "homepage", "default_branch"}),
+    ({"github"}, {"event"}, {"workflow_run"}, {"path"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_branch"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_commit"}, {"message"}),
+    ({"github"}, {"event"}, {"check_suite"}, {"head_commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"check_run"}, {"check_suite"}, {"head_branch"}),
+    ({"github"}, {"event"}, {"commit"}, {"commit"}, {"message"}),          # a `status` event's commit
+    ({"github"}, {"event"}, {"commit"}, {"commit"}, _WHO, _IDENTITY),
+    ({"github"}, {"event"}, {"branches"}, None, {"name"}),
 ]
 
-# References to a pull request's code (OBAAF-GHA-002, OBAAF-GHA-012).
-PR_HEAD_REF_RE = re.compile(
-    r"github\.event\.pull_request\.head\.(sha|ref)\b|github\.head_ref\b|"
-    r"github\.event\.workflow_run\.head_(sha|branch)\b|github\.event\.workflow_run\.head_repository\b|"
-    r"refs/pull/|github\.event\.issue\.pull_request|github\.event\.pull_request\.merge_commit_sha"
-)
-PR_FETCH_CMD_RE = re.compile(
-    r"(^|[\s;&|(])gh\s+pr\s+checkout\b|git\s+fetch\b[^\n]*\bpull/|git\s+fetch\b[^\n]*refs/pull/|"
-    r"git\s+(checkout|switch)\b[^\n]*\$\{\{\s*github\.event\.pull_request\.head"
-)
+# A pull request's code (OBAAF-GHA-002, OBAAF-GHA-012), as context references (flagship slice 2d.2c).
+# Each is read with the expression reader, so letter case, index syntax, `format`, `join`, `fromJSON` and
+# `toJSON` do not hide it, and a value given through `env` is followed to where it is set.
+#
+# What names the pull request's head commit, branch or repository. Under `head.repo` and
+# `head_repository` everything but the few fields below names the fork (its name, owner, clone URLs).
+_HEAD_REPO_FLAGS = {"fork", "private", "id", "node_id", "visibility", "archived", "disabled", "is_template"}
+# What names a pull request by number (from which `refs/pull/N/head` is built) or its patch.
+_PR_NUMBER_PATHS = [
+    ("github", "event", "number"), ("github", "event", "pull_request", "number"),
+    ("github", "event", "issue", "number"), ("github", "event", "pull_request", "patch_url"),
+    ("github", "event", "pull_request", "diff_url"), ("github", "event", "pull_request", "url"),
+    ("github", "event", "pull_request", "html_url"),
+]
+# References that name the base repository's own code, never the pull request's, in the events
+# OBAAF-GHA-002 is about: on pull_request_target, workflow_run and the comment and review events,
+# `github.sha` and `github.ref` are the base branch's (on pull_request they are the merge commit,
+# which OBAAF-GHA-012 treats separately).
+BASE_CODE_REFS = frozenset({
+    "github.sha", "github.ref", "github.ref_name", "github.base_ref", "github.repository", "github.workflow_sha",
+    "github.repository_owner", "github.event.repository.full_name", "github.event.repository.name",
+    "github.event.repository.default_branch", "github.event.pull_request.base.sha",
+    "github.event.pull_request.base.ref", "github.event.pull_request.base.repo.full_name",
+    "github.event.pull_request.base.repo.name", "github.event.pull_request.base.repo.clone_url",
+    "github.event.pull_request.base.label", "github.event.repository.owner.login",
+    "github.event.repository.clone_url", "github.event.workflow_run.repository.full_name",
+    "github.event.workflow_run.repository.default_branch",
+})
+# The references that are the merge commit when the event is a pull request's own (OBAAF-GHA-012).
+MERGE_COMMIT_REFS = frozenset({"github.sha", "github.ref", "github.ref_name"})
+# Events whose default checkout, and whose `github.sha` and `github.ref`, are the pull request's
+# merge commit (refs/pull/N/merge).
+MERGE_REF_EVENTS = frozenset({"pull_request", "pull_request_review", "pull_request_review_comment"})
+# Text in a value or a script that names a pull request's code without an expression.
+PR_CODE_TEXT_RE = re.compile(
+    r"refs/pull/|(?<![\w-])pull/[^\s/'\"]+/(head|merge)\b|/pull/[^\s/'\"]+\.(patch|diff)\b", re.I)
+# The same in a script: pull request fields read from the event file, the GitHub CLI or the API, and
+# the runner's own variable for the head branch.
+PR_CODE_SCRIPT_RE = re.compile(
+    r"pull_request\s*\.\s*head\b|pull_request['\"]?\s*\]\s*\[\s*['\"]head|\.head\s*\.\s*(sha|ref)\b|"
+    r"\bhead[_.]?(sha|ref)\b|\bheadRef(Oid|Name)\b|\bheadRepository(Owner)?\b|\bGITHUB_HEAD_REF\b|"
+    r"\bmerge_commit_sha\b|(?<![\w.-])gh['\"]?\s+pr\s+diff\b", re.I)
+# The subcommands of git that bring code into the workspace or read it from a ref.
+GIT_CODE_COMMANDS = frozenset({
+    "fetch", "pull", "clone", "checkout", "switch", "reset", "worktree", "merge", "rebase", "cherry-pick", "show",
+    "apply", "am", "restore", "read-tree", "archive", "submodule", "cat-file",
+})
+# git's global options that take a value as the next word (`-C DIR`); `--opt=value` is one word.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+                                "--config-env", "--exec-path", "--list-cmds", "--attr-source"})
+_GH_VALUE_OPTIONS = frozenset({"-R", "--repo", "--hostname"})
+# Downloads count when the line fetches an archive, the contents API, raw files or a diff or patch.
+_FETCHED_RE = re.compile(r"tarball|zipball|/archive/|/contents/|codeload\.|raw\.githubusercontent|\.(diff|patch)\b|"
+                         r"vnd\.github(\.v3)?\.(diff|patch|raw)|/git/(blobs|trees)|patch_url|diff_url", re.I)
+_DOWNLOADERS = frozenset({"curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"})
+_SCRIPT_API_RE = re.compile(r"\b(getContent|downloadTarballArchive|downloadZipballArchive|getArchive)\b|"
+                            r"format\s*:\s*['\"](diff|patch)['\"]", re.I)
+# A command written as an argument list (`['git', 'fetch', ...]`, `exec.exec('git', ['fetch', ...])`), for
+# scripts in other languages. The quotes are required, so the pattern cannot backtrack.
+_GIT_LIST_RE = re.compile(r"(?<![\w.-])['\"]git(?:\.exe)?['\"]\s*,\s*\[?\s*['\"](" +
+                          "|".join(re.escape(c) for c in sorted(GIT_CODE_COMMANDS)) + r")['\"]", re.I)
+def _names_pr_code(path: tuple, extracted: bool, numbers: bool) -> bool:
+    """Whether a context reference names a pull request's code: its head commit, branch or
+    repository, its merge commit, or (with `numbers`) its number or patch. A reference to an object
+    that holds one of these counts when something can turn the object into text (`extracted`, a
+    wildcard or a computed index); so does a wildcard or computed segment where a name is expected."""
+    names = [s.value.lower() if s.kind == expr_mod.NAME else None for s in path]
+    loose = extracted or any(n is None for n in names)
+
+    def at(i: int, *accepted: str) -> bool:
+        return i < len(names) and (names[i] is None or names[i] in accepted)
+
+    def shorter(i: int) -> bool:          # the reference stops before position i: an object
+        return len(names) <= i and loose
+
+    if not at(0, "github"):
+        return False
+    if len(names) == 1:
+        return loose
+    if at(1, "head_ref"):
+        return True
+    if not at(1, "event"):
+        return False
+    if shorter(2):
+        return True
+    if at(2, "pull_request"):
+        if shorter(3):
+            return True
+        if at(3, "merge_commit_sha"):
+            return True
+        if at(3, "head"):
+            if shorter(4) or at(4, "sha", "ref", "label", "user"):
+                return True
+            if at(4, "repo"):
+                return shorter(5) or (len(names) > 5 and (names[5] is None or names[5] not in _HEAD_REPO_FLAGS))
+            return False
+    if at(2, "workflow_run"):
+        if shorter(3) or at(3, "head_sha", "head_branch", "head_commit", "pull_requests"):
+            return True
+        if at(3, "head_repository"):
+            return shorter(4) or (len(names) > 4 and (names[4] is None or names[4] not in _HEAD_REPO_FLAGS))
+    if at(2, "issue") and (shorter(3) or at(3, "pull_request")):
+        return True
+    # On a pull request's `synchronize`, `after` is its new head commit; a review and a review comment
+    # name the head commit they are about.
+    if at(2, "after") or (at(2, "review", "comment") and at(3, "commit_id")):
+        return True
+    if numbers:
+        for wanted in _PR_NUMBER_PATHS:
+            if len(names) == len(wanted) and all(n is None or n == w for n, w in zip(names, wanted)):
+                return True
+    return False
+
+
+@dataclass
+class PrCode:
+    """What a value says about a pull request's code: "head" when it names it, "unresolved" when it
+    is an expression the checker cannot read to a value (a step's or job's output, an input, a
+    variable, an `env` name set nowhere in the file, a reference to anything else), "base" when it
+    names only the base repository's code or nothing computed at all. `reads` are the references
+    behind the answer (for "base", the base references read)."""
+
+    state: str
+    reads: list[str] = field(default_factory=list)
+
+
+_HEAD, _UNRESOLVED, _BASE = "head", "unresolved", "base"
+_NOT_SET = object()
+
+
+class Env:
+    """The env a value can read: mappings from the innermost (a step's) to the outermost (the
+    workflow's). A value set in one of them reads only the ones outside it, as GitHub evaluates them,
+    so a step's `REF: ${{ env.REF }}` reads the job's REF."""
+
+    def __init__(self, *scopes: Any) -> None:
+        self.scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        self.names = sorted({str(key) for scope in self.scopes for key in scope})
+
+    def find(self, name: str, start: int = 0, exact: bool = False) -> tuple[Any, int]:
+        """The value of `name` in the first scope from `start` that sets it, and that scope's index.
+        `${{ env.NAME }}` matches names without regard to case; a shell's `$NAME` (`exact`) does not."""
+        wanted = name if exact else name.lower()
+        for level in range(start, len(self.scopes)):
+            for key, given in self.scopes[level].items():
+                if (str(key) if exact else str(key).lower()) == wanted:
+                    return given, level
+        return _NOT_SET, len(self.scopes)
+
+
+def env_lookup(*scopes: Any) -> Env:
+    return Env(*scopes)
+
+
+def pr_code(value: Any, env: "Env | None" = None, numbers: bool = True, runtime_only: bool = False,
+            start: int = 0, _cache: dict | None = None, _stack: frozenset = frozenset()) -> PrCode:
+    """Read a value (a checkout's `ref` or `repository`, or part of a script) for a pull request's
+    code. `env` is the env the value can read, from scope `start` outward (None: it cannot read env).
+    With `runtime_only` (for scripts, which read many values that name no code), only step and job
+    outputs and fields an outsider writes are unresolved, and other references count as nothing.
+    Each env name is read once however many values read it, so the time is linear in the env's size."""
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    base: set[str] = set()
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return PrCode(_UNRESOLVED, ["a value that is not text"])
+    text = value if isinstance(value, str) else ""
+    if PR_CODE_TEXT_RE.search(text):
+        head.add("refs/pull/")
+    try:
+        bodies = list(expressions(text))
+    except expr_mod.TooComplex:
+        return PrCode(_UNRESOLVED, ["an expression too complex to read"])
+    cache = {} if _cache is None else _cache
+    for body in bodies:
+        try:
+            found = expr_mod.refs(body)
+        except (expr_mod.TooComplex, RecursionError):
+            unresolved.add("an expression too complex to read")
+            continue
+        for ref in found:
+            shown = expr_mod.dotted(ref.path)
+            first = ref.path[0].value.lower() if ref.path[0].kind == expr_mod.NAME else ""
+            if _names_pr_code(ref.path, ref.extracted, numbers):
+                head.add(shown)
+            elif first == "env" and len(ref.path) > 1 and ref.path[1].kind == expr_mod.NAME and env is not None:
+                given, level = env.find(ref.path[1].value, start)
+                key = (ref.path[1].value.lower(), start)
+                if given is _NOT_SET:
+                    if not runtime_only:
+                        unresolved.add(shown)
+                    continue
+                if key in _stack:
+                    continue                    # a loop: GitHub cannot evaluate it either
+                if key not in cache:
+                    cache[key] = pr_code(given, env, numbers, runtime_only, level + 1, cache, _stack | {key})
+                inner = cache[key]
+                target = head if inner.state == _HEAD else unresolved if inner.state == _UNRESOLVED else base
+                target.update(inner.reads or [shown])
+            elif shown in BASE_CODE_REFS:
+                base.add(shown)
+            elif runtime_only:
+                if first in ("steps", "needs") or any(
+                        expr_mod.reaches(ref.path, pattern, ref.extracted) for pattern in UNTRUSTED_PATHS):
+                    unresolved.add(shown)
+            else:
+                unresolved.add(shown)
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE, sorted(base))
+
+
+def script_lines(text: str, powershell: bool = False) -> list[str]:
+    """A script's logical lines: a line ended by a backslash (or, in PowerShell, a backquote) is
+    joined to the next."""
+    joined = re.sub(r"[\\`][ \t]*\r?\n" if powershell else r"\\[ \t]*\r?\n", " ", text)
+    return joined.splitlines()
+
+
+def _sub_expressions(text: str, replace: "Callable[[str], str]") -> str:
+    """`text` with each `${{ ... }}` (to the first `}}`) replaced by `replace(expression)`, in one pass:
+    an expression with no end is left as it is."""
+    out, pos = [], 0
+    while True:
+        begin = text.find("${{", pos)
+        end = text.find("}}", begin + 3) if begin != -1 else -1
+        if end == -1:
+            out.append(text[pos:])
+            return "".join(out)
+        out.append(text[pos:begin])
+        out.append(replace(text[begin:end + 2]))
+        pos = end + 2
+
+
+_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
+_SEPARATORS = frozenset({";", "&&", "||", "&", ";;", "\n"})
+# How a script reads a variable: `$NAME`, `${NAME...}`, PowerShell's `$env:NAME`, cmd's `%NAME%`,
+# Node's `process.env.NAME`, Python's `os.environ['NAME']`, `os.environ.get('NAME')`, `getenv('NAME')`.
+_VARIABLE_RE = re.compile(
+    r"\$\{?#?!?([A-Za-z_]\w*)|\$env:([A-Za-z_]\w*)|%([A-Za-z_]\w*)%|process\.env\.([A-Za-z_]\w*)|"
+    r"os\.environ(?:\.get)?\s*[\[(]\s*['\"]([A-Za-z_]\w*)|getenv\s*\(\s*['\"]([A-Za-z_]\w*)", re.I)
+# Where a script sets a variable: `NAME=...` at the start of a command (after `export`, `local`,
+# `declare -x` and the like, or `const` and `let` in a script language), `read [-r] NAME`, `for NAME in`,
+# `mapfile NAME`, `readarray NAME`.
+_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]\s*|\b(?:export|local|readonly|typeset|declare|const|let|var|set)\s+(?:-\w+\s+)*)"
+    r"\$?([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*:?\+?=\s*")
+_READ_RE = re.compile(r"\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+)?)*([A-Za-z_]\w*)|\bfor\s+([A-Za-z_]\w*)\s+in\b")
+# A file a line writes: `> FILE`, `>> FILE`, `-o FILE`, `--output FILE`, `tee FILE`, `-OutFile FILE`.
+_WRITES_RE = re.compile(r"(?:>>?|(?<![\w-])-o|--output(?:=|\s)|\btee(?:\s+-a)?|-OutFile)\s*['\"]?([^\s'\";&|<>]+)", re.I)
+_PATH_WORD_RE = re.compile(r"[^\s'\"`;&|<>(){}\[\],+]+")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+# Words after which a command starts (`a | git ...`, `then git ...`).
+_COMMAND_STARTS = frozenset({"|", "|&", "(", ")", "{", "!", "then", "do", "else", "elif", "if", "while", "until"})
+# Commands that run the command after them, with the options of theirs that take a value as the next word;
+# for `timeout`, the duration is a word of its own too (`sudo -u runner git ...`, `timeout 300 git ...`).
+_RUNNERS = {
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T"}, "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir"}, "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"}, "nohup": set(), "stdbuf": {"-i", "-o", "-e"},
+    "xargs": {"-n", "-I", "-L", "-P", "-s", "-a", "-d", "-E", "--max-args", "--replace", "--delimiter"},
+    "time": {"-f", "-o", "--format", "--output"}, "command": set(), "builtin": set(), "exec": {"-a"}, "chronic": set(), "unbuffer": set(),
+    "runuser": {"-u", "-g"}, "setsid": set(), "flock": {"-w", "-E"}, "retry": {"-t", "--times", "-d", "--delay"},
+}
+# Runners whose first word after their options is theirs, not the command's: a duration or a count
+# (`timeout 300`, `retry 3`), or a lock file (`flock /tmp/x.lock`).
+_TAKES_NUMBER = frozenset({"timeout", "retry"})
+_TAKES_WORD = frozenset({"flock"})
+# `docker exec [options] CONTAINER COMMAND`: the options of `docker exec` that take a value.
+_DOCKER_EXEC_OPTIONS = frozenset({"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"})
+# Shells and the option that hands them a script: a quoted script after it is read again.
+_SCRIPT_OPTION_RE = re.compile(r"-[a-zA-Z]*c\Z")
+
+
+def _strip_comment(line: str) -> str:
+    """The line up to a `#` that starts a shell comment: at the start of a word and outside quotes."""
+    quote, escaped, previous = "", False, " "
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped, previous = False, ch
+            continue
+        if ch == "\\" and quote != "'":
+            escaped, previous = True, ch
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (previous.isspace() or previous in ";&|("):
+            return line[:i]
+        previous = ch
+    return line
+
+
+def _shell_words(line: str) -> list[str] | None:
+    """A line split as a POSIX shell splits it, operators as words of their own. None when the line
+    cannot be split (an unclosed quote)."""
+    try:
+        lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _commands(words: list[str]) -> list[list[str]]:
+    """The commands of a split line: runs of words between `;`, `&&`, `||` and `&`. A pipeline stays
+    one command, so `gh pr diff N | git apply` is read together."""
+    out, current = [], []
+    for word in words:
+        if word in _SEPARATORS:
+            if current:
+                out.append(current)
+            current = []
+        else:
+            current.append(word)
+    if current:
+        out.append(current)
+    return out
+
+
+def _base(word: str) -> str:
+    return word.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+
+
+_CREATE_FLAGS = frozenset({"-c", "-C", "-b", "-B", "--create", "--force-create", "--orphan"})
+
+
+def _command_name(word: str) -> str:
+    """The name of the command a word starts: its base name, after a `NAME=` assignment, a backquote
+    or `$(` that open it (`` OUT=`git ``)."""
+    head, sep, tail = word.partition("=")
+    if sep and _IDENTIFIER_RE.fullmatch(head):
+        word = tail
+    return _base(word.lstrip("`$("))
+
+
+def _command_positions(words: list[str]) -> set[int]:
+    """Where a command's name stands among a command's words: the first word, the word after `|`, `(`,
+    `then` and the like, after `NAME=value` words, and after a command that runs the next one (`sudo`,
+    `env`, `timeout 300`, `xargs -r`) and its options; and any word a backquote or `$(` opens."""
+    positions, expecting, i = set(), True, 0
+    while i < len(words):
+        word = words[i]
+        if word.startswith(("`", "$(")) and len(word) > 2:
+            positions.add(i)
+        if not expecting:
+            expecting = word in _COMMAND_STARTS
+            i += 1
+            continue
+        if word in _COMMAND_STARTS:
+            i += 1
+            continue
+        head, sep, _ = word.partition("=")
+        if sep and _IDENTIFIER_RE.fullmatch(head) and "`" not in word and "$(" not in word:
+            i += 1                                   # an assignment before the command
+            continue
+        name = _command_name(word)
+        positions.add(i)
+        if name in _RUNNERS:
+            options, i = _RUNNERS[name], i + 1
+            while i < len(words) and (words[i].startswith("-") or (name == "env" and "=" in words[i])):
+                i += 2 if words[i] in options else 1
+            if (name in _TAKES_NUMBER and i < len(words) and words[i][:1].isdigit()) or (
+                    name in _TAKES_WORD and i < len(words) and words[i] not in _COMMAND_STARTS):
+                i += 1
+            continue                                 # still expecting the command it runs
+        if name in ("docker", "podman") and i + 1 < len(words) and words[i + 1] == "exec":
+            i += 2
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _DOCKER_EXEC_OPTIONS else 1
+            i += 1                                   # the container
+            continue
+        expecting = False
+        i += 1
+    return positions
+
+
+def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set[int]]:
+    """What brings code in among a command's words, if anything ("git SUBCOMMAND", "gh pr checkout",
+    which needs nothing else to be the pull request's code, "patch", "gh repo clone", "gh api", or a
+    downloader), and the words not to read for what it brings in: the name of a branch that `git
+    switch -c NAME` or `git checkout -b NAME` creates, which names nothing fetched. A name counts only
+    where a command starts (see `_command_positions`), unless `anywhere` (for a script in another
+    language, split roughly), where `patch` is not looked for: it is a word of HTTP and of APIs."""
+    found, skip = None, set()
+    positions = range(len(words)) if anywhere else _command_positions(words)
+    for i in sorted(positions):
+        word = words[i]
+        name = _command_name(word)
+        if name in ("git", "git.exe"):
+            j = i + 1
+            while j < len(words) and words[j].startswith("-"):
+                j += 2 if words[j] in _GIT_VALUE_OPTIONS else 1
+            if j < len(words) and words[j].lower() in GIT_CODE_COMMANDS:
+                sub = words[j].lower()
+                if sub in ("switch", "checkout"):
+                    rest = range(j + 1, len(words))
+                    created = {k + 1 for k in rest if words[k] in _CREATE_FLAGS and k + 1 < len(words)}
+                    if created:
+                        skip |= created
+                        starts = [k for k in rest if k not in skip and not words[k].startswith("-")
+                                  and words[k] not in ("|", "<", ">", "(", ")")]
+                        if not starts:
+                            continue        # a new branch at the current commit brings nothing in
+                return f"git {sub}", skip
+        elif name in ("gh", "gh.exe"):
+            subs, j = [], i + 1
+            while j < len(words) and len(subs) < 2 and words[j] not in ("|", "(", ")", "<", ">"):
+                if words[j].startswith("-"):
+                    j += 2 if words[j] in _GH_VALUE_OPTIONS else 1
+                    continue
+                subs.append(words[j].lower())
+                j += 1
+            if subs[:1] == ["pr"] and subs[1:2] in (["checkout"], ["co"]):
+                return "gh pr checkout", skip
+            if subs == ["repo", "clone"]:
+                found = found or "gh repo clone"
+            if subs[:1] == ["api"]:
+                found = found or "gh api"
+        elif name == "patch" and not anywhere:
+            return "patch", skip
+        elif name in _DOWNLOADERS:
+            found = found or name
+    return found, skip
+
+
+def _remote(words: list[str]) -> tuple[str, str] | None:
+    """`git remote add NAME URL` or `git remote set-url NAME URL`: the remote's name and address."""
+    for i, word in enumerate(words):
+        if _base(word) in ("git", "git.exe") and words[i + 1:i + 3] in (["remote", "add"], ["remote", "set-url"]):
+            rest = [w for w in words[i + 3:] if not w.startswith("-")]
+            if len(rest) >= 2:
+                return rest[0], rest[1]
+    return None
+
+
+def _canonical(value: Any, _seen: set | None = None) -> Any:
+    """A YAML value as JSON can hold it with sorted keys: keys as text, anything else as its text."""
+    _seen = _seen if _seen is not None else set()
+    if isinstance(value, (dict, list)):
+        if id(value) in _seen:
+            return "(alias)"
+        _seen = _seen | {id(value)}
+        if isinstance(value, dict):
+            return {as_text(k): _canonical(v, _seen) for k, v in value.items()}
+        return [_canonical(v, _seen) for v in value]
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    return as_text(value)
+
+
+def digest_of(value: Any) -> str:
+    """A short digest of how a YAML value is written, for a finding's facts."""
+    written = json.dumps(_canonical(value), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(written.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _call_text(script: str, start: int, limit: int | None = None) -> str:
+    """The argument list of a call whose name ends at `start`: from its `(` to the `)` that closes
+    it, and never past `limit` (the next call), so reading every call reads the script once."""
+    limit = len(script) if limit is None else limit
+    begin = script.find("(", start, limit)
+    if begin == -1:
+        return ""
+    depth = 0
+    for i in range(begin, limit):
+        if script[i] == "(":
+            depth += 1
+        elif script[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return script[begin:i + 1]
+    return script[begin:limit]
+
+
+def _definition(script: str, name: str) -> str:
+    """Where a script defines a name (`const NAME = ...`, `let`, `var`, or a plain assignment): the
+    value, to the end of its brackets when it opens one, else to the end of the line."""
+    match = re.search(rf"(?:\b(?:const|let|var)\s+|^\s*){re.escape(name)}\s*=\s*", script, re.M)
+    if not match:
+        return ""
+    rest = script[match.end():match.end() + 4000]
+    if rest[:1] in "{[(":
+        closer = {"{": "}", "[": "]", "(": ")"}[rest[0]]
+        depth = 0
+        for i, ch in enumerate(rest):
+            depth += ch == rest[0]
+            depth -= ch == closer
+            if depth == 0:
+                return rest[:i + 1]
+        return rest
+    return rest.split("\n", 1)[0]
+
+
+def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
+    """Whether a step's scripts bring a pull request's code into the workspace.
+
+    Each line is split as a POSIX shell splits it (comments dropped, continued lines joined), command
+    by command; a pipeline is one command, and a quoted script given to `sh -c`, `bash -c` or `eval`
+    is read again. A line the shell reader cannot split, and the lines of a script in another
+    language (`shell: python`, `node`, PowerShell, an `actions/github-script` script), are also split
+    roughly (quotes and brackets dropped), where `git` counts anywhere.
+
+    "head": a command that brings code in (git with a subcommand in GIT_CODE_COMMANDS, after any
+    global options; `gh repo clone`; `gh api`, curl or wget of an archive, contents or a diff;
+    `patch`) together with something in the same command that names the pull request's code: an
+    expression or env value that names it, a field read from the event file or the GitHub CLI,
+    `gh pr diff`, `refs/pull/...`, the pull request's number, a variable set earlier in the step
+    from any of these, a file an earlier command wrote from them, or a git remote added with the
+    head's address. `gh pr checkout` needs nothing more. "unresolved": such a command with a step's
+    or job's output, or a field an outsider writes, instead. Values passed from other steps
+    (GITHUB_ENV, files) are not followed."""
+    text = step.scripts().replace("\x00", "�")
+    if not text:
+        return PrCode(_BASE)
+    shell = (shell or as_text(step.raw.get("shell") or "")).lower()
+    github_script = (step.action or "").lower().startswith("actions/github-script")
+    language = github_script or any(name in shell for name in ("python", "node", "pwsh", "powershell", "ruby", "perl"))
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    tainted: dict[str, PrCode] = {}     # variables (and git remotes) set from the pull request's code
+    files: dict[str, PrCode] = {}       # files written from it
+    cache: dict = {}
+
+    def collect(found: PrCode, hits: set, open_: set) -> None:
+        if found.state == _HEAD:
+            hits.update(found.reads)
+        elif found.state == _UNRESOLVED:
+            open_.update(found.reads)
+
+    def read(fragment: str) -> PrCode:
+        hits: set = set()
+        open_: set = set()
+        collect(pr_code(fragment, env, numbers=True, runtime_only=True, _cache=cache), hits, open_)
+        marker = PR_CODE_SCRIPT_RE.search(fragment)
+        if marker:
+            hits.add(one_line(marker.group(0), 60))
+        for match in _VARIABLE_RE.finditer(fragment):
+            name = next(g for g in match.groups() if g)
+            exact = match.group(1) is not None or match.group(4) is not None
+            if name in tainted:
+                collect(tainted[name], hits, open_)
+                continue
+            given, level = env.find(name, 0, exact=exact)
+            if given is _NOT_SET:
+                continue
+            key = ("$" + (name if exact else name.lower()), 0)
+            if key not in cache:
+                cache[key] = pr_code(given, env, numbers=True, runtime_only=True, start=level + 1, _cache=cache)
+            collect(cache[key], hits, open_)
+        words = set(_PATH_WORD_RE.findall(fragment))
+        for word in words:
+            if word in files:
+                collect(files[word], hits, open_)
+            elif word.split("/", 1)[0] in tainted and not word.startswith("$"):
+                collect(tainted[word.split("/", 1)[0]], hits, open_)     # a remote, or a variable read as a word
+        if language:
+            for name in set(_IDENTIFIER_RE.findall(fragment)) & tainted.keys():
+                collect(tainted[name], hits, open_)
+        if hits:
+            return PrCode(_HEAD, sorted(hits))
+        return PrCode(_UNRESOLVED, sorted(open_)) if open_ else PrCode(_BASE)
+
+    def note(found: PrCode) -> None:
+        collect(found, head, unresolved)
+
+    queue = [(line, 0) for line in script_lines(text, powershell="pwsh" in shell or "powershell" in shell)]
+    while queue:
+        raw_line, depth = queue.pop(0)
+        line = _strip_comment(raw_line) if not language else raw_line
+        placeholders: list[str] = []
+
+        def hold(expression: str) -> str:
+            placeholders.append(expression)
+            return f"\x00{len(placeholders) - 1}\x00"
+
+        def put_back(fragment: str) -> str:
+            return _PLACEHOLDER_RE.sub(
+                lambda m: placeholders[int(m.group(1))] if int(m.group(1)) < len(placeholders) else m.group(0), fragment)
+
+        words = None if language else _shell_words(_sub_expressions(line, hold))
+        commands: list[tuple[str, str | None, list]] = []
+        if words is not None:
+            for command in _commands(words):
+                tool, skip = _fetching(command)
+                piece = put_back(" ".join(word for k, word in enumerate(command) if k not in skip))
+                commands.append((piece, tool, [put_back(word) for word in command]))
+                if depth < 2:
+                    for k, word in enumerate(command):
+                        if any(c.isspace() for c in word) and ("$(" in word or "`" in word or (k and (
+                                _SCRIPT_OPTION_RE.match(command[k - 1]) or command[k - 1] == "eval"))):
+                            queue.insert(0, (put_back(word), depth + 1))
+        if words is None:
+            # Split roughly: quotes, backquotes, brackets and commas dropped, operators set apart, each
+            # `${{ }}` one word. In a script language `git` counts anywhere (`subprocess.run(['git',
+            # 'fetch', ...])`, `execSync(`git fetch ...`)`); in a shell line that could not be split, only
+            # where a command starts.
+            rough = _sub_expressions(line, lambda expression: " EXPR ")
+            rough = re.sub(r"(&&|\|\||[;&|<>])", r" \1 ", re.sub(r"[\"'`(),\[\]{}+]|\bf(?=[\"'])", " ", rough))
+            found = [(_fetching(command, anywhere=language)[0], command) for command in _commands(rough.split())]
+            tool = next((t for t, _ in found if t), None)
+            # One entry for the line, so what it sets is recorded whether or not it fetches.
+            commands.append((line, tool, next((c for t, c in found if t), rough.split())))
+        for piece, tool, command in commands:
+            if tool == "gh pr checkout":
+                head.add("gh pr checkout")
+            elif tool in _DOWNLOADERS or tool == "gh api":
+                # A download brings code in when it fetches an archive, contents or a diff: written in the
+                # line, or read from the pull request's patch or diff address.
+                found = read(piece)
+                if _FETCHED_RE.search(piece) or any(_FETCHED_RE.search(r) for r in found.reads):
+                    note(found)
+            elif tool:
+                note(read(piece))
+            # What this command sets or writes, for the commands after it.
+            remote = _remote(command)
+            assigned = [m.group(1) for m in _ASSIGN_RE.finditer(piece)] + \
+                       [a or b for a, b in _READ_RE.findall(piece)]
+            written = [name for name in _WRITES_RE.findall(piece) if not name.startswith("/dev/")]
+            if remote or assigned or written:
+                found = read(remote[1] if remote else piece)
+                if found.state != _BASE:
+                    for name in assigned + ([remote[0]] if remote else []):
+                        tainted[name] = found
+                    for name in written:
+                        files[name] = found
+    script = as_text(step.with_.get("script") or "") if github_script else ""
+    matches = list(_SCRIPT_API_RE.finditer(script))
+    for k, match in enumerate(matches):
+        if match.group(1):
+            # Contents or an archive, read from the call's own arguments (written over several lines,
+            # and never past the next call): at the pull request's head, it is its code; without a
+            # ref, the default branch's. An argument that is a name is read where it is defined.
+            limit = matches[k + 1].start() if k + 1 < len(matches) else len(script)
+            call = _call_text(script, match.end(), limit)
+            found = read(call)
+            if found.state == _BASE:
+                for name in list(dict.fromkeys(_IDENTIFIER_RE.findall(call)))[:20]:
+                    defined = _definition(script, name)
+                    if defined:
+                        found = read(defined)
+                        if found.state != _BASE:
+                            break
+            note(found)
+        elif re.search(r"['\"`](apply|am)['\"`]|\bgit\s+(apply|am)\b|\bpatch\s+-p", script):
+            # The pull request's diff or patch, applied in the same script.
+            head.add(one_line(match.group(0), 60))
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE)
 
 
 def _balanced(toks: list) -> bool:
@@ -354,32 +1076,135 @@ class Permissions:
 
     @classmethod
     def parse(cls, raw: Any) -> "Permissions | None":
+        """The permissions written in a workflow, read the widest way where the text is not one of the
+        forms GitHub documents: a string other than `read-all` or `write-all`, or a value of the
+        wrong kind, counts as `write-all`, and a scope at any level other than `read` or `none`
+        counts as `write`. Such text is also a problem of the file (`permissions_problem`), which
+        fails the check; reading it widely keeps any rule that runs from passing it. `None` (the key
+        written with no value) is handled by the caller as not declared."""
         if raw is None:
             return None
         if isinstance(raw, str):
-            raw = raw.strip()
             if raw in ("read-all", "write-all"):
                 return cls(declared=True, mode=raw)
-            return cls(declared=True, mode="map")
+            return cls(declared=True, mode="write-all")
         if isinstance(raw, dict):
-            return cls(declared=True, mode="map", scopes={str(k): str(v) for k, v in raw.items()})
-        return cls(declared=True)
+            scopes: dict = {}
+            for key, value in raw.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    return cls(declared=True, mode="write-all")
+                scopes[key] = value if value in ("read", "none") else "write"
+            return cls(declared=True, mode="map", scopes=scopes)
+        return cls(declared=True, mode="write-all")
 
     def level(self, scope: str) -> str:
+        """The level of one scope. A scope written in another case, or with spaces round it, counts
+        as that scope, so `ID-TOKEN: write` is `id-token` to OBAAF-GHA-004 as it is a write scope to
+        OBAAF-GHA-003 (and a problem of the file either way)."""
         if self.mode == "write-all":
             return "write"
         if self.mode == "read-all":
             return "none" if scope == "id-token" else "read"
-        return self.scopes.get(scope, "none")
+        levels = [v for k, v in self.scopes.items() if k.strip().translate(_ASCII_LOWER) == scope]
+        return max(levels, key=_LEVEL_RANK.__getitem__, default="none")
 
     def write_scopes(self) -> list[str]:
         if self.mode == "write-all":
             return ["write-all"]
-        return sorted(s for s, v in self.scopes.items() if v == "write" and s != "id-token")
+        return sorted(s for s, v in self.scopes.items() if v == "write"
+                      and s.strip().translate(_ASCII_LOWER) != "id-token")
 
     @property
     def oidc(self) -> bool:
         return self.level("id-token") == "write"
+
+
+_NUMBER_OR_BOOLEAN = re.compile(r"[-+]?(\.?[0-9][0-9a-zA-Z_.:+-]*|\.(inf|nan))|true|false|yes|no|on|off|null|~",
+                                re.IGNORECASE)
+
+
+def _spellings(source: str, value) -> set[str]:
+    """The names a plain value written as `source` may be to one YAML reader or another: the text
+    as written, and the number or true or false each reading makes of it, in decimal."""
+    out = {source.strip().lower(), as_text(value).lower()}
+    text = source.strip().lower()
+    if len(text) > 100:
+        return out
+    readings = []
+    for read in (lambda t: int(t, 10), lambda t: int(t, 0), lambda t: int(t.replace("_", ""), 0),
+                 lambda t: int(t, 8) if re.fullmatch(r"[-+]?0[0-7]+", t) else None, float):
+        try:
+            readings.append(read(text))
+        except (ValueError, OverflowError):
+            pass
+    for number in readings:
+        if number is None:
+            continue
+        out.add(str(number).lower())
+        if isinstance(number, float) and number.is_integer():
+            out.add(str(int(number)))
+    if text in ("true", "false"):
+        out.add(text)
+    return out
+
+
+def scalar_environment_match(value, wanted: str | None, source: str | None = None) -> str:
+    """Whether an environment written as a plain number or true or false (`environment: 010`), or
+    as text another reader takes for one (`0o10`), can be the one a protected_secrets entry names.
+    YAML readers do not agree on what such a value is, so "unsure" where the wanted name is one of
+    the names it may be (`010` may be 8, 10 or "010"), else "differs". Where the text as written
+    could not be found, "unsure" for any wanted name that looks like a number or true or false."""
+    if wanted is None:
+        return "unsure"
+    if source is None:
+        return "unsure" if _NUMBER_OR_BOOLEAN.fullmatch(wanted.strip()) else "differs"
+    return "unsure" if wanted.strip().lower() in _spellings(source, value) else "differs"
+
+
+def environment_match(declared: str, wanted: str | None) -> str:
+    """Whether an environment named as text is the one a protected_secrets entry names: "same" for
+    the same name, or the same name in another case where both are ASCII (GitHub's environment
+    names do not differ by case); "unsure" where they differ only in the case of other letters,
+    which Python folds and GitHub may not; "differs" otherwise. A `wanted` of None is any
+    environment."""
+    if wanted is None or declared == wanted:
+        return "same"
+    if declared.isascii() and wanted.isascii():
+        return "same" if declared.lower() == wanted.lower() else "differs"
+    return "unsure" if declared.casefold() == wanted.casefold() else "differs"
+
+
+_LEVEL_RANK = {"none": 0, "read": 1, "write": 2}
+_EVENT_SPELLING = re.compile(r"[a-z][a-z_]*\Z")
+_SCOPE_NAME = re.compile(r"[a-z][a-z-]*\Z")
+
+
+def permissions_problem(raw: Any, where: str) -> str | None:
+    """What makes a `permissions` value one the checker cannot tell the meaning of, if anything.
+    GitHub documents `read-all`, `write-all`, `{}`, and a mapping of scope names (lower-case letters
+    and hyphens) to `read`, `write` or `none`. Anything else (another case, spaces in a quoted
+    value, an expression, a number) may not be read as GitHub would read it, whatever that is; it
+    is a problem of the file, so the check fails rather than pass a token it may have misread. A
+    scope name written in lower-case letters and hyphens that GitHub does not know is read as
+    written: GitHub adds scopes, and a list here would fail every file that uses a new one."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw in ("read-all", "write-all"):
+            return None
+        return (f"{where} has permissions written as {shown_value(raw)}, which is not read-all, write-all or a "
+                "mapping of scopes, so the checker cannot tell what the token may do")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if not isinstance(key, str) or not _SCOPE_NAME.match(key):
+                return (f"{where} names a permission scope as {shown_value(key)}; GitHub's scopes are written in "
+                        "lower-case letters and hyphens, so the checker cannot tell which scope it is")
+            if not isinstance(value, str) or value not in ("read", "write", "none"):
+                return (f"{where} gives permission scope '{key}' the level {shown_value(value)}, which is not read, "
+                        "write or none, so the checker cannot tell what the token may do")
+        return None
+    return (f"{where} has permissions that are neither text nor a mapping ({shown_value(raw)}), so the checker "
+            "cannot tell what the token may do")
 
 
 @dataclass
@@ -454,6 +1279,18 @@ class Step:
         repository's own action and is not taken for it."""
         return (self.action or "").lower() == EGRESS_ACTION
 
+    def scripts(self) -> str:
+        """Everything a step runs as a command line: `agent_text()` (the run script, a github-script
+        script and the command OBAAF's egress action runs) and a `docker://` step's `entrypoint` and
+        `args`, which GitHub hands to the container as its command."""
+        parts = [self.agent_text()]
+        if self.uses and self.uses.strip().lower().startswith("docker://"):
+            for key in ("entrypoint", "args"):
+                given = self.with_.get(key)
+                if isinstance(given, str):
+                    parts.append(given)
+        return "\n".join(p for p in parts if p)
+
     def agent_text(self) -> str:
         """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,
         which is an agent's command line like any other."""
@@ -517,16 +1354,122 @@ class Job:
 
     @property
     def permissions(self) -> Permissions | None:
-        if "permissions" in self.raw:
-            return Permissions.parse(self.raw.get("permissions") if self.raw.get("permissions") is not None else {})
+        """The job's token permissions: its own `permissions`, else the workflow's, else None (the
+        default, or a calling workflow's). `permissions:` written with no value is taken as not
+        written, the wider of the two readings: what GitHub makes of it is not established, and
+        reading it as `{}` would hide a workflow-level `write-all`."""
+        if self.raw.get("permissions") is not None:
+            return Permissions.parse(self.raw.get("permissions"))
         return self.workflow.permissions
+
+    @property
+    def environment_reading(self) -> tuple[str, Any]:
+        """How the job's environment is written: ("none", None) when it declares none, or a name
+        that is blank or missing (most likely no environment to GitHub, which is the full risk);
+        ("literal", name) for a name written as text; ("expression", text) for a name with an
+        expression in it; ("scalar", value) for a number or true or false, whose text this reader
+        and GitHub's may not agree on (`010`); ("unreadable", value) for a list or a mapping."""
+        written = self.raw.get("environment")
+        if isinstance(written, dict):
+            written = written.get("name")
+        if written is None or (isinstance(written, str) and not written.strip()):
+            return ("none", None)
+        if isinstance(written, str):
+            if "${{" in written:
+                return ("expression", written)
+            # Text this reader keeps as text that another reads as a number or true or false
+            # (`0o10`, `1e3`) is a scalar too, unless it was quoted.
+            source = self.environment_source()
+            if source is not None and source[1] is None and _YAML12_SCALAR_RE.fullmatch(written):
+                return ("scalar", written)
+            return ("literal", written)
+        if isinstance(written, (bool, int, float)):
+            return ("scalar", written)
+        return ("unreadable", written)
+
+    def environment_source(self) -> tuple[str, str | None] | None:
+        """The text of the job's environment name as written in the file, and its quoting style
+        (None for a plain value), read from the composed YAML; None where it cannot be found (a
+        merge key, a job reached another way)."""
+        return self.workflow.environment_sources().get(self.id)
 
     @property
     def environment(self) -> str | None:
         env = self.raw.get("environment")
         if isinstance(env, dict):
-            return str(env.get("name") or "") or None
-        return str(env) if env else None
+            return as_text(env.get("name") or "") or None
+        return as_text(env) if env else None
+
+    def environment_candidates(self) -> tuple[list[str], bool]:
+        """The names the job's environment can have, and whether that is all of them (flagship slice
+        2d.2d). A name written as text is itself. A name written as one expression gives the text values
+        written in it (`github.ref == 'refs/heads/main' && 'production' || 'staging'`) and, for each
+        `matrix.<key>` it reads, the values the matrix written out in the file gives that key; it is all
+        of them only when the expression reads nothing but the matrix and every such value is plain
+        text. Anything else (an input, a variable, the event, a computed matrix) leaves the list open."""
+        kind, written = self.environment_reading
+        if kind == "none":
+            return [], True
+        if kind != "expression":
+            return [as_text(written)], kind == "literal"
+        names: list[str] = []
+        complete = True
+        text = str(written)
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or text.strip() != expr_mod.OPEN + found[0] + "}}":
+            complete = False        # text around the expression, or several expressions
+        for body in found:
+            try:
+                toks = expr_mod.tokens(body)
+                refs = expr_mod.refs(body)
+            except expr_mod.TooComplex:
+                return names, False
+            names += [value for kind_, value in toks if kind_ == "str"]
+            # A function can build a name from pieces (`format('{0}{1}', 'pr', 'oduction')`), so a name
+            # given by one is never all of them.
+            if any(a[0] == "id" and b == ("op", "(") for a, b in zip(toks, toks[1:])):
+                complete = False
+            for ref in refs:
+                root = ref.path[0].value.lower() if ref.path and ref.path[0].kind == expr_mod.NAME else ""
+                if root != "matrix" or len(ref.path) != 2 or ref.path[1].kind != expr_mod.NAME:
+                    complete = False
+                    continue
+                values = self._matrix_values(ref.path[1].value)
+                if values is None:
+                    complete = False
+                else:
+                    names += values
+        return list(dict.fromkeys(names)), complete
+
+    def _matrix_values(self, name: str) -> list[str] | None:
+        """The text values a matrix written out in the file gives `name`, from its list and its
+        `include` entries; None when they cannot all be read as text (the same limits as for runner
+        labels: a merge key in the file, a computed matrix or entry, a key in another case or not plain
+        ASCII text, a value that is not text or that YAML 1.2 could read as other than text)."""
+        if self.workflow.has_merge_key:
+            return None
+        strategy = self.raw.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            return None
+        include = matrix.get("include", [])
+        if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
+            return None
+        keys = list(matrix) + [key for entry in include for key in entry]
+        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
+                                     for key in keys):
+            return None
+        if any(key != name and key.lower() == name.lower() for key in keys):
+            return None
+        listed = matrix.get(name, [])
+        if not isinstance(listed, list):
+            return None
+        out = []
+        for value in list(listed) + [entry[name] for entry in include if name in entry]:
+            if not isinstance(value, str) or "${{" in value or _YAML12_SCALAR_RE.fullmatch(value):
+                return None
+            out.append(value)
+        return out
 
     @property
     def cache_mode(self) -> str | None:
@@ -552,36 +1495,90 @@ class Job:
 
     @property
     def self_hosted(self) -> bool:
-        labels = [label.lower() for label in self.runs_on]
-        return any(label == "self-hosted" or label.startswith("group:") for label in labels)
+        return any(is_self_hosted_label(label) for label in self.runs_on)
 
     def runner_label_sets(self) -> list[list[str]] | None:
-        """Each set of labels the job can run on, with `${{ matrix.x }}` resolved from a literal
-        matrix; None when a label comes from an expression that cannot be resolved."""
+        """Each set of labels the job can run on, with `${{ matrix.x }}` and `${{ matrix.x || 'label' }}`
+        resolved from a matrix written out in the file; None when a label comes from an expression that
+        cannot be resolved.
+
+        The expression is read from its tokens (flagship slice 2d.7, issue #141). For `matrix.x ||
+        'label'` the default is one of the labels wherever a row may lack `x` or give it a value that
+        is false to GitHub (an empty text): unless `x` is a key of the matrix with a list of values and
+        every `include` entry sets it, a row may lack it, because an `include` entry that cannot be added
+        to any combination makes a row of its own. So the sets can be more than the job runs on, never
+        fewer. The values of `x` computed when the job runs, an `include` or an `include` entry computed
+        when the job runs, a key written in another case (GitHub compares property names without
+        regard to case), a key that is not plain ASCII text with no expression, a value YAML 1.2 could
+        read as other than text, a YAML merge key (`<<`) anywhere in the file, or any other expression
+        leaves the labels unresolved."""
         labels = self.runs_on
         expr = [label for label in labels if "${{" in label]
         if not expr:
             return [labels] if labels else None
         if len(labels) != 1:
             return None
-        match = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}", labels[0].strip())
+        text = labels[0].strip()
+        if not (text.startswith(expr_mod.OPEN) and text.endswith("}}")):
+            return None
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or len(expr_mod.OPEN) + len(found[0]) + 2 != len(text):
+            return None
+        body = found[0]
+        toks = expr_mod.tokens(body)
+        if len(toks) < 3 or toks[0] != ("id", "matrix") or toks[1] != ("op", ".") or toks[2][0] != "id":
+            return None
+        name, rest = toks[2][1], toks[3:]
+        default = None
+        if rest:
+            # `|| 'label'`, and nothing else: the two bars written together, a closed string after them.
+            if (len(rest) != 3 or rest[:2] != [("op", "|"), ("op", "|")] or rest[2][0] != "str"
+                    or "||" not in body or not body.rstrip().endswith("'")):
+                return None
+            default = rest[2][1]
+        if self.workflow.has_merge_key:
+            return None         # a matrix read two ways (found by the second review of 2d.7)
         strategy = self.raw.get("strategy")
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-        if not match or not isinstance(matrix, dict):
+        if not isinstance(matrix, dict):
             return None
-        values = matrix.get(match.group(1))
-        include = matrix.get("include") if isinstance(matrix.get("include"), list) else []
-        extra = [i.get(match.group(1)) for i in include if isinstance(i, dict) and match.group(1) in i]
-        if not isinstance(values, list) and not extra:
+        include = matrix.get("include", [])
+        if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
             return None
-        out = []
-        for value in (values if isinstance(values, list) else []) + extra:
+        # Every key must be plain ASCII text with no expression, so that the checker's comparison is
+        # GitHub's: a key YAML reads as true or a number, one computed when the job runs, or one with a
+        # letter outside ASCII (whose case GitHub may fold otherwise) leaves the labels unresolved
+        # (found by the review of 2d.7).
+        keys = list(matrix) + [key for entry in include for key in entry]
+        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
+                                     for key in keys):
+            return None
+        if any(key != name and key.lower() == name.lower() for key in keys):
+            return None
+        if name in matrix and not isinstance(matrix[name], list):
+            return None
+        values = list(matrix.get(name) or [])
+        extra = [entry[name] for entry in include if name in entry]
+        if not values and not extra and default is None:
+            return None
+        out: list[list[str]] = []
+        falsy = False
+        for value in values + extra:
+            if isinstance(value, str) and _YAML12_SCALAR_RE.fullmatch(value):
+                return None     # text to this reader, and maybe a number or false to GitHub's (YAML 1.2)
             if isinstance(value, str) and "${{" not in value:
-                out.append([value])
+                if value == "" and default is not None:
+                    falsy = True        # `'' || 'label'` is the label
+                else:
+                    out.append([value])
             elif isinstance(value, list) and all(isinstance(v, str) and "${{" not in v for v in value):
                 out.append([str(v) for v in value])
             else:
                 return None
+        if default is not None:
+            may_lack = not (name in matrix and values and all(name in entry for entry in include))
+            if may_lack or falsy:
+                out.append([default])
         return out or None
 
     @property
@@ -594,10 +1591,9 @@ class Job:
             return "unknown"
         kinds = set()
         for labels in sets:
-            lower = [label.lower() for label in labels]
-            if any(label == "self-hosted" or label.startswith("group:") for label in lower):
+            if any(is_self_hosted_label(label) for label in labels):
                 kinds.add("self-hosted")
-            elif len(lower) == 1 and HOSTED_LABEL_RE.match(lower[0]):
+            elif len(labels) == 1 and is_hosted_label(labels[0]):
                 kinds.add("github-hosted")
             else:
                 kinds.add("unknown")
@@ -608,16 +1604,42 @@ class Job:
 
     @property
     def mixed_runner_expression(self) -> bool:
-        """A runtime selector mentioning both hosted and self-hosted alternatives.
+        """A runtime selector that sends a fork's pull request to a standard GitHub-hosted runner, in
+        the form the checker recognises (flagship slice 2d.2d):
+        `github.event.pull_request.head.repo.full_name == github.repository && <anything> || '<hosted>'`
+        (or `!=` with the two values the other way round, or the two sides of the test swapped).
 
-        This is uncertainty, not proof that a fork-safe selector is correct. Literal
-        matrices are handled by runner_kind and retain findings for known pools.
-        """
-        if self.runner_label_sets() is not None or self.self_hosted:
+        Before 2d.2d any selector that mentioned a hosted label and `self-hosted` counted, so
+        `false && 'ubuntu-latest' || 'self-hosted'` did. `head.repo.fork && '<hosted>' || '<self-hosted>'`
+        no longer counts: for a pull request whose fork was deleted, `head.repo` is null and the selector
+        picks the second value (whether GitHub starts a run then is not verified), where the form above
+        picks the hosted one. The rule still decides whether the job's events carry
+        `pull_request.head.repo`; on any other event the form picks the second value."""
+        if self.runner_label_sets() is not None or self.self_hosted or len(self.runs_on) != 1:
             return False
-        labels = ' '.join(self.runs_on).lower()
-        return ('${{' in labels and 'self-hosted' in labels
-                and re.search(r"['\"](?:ubuntu|windows|macos)-[a-z0-9.-]+['\"]", labels) is not None)
+        text = self.runs_on[0].strip()
+        found = expr_mod.bodies(text)
+        if len(found) != 1 or text != expr_mod.OPEN + found[0] + "}}":
+            return False
+        body = re.sub(r"\s+", "", found[0].replace('"', "'"))
+        head = r"github\.event\.pull_request\.head\.repo"
+        hosted = r"'([a-z0-9.-]+)'"
+        value = r"(?:'[^']*'|[a-z0-9_.()\[\]',-]+)"
+        forms = [
+            rf"(?:{head}\.full_name==github\.repository|github\.repository=={head}\.full_name)&&{value}\|\|{hosted}",
+            rf"(?:{head}\.full_name!=github\.repository|github\.repository!={head}\.full_name)&&{hosted}\|\|{value}",
+        ]
+        lowered = body.lower()
+        for form in forms:
+            match = re.fullmatch(form, lowered)
+            if match and is_hosted_label(match.group(1)) and "'" not in body.split("&&")[0]:
+                return True
+        return False
+
+    @property
+    def selector(self) -> str:
+        """The runtime selector as written, without the spaces, for a finding's facts."""
+        return re.sub(r"\s+", "", " ".join(self.runs_on))
 
     @property
     def reusable(self) -> str | None:
@@ -698,8 +1720,11 @@ class Job:
             if any(step.uses_action(a) for a in actions):
                 out.append(step)
                 continue
-            text = step.text()
-            if text and any(rx.search(text) for rx in commands):
+            # Everything the step runs as a command line, also with each command continued on the next
+            # line joined to it and with quotes taken out (`"npm" publish`), so that neither hides a
+            # command a list names (flagship slice 2d.2d). Both readings are matched.
+            text = step.scripts()
+            if text and any(rx.search(variant) for variant in upload_readings(text) for rx in commands):
                 out.append(step)
         return out
 
@@ -714,6 +1739,14 @@ class Job:
         return out
 
 
+def upload_readings(text: str) -> list[str]:
+    """A script as written, with lines continued by a backslash, a backtick or a caret joined, and the
+    same with quote characters taken out: the readings release commands are looked for in."""
+    joined = re.sub(r"[\\`^]\r?\n[ \t]*", " ", text)
+    unquoted = re.sub(r"[\"']", "", joined)
+    return [text, joined, unquoted]
+
+
 @dataclass
 class Workflow:
     path: str
@@ -726,22 +1759,81 @@ class Workflow:
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
 
     @property
+    def has_merge_key(self) -> bool:
+        """Whether the file has a YAML merge key (`<<`) anywhere: this reader (YAML 1.1) merges it away,
+        and a YAML 1.2 reader takes it for a key of that name, so what a mapping holds is read two ways.
+        Read once, from the composed nodes; a file that cannot be composed counts as having one."""
+        cached = self.__dict__.get("_has_merge_key")
+        if cached is None:
+            from obaaf.checker.egress import _has_merge_key
+            try:
+                cached = _has_merge_key(self.text)
+            except Exception:       # a file the reader cannot compose: say yes, so nothing is resolved from it
+                cached = True
+            self.__dict__["_has_merge_key"] = cached
+        return cached
+
+    @property
     def triggers(self) -> dict[str, Any]:
         on = self.raw.get("on")
         if isinstance(on, str):
             return {on: None}
         if isinstance(on, list):
-            return {str(e): None for e in on}
+            return {as_text(e): None for e in on}
         if isinstance(on, dict):
-            return {str(k): v for k, v in on.items()}
+            return {as_text(k): v for k, v in on.items()}
         return {}
 
     @property
     def permissions(self) -> Permissions | None:
-        if "permissions" not in self.raw:
-            return None
-        raw = self.raw.get("permissions")
-        return Permissions.parse(raw if raw is not None else {})
+        """The workflow's own `permissions`, or None. Written with no value it is taken as not
+        written (see Job.permissions)."""
+        return Permissions.parse(self.raw.get("permissions"))
+
+    def composed(self):
+        """The file's YAML node tree (no values constructed), or None if it cannot be composed. Kept
+        for the life of the workflow."""
+        if "_composed" not in self.__dict__:
+            try:
+                self.__dict__["_composed"] = yamlutil.yaml.compose(self.text, Loader=yamlutil._Loader)
+            except Exception:       # anything the reader refuses: the source is simply not known
+                self.__dict__["_composed"] = None
+        return self.__dict__["_composed"]
+
+    def environment_sources(self) -> dict:
+        """Job id (as written) -> (text, style) of its environment name, for every job whose name is
+        a plain mapping entry in the composed file. Built once, so asking for every job costs one
+        walk of the file."""
+        if "_environment_sources" in self.__dict__:
+            return self.__dict__["_environment_sources"]
+        yaml = yamlutil.yaml
+
+        def get(node, key):
+            found = None
+            if isinstance(node, yaml.MappingNode):
+                for k, v in node.value:
+                    if isinstance(k, yaml.ScalarNode) and k.value == key:
+                        found = v
+            return found
+
+        out: dict = {}
+        jobs = get(self.composed(), "jobs")
+        for key, job in (jobs.value if isinstance(jobs, yaml.MappingNode) else []):
+            if not isinstance(key, yaml.ScalarNode):
+                continue
+            env = get(job, "environment")
+            if isinstance(env, yaml.MappingNode):
+                env = get(env, "name")
+            if isinstance(env, yaml.ScalarNode):
+                out[key.value] = (env.value, env.style)
+        self.__dict__["_environment_sources"] = out
+        return out
+
+    @property
+    def callable(self) -> bool:
+        """Whether another workflow can call this one (`workflow_call`). A called workflow's jobs get
+        the token the calling job grants, narrowed by what the called workflow declares."""
+        return "workflow_call" in self.triggers
 
     @property
     def env(self) -> dict:
@@ -805,10 +1897,26 @@ def parse(path: str, text: str) -> Workflow:
     if not isinstance(jobs, dict):
         workflow.error = "no jobs"
         return workflow
+    on = raw.get("on")
+    events = [on] if isinstance(on, str) else list(on) if isinstance(on, (list, dict)) else []
+    odd = next((event for event in events if not isinstance(event, str) or not _EVENT_SPELLING.match(event)), None)
+    if odd is not None:
+        # GitHub's event names are lower-case letters and underscores. One written otherwise (another
+        # case, a mapping inside the list) is not an event the rules know, and treating it as none
+        # would drop an untrusted trigger without a word.
+        workflow.problems.append(f"lists a trigger under 'on' written as {shown_value(odd)}, which is not an event "
+                                 "name as GitHub writes them (lower-case letters and underscores), so the checker "
+                                 "cannot tell which events start the workflow")
+    problem = permissions_problem(raw.get("permissions"), "the workflow")
+    if problem:
+        workflow.problems.append(problem)
     for job_id, job_raw in jobs.items():
         if not isinstance(job_raw, dict):
             workflow.problems.append(f"job '{job_id}' is not a mapping, so the checker cannot check what it does")
             continue
+        problem = permissions_problem(job_raw.get("permissions"), f"job '{job_id}'")
+        if problem:
+            workflow.problems.append(problem)
         job = Job(id=str(job_id), raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")
         if isinstance(steps, list):
@@ -1118,14 +2226,28 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     return list(dict.fromkeys(out))
 
 
-# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod,
-# app-store). A name that says it is not production, or comes before it, is taken at its word.
+# An environment whose name says where releases go, anywhere in the name (AppProd, awsprod, app-store,
+# euproduction), as before slice 2d.2d, with two changes from its reviewers: words that only hold those
+# letters (`kitchen`, `restore`, `keystore`, `reproducible`, `product`) are taken out first, and a few
+# short names are added as whole words (`live`, `prd`, `cd`, `pypi`, `testpypi`, `npm`, `crates`,
+# `rubygems`, `nuget`, `pages`, `testflight`). `switch` still counts: it is a game console a studio
+# releases to.
+# A name that says it is not production, or comes before it, is taken at its word.
 RELEASE_ENVIRONMENT_RE = re.compile(r"release|prod|publish|store|steam|itch|deploy")
+NOT_RELEASE_RE = re.compile(r"restor|datastore|keystore|firestore|filestore|objectstore|kitchen|stitch|pitch|"
+                            r"glitch|twitch|(?<!s)witch|hitch|reproduc|product(?!ion)|prodigy")
+RELEASE_WORD_RE = re.compile(r"(?<![a-z0-9])(live|prd|cd|pypi|testpypi|npm|crates|rubygems|nuget|pages|testflight)"
+                             r"(?![a-z0-9])")
 NOT_PRODUCTION_RE = re.compile(r"(?<![a-z])(non|pre)[-_. ]?prod")     # not the end of `canon-prod`
 
 
 def release_environment(name) -> bool:
-    return bool(RELEASE_ENVIRONMENT_RE.search(NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())))
+    text = NOT_PRODUCTION_RE.sub(" ", str(name or "").lower())
+    if RELEASE_ENVIRONMENT_RE.search(NOT_RELEASE_RE.sub(" ", text)):
+        return True
+    # Whole words, with a capital after a lower-case letter starting one (`AppLive`).
+    words = NOT_PRODUCTION_RE.sub(" ", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(name or "")).lower())
+    return bool(RELEASE_WORD_RE.search(words))
 
 
 def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
@@ -1144,6 +2266,12 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
         # Whatever starts the job: a job that a pull request or a comment can start and that uses
         # the production environment is the case OBAAF-GHA-015 exists for.
         lanes["release"] = f"uses the '{job.environment}' environment"
+    else:
+        # An environment named by an expression is a release environment when one of the names it can
+        # have is (`${{ matrix.env }}` over staging and production), flagship slice 2d.2d.
+        named = next((name for name in job.environment_candidates()[0] if release_environment(name)), None)
+        if named is not None:
+            lanes["release"] = f"uses the '{job.environment}' environment, which can be '{named}'"
     if triggers and triggers <= PR_TRIGGERS | {"merge_group"} | ({"push"} if "pull_request" in triggers else set()):
         lanes["untrusted"] = "builds pull requests"
     return lanes

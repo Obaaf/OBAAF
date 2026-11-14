@@ -4,6 +4,10 @@
 #   attempts.sh outside <label-prefix> <results-file>
 #   attempts.sh inside  <label-prefix> <record-prefix> <results-file> <real-workspace>
 #
+# (The record prefix labelled the DNS attempts that 2c.2 recorded without
+# asserting; since slice 2c.4 they are asserted under the label prefix, and
+# the record prefix is kept only so the command line does not change.)
+#
 # The same attempts run twice: first outside the sandbox, where each must get
 # out (the control), then inside it, where each must not. This script's own
 # exit statuses are not evidence. The judge (judge.py) reads a packet capture
@@ -85,7 +89,10 @@ note "RESULT allowed-https $? $code"
 
 # --- must block: unlisted hosts ----------------------------------------------
 try https-unlisted      curl -sS --max-time $T -o /dev/null https://example.org/
-try http-unlisted       curl -sS --max-time $T -o /dev/null http://example.net/
+# curl reads only the lower-case http_proxy for plain HTTP, and AWF sets the
+# upper-case HTTP_PROXY: name the proxy, so this goes through it inside (outside,
+# HTTP_PROXY is unset and an empty --proxy means none).
+try http-unlisted       curl -sS --max-time $T -o /dev/null --proxy "${HTTP_PROXY:-}" http://example.net/
 try noproxy-unlisted    env NO_PROXY='*' no_proxy='*' curl -sS --noproxy '*' --max-time $T -o /dev/null https://example.org/
 try proxy-override      env HTTPS_PROXY=http://208.67.220.123:443 https_proxy=http://208.67.220.123:443 curl -sS --max-time $T -o /dev/null https://example.com/
 
@@ -139,10 +146,106 @@ else
 fi
 try docker-socket       docker run --rm --network host busybox:1.37 wget -q -T $T -O /dev/null http://208.67.222.222/
 
+# --- must block: data in a host name (slice 2c.4) ----------------------------
+# The name holds the label; a DNS query for it leaving the runner would carry it.
+# The first two go to the proxy, which looks the name up before refusing it; the
+# judge also requires their names in the action's resolver's refusals, so they
+# show the resolver at work. The last two are the command's own lookups, which
+# go to Docker's resolver in the command's container and, on AWF's internal
+# network, go no further with or without the action's resolver (as in 2c.2);
+# they are asserted so that a change there is seen.
+try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$prefix-viaproxy.example.com/"
+try dns-via-proxy-http  curl -sS --max-time $T -o /dev/null --proxy "${HTTP_PROXY:-}" "http://$prefix-plainproxy.example.com/"
+try dns-default-getent  getent ahosts "$prefix-getent.example.com"
+try dns-default-dig     dig +time=3 +tries=1 "$prefix-digdefault.example.com" A
+
+# --- must block: programs on the runner that listen in /tmp (slice 2c.6) -----
+# A socket or named pipe in the runner's /tmp, which is mounted into the
+# sandbox, belongs to a program outside it. Every .NET program (the runner's
+# own Runner.Listener and Runner.Worker among them) listens on
+# /tmp/dotnet-diagnostic-<pid>-...-socket unless told not to; that socket can
+# make it dump its memory or load a library. Outside, each is counted and
+# connected to (the control); inside, none may accept a connection or be
+# writable. The scratch directory is the command's own and is left out.
+if [ "$mode" = inside ]; then own="$(dirname "${TMPDIR:-/nonexistent/x}")"; else own=/nonexistent; fi
+endpoints="$(find /tmp -maxdepth 4 \( -path "$own" -o -path /tmp/gh-aw \) -prune -o \( -type s -o -type p \) -print 2>/dev/null)"
+note "FACT tmp_endpoints $(printf '%s\n' "$endpoints" | grep -c . ) $(printf '%s\n' "$endpoints" | sed -E 's/[0-9]+/N/g' | sort -u | tr '\n' ' ' | cut -c1-600)"
+sockets=0; connected=0; pipes=0; writable=0
+while IFS= read -r ep; do
+  [ -n "$ep" ] || continue
+  if [ -S "$ep" ]; then
+    sockets=$((sockets + 1))
+    curl -sS --max-time 3 --unix-socket "$ep" -o /dev/null http://localhost/ >/dev/null 2>&1
+    # 7: could not connect. Anything else means the socket accepted the connection.
+    [ $? -ne 7 ] && connected=$((connected + 1))
+  elif [ -p "$ep" ]; then
+    pipes=$((pipes + 1))
+    [ -w "$ep" ] && writable=$((writable + 1))
+  fi
+done <<< "$endpoints"
+note "RESULT tmp-socket-connect $connected $sockets"
+note "RESULT tmp-pipe-writable $writable $pipes"
+diag="$(python3 - <<'PY' 2>/dev/null
+import glob, socket, struct
+magic = b"DOTNET_IPC_V1\0"
+# ProcessInfo (command set 0x04, command 0x00): it answers with the process's
+# id and command line, and changes nothing.
+request = magic + struct.pack("<HBBH", 20, 0x04, 0x00, 0)
+answered = total = 0
+names = []
+for path in glob.glob("/tmp/dotnet-diagnostic-*"):
+    total += 1
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(path)
+        s.sendall(request)
+        reply = b""
+        while len(reply) < 4096:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            reply += chunk
+            if len(reply) >= 20 and len(reply) >= struct.unpack_from("<H", reply, 14)[0]:
+                break
+        s.close()
+        if reply.startswith(magic):
+            answered += 1
+            # The payload: process id (8 bytes), runtime cookie (16), then the
+            # command line as a length (4, in UTF-16 units) and UTF-16 text.
+            # Only the program's name is kept, for the record.
+            units = struct.unpack_from("<I", reply, 20 + 24)[0]
+            line = reply[48:48 + 2 * units].decode("utf-16-le", errors="replace").rstrip("\0")
+            names.append((line.split() or ["?"])[0].rsplit("/", 1)[-1][:40])
+    except (OSError, struct.error):
+        pass
+print(answered, total, ",".join(sorted(names)) or "-")
+PY
+)"
+note "RESULT dotnet-diagnostics ${diag:-? ? -}"
+
+# --- must not reach a later step: links, pipes and sockets in the copy (slice 2c.6) --
+# A later step reads or uploads the scratch directory with the runner's full
+# access; a link left there would point it at the runner's own files. The
+# action deletes every entry that is not a regular file or a directory, and
+# the workflow checks that these are gone and listed in its removed output.
+if [ "$mode" = inside ]; then
+  made=0
+  ln -s /proc/self/environ escape-link-environ 2>/dev/null && made=$((made + 1))
+  ln -s /home/runner/work/_temp escape-link-runner-temp 2>/dev/null && made=$((made + 1))
+  ln -s ../../../../../../../etc/hostname escape-link-relative 2>/dev/null && made=$((made + 1))
+  mkdir -p escape-dir && ln -s / escape-dir/escape-link-root 2>/dev/null && made=$((made + 1))
+  mkfifo escape-fifo 2>/dev/null && made=$((made + 1))
+  python3 -c "import socket; socket.socket(socket.AF_UNIX).bind('escape-socket')" 2>/dev/null && made=$((made + 1))
+  # In one of the home's tool directories, which AWF mounts from the scratch
+  # home (the top of the home is AWF's own directory, which the action deletes).
+  mkdir -p "$HOME/.cache" && ln -s /proc/self/environ "$HOME/.cache/escape-link-home" 2>/dev/null && made=$((made + 1))
+  # A directory the action cannot list as the runner's user, holding a link.
+  mkdir -p escape-locked && ln -s /proc/self/environ escape-locked/escape-link-hidden 2>/dev/null && made=$((made + 1)) && chmod 000 escape-locked
+  note "RESULT plant-special $made"
+fi
+
 # --- recorded, not asserted --------------------------------------------------
-try dns-default-getent  getent ahosts "$record_prefix-getent.example.com"
-try dns-default-dig     dig +time=3 +tries=1 "$record_prefix-dig.example.com" A
-try dns-via-proxy       curl -sS --max-time $T -o /dev/null "https://$record_prefix-proxy.example.com/"
 code=$(curl -sS --max-time $T -o /dev/null -w '%{http_code}' -H 'Host: example.org' https://api.github.com/ 2>/dev/null)
 note "RESULT host-mismatch $? $code"
 

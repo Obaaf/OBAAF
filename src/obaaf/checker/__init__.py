@@ -218,6 +218,11 @@ def parse_protected_secrets(value, path) -> dict:
         if env is not None and (not isinstance(env, str) or not env.strip() or "${{" in env):
             raise ConfigError(f"{path}: protected_secrets environment for {name!r} must be a literal "
                               "environment name")
+        if name.upper() in out:
+            # Secret names are one name to GitHub whatever their case, so two entries for one name
+            # would be one entry here, and which environment applied would depend on their order.
+            raise ConfigError(f"{path}: protected_secrets names {name!r} twice (secret names do not differ by "
+                              "case); write it once, with the environment it needs")
         out[name.upper()] = env.strip() if isinstance(env, str) else None
     return out
 
@@ -458,7 +463,13 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         except ValueError:
             rel = path.as_posix()
         rels.append(rel)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # A file the checker could not read is an error, never a traceback or a pass.
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel, path)
+            continue
         workflow = wf_mod.parse(rel, text)
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
@@ -515,15 +526,16 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         findings.extend(result.findings)
         agent_lane_present = agent_lane_present or result.agent_present
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
+    repo_notes: list[str] = []
     if is_repo:
-        findings.extend(rules_mod.repo_findings(root, rels, catalog))
+        findings.extend(rules_mod.repo_findings(root, rels, catalog, errors, repo_notes))
     # A lane declaration that does nothing is a finding like any other: it can fail the check, be
     # fixed by correcting it, or be accepted by an ignore or baseline entry.
     findings.extend(declared.findings(catalog))
     today = today or date.today()
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
-    notes = _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+    notes = repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -756,11 +768,19 @@ class _LaneDeclarations:
 
 
 def lanes(target: Path, config: Config | None = None, platform: str = "auto",
-          notes: list | None = None) -> list[tuple[str, str, str, str]]:
+          notes: list | None = None, errors: list | None = None,
+          seen: list | None = None) -> list[tuple[str, str, str, str]]:
     """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
     checker classified them. Lane declarations that did nothing, which `check` reports as findings,
-    are added to `notes` as lines of text when it is given."""
+    are added to `notes` as lines of text when it is given. Whatever `check` would report as an error
+    for a file (it could not be read or parsed, an input is given twice, the rules could not read an
+    expression) is added to `errors` as `check` words it, and a Jenkinsfile part of whose pipeline was
+    not analyzed is added to `notes` (slice 3.2a); every file looked at, read or not, is added to `seen`."""
+    errors = [] if errors is None else errors
+    seen = [] if seen is None else seen
+    notes = [] if notes is None else notes
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
+    firewall = egress_mod.read_firewall_policy(root) if is_repo else None
     config = config or Config.load(root)
     jenkins_sought = is_repo and platform != "github" and target.resolve() == root
     declared = _LaneDeclarations(config, root, is_repo, not is_repo, workflows_sought=platform != "jenkins",
@@ -768,29 +788,68 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
                                              list(config.jenkins.get("exclude") or []))
-    script_cmds = _script_commands(load(), config)
+    catalog = load()
+    script_cmds = _script_commands(catalog, config)
     out = []
     for path in files:
         rel = path.relative_to(root).as_posix()
-        workflow = wf_mod.parse(rel, path.read_text(encoding="utf-8", errors="replace"))
+        seen.append(rel)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel, path)
+            continue
+        workflow = wf_mod.parse(rel, text)
         if workflow.error:
+            errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
         declared.workflow(workflow, path)
+        # What `check` reports as an error for the file (an input given twice under two spellings, an
+        # expression too deep for the rules to read) means the file was not fully read, so `--lanes`
+        # must not pass it either. The rules are run only to find those errors.
+        try:
+            rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
+                                    agents=config.agents, firewall=firewall).run()
+        except expr_mod.TooComplex as exc:
+            errors.append(f"{rel}: {exc}")
+        except (RecursionError, MemoryError):
+            errors.append(f"{rel}: too deeply nested or too large to read; the checker cannot tell what this "
+                          "file does")
+        errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
-    catalog = load()
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()
-        result = jenkins_mod.analyze(rel, path.read_bytes(), catalog, root, extra_agents=config.agents,
+        seen.append(rel)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel)
+            continue
+        result = jenkins_mod.analyze(rel, data, catalog, root, extra_agents=config.agents,
                                      lane_overrides=config.lanes)
         if result.error:
+            errors.append(f"{rel}: {result.error}")
             declared.unreadable(rel)
         else:
             declared.jenkinsfile(rel, result)
+            # `check` says no rule can pass such a file and still ends 0 (the Jenkins analyser is
+            # advisory); the listing says the same, so a stage in the part not analyzed is not missing
+            # in silence.
+            general = list(dict.fromkeys(f"line {u.line}: {u.reason}" for u in result.unknowns
+                                         if u.rule == jenkins_mod.ALL))
+            if general:
+                notes.append(f"{wf_mod.one_line(rel, 120)}: part of the pipeline was not analyzed, so a stage in "
+                             f"it may be missing from this list ({wf_mod.one_line('; '.join(general))})")
         out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
-    if notes is not None:
-        notes.extend(declared.notes(catalog))
+    if is_repo:
+        # A CODEOWNERS or instruction file `check` could not read is an error there, so it is here too
+        # (slice 2d.8); the repository rules are run only to find it.
+        rules_mod.repo_findings(root, [], catalog, errors, notes)
+    notes.extend(declared.notes(catalog))
     return out
