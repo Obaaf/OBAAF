@@ -371,8 +371,9 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
 
 # Printed at the end of a text report when no configuration file was read (slice 3.2a).
 FIRST_RUN_CONFIG = ("No configuration file was read, so a job counts as an agent job only when it runs an agent "
-                    "tool OBAAF knows. Run the same command with --lanes to see how each job was classified, and "
-                    "declare the others in .github/obaaf.yml (docs/checker-configuration.md).")
+                    "tool OBAAF knows or sets OBAAF_LANE: agent. Run the same command with --lanes to see how each "
+                    "job was classified, and declare the others with OBAAF_LANE or in .github/obaaf.yml, which a "
+                    "check of one file reads only when given with --config (docs/checker-configuration.md).")
 FIRST_RUN_OTHER_TOOLS = ("Other tools find workflow mistakes OBAAF does not look for: run zizmor, actionlint and "
                          "poutine beside it, and turn on GitHub's code scanning default setup, which analyses "
                          "workflows with CodeQL (docs/landscape.md).")

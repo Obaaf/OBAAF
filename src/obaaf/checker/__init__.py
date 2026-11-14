@@ -458,7 +458,13 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         except ValueError:
             rel = path.as_posix()
         rels.append(rel)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # A file the checker could not read is an error, never a traceback or a pass.
+            errors.append(f"{rel}: cannot be read: {exc}")
+            declared.unreadable(rel, path)
+            continue
         workflow = wf_mod.parse(rel, text)
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
@@ -760,12 +766,15 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
           seen: list | None = None) -> list[tuple[str, str, str, str]]:
     """(file, job or stage, lane, reason) for every workflow job and Jenkins stage, to show how the
     checker classified them. Lane declarations that did nothing, which `check` reports as findings,
-    are added to `notes` as lines of text when it is given. A file that could not be read, whose jobs
-    are therefore missing from the list, is added to `errors` as `check` words it (slice 3.2a), and
-    every file looked at, read or not, to `seen`."""
+    are added to `notes` as lines of text when it is given. Whatever `check` would report as an error
+    for a file (it could not be read or parsed, an input is given twice, the rules could not read an
+    expression) is added to `errors` as `check` words it, and a Jenkinsfile part of whose pipeline was
+    not analyzed is added to `notes` (slice 3.2a); every file looked at, read or not, is added to `seen`."""
     errors = [] if errors is None else errors
     seen = [] if seen is None else seen
+    notes = [] if notes is None else notes
     root, files, jenkins_paths, is_repo = _resolve(target, platform)
+    firewall = egress_mod.read_firewall_policy(root) if is_repo else None
     config = config or Config.load(root)
     jenkins_sought = is_repo and platform != "github" and target.resolve() == root
     declared = _LaneDeclarations(config, root, is_repo, not is_repo, workflows_sought=platform != "jenkins",
@@ -773,7 +782,8 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
                                              list(config.jenkins.get("exclude") or []))
-    script_cmds = _script_commands(load(), config)
+    catalog = load()
+    script_cmds = _script_commands(catalog, config)
     out = []
     for path in files:
         rel = path.relative_to(root).as_posix()
@@ -793,11 +803,19 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
         declared.workflow(workflow, path)
-        # What `check` reports as an error for the file (an input given twice under two spellings) can
-        # change what a job runs, so the listing of that file is not to be trusted either.
+        # What `check` reports as an error for the file (an input given twice under two spellings, an
+        # expression too deep for the rules to read) means the file was not fully read, so `--lanes`
+        # must not pass it either. The rules are run only to find those errors.
+        try:
+            rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
+                                    agents=config.agents, firewall=firewall).run()
+        except expr_mod.TooComplex as exc:
+            errors.append(f"{rel}: {exc}")
+        except (RecursionError, MemoryError):
+            errors.append(f"{rel}: too deeply nested or too large to read; the checker cannot tell what this "
+                          "file does")
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
-    catalog = load()
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()
         seen.append(rel)
@@ -814,7 +832,14 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             declared.unreadable(rel)
         else:
             declared.jenkinsfile(rel, result)
+            # `check` says no rule can pass such a file and still ends 0 (the Jenkins analyser is
+            # advisory); the listing says the same, so a stage in the part not analyzed is not missing
+            # in silence.
+            general = list(dict.fromkeys(f"line {u.line}: {u.reason}" for u in result.unknowns
+                                         if u.rule == jenkins_mod.ALL))
+            if general:
+                notes.append(f"{wf_mod.one_line(rel, 120)}: part of the pipeline was not analyzed, so a stage in "
+                             f"it may be missing from this list ({wf_mod.one_line('; '.join(general))})")
         out += [(rel, f"stage {stage}", lane, reason) for stage, lane, reason in result.lanes]
-    if notes is not None:
-        notes.extend(declared.notes(catalog))
+    notes.extend(declared.notes(catalog))
     return out

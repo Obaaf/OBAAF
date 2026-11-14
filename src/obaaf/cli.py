@@ -126,8 +126,8 @@ def cmd_check(args) -> int:
         for error in errors:
             print(f"error: {one_line(error)}", file=sys.stderr)
         if errors:
-            print(f"error: {len(errors)} problem(s) in the files above: the jobs of a file that could not be read "
-                  "are not listed, and obaaf check fails on the same files.", file=sys.stderr)
+            print(f"error: {len(errors)} problem(s) above, on which obaaf check fails too; a file that could not be "
+                  "read or parsed has none of its jobs listed.", file=sys.stderr)
             return EXIT_FAIL
         return EXIT_OK
     try:

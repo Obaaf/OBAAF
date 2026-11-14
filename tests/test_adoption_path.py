@@ -284,7 +284,7 @@ class TheCommandsOnThePagesExistTest(unittest.TestCase):
         gate, upgrading = (path.read_text(encoding="utf-8") for path in DOCS)
         for text in ("tests/test_adoption_path.py", "| 0 |", "| 1 |", "| 2 |", "`never` included",
                      "Without `--owner`, `--reason` and `--expires` the status is 2", "no longer found",
-                     "`--lanes` lists and judges nothing", "the status is 1; a path with nothing to list is status 2", "is not written to the baseline",
+                     "`--lanes` lists and judges nothing", "the status is 1; a path with no workflow or Jenkinsfile is status 2", "is not written to the baseline",
                      "A step with no `name` or `id` is known by the action it uses"):
             with self.subTest(page="from-report-to-gate.md", text=text):
                 self.assertIn(text, gate)

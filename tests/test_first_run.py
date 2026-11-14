@@ -5,7 +5,10 @@ statuses `obaaf check` uses, where it used to end 0 in silence; the text report 
 that wrote it; and a run with no configuration file says what that leaves out.
 """
 import json
+import os
+import sys
 import unittest
+from pathlib import Path
 
 from helpers import TempDir, run_cli
 from obaaf import __version__
@@ -62,7 +65,7 @@ class LanesSaysWhatItDidNotReadTest(unittest.TestCase):
         self.assertIn(".github/workflows/agent.yml#review: agent", out)
         self.assertNotIn("broken.yml", out)
         self.assertIn("error: .github/workflows/broken.yml: cannot parse YAML", err)
-        self.assertIn("error: 1 problem(s) in the files above", err)
+        self.assertIn("error: 1 problem(s) above, on which obaaf check fails too", err)
 
     def test_an_input_given_twice_fails_the_listing_as_it_fails_the_check(self):
         with TempDir() as tmp:
@@ -82,6 +85,61 @@ class LanesSaysWhatItDidNotReadTest(unittest.TestCase):
             code, out, err = run_cli("check", tmp / "missing", "--lanes")
             self.assertEqual((code, out), (2, ""))
             self.assertIn("not found", err)
+
+    def test_an_expression_too_deep_for_the_rules_fails_the_listing_as_it_fails_the_check(self):
+        deep = AGENT + '      - run: echo "${{ ' + "a[" * 1100 + "1" + "]" * 1100 + ' }}"\n'
+        with TempDir() as tmp:
+            repository(tmp, {"deep.yml": deep})
+            code, out, err = run_cli("check", tmp, "--lanes")
+            check = run_cli("check", tmp, "--fail-on", "never")
+        self.assertEqual(code, 1, err)
+        self.assertIn(".github/workflows/deep.yml#review: agent", out)
+        self.assertIn("error: .github/workflows/deep.yml: an expression is nested too deeply", err)
+        self.assertEqual(check[0], 1, check[1] + check[2])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.path.exists("/proc/self/mem"), "needs /proc/self/mem")
+    def test_a_workflow_that_cannot_be_read_is_an_error_and_not_a_traceback(self):
+        with TempDir() as tmp:
+            repository(tmp, {"plain.yml": PLAIN})
+            (tmp / ".github" / "workflows" / "mem.yml").symlink_to("/proc/self/mem")
+            code, out, err = run_cli("check", tmp, "--lanes")
+            check = run_cli("check", tmp, "--fail-on", "never")
+        self.assertEqual(code, 1, err)
+        self.assertIn(".github/workflows/plain.yml#build:", out)
+        self.assertIn("error: .github/workflows/mem.yml: cannot be read:", err)
+        self.assertEqual(check[0], 1, check[2])
+        self.assertIn(".github/workflows/mem.yml: cannot be read:", check[1])
+
+    def test_a_jenkinsfile_that_cannot_be_analyzed_fails_the_listing(self):
+        deep = "pipeline { agent any\n stages { stage('A') { steps { sh 'x'\n" + "script { " * 70 + "\n"
+        with TempDir() as tmp:
+            Path(tmp, "Jenkinsfile").write_text(deep, encoding="utf-8")
+            code, out, err = run_cli("check", tmp, "--lanes")
+            check = run_cli("check", tmp, "--fail-on", "never")
+        self.assertEqual((code, out), (1, ""), err)
+        self.assertIn("error: Jenkinsfile: not analyzed:", err)
+        self.assertEqual(check[0], 1, check[1] + check[2])
+
+    def test_a_jenkinsfile_partly_analyzed_is_a_note_and_ends_as_the_check_does(self):
+        partial = ("pipeline {\n  agent any\n  stages {\n    stage('Review') {\n      steps {\n"
+                   "        sh 'npx @anthropic-ai/claude-code -p review'\n      }\n    }\n"
+                   "    stage('Build') {\n      steps {\n        sh 'make'\n  }\n}\n")
+        with TempDir() as tmp:
+            Path(tmp, "Jenkinsfile").write_text(partial, encoding="utf-8")
+            code, out, err = run_cli("check", tmp, "--lanes")
+            check = run_cli("check", tmp, "--fail-on", "never")
+        self.assertEqual(code, check[0], check[1] + check[2])
+        self.assertEqual(code, 0)
+        self.assertIn("note: Jenkinsfile: part of the pipeline was not analyzed, so a stage in it may be missing", err)
+        self.assertIn("No rule can pass, because part of the pipeline was not analyzed", check[1])
+
+    def test_a_workflow_with_no_jobs_is_read_and_ends_with_zero(self):
+        with TempDir() as tmp:
+            repository(tmp, {"none.yml": "on: push\njobs: {}\n"})
+            code, out, err = run_cli("check", tmp, "--lanes")
+            check = run_cli("check", tmp, "--fail-on", "never")
+        self.assertEqual((code, out), (0, ""), err)
+        self.assertEqual(check[0], 0, check[1] + check[2])
 
     def test_a_listing_with_every_file_read_still_ends_with_zero(self):
         with TempDir() as tmp:
@@ -109,6 +167,16 @@ class TheTextReportTest(unittest.TestCase):
                                       f"Checked by obaaf {__version__}."])
         for name in ("--lanes", ".github/obaaf.yml", "zizmor", "actionlint", "poutine", "code scanning"):
             self.assertIn(name, out)
+
+    def test_the_first_run_line_names_the_declaration_that_works_without_a_file(self):
+        declared = PLAIN.replace("    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    env:\n      OBAAF_LANE: agent\n")
+        with TempDir() as tmp:
+            repository(tmp, {"bot.yml": declared})
+            lanes = run_cli("check", tmp, "--lanes")[1]
+            out = run_cli("check", tmp, "--fail-on", "never")[1]
+        self.assertIn("#build: agent (set by OBAAF_LANE)", lanes)
+        self.assertIn("or sets OBAAF_LANE: agent", out)
+        self.assertIn("--config", report.FIRST_RUN_CONFIG)
 
     def test_with_a_configuration_file_it_does_not(self):
         for config in ("{}\n", "lanes:\n  .github/workflows/plain.yml#build: trusted\n"):
