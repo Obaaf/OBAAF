@@ -1565,8 +1565,11 @@ class WorkflowRules:
 
     # Variables bash or the dynamic loader act on, which the action's own bash steps would obey outside
     # the sandbox, where the key is held (issue #139, and the review of 2c.7).
+    # ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step prints set them (`::set-env::`, `::add-path::`;
+    # found by the second review of 2c.7).
     _LOADED_BY_BASH = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD",
-                                 "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
+                                 "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+                                 "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
     # A step that sets variables or the PATH for the steps after it, the action's own included.
     _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|GITHUB_PATH|BASH_ENV|exportVariable|addPath", re.I)
 
@@ -1726,6 +1729,7 @@ class WorkflowRules:
         evidence = any(place.reaches for place in placements) or any(
             self._agent_step(step, step.agent_text()) or step.index in job.agent_script_steps for step in confined)
         first = min(holder.index for holder in keyed) if keyed else 0
+        agent_seen = False           # an agent recognised in a step before or beside a key, said as "not met"
         for step in sorted(nearby.values(), key=lambda s: s.index):
             where = f"step '{one_line(step.name, 80)}'"
             if step.confines:
@@ -1748,6 +1752,7 @@ class WorkflowRules:
                                   "script the checker reads as neither an install it can vouch for nor a run")
                     why = None
             if why or step.index in job.agent_script_steps:
+                agent_seen = True
                 problems.append(f"{where} {why or 'runs an agent in a script'}, outside the sandbox, before or beside "
                                 "the step that holds the key, as the same user, and can reach the key through what "
                                 "it leaves for that step (its environment, its PATH, a process left running)")
@@ -1765,16 +1770,20 @@ class WorkflowRules:
             if beside:
                 unsure.append(f"{where} runs beside the step that holds the key, as the same user, and could read it "
                               "from that step's process")
-            elif egress_mod.leaves_process(step.run):
+            elif egress_mod.leaves_process(text):
                 unsure.append(f"{where}, before the step that holds the key, may leave a process running "
-                              f"({egress_mod.leaves_process(step.run)}) as the same user, which could read the key "
+                              f"({egress_mod.leaves_process(text)}) as the same user, which could read the key "
                               "from that step's process")
+            own_env = step.raw.get("env")
+            if isinstance(own_env, dict) and any(str(key).upper() == "ACTIONS_ALLOW_UNSECURE_COMMANDS" for key in own_env):
+                unsure.append(f"{where}, before or beside the step that holds the key, sets "
+                              "ACTIONS_ALLOW_UNSECURE_COMMANDS, so any line it prints can set a variable or the PATH "
+                              "for the steps after it")
             if self._SETS_FOR_LATER_RE.search(text):
                 unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV or "
                               "GITHUB_PATH, or names BASH_ENV, which can make the action's own steps, which hold the "
                               "key, load or run something else (issue #139)")
-        if nearby and not evidence and not any(
-                self._agent_step(step, step.agent_text()) for step in nearby.values() if not step.confines):
+        if nearby and not evidence and not agent_seen:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "
                           "could run in a step before or beside the one that holds the key")
@@ -1791,8 +1800,9 @@ class WorkflowRules:
                       "use OBAAF's egress action at a commit OBAAF lists as released, on the runner it was tested on: "
                       f"the command can use a key the proxy holds and cannot read it.{said} The step's own process "
                       "holds each key outside the sandbox. The steps that can run before or beside it were read for "
-                      "an agent, a credential, a process left running and a write to GITHUB_ENV or GITHUB_PATH; what "
-                      "an action used before it does, and what a script file it runs writes, were not. Not stopped: "
+                      "an agent, a credential, and, by the words in their scripts, a process left running and a write "
+                      "to GITHUB_ENV or GITHUB_PATH; what an action used before it does, what an accepted install's "
+                      "own scripts do, and what a script file a step runs writes, were not. Not stopped: "
                       "the command can use the key through the proxy, so it can make the provider act for it (calls "
                       "charged to the key, remote MCP servers, URLs the provider fetches)")
         else:

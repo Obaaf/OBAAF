@@ -1112,8 +1112,8 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy", control.detail)
         # What is still true of a key behind the proxy is said beside the verdict.
         self.assertIn("The step's own process holds each key outside the sandbox", control.detail)
-        self.assertIn("what an action used before it does, and what a script file it runs writes, were not",
-                      control.detail)
+        self.assertIn("by the words in their scripts", control.detail)
+        self.assertIn("what an accepted install's own scripts do", control.detail)
         self.assertIn("make the provider act for it", control.detail)
 
     def test_no_listed_commit_or_a_tag_is_cannot_tell(self):
@@ -1312,6 +1312,24 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
             control = self.key(**case) if isinstance(case, dict) else self.key(case)
             with self.subTest(name):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+
+    def test_an_accepted_install_does_not_count_as_an_agent_seen(self):
+        """Found by the second review: an install step that 2c.8 accepts switched the "no evidence" rule off."""
+        env = {"REVIEW_KEY": "${{ secrets.REVIEW_KEY }}"}
+        steps = (CHECKOUT + "\n      - run: sudo npm install -g @anthropic-ai/claude-code\n"
+                 "      - run: python agents/fix.py\n" + keyed(model_keys=None, step_env=env, run="make lint"))
+        control = self.key(steps)
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("cannot tell where the agent runs", control.detail)
+
+    def test_unsecure_workflow_commands_are_cannot_tell(self):
+        """Found by the second review: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step prints
+        (`::set-env name=BASH_ENV::...`) sets a variable for the step that holds the key."""
+        before = "      - run: gh issue view 1\n"
+        for kw in ({"steps": before + keyed(), "job_extra": "    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"},
+                   {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()}):
+            with self.subTest(**kw):
+                self.assertEqual(self.key(**kw).verdict, CANNOT_TELL)
 
     def test_steps_after_it_cannot_reach_the_key(self):
         """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
