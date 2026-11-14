@@ -14,8 +14,8 @@ from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     FULL_SHA_RE, PR_FETCH_CMD_RE, PR_HEAD_REF_RE, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS, UNTRUSTED_FIELDS_RE,
-    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, environment_match, expressions, input_name,
-    one_line, runs_after_failure, shown_value, value_identity,
+    UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, Step, Workflow, as_text, environment_match, expressions,
+    input_name, one_line, runs_after_failure, scalar_environment_match, shown_value, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -256,13 +256,14 @@ class WorkflowRules:
                      triggers=sorted(privileged), environment=job.environment)
         elif privileged:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and can be started by {triggers}.",
-                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged))
+                     "Job '{job}' receives {secrets}{environment} and can be started by {triggers}.",
+                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged),
+                     environment=self._environment_fact(job))
         elif triggers & PR_TRIGGERS:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and runs on pull requests. Forks get no secrets, but "
-                     "branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
-                     secrets=secrets)
+                     "Job '{job}' receives {secrets}{environment} and runs on pull requests. Forks get no secrets, "
+                     "but branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
+                     secrets=secrets, environment=self._environment_fact(job))
 
     # -------------------------------------------------------------- GHA-024
     def protected_secrets(self, job: Job) -> None:
@@ -290,16 +291,18 @@ class WorkflowRules:
         state, declared = job.environment_reading
         via = (" (it passes every secret: secrets: inherit)" if "*inherit" in names
                else " (it can take every secret)" if takes_all else "")
+        every = sorted(n for n in names if n.startswith("*"))
         reported: set[tuple] = set()
         for name, pattern, wanted in hits:
-            match = environment_match(declared, wanted) if state == "literal" else None
+            match = (environment_match(declared, wanted) if state == "literal"
+                     else scalar_environment_match(declared, wanted) if state == "scalar" else None)
             if not caller and match == "same":
                 continue
             # One finding for each secret and the environment it needs, however many entries ask for it.
             if (name, wanted) in reported:
                 continue
             reported.add((name, wanted))
-            values = {"secret": name, "via": Fact(takes_all, via),
+            values = {"secret": name, "via": Fact(every, via),
                       "need": Fact(wanted or "", f"environment '{wanted}'" if wanted else "an environment")}
             if caller:
                 self.add("OBAAF-GHA-024", job.line,
@@ -312,19 +315,22 @@ class WorkflowRules:
                          "Job '{job}' uses protected secret {secret}{via} with environment '{declared}', an "
                          "expression the checker cannot confirm is {need}.", job, severity="medium",
                          kind="environment-expression", declared=declared, **values)
-            elif state == "unreadable" or match == "unsure":
-                written = job.raw.get("environment")
-                written = written.get("name") if isinstance(written, dict) else written
+            elif match == "unsure":
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} with environment {declared}, which the "
-                         "checker cannot tell GitHub reads as {need}: it is not plain text, it is blank, or it "
-                         "differs from that name only in the case of letters outside ASCII.", job,
-                         severity="medium", kind="environment-unsure",
-                         declared=Fact(value_identity(written), shown_value(written)), **values)
-            elif state == "literal":
+                         "checker cannot tell GitHub reads as {need}: it is a number or true or false, whose text "
+                         "YAML readers do not agree on, or it differs from that name only in the case of letters "
+                         "outside ASCII.", job, severity="medium", kind="environment-unsure",
+                         declared=Fact(value_identity(declared), shown_value(declared)), **values)
+            elif state == "unreadable":
+                self.add("OBAAF-GHA-024", job.line,
+                         "Job '{job}' uses protected secret {secret}{via} with an environment written as {declared}, "
+                         "which is not a name, so it is not {need}.", job, kind="environment-not-a-name",
+                         declared=Fact(value_identity(declared), shown_value(declared)), **values)
+            elif state in ("literal", "scalar"):
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} in environment '{declared}', not {need}.",
-                         job, kind="other-environment", declared=declared, **values)
+                         job, kind="other-environment", declared=as_text(declared), **values)
             else:
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} without declaring {need}, so it "
@@ -2077,13 +2083,14 @@ class WorkflowRules:
                                  for n in every)
             self.add("OBAAF-GHA-018", job.line,
                      "Job '{job}' can read every secret ({how}){environment}, so any signing key stored for it "
-                     "is available to its steps.", job, severity=severity, kind="any-secret",
+                     "is available to what it runs.", job, severity=severity, kind="any-secret",
                      how=Fact(every, shown), environment=environment)
         commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
         actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
-            # A command continued on the next line with a backslash is one command to the shell.
-            text = re.sub(r"\\[ \t]*\r?\n", " ", step.text())
+            # A command continued on the next line is one command to the shell: a backslash in sh and
+            # bash, a backtick in PowerShell, a caret in cmd.
+            text = re.sub(r"[\\`^][ \t]*\r?\n", " ", step.text())
             if any(step.uses_action(a) for a in actions):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,

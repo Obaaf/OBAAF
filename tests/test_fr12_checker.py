@@ -481,7 +481,7 @@ jobs:
             # naming the secret, which was always reported. Until slice 2d.2b inherit was not.
             inherit = head + "    secrets: inherit\n"
             found = [f for f in findings_for(tmp, inherit, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
-            self.assertEqual([(f.severity, f.kind, f.facts["via"]) for f in found], [("high", "caller", True)])
+            self.assertEqual([(f.severity, f.kind, f.facts["via"]) for f in found], [("high", "caller", ["*inherit"])])
             self.assertIn("secrets: inherit", found[0].message)
             mapped = head + "    secrets:\n      token: ${{ secrets.PRIVATE_SET_TOKEN }}\n"
             found = [f for f in findings_for(tmp, mapped, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]

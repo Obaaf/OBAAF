@@ -370,8 +370,8 @@ class Permissions:
         if raw is None:
             return None
         if isinstance(raw, str):
-            if raw.strip() in ("read-all", "write-all"):
-                return cls(declared=True, mode=raw.strip())
+            if raw in ("read-all", "write-all"):
+                return cls(declared=True, mode=raw)
             return cls(declared=True, mode="write-all")
         if isinstance(raw, dict):
             scopes: dict = {}
@@ -404,6 +404,19 @@ class Permissions:
         return self.level("id-token") == "write"
 
 
+_NUMBER_OR_BOOLEAN = re.compile(r"[-+]?(\.?[0-9][0-9a-zA-Z_.:+-]*|\.(inf|nan))|true|false|yes|no|on|off|null|~",
+                                re.IGNORECASE)
+
+
+def scalar_environment_match(value, wanted: str | None) -> str:
+    """Whether an environment written as a number or true or false (`environment: 010`) can be the
+    one a protected_secrets entry names. YAML readers do not agree on the text of such a value, so
+    "unsure" where the wanted name could be one spelling of it, else "differs"."""
+    if wanted is None:
+        return "unsure"
+    return "unsure" if _NUMBER_OR_BOOLEAN.fullmatch(wanted.strip()) else "differs"
+
+
 def environment_match(declared: str, wanted: str | None) -> str:
     """Whether an environment named as text is the one a protected_secrets entry names: "same" for
     the same name, or the same name in another case where both are ASCII (GitHub's environment
@@ -425,13 +438,15 @@ _SCOPE_NAME = re.compile(r"[a-z][a-z-]*\Z")
 def permissions_problem(raw: Any, where: str) -> str | None:
     """What makes a `permissions` value one the checker cannot tell the meaning of, if anything.
     GitHub documents `read-all`, `write-all`, `{}`, and a mapping of scope names (lower-case letters
-    and hyphens) to `read`, `write` or `none`. Anything else (another case, spaces inside a quoted
-    level, an expression, a number) is not read as GitHub would read it, whatever that is; it is
-    a problem of the file, so the check fails rather than pass a token it may have misread."""
+    and hyphens) to `read`, `write` or `none`. Anything else (another case, spaces in a quoted
+    value, an expression, a number) may not be read as GitHub would read it, whatever that is; it
+    is a problem of the file, so the check fails rather than pass a token it may have misread. A
+    scope name written in lower-case letters and hyphens that GitHub does not know is read as
+    written: GitHub adds scopes, and a list here would fail every file that uses a new one."""
     if raw is None:
         return None
     if isinstance(raw, str):
-        if raw.strip() in ("read-all", "write-all"):
+        if raw in ("read-all", "write-all"):
             return None
         return (f"{where} has permissions written as {shown_value(raw)}, which is not read-all, write-all or a "
                 "mapping of scopes, so the checker cannot tell what the token may do")
@@ -592,30 +607,29 @@ class Job:
         return self.workflow.permissions
 
     @property
-    def environment_reading(self) -> tuple[str, str | None]:
-        """How the job's environment is written: ("none", None) when it declares none;
+    def environment_reading(self) -> tuple[str, Any]:
+        """How the job's environment is written: ("none", None) when it declares none, or a name
+        that is blank or missing (most likely no environment to GitHub, which is the full risk);
         ("literal", name) for a name written as text; ("expression", text) for a name with an
-        expression in it; ("unreadable", None) for a name that is not text (a number, true or
-        false, a list) or is blank, which the checker cannot tell how GitHub reads."""
+        expression in it; ("scalar", value) for a number or true or false, whose text this reader
+        and GitHub's may not agree on (`010`); ("unreadable", value) for a list or a mapping."""
         written = self.raw.get("environment")
         if isinstance(written, dict):
-            if "name" not in written or written.get("name") is None:
-                return ("none", None) if not written else ("unreadable", None)
             written = written.get("name")
-        if written is None:
+        if written is None or (isinstance(written, str) and not written.strip()):
             return ("none", None)
-        if not isinstance(written, str) or not written.strip():
-            return ("unreadable", None)
-        if "${{" in written:
-            return ("expression", written)
-        return ("literal", written)
+        if isinstance(written, str):
+            return ("expression", written) if "${{" in written else ("literal", written)
+        if isinstance(written, (bool, int, float)):
+            return ("scalar", written)
+        return ("unreadable", written)
 
     @property
     def environment(self) -> str | None:
         env = self.raw.get("environment")
         if isinstance(env, dict):
-            return str(env.get("name") or "") or None
-        return str(env) if env else None
+            return as_text(env.get("name") or "") or None
+        return as_text(env) if env else None
 
     @property
     def cache_mode(self) -> str | None:

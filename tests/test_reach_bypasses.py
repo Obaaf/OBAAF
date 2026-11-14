@@ -50,6 +50,8 @@ class PermissionsAreReadTheWideWayTest(unittest.TestCase):
             "permissions:\n  id-token: Write\n": (None, True),
             "permissions:\n  ID-TOKEN: write\n": (None, True),
             "permissions: 7\n": ("write-all", True),
+            "permissions: ' read-all'\n": ("write-all", True),
+            "permissions: |\n  read-all\n": ("write-all", True),
             "permissions:\n  contents: 0x" + "f" * 4000 + "\n": ("write-all", True),
         }
         with TempDir() as tmp:
@@ -67,7 +69,8 @@ class PermissionsAreReadTheWideWayTest(unittest.TestCase):
 
     def test_documented_spellings_are_no_problem(self):
         with TempDir() as tmp:
-            for top in ("permissions: read-all\n", "permissions: {}\n", "permissions:\n  contents: read\n"
+            for top in ("permissions: read-all\n", "permissions: 'write-all'\n", "permissions: {}\n",
+                        "permissions:\n  contents: read\n"
                         "  id-token: none\n  pull-requests: write\n  copilot-requests: write\n"):
                 with self.subTest(top=top):
                     self.assertEqual(check(tmp, agent_workflow(top=top)).errors, [])
@@ -151,13 +154,39 @@ class ProtectedSecretsTest(unittest.TestCase):
     def test_ascii_case_still_matches(self):
         self.assertEqual(self.run_case({"PYPI_TOKEN": "release"}, "    environment: {name: Release}\n"), [])
 
-    def test_a_name_that_is_not_text_or_is_blank_is_not_taken_for_an_environment(self):
-        for protected, job in (({"PYPI_TOKEN": "8"}, "    environment: 010\n"),
-                               (["PYPI_TOKEN"], "    environment: ' '\n"),
-                               (["PYPI_TOKEN"], "    environment: {name: [release]}\n")):
-            with self.subTest(job=job):
+    def test_a_name_that_is_not_text_is_unconfirmed_only_where_it_could_be_the_name(self):
+        # `010` is 8 to this reader and may be 10, or text, to another, so it may be environment "8";
+        # it cannot be "release", and neither can `1`, true or a list, which stay as severe as the
+        # same name written in quotes.
+        for protected, job, expected in (
+                ({"PYPI_TOKEN": "8"}, "    environment: 010\n", ("environment-unsure", "medium")),
+                (["PYPI_TOKEN"], "    environment: 010\n", ("environment-unsure", "medium")),
+                ({"PYPI_TOKEN": "release"}, "    environment: 1\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "release"}, "    environment: true\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "release"}, "    environment: \"1\"\n", ("other-environment", "high")),
+                ({"PYPI_TOKEN": "release"}, "    environment: [staging]\n", ("environment-not-a-name", "high")),
+                (["PYPI_TOKEN"], "    environment: {name: [release]}\n", ("environment-not-a-name", "high"))):
+            with self.subTest(job=job, protected=protected):
                 found = self.run_case(protected, job)
-                self.assertEqual([(f.kind, f.severity) for f in found], [("environment-unsure", "medium")])
+                self.assertEqual([(f.kind, f.severity) for f in found], [expected])
+
+    def test_a_blank_or_missing_name_is_no_environment(self):
+        for job in ("    environment: ''\n", "    environment: ' '\n", "    environment: {url: x}\n",
+                    "    environment: {name: ''}\n"):
+            with self.subTest(job=job):
+                found = self.run_case(["PYPI_TOKEN"], job)
+                self.assertEqual([(f.kind, f.severity) for f in found], [("no-environment", "high")])
+
+    def test_how_a_caller_passes_every_secret_is_part_of_the_finding(self):
+        config = checker.Config.from_data({"protected_secrets": {"PYPI_TOKEN": "release"}}, "test")
+        head = "on: push\npermissions: {}\njobs:\n  call:\n    uses: org/r/.github/workflows/x.yml@" + SHA + "\n"
+        facts = []
+        with TempDir() as tmp:
+            for passed in ("    secrets: inherit\n", "    secrets:\n      all: ${{ toJSON(secrets) }}\n",
+                           "    secrets:\n      all: ${{ secrets[inputs.name] }}\n"):
+                found = of(check(tmp, head + passed, config=config), "OBAAF-GHA-024")
+                facts.append([(f.kind, f.facts["via"]) for f in found])
+        self.assertEqual(facts, [[("caller", ["*inherit"])], [("caller", ["*"])], [("caller", ["*"])]])
 
     def test_two_entries_for_one_secret_name_are_a_configuration_error(self):
         with self.assertRaises(checker.ConfigError):
@@ -193,13 +222,19 @@ class SigningKeysTest(unittest.TestCase):
                  "      - run: gpg --pinentry-mode loopback --import k.asc\n",
                  "      - run: security import cert.P12 -k build.keychain\n",
                  "      - shell: pwsh\n        run: Import-PfxCertificate -FilePath c.pfx\n",
+                 "      - shell: pwsh\n        run: |\n          signtool sign `\n            /f cert.pfx app.exe\n",
+                 "      - shell: cmd\n        run: |\n          signtool sign ^\n            /f cert.pfx app.exe\n",
+                 "      - run: gpg --passphrase \"a b\" --import k.asc\n", "      - run: gpg.exe --import k.asc\n",
                  "      - uses: crazy-max/ghaction-import-gpg@" + SHA + "\n",
                  "      - uses: apple-actions/import-codesign-certs@" + SHA + "\n"]
         with TempDir() as tmp:
             for body in steps:
                 with self.subTest(body=body.strip()[:40]):
                     self.assertEqual(len(of(check(tmp, self.job(body)), "OBAAF-GHA-018")), 1)
-            self.assertEqual(of(check(tmp, self.job("      - run: gpg --list-keys\n")), "OBAAF-GHA-018"), [])
+            for harmless in ("      - run: gpg --list-keys\n", "      - run: gpg --import-ownertrust t.txt\n",
+                             "      - run: |\n          gpg --version\n          rpm --import https://x/k.asc\n"):
+                with self.subTest(harmless=harmless.strip()[:40]):
+                    self.assertEqual(of(check(tmp, self.job(harmless)), "OBAAF-GHA-018"), [])
 
     def test_common_signing_secret_names(self):
         with TempDir() as tmp:
@@ -213,6 +248,15 @@ class TheEnvironmentIsPartOfASecretsFindingTest(unittest.TestCase):
     """An environment's secret takes precedence over a repository secret of the same name, so the
     same reference in another environment reads another secret. An acceptance written for the job
     in `sandbox` covered it in `production`."""
+
+    def test_the_environment_is_a_fact_of_gha_001(self):
+        body = ("on: pull_request\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\nENV    steps:\n"
+                "      - run: deploy\n        env:\n          T: ${{ secrets.DEPLOY_TOKEN }}\n")
+        with TempDir() as tmp:
+            facts = [[f.facts for f in of(check(tmp, body.replace("ENV", env)), "OBAAF-GHA-001")]
+                     for env in ("", "    environment: sandbox\n", "    environment: production\n")]
+        self.assertEqual(len({repr(f) for f in facts}), 3)
+        self.assertEqual([len(f) for f in facts], [1, 1, 1])
 
     def test_the_environment_is_a_fact_of_gha_005_and_gha_018(self):
         body = ("on: push\npermissions: {}\njobs:\n  agent:\n    runs-on: ubuntu-latest\nENV    steps:\n"

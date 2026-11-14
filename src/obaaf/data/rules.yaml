@@ -26,12 +26,13 @@ rules:
       keeps the finding high, because GitHub creates an environment it does not know on first use with no
       protection rules, and an expression can name one the event's author picks. Pull-request workflows are
       reported at low severity: forks receive no secrets, but branches pushed by anyone with write access do.
-      Not followed: whether a named environment really requires reviewers (a repository setting; `obaaf audit`
-      reads it); events an app can raise for an outsider's change (`check_run`, `check_suite`, `status`,
-      `deployment`, `deployment_status`) and `merge_group`, which are not treated as untrusted; a workflow
-      another workflow calls, whose caller's trigger is not known from its own file; and secrets that reach
-      the job through artifacts, caches or another job's outputs. An event name written other than in
-      lower-case letters and underscores is a problem of the file, which fails the check.
+      The job's environment is part of the finding, because a secret of the same name in another environment
+      is another secret. Not followed: whether a named environment really requires reviewers (a repository
+      setting; `obaaf audit` reads it); events an app can raise for an outsider's change (`check_run`,
+      `check_suite`, `status`, `deployment`, `deployment_status`) and `merge_group`, which are not treated as
+      untrusted; a workflow another workflow calls, whose caller's trigger is not known from its own file; and
+      secrets that reach the job through artifacts, caches or another job's outputs. An event name written
+      other than in lower-case letters and underscores is a problem of the file, which fails the check.
     fix: >-
       Move the step that needs the secret into a workflow that runs only after review (for example on
       a push to a protected branch, or behind an environment with required reviewers), and pass only
@@ -64,13 +65,14 @@ rules:
       A job that runs an AI agent holds write permissions, or does not declare its permissions and so may
       inherit write access: the repository default, or, in a workflow another can call (`workflow_call`),
       whatever the calling job grants. Text the agent reads can then direct those writes. Permissions written
-      in a form GitHub does not document (another case, a level other than `read`, `write` or `none`, a string
-      other than `read-all` or `write-all`, an expression) are a problem of the file, which fails the check,
-      and are read as the widest grant they could be; `permissions:` with no value is taken as not written.
-      Not followed: the repository's or organization's default token permissions (an undeclared job is
-      reported whatever they are); what a calling workflow grants; write access through a token taken from a
-      secret, which OBAAF-GHA-005 reports as a secret; and a local composite action that runs an agent, which
-      does not make the job an agent job.
+      in a form GitHub does not document (a scope name in another case, a level other than `read`, `write` or
+      `none`, a string other than exactly `read-all` or `write-all`, an expression) are a problem of the file,
+      which fails the check, and are read as the widest grant they could be; `permissions:` with no value is
+      taken as not written, and a scope name in lower-case letters and hyphens that GitHub does not know is
+      read as written. Not followed: the repository's or organization's default token permissions (an
+      undeclared job is reported whatever they are); what a calling workflow grants; write access through a
+      token taken from a secret, which OBAAF-GHA-005 reports as a secret; and a local composite action that
+      runs an agent, which does not make the job an agent job.
     fix: >-
       Give the agent job `permissions: {contents: read}` (plus other read permissions it needs) and
       apply its proposals in a separate effect job behind a protected environment.
@@ -363,9 +365,10 @@ rules:
       finding about its secrets. Not followed: a signing secret whose name matches none of the patterns in the
       detection data (names are guesses, and a key can be stored under any name); a signing command or action
       not in that data (commands are matched in `run` and `actions/github-script` scripts, with a line
-      continued by a backslash joined first); keys fetched at run time from a vault or a cloud key service;
-      and, for a step reported for its command, what the command does: the finding names the step and not its
-      text, so a harmless step that is accepted keeps its acceptance if it later loads a private key.
+      continued by a backslash, a PowerShell backtick or a cmd caret joined first); keys fetched at run time
+      from a vault or a cloud key service; and, for a step reported for its command, what the command does:
+      the finding names the step and not its text, so a harmless step that is accepted keeps its acceptance if
+      it later loads a private key.
     fix: >-
       Sign through a hardware-backed or managed signing service (a cloud key service, an HSM-backed
       signing service, or platform-managed signing), so no build step can read the private key.
@@ -483,12 +486,13 @@ rules:
       inherit: either passes the secret's repository or organization copy wherever one exists. Every matching
       entry applies, so a looser pattern cannot relax a stricter one, and two entries for the same secret name
       in different case are a configuration error. Environment names are compared without regard to the case
-      of the letters A to Z only. An environment named by an expression, one that is not plain text or is
-      blank, and one that differs from the named environment only in the case of letters outside ASCII cannot
-      be confirmed and are reported at medium severity (an expression is never evaluated, even a constant
-      one). The checker cannot see where the secret is stored or the environment's branch rule (GitHub does
-      not say whether a branch rule applies to a job that writes `deployment: false`); check both in the
-      repository settings, or with `obaaf audit`.
+      of the letters A to Z only. An environment named by an expression, one written as a number or true or
+      false that could be the named environment in another reader's spelling, and one that differs from the
+      named environment only in the case of letters outside ASCII cannot be confirmed and are reported at
+      medium severity (an expression is never evaluated, even a constant one). A blank or missing name counts
+      as no environment, and a list or a mapping as a name that is not the one wanted. The checker cannot see
+      where the secret is stored or the environment's branch rule; check both in the repository settings, or
+      with `obaaf audit`.
     fix: >-
       Keep the secret only in the environment named in protected_secrets, limit that environment's
       deployment branches to the default branch, delete any repository or organization copy, and add
