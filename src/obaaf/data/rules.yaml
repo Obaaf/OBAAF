@@ -402,7 +402,9 @@ rules:
       the only outside events are `pull_request`, `pull_request_review` and `pull_request_review_comment`
       (a run from a fork gets no secrets and a read-only token) and when the job names an environment in
       plain text, which may require a reviewer (as for OBAAF-GHA-001); high otherwise. Why the job is a
-      release job, the steps that make it one and its environment are facts. A job nothing marks a
+      release job, the steps that make it one (by the command or action that publishes, not where it
+      publishes to: `docker push localhost:5000/t` and `docker push docker.io/org/app` are the same) and
+      its environment are facts. A job nothing marks a
       release job, but that an outside event can start and that has `packages: write`, a secret whose
       name says it publishes, a step using an action under `publishing_actions`, or an environment name
       the checker cannot read, is reported at medium (low on pull request events only) as one that may
