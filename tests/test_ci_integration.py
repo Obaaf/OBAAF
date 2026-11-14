@@ -209,11 +209,15 @@ class TheTemplateStepTest(unittest.TestCase):
         self.assertEqual(config, "{}\n")
 
     def test_a_link_on_the_target_branch_fails_the_step(self):
-        base = {"conf/obaaf.yml": "# the real one\n", ".github/obaaf.yaml": "# a looser one\n"}
-        calls, config, _ = self.run_step("pull_request", base, links={".github/obaaf.yml": "../conf/obaaf.yml"},
-                                         status=1)
-        self.assertEqual(calls, [])
-        self.assertIsNone(config)
+        # A link where the checker would stop (no regular file at an earlier name), with looser files after it.
+        for i, name in enumerate(CONFIG_LOCATIONS):
+            with self.subTest(name=name):
+                base = {"conf/obaaf.yml": "# the real one\n"}
+                base.update({later: "# a looser one\n" for later in CONFIG_LOCATIONS[i + 1:]})
+                target = "../conf/obaaf.yml" if "/" in name else "conf/obaaf.yml"
+                calls, config, _ = self.run_step("pull_request", base, links={name: target}, status=1)
+                self.assertEqual(calls, [])
+                self.assertIsNone(config)
 
     def test_a_push_reads_its_own_configuration_even_with_a_directory_of_that_name(self):
         calls, config, _ = self.run_step("push", {".github/obaaf.yml": "# planted\n"})
