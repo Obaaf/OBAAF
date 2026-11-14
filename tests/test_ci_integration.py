@@ -160,7 +160,8 @@ class ThePageTest(unittest.TestCase):
 class TheTemplateStepTest(unittest.TestCase):
     """The template's check step, run with bash and a stand-in for obaaf that keeps what it is given."""
 
-    def run_step(self, event: str, base: dict, workspace: dict | None = None) -> tuple[list, str | None, bool]:
+    def run_step(self, event: str, base: dict, workspace: dict | None = None, links: dict | None = None,
+                 status: int = 0) -> tuple[list, str | None, bool]:
         workflow = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
         script = next(s["run"] for s in workflow["jobs"]["check"]["steps"] if "obaaf check" in s.get("run", ""))
         with TempDir() as directory:
@@ -170,6 +171,9 @@ class TheTemplateStepTest(unittest.TestCase):
             for name, text in {**{f".obaaf-base/{k}": v for k, v in base.items()}, **(workspace or {})}.items():
                 (work / name).parent.mkdir(parents=True, exist_ok=True)
                 (work / name).write_text(text, encoding="utf-8")
+            for name, target in (links or {}).items():
+                (work / ".obaaf-base" / name).parent.mkdir(parents=True, exist_ok=True)
+                (work / ".obaaf-base" / name).symlink_to(target)
             log = directory / "calls"
             stub = bin_ / "obaaf"
             stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$OBAAF_CALLS"\n'
@@ -179,8 +183,8 @@ class TheTemplateStepTest(unittest.TestCase):
             env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
                    "GITHUB_EVENT_NAME": event, "OBAAF_CALLS": str(log)}
             done = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(done.returncode, status, done.stdout + done.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
             config = Path(f"{log}.config")
             return calls, config.read_text(encoding="utf-8") if config.exists() else None, (work / ".obaaf-base").exists()
 
@@ -190,6 +194,8 @@ class TheTemplateStepTest(unittest.TestCase):
                 calls, config, left = self.run_step("pull_request", {name: f"# from {name}\n"})
                 self.assertEqual(len(calls), 2, calls)
                 self.assertTrue(all("--config" in c for c in calls), calls)
+                self.assertIn("--format sarif --output obaaf.sarif --fail-on never", calls[0])
+                self.assertTrue(calls[1].endswith("--fail-on medium"), calls)
                 self.assertEqual(config, f"# from {name}\n")
                 self.assertFalse(left)
 
@@ -202,9 +208,17 @@ class TheTemplateStepTest(unittest.TestCase):
         _, config, _ = self.run_step("pull_request", {})
         self.assertEqual(config, "{}\n")
 
+    def test_a_link_on_the_target_branch_fails_the_step(self):
+        base = {"conf/obaaf.yml": "# the real one\n", ".github/obaaf.yaml": "# a looser one\n"}
+        calls, config, _ = self.run_step("pull_request", base, links={".github/obaaf.yml": "../conf/obaaf.yml"},
+                                         status=1)
+        self.assertEqual(calls, [])
+        self.assertIsNone(config)
+
     def test_a_push_reads_its_own_configuration_even_with_a_directory_of_that_name(self):
         calls, config, _ = self.run_step("push", {".github/obaaf.yml": "# planted\n"})
         self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[1].endswith("--fail-on medium"), calls)
         self.assertFalse(any("--config" in c for c in calls), calls)
         self.assertIsNone(config)
 
@@ -214,6 +228,8 @@ class TheTemplateStepTest(unittest.TestCase):
         checkout = next(i for i, s in enumerate(steps) if s.get("with", {}).get("path") == ".obaaf-base")
         self.assertLess(removal, checkout)
         self.assertEqual(steps[removal]["if"], steps[checkout]["if"])
+        on = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))[True]   # YAML 1.1 reads `on:` as true
+        self.assertIn("edited", on["pull_request"]["types"])
         patterns = steps[checkout]["with"]["sparse-checkout"].split()
         self.assertEqual(patterns, ["/" + name for name in CONFIG_LOCATIONS])
 

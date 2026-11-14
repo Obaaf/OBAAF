@@ -34,7 +34,7 @@ obaaf check . --format json --output obaaf.json --fail-on medium
 obaaf check . --format sarif --output obaaf.sarif --fail-on never
 ```
 
-- **JSON** names its format, `obaaf-check/v0.1`. Each entry under `findings` has `rule`, `path`, `line`, `severity`, `state`, `message` and `fix`, among other fields. `errors` lists what the checker could not read, and `notes` adds context. The fields added since 0.3.0 are listed in [upgrading.md](upgrading.md#what-a-script-that-reads-the-output-will-notice). Fields have been added under the same format name and none removed; nothing yet promises that this will stay so.
+- **JSON** names its format, `obaaf-check/v0.1`. Each entry under `findings` has `rule`, `path`, `line`, `severity`, `state`, `message` and `fix`, among other fields. `errors` lists what the checker could not read, and `notes` adds context. The fields added since 0.3.0 are listed in [upgrading.md](upgrading.md#what-a-script-that-reads-the-output-will-notice). Since 0.3.0 every top-level field and every field of a finding has been kept under the same format name, and fields have been added; the entries under `baseline.stale` changed (they are the baseline's own entries, and lost `fingerprint` and `message`). Nothing yet promises what the next version keeps.
 - **SARIF** is version 2.1.0. Findings are under `runs[0].results`. What the checker could not read is an error under `runs[0].invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`.
 
 **GitHub code scanning does not show the notifications.** Going by GitHub's page on its SARIF support, a file the checker could not read, the accepted-risk total and the expiry warnings do not appear there, and an accepted finding is an open alert like any other ([the checker's guide](checker-configuration.md#the-report-begins-with-the-accepted-risk) has the details; no upload has been made to check it). So keep the step that runs `obaaf check` able to fail: that is where an unread file shows.
@@ -54,10 +54,10 @@ Use OBAAF's template [`obaaf-pipeline-check.yml`](../templates/github-actions/wo
 What it does:
 
 - **It runs on every pull request and on pushes to `main`**, with a read-only token and without keeping the checkout's credentials.
-- **On a pull request it reads the checker configuration from the branch the pull request targets** (`.github/obaaf.yml`, `.github/obaaf.yaml` or `obaaf.yml`, the first that exists, as the checker chooses), so a pull request cannot accept its own findings by editing the configuration. It can still edit the workflow file itself: require a code owner's review for `.github/` (the template's [CODEOWNERS example](../templates/github-actions/CODEOWNERS.example)).
+- **On a pull request it reads the checker configuration from the branch the pull request targets** (`.github/obaaf.yml`, `.github/obaaf.yaml` or `obaaf.yml`, the first that exists, as the checker chooses), so a pull request cannot accept its own findings by editing the configuration. It runs again when a pull request is moved to another target branch. The configuration must be a regular file there: the step cannot follow a link, and fails if it finds one. It can still edit the workflow file itself: require a code owner's review for `.github/` (the template's [CODEOWNERS example](../templates/github-actions/CODEOWNERS.example)).
 - **The job writes the SARIF report without failing on findings, then runs the gate** at `--fail-on medium`, and keeps the report as an artifact for 14 days. A file the checker cannot read fails the job at the first command.
 - **The `upload` job is off until you set the repository variable `OBAAF_UPLOAD_SARIF` to `true`.** It then sends the report of each push to `main` to code scanning, under the category `obaaf`. Code scanning on a private repository needs GitHub Advanced Security.
-- **To require it**, wait for one run, then add the check `check` to the branch's ruleset. That is the job's id; if another workflow also has a job `check`, give this one a `name:` first, so the name you require is not shared. The template has no `merge_group` trigger: with a merge queue, add one, or the required check never reports there.
+- **To require it**, wait for one run, then add the check `check` to the branch's ruleset. That is the job's id; if another workflow also has a job `check`, give this one a `name:` first, so the name you require is not shared. The template has no `merge_group` trigger: with a merge queue, add one, or the required check never reports there. A `merge_group` run reads the configuration in the queued change, as a push does; only the pull-request run reads the target branch's.
 
 If you use a baseline, add `--baseline .github/obaaf-baseline.json` to both `obaaf check` lines. The template does not read the baseline from the target branch: a pull request that edits it needs the same review as one that edits the workflow. On a pull request the configuration is read from a copy outside the repository, so a finding reported in the configuration file itself (`OBAAF-CFG-001`, a lane declaration that does nothing) has another path there than on a push, and a baseline entry for it matches on one and not the other: correct such a declaration rather than accept it.
 
@@ -77,6 +77,8 @@ name: OBAAF pipeline check
 
 on:
   pull_request:
+    # edited: a pull request moved to another target branch is checked again against that branch.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -123,6 +125,10 @@ jobs:
             # The first that exists on the target branch, as the checker would choose; none is {}.
             echo '{}' > "$RUNNER_TEMP/obaaf.yml"
             for name in .github/obaaf.yml .github/obaaf.yaml obaaf.yml; do
+              if [ -L ".obaaf-base/$name" ]; then
+                echo "::error::$name on the target branch is a link, which this step cannot follow; make it a regular file"
+                exit 1
+              fi
               if [ -f ".obaaf-base/$name" ]; then
                 cp ".obaaf-base/$name" "$RUNNER_TEMP/obaaf.yml"
                 break
@@ -205,12 +211,12 @@ Then run `pre-commit validate-config .pre-commit-config.yaml`, `pre-commit insta
 
 Run by the ChatGPT session that wrote the first version of this page (2026-11-14, Linux, Python 3.12): the action's install step, outside GitHub, with runner-style paths (`pip check` reported no broken requirements and the installed `obaaf --version` printed `0.4.0.dev0`); pre-commit 4.7.0 validating and installing the hook in a scratch repository, where it passed a clean workflow and failed with status 1 on the risky fixture, in two fresh environments.
 
-Run by the review (run `stint`, 2026-11-14, Python 3.13): every exit status and report field on this page, from source at `flagship` `058cbfd` (between `a620b95` and it, the command line and the reports did not change; the egress and runner-label rules did); `obaaf check` on the workflow above with a CODEOWNERS file (no findings at `--fail-on low`). The action itself runs on Linux, macOS and Windows in OBAAF's own CI (`setup-action` jobs). The pins are the template's; the review did not check them against GitHub.
+Run by the review (run `stint`, 2026-11-14, Python 3.13): every exit status and report field on this page, from source at `flagship` `058cbfd` (between `a620b95` and it, the command line and the reports did not change; OBAAF-GHA-005's fifth control and the reading of runner labels did); `obaaf check` on the workflow above with a CODEOWNERS file (no findings at `--fail-on low`). The action itself runs on Linux, macOS and Windows in OBAAF's own CI (`setup-action` jobs). The pins are the template's; the review did not check them against GitHub.
 
 Not run: this workflow on a GitHub runner (including the review's change to the template: the configuration read under all three names, and a pull request's own `.obaaf-base` removed; git's handling of the three patterns was checked locally), an upload to code scanning, a required check in a ruleset, actionlint on the workflow above (it could not be installed in the review's session), and pre-commit in the review's session (no access to PyPI).
 
 ## What is still missing
 
 - **OBAAF has no hook definition of its own** (`.pre-commit-hooks.yaml`), and no test runs pre-commit; the tests read the hook's configuration only.
-- **No promise about the JSON and SARIF formats.** Fields have only been added so far, under the same format name, but OBAAF is 0.x and says nothing about keeping it so.
-- **The template is the only workflow tested**, and only by reading it; nothing has run it on GitHub with a pull request.
+- **No promise about the JSON and SARIF formats.** OBAAF is 0.x, and the format name `obaaf-check/v0.1` did not change when the entries under `baseline.stale` did.
+- **The template is the only workflow tested**: its check step is run with bash and a stand-in for `obaaf`, and nothing has run the workflow on GitHub with a pull request.
