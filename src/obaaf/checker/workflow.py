@@ -8,11 +8,13 @@ releases, and which caches can it read.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
@@ -152,16 +154,663 @@ UNTRUSTED_PATHS = [
     ({"github"}, {"head_ref"}),
 ]
 
-# References to a pull request's code (OBAAF-GHA-002, OBAAF-GHA-012).
-PR_HEAD_REF_RE = re.compile(
-    r"github\.event\.pull_request\.head\.(sha|ref)\b|github\.head_ref\b|"
-    r"github\.event\.workflow_run\.head_(sha|branch)\b|github\.event\.workflow_run\.head_repository\b|"
-    r"refs/pull/|github\.event\.issue\.pull_request|github\.event\.pull_request\.merge_commit_sha"
-)
-PR_FETCH_CMD_RE = re.compile(
-    r"(^|[\s;&|(])gh\s+pr\s+checkout\b|git\s+fetch\b[^\n]*\bpull/|git\s+fetch\b[^\n]*refs/pull/|"
-    r"git\s+(checkout|switch)\b[^\n]*\$\{\{\s*github\.event\.pull_request\.head"
-)
+# A pull request's code (OBAAF-GHA-002, OBAAF-GHA-012), as context references (flagship slice 2d.2c).
+# Each is read with the expression reader, so letter case, index syntax, `format`, `join`, `fromJSON` and
+# `toJSON` do not hide it, and a value given through `env` is followed to where it is set.
+#
+# What names the pull request's head commit, branch or repository. Under `head.repo` and
+# `head_repository` everything but the few fields below names the fork (its name, owner, clone URLs).
+_HEAD_REPO_FLAGS = {"fork", "private", "id", "node_id", "visibility", "archived", "disabled", "is_template"}
+# What names a pull request by number (from which `refs/pull/N/head` is built) or its patch.
+_PR_NUMBER_PATHS = [
+    ("github", "event", "number"), ("github", "event", "pull_request", "number"),
+    ("github", "event", "issue", "number"), ("github", "event", "pull_request", "patch_url"),
+    ("github", "event", "pull_request", "diff_url"), ("github", "event", "pull_request", "url"),
+    ("github", "event", "pull_request", "html_url"),
+]
+# References that name the base repository's own code, never the pull request's, in the events
+# OBAAF-GHA-002 is about: on pull_request_target, workflow_run and the comment and review events,
+# `github.sha` and `github.ref` are the base branch's (on pull_request they are the merge commit,
+# which OBAAF-GHA-012 treats separately).
+BASE_CODE_REFS = frozenset({
+    "github.sha", "github.ref", "github.ref_name", "github.base_ref", "github.repository", "github.workflow_sha",
+    "github.repository_owner", "github.event.repository.full_name", "github.event.repository.name",
+    "github.event.repository.default_branch", "github.event.pull_request.base.sha",
+    "github.event.pull_request.base.ref", "github.event.pull_request.base.repo.full_name",
+    "github.event.pull_request.base.repo.name", "github.event.pull_request.base.repo.clone_url",
+    "github.event.pull_request.base.label", "github.event.repository.owner.login",
+    "github.event.repository.clone_url", "github.event.workflow_run.repository.full_name",
+    "github.event.workflow_run.repository.default_branch",
+})
+# The references that are the merge commit when the event is a pull request's own (OBAAF-GHA-012).
+MERGE_COMMIT_REFS = frozenset({"github.sha", "github.ref", "github.ref_name"})
+# Events whose default checkout, and whose `github.sha` and `github.ref`, are the pull request's
+# merge commit (refs/pull/N/merge).
+MERGE_REF_EVENTS = frozenset({"pull_request", "pull_request_review", "pull_request_review_comment"})
+# Text in a value or a script that names a pull request's code without an expression.
+PR_CODE_TEXT_RE = re.compile(
+    r"refs/pull/|(?<![\w-])pull/[^\s/'\"]+/(head|merge)\b|/pull/[^\s/'\"]+\.(patch|diff)\b", re.I)
+# The same in a script: pull request fields read from the event file, the GitHub CLI or the API, and
+# the runner's own variable for the head branch.
+PR_CODE_SCRIPT_RE = re.compile(
+    r"pull_request\s*\.\s*head\b|pull_request['\"]?\s*\]\s*\[\s*['\"]head|\.head\s*\.\s*(sha|ref)\b|"
+    r"\bhead[_.]?(sha|ref)\b|\bheadRef(Oid|Name)\b|\bheadRepository(Owner)?\b|\bGITHUB_HEAD_REF\b|"
+    r"\bmerge_commit_sha\b|(?<![\w.-])gh['\"]?\s+pr\s+diff\b", re.I)
+# The subcommands of git that bring code into the workspace or read it from a ref.
+GIT_CODE_COMMANDS = frozenset({
+    "fetch", "pull", "clone", "checkout", "switch", "reset", "worktree", "merge", "rebase", "cherry-pick", "show",
+    "apply", "am", "restore", "read-tree", "archive", "submodule", "cat-file",
+})
+# git's global options that take a value as the next word (`-C DIR`); `--opt=value` is one word.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+                                "--config-env", "--exec-path", "--list-cmds", "--attr-source"})
+_GH_VALUE_OPTIONS = frozenset({"-R", "--repo", "--hostname"})
+# Downloads count when the line fetches an archive, the contents API, raw files or a diff or patch.
+_FETCHED_RE = re.compile(r"tarball|zipball|/archive/|/contents/|codeload\.|raw\.githubusercontent|\.(diff|patch)\b|"
+                         r"vnd\.github(\.v3)?\.(diff|patch|raw)|/git/(blobs|trees)|patch_url|diff_url", re.I)
+_DOWNLOADERS = frozenset({"curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"})
+_SCRIPT_API_RE = re.compile(r"\b(getContent|downloadTarballArchive|downloadZipballArchive|getArchive)\b|"
+                            r"format\s*:\s*['\"](diff|patch)['\"]", re.I)
+# A command written as an argument list (`['git', 'fetch', ...]`, `exec.exec('git', ['fetch', ...])`), for
+# scripts in other languages. The quotes are required, so the pattern cannot backtrack.
+_GIT_LIST_RE = re.compile(r"(?<![\w.-])['\"]git(?:\.exe)?['\"]\s*,\s*\[?\s*['\"](" +
+                          "|".join(re.escape(c) for c in sorted(GIT_CODE_COMMANDS)) + r")['\"]", re.I)
+def _names_pr_code(path: tuple, extracted: bool, numbers: bool) -> bool:
+    """Whether a context reference names a pull request's code: its head commit, branch or
+    repository, its merge commit, or (with `numbers`) its number or patch. A reference to an object
+    that holds one of these counts when something can turn the object into text (`extracted`, a
+    wildcard or a computed index); so does a wildcard or computed segment where a name is expected."""
+    names = [s.value.lower() if s.kind == expr_mod.NAME else None for s in path]
+    loose = extracted or any(n is None for n in names)
+
+    def at(i: int, *accepted: str) -> bool:
+        return i < len(names) and (names[i] is None or names[i] in accepted)
+
+    def shorter(i: int) -> bool:          # the reference stops before position i: an object
+        return len(names) <= i and loose
+
+    if not at(0, "github"):
+        return False
+    if len(names) == 1:
+        return loose
+    if at(1, "head_ref"):
+        return True
+    if not at(1, "event"):
+        return False
+    if shorter(2):
+        return True
+    if at(2, "pull_request"):
+        if shorter(3):
+            return True
+        if at(3, "merge_commit_sha"):
+            return True
+        if at(3, "head"):
+            if shorter(4) or at(4, "sha", "ref", "label", "user"):
+                return True
+            if at(4, "repo"):
+                return shorter(5) or (len(names) > 5 and (names[5] is None or names[5] not in _HEAD_REPO_FLAGS))
+            return False
+    if at(2, "workflow_run"):
+        if shorter(3) or at(3, "head_sha", "head_branch", "head_commit", "pull_requests"):
+            return True
+        if at(3, "head_repository"):
+            return shorter(4) or (len(names) > 4 and (names[4] is None or names[4] not in _HEAD_REPO_FLAGS))
+    if at(2, "issue") and (shorter(3) or at(3, "pull_request")):
+        return True
+    # On a pull request's `synchronize`, `after` is its new head commit; a review and a review comment
+    # name the head commit they are about.
+    if at(2, "after") or (at(2, "review", "comment") and at(3, "commit_id")):
+        return True
+    if numbers:
+        for wanted in _PR_NUMBER_PATHS:
+            if len(names) == len(wanted) and all(n is None or n == w for n, w in zip(names, wanted)):
+                return True
+    return False
+
+
+@dataclass
+class PrCode:
+    """What a value says about a pull request's code: "head" when it names it, "unresolved" when it
+    is an expression the checker cannot read to a value (a step's or job's output, an input, a
+    variable, an `env` name set nowhere in the file, a reference to anything else), "base" when it
+    names only the base repository's code or nothing computed at all. `reads` are the references
+    behind the answer (for "base", the base references read)."""
+
+    state: str
+    reads: list[str] = field(default_factory=list)
+
+
+_HEAD, _UNRESOLVED, _BASE = "head", "unresolved", "base"
+_NOT_SET = object()
+
+
+class Env:
+    """The env a value can read: mappings from the innermost (a step's) to the outermost (the
+    workflow's). A value set in one of them reads only the ones outside it, as GitHub evaluates them,
+    so a step's `REF: ${{ env.REF }}` reads the job's REF."""
+
+    def __init__(self, *scopes: Any) -> None:
+        self.scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        self.names = sorted({str(key) for scope in self.scopes for key in scope})
+
+    def find(self, name: str, start: int = 0, exact: bool = False) -> tuple[Any, int]:
+        """The value of `name` in the first scope from `start` that sets it, and that scope's index.
+        `${{ env.NAME }}` matches names without regard to case; a shell's `$NAME` (`exact`) does not."""
+        wanted = name if exact else name.lower()
+        for level in range(start, len(self.scopes)):
+            for key, given in self.scopes[level].items():
+                if (str(key) if exact else str(key).lower()) == wanted:
+                    return given, level
+        return _NOT_SET, len(self.scopes)
+
+
+def env_lookup(*scopes: Any) -> Env:
+    return Env(*scopes)
+
+
+def pr_code(value: Any, env: "Env | None" = None, numbers: bool = True, runtime_only: bool = False,
+            start: int = 0, _cache: dict | None = None, _stack: frozenset = frozenset()) -> PrCode:
+    """Read a value (a checkout's `ref` or `repository`, or part of a script) for a pull request's
+    code. `env` is the env the value can read, from scope `start` outward (None: it cannot read env).
+    With `runtime_only` (for scripts, which read many values that name no code), only step and job
+    outputs and fields an outsider writes are unresolved, and other references count as nothing.
+    Each env name is read once however many values read it, so the time is linear in the env's size."""
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    base: set[str] = set()
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return PrCode(_UNRESOLVED, ["a value that is not text"])
+    text = value if isinstance(value, str) else ""
+    if PR_CODE_TEXT_RE.search(text):
+        head.add("refs/pull/")
+    try:
+        bodies = list(expressions(text))
+    except expr_mod.TooComplex:
+        return PrCode(_UNRESOLVED, ["an expression too complex to read"])
+    cache = {} if _cache is None else _cache
+    for body in bodies:
+        try:
+            found = expr_mod.refs(body)
+        except (expr_mod.TooComplex, RecursionError):
+            unresolved.add("an expression too complex to read")
+            continue
+        for ref in found:
+            shown = expr_mod.dotted(ref.path)
+            first = ref.path[0].value.lower() if ref.path[0].kind == expr_mod.NAME else ""
+            if _names_pr_code(ref.path, ref.extracted, numbers):
+                head.add(shown)
+            elif first == "env" and len(ref.path) > 1 and ref.path[1].kind == expr_mod.NAME and env is not None:
+                given, level = env.find(ref.path[1].value, start)
+                key = (ref.path[1].value.lower(), start)
+                if given is _NOT_SET:
+                    if not runtime_only:
+                        unresolved.add(shown)
+                    continue
+                if key in _stack:
+                    continue                    # a loop: GitHub cannot evaluate it either
+                if key not in cache:
+                    cache[key] = pr_code(given, env, numbers, runtime_only, level + 1, cache, _stack | {key})
+                inner = cache[key]
+                target = head if inner.state == _HEAD else unresolved if inner.state == _UNRESOLVED else base
+                target.update(inner.reads or [shown])
+            elif shown in BASE_CODE_REFS:
+                base.add(shown)
+            elif runtime_only:
+                if first in ("steps", "needs") or any(
+                        expr_mod.reaches(ref.path, pattern, ref.extracted) for pattern in UNTRUSTED_PATHS):
+                    unresolved.add(shown)
+            else:
+                unresolved.add(shown)
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE, sorted(base))
+
+
+def script_lines(text: str, powershell: bool = False) -> list[str]:
+    """A script's logical lines: a line ended by a backslash (or, in PowerShell, a backquote) is
+    joined to the next."""
+    joined = re.sub(r"[\\`][ \t]*\r?\n" if powershell else r"\\[ \t]*\r?\n", " ", text)
+    return joined.splitlines()
+
+
+def _sub_expressions(text: str, replace: "Callable[[str], str]") -> str:
+    """`text` with each `${{ ... }}` (to the first `}}`) replaced by `replace(expression)`, in one pass:
+    an expression with no end is left as it is."""
+    out, pos = [], 0
+    while True:
+        begin = text.find("${{", pos)
+        end = text.find("}}", begin + 3) if begin != -1 else -1
+        if end == -1:
+            out.append(text[pos:])
+            return "".join(out)
+        out.append(text[pos:begin])
+        out.append(replace(text[begin:end + 2]))
+        pos = end + 2
+
+
+_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
+_SEPARATORS = frozenset({";", "&&", "||", "&", ";;", "\n"})
+# How a script reads a variable: `$NAME`, `${NAME...}`, PowerShell's `$env:NAME`, cmd's `%NAME%`,
+# Node's `process.env.NAME`, Python's `os.environ['NAME']`, `os.environ.get('NAME')`, `getenv('NAME')`.
+_VARIABLE_RE = re.compile(
+    r"\$\{?#?!?([A-Za-z_]\w*)|\$env:([A-Za-z_]\w*)|%([A-Za-z_]\w*)%|process\.env\.([A-Za-z_]\w*)|"
+    r"os\.environ(?:\.get)?\s*[\[(]\s*['\"]([A-Za-z_]\w*)|getenv\s*\(\s*['\"]([A-Za-z_]\w*)", re.I)
+# Where a script sets a variable: `NAME=...` at the start of a command (after `export`, `local`,
+# `declare -x` and the like, or `const` and `let` in a script language), `read [-r] NAME`, `for NAME in`,
+# `mapfile NAME`, `readarray NAME`.
+_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]\s*|\b(?:export|local|readonly|typeset|declare|const|let|var|set)\s+(?:-\w+\s+)*)"
+    r"\$?([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*:?\+?=\s*")
+_READ_RE = re.compile(r"\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+)?)*([A-Za-z_]\w*)|\bfor\s+([A-Za-z_]\w*)\s+in\b")
+# A file a line writes: `> FILE`, `>> FILE`, `-o FILE`, `--output FILE`, `tee FILE`, `-OutFile FILE`.
+_WRITES_RE = re.compile(r"(?:>>?|(?<![\w-])-o|--output(?:=|\s)|\btee(?:\s+-a)?|-OutFile)\s*['\"]?([^\s'\";&|<>]+)", re.I)
+_PATH_WORD_RE = re.compile(r"[^\s'\"`;&|<>(){}\[\],+]+")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+# Words after which a command starts (`a | git ...`, `then git ...`).
+_COMMAND_STARTS = frozenset({"|", "|&", "(", ")", "{", "!", "then", "do", "else", "elif", "if", "while", "until"})
+# Commands that run the command after them, with the options of theirs that take a value as the next word;
+# for `timeout`, the duration is a word of its own too (`sudo -u runner git ...`, `timeout 300 git ...`).
+_RUNNERS = {
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T"}, "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir"}, "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"}, "nohup": set(), "stdbuf": {"-i", "-o", "-e"},
+    "xargs": {"-n", "-I", "-L", "-P", "-s", "-a", "-d", "-E", "--max-args", "--replace", "--delimiter"},
+    "time": {"-f", "-o", "--format", "--output"}, "command": set(), "builtin": set(), "exec": {"-a"}, "chronic": set(), "unbuffer": set(),
+    "runuser": {"-u", "-g"}, "setsid": set(), "flock": {"-w", "-E"}, "retry": {"-t", "--times", "-d", "--delay"},
+}
+# Runners whose first word after their options is theirs, not the command's: a duration or a count
+# (`timeout 300`, `retry 3`), or a lock file (`flock /tmp/x.lock`).
+_TAKES_NUMBER = frozenset({"timeout", "retry"})
+_TAKES_WORD = frozenset({"flock"})
+# `docker exec [options] CONTAINER COMMAND`: the options of `docker exec` that take a value.
+_DOCKER_EXEC_OPTIONS = frozenset({"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"})
+# Shells and the option that hands them a script: a quoted script after it is read again.
+_SCRIPT_OPTION_RE = re.compile(r"-[a-zA-Z]*c\Z")
+
+
+def _strip_comment(line: str) -> str:
+    """The line up to a `#` that starts a shell comment: at the start of a word and outside quotes."""
+    quote, escaped, previous = "", False, " "
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped, previous = False, ch
+            continue
+        if ch == "\\" and quote != "'":
+            escaped, previous = True, ch
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (previous.isspace() or previous in ";&|("):
+            return line[:i]
+        previous = ch
+    return line
+
+
+def _shell_words(line: str) -> list[str] | None:
+    """A line split as a POSIX shell splits it, operators as words of their own. None when the line
+    cannot be split (an unclosed quote)."""
+    try:
+        lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _commands(words: list[str]) -> list[list[str]]:
+    """The commands of a split line: runs of words between `;`, `&&`, `||` and `&`. A pipeline stays
+    one command, so `gh pr diff N | git apply` is read together."""
+    out, current = [], []
+    for word in words:
+        if word in _SEPARATORS:
+            if current:
+                out.append(current)
+            current = []
+        else:
+            current.append(word)
+    if current:
+        out.append(current)
+    return out
+
+
+def _base(word: str) -> str:
+    return word.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+
+
+_CREATE_FLAGS = frozenset({"-c", "-C", "-b", "-B", "--create", "--force-create", "--orphan"})
+
+
+def _command_name(word: str) -> str:
+    """The name of the command a word starts: its base name, after a `NAME=` assignment, a backquote
+    or `$(` that open it (`` OUT=`git ``)."""
+    head, sep, tail = word.partition("=")
+    if sep and _IDENTIFIER_RE.fullmatch(head):
+        word = tail
+    return _base(word.lstrip("`$("))
+
+
+def _command_positions(words: list[str]) -> set[int]:
+    """Where a command's name stands among a command's words: the first word, the word after `|`, `(`,
+    `then` and the like, after `NAME=value` words, and after a command that runs the next one (`sudo`,
+    `env`, `timeout 300`, `xargs -r`) and its options; and any word a backquote or `$(` opens."""
+    positions, expecting, i = set(), True, 0
+    while i < len(words):
+        word = words[i]
+        if word.startswith(("`", "$(")) and len(word) > 2:
+            positions.add(i)
+        if not expecting:
+            expecting = word in _COMMAND_STARTS
+            i += 1
+            continue
+        if word in _COMMAND_STARTS:
+            i += 1
+            continue
+        head, sep, _ = word.partition("=")
+        if sep and _IDENTIFIER_RE.fullmatch(head) and "`" not in word and "$(" not in word:
+            i += 1                                   # an assignment before the command
+            continue
+        name = _command_name(word)
+        positions.add(i)
+        if name in _RUNNERS:
+            options, i = _RUNNERS[name], i + 1
+            while i < len(words) and (words[i].startswith("-") or (name == "env" and "=" in words[i])):
+                i += 2 if words[i] in options else 1
+            if (name in _TAKES_NUMBER and i < len(words) and words[i][:1].isdigit()) or (
+                    name in _TAKES_WORD and i < len(words) and words[i] not in _COMMAND_STARTS):
+                i += 1
+            continue                                 # still expecting the command it runs
+        if name in ("docker", "podman") and i + 1 < len(words) and words[i + 1] == "exec":
+            i += 2
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _DOCKER_EXEC_OPTIONS else 1
+            i += 1                                   # the container
+            continue
+        expecting = False
+        i += 1
+    return positions
+
+
+def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set[int]]:
+    """What brings code in among a command's words, if anything ("git SUBCOMMAND", "gh pr checkout",
+    which needs nothing else to be the pull request's code, "patch", "gh repo clone", "gh api", or a
+    downloader), and the words not to read for what it brings in: the name of a branch that `git
+    switch -c NAME` or `git checkout -b NAME` creates, which names nothing fetched. A name counts only
+    where a command starts (see `_command_positions`), unless `anywhere` (for a script in another
+    language, split roughly), where `patch` is not looked for: it is a word of HTTP and of APIs."""
+    found, skip = None, set()
+    positions = range(len(words)) if anywhere else _command_positions(words)
+    for i in sorted(positions):
+        word = words[i]
+        name = _command_name(word)
+        if name in ("git", "git.exe"):
+            j = i + 1
+            while j < len(words) and words[j].startswith("-"):
+                j += 2 if words[j] in _GIT_VALUE_OPTIONS else 1
+            if j < len(words) and words[j].lower() in GIT_CODE_COMMANDS:
+                sub = words[j].lower()
+                if sub in ("switch", "checkout"):
+                    rest = range(j + 1, len(words))
+                    created = {k + 1 for k in rest if words[k] in _CREATE_FLAGS and k + 1 < len(words)}
+                    if created:
+                        skip |= created
+                        starts = [k for k in rest if k not in skip and not words[k].startswith("-")
+                                  and words[k] not in ("|", "<", ">", "(", ")")]
+                        if not starts:
+                            continue        # a new branch at the current commit brings nothing in
+                return f"git {sub}", skip
+        elif name in ("gh", "gh.exe"):
+            subs, j = [], i + 1
+            while j < len(words) and len(subs) < 2 and words[j] not in ("|", "(", ")", "<", ">"):
+                if words[j].startswith("-"):
+                    j += 2 if words[j] in _GH_VALUE_OPTIONS else 1
+                    continue
+                subs.append(words[j].lower())
+                j += 1
+            if subs[:1] == ["pr"] and subs[1:2] in (["checkout"], ["co"]):
+                return "gh pr checkout", skip
+            if subs == ["repo", "clone"]:
+                found = found or "gh repo clone"
+            if subs[:1] == ["api"]:
+                found = found or "gh api"
+        elif name == "patch" and not anywhere:
+            return "patch", skip
+        elif name in _DOWNLOADERS:
+            found = found or name
+    return found, skip
+
+
+def _remote(words: list[str]) -> tuple[str, str] | None:
+    """`git remote add NAME URL` or `git remote set-url NAME URL`: the remote's name and address."""
+    for i, word in enumerate(words):
+        if _base(word) in ("git", "git.exe") and words[i + 1:i + 3] in (["remote", "add"], ["remote", "set-url"]):
+            rest = [w for w in words[i + 3:] if not w.startswith("-")]
+            if len(rest) >= 2:
+                return rest[0], rest[1]
+    return None
+
+
+def _canonical(value: Any, _seen: set | None = None) -> Any:
+    """A YAML value as JSON can hold it with sorted keys: keys as text, anything else as its text."""
+    _seen = _seen if _seen is not None else set()
+    if isinstance(value, (dict, list)):
+        if id(value) in _seen:
+            return "(alias)"
+        _seen = _seen | {id(value)}
+        if isinstance(value, dict):
+            return {as_text(k): _canonical(v, _seen) for k, v in value.items()}
+        return [_canonical(v, _seen) for v in value]
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    return as_text(value)
+
+
+def digest_of(value: Any) -> str:
+    """A short digest of how a YAML value is written, for a finding's facts."""
+    written = json.dumps(_canonical(value), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(written.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _call_text(script: str, start: int, limit: int | None = None) -> str:
+    """The argument list of a call whose name ends at `start`: from its `(` to the `)` that closes
+    it, and never past `limit` (the next call), so reading every call reads the script once."""
+    limit = len(script) if limit is None else limit
+    begin = script.find("(", start, limit)
+    if begin == -1:
+        return ""
+    depth = 0
+    for i in range(begin, limit):
+        if script[i] == "(":
+            depth += 1
+        elif script[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return script[begin:i + 1]
+    return script[begin:limit]
+
+
+def _definition(script: str, name: str) -> str:
+    """Where a script defines a name (`const NAME = ...`, `let`, `var`, or a plain assignment): the
+    value, to the end of its brackets when it opens one, else to the end of the line."""
+    match = re.search(rf"(?:\b(?:const|let|var)\s+|^\s*){re.escape(name)}\s*=\s*", script, re.M)
+    if not match:
+        return ""
+    rest = script[match.end():match.end() + 4000]
+    if rest[:1] in "{[(":
+        closer = {"{": "}", "[": "]", "(": ")"}[rest[0]]
+        depth = 0
+        for i, ch in enumerate(rest):
+            depth += ch == rest[0]
+            depth -= ch == closer
+            if depth == 0:
+                return rest[:i + 1]
+        return rest
+    return rest.split("\n", 1)[0]
+
+
+def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
+    """Whether a step's scripts bring a pull request's code into the workspace.
+
+    Each line is split as a POSIX shell splits it (comments dropped, continued lines joined), command
+    by command; a pipeline is one command, and a quoted script given to `sh -c`, `bash -c` or `eval`
+    is read again. A line the shell reader cannot split, and the lines of a script in another
+    language (`shell: python`, `node`, PowerShell, an `actions/github-script` script), are also split
+    roughly (quotes and brackets dropped), where `git` counts anywhere.
+
+    "head": a command that brings code in (git with a subcommand in GIT_CODE_COMMANDS, after any
+    global options; `gh repo clone`; `gh api`, curl or wget of an archive, contents or a diff;
+    `patch`) together with something in the same command that names the pull request's code: an
+    expression or env value that names it, a field read from the event file or the GitHub CLI,
+    `gh pr diff`, `refs/pull/...`, the pull request's number, a variable set earlier in the step
+    from any of these, a file an earlier command wrote from them, or a git remote added with the
+    head's address. `gh pr checkout` needs nothing more. "unresolved": such a command with a step's
+    or job's output, or a field an outsider writes, instead. Values passed from other steps
+    (GITHUB_ENV, files) are not followed."""
+    text = step.scripts().replace("\x00", "�")
+    if not text:
+        return PrCode(_BASE)
+    shell = (shell or as_text(step.raw.get("shell") or "")).lower()
+    github_script = (step.action or "").lower().startswith("actions/github-script")
+    language = github_script or any(name in shell for name in ("python", "node", "pwsh", "powershell", "ruby", "perl"))
+    head: set[str] = set()
+    unresolved: set[str] = set()
+    tainted: dict[str, PrCode] = {}     # variables (and git remotes) set from the pull request's code
+    files: dict[str, PrCode] = {}       # files written from it
+    cache: dict = {}
+
+    def collect(found: PrCode, hits: set, open_: set) -> None:
+        if found.state == _HEAD:
+            hits.update(found.reads)
+        elif found.state == _UNRESOLVED:
+            open_.update(found.reads)
+
+    def read(fragment: str) -> PrCode:
+        hits: set = set()
+        open_: set = set()
+        collect(pr_code(fragment, env, numbers=True, runtime_only=True, _cache=cache), hits, open_)
+        marker = PR_CODE_SCRIPT_RE.search(fragment)
+        if marker:
+            hits.add(one_line(marker.group(0), 60))
+        for match in _VARIABLE_RE.finditer(fragment):
+            name = next(g for g in match.groups() if g)
+            exact = match.group(1) is not None or match.group(4) is not None
+            if name in tainted:
+                collect(tainted[name], hits, open_)
+                continue
+            given, level = env.find(name, 0, exact=exact)
+            if given is _NOT_SET:
+                continue
+            key = ("$" + (name if exact else name.lower()), 0)
+            if key not in cache:
+                cache[key] = pr_code(given, env, numbers=True, runtime_only=True, start=level + 1, _cache=cache)
+            collect(cache[key], hits, open_)
+        words = set(_PATH_WORD_RE.findall(fragment))
+        for word in words:
+            if word in files:
+                collect(files[word], hits, open_)
+            elif word.split("/", 1)[0] in tainted and not word.startswith("$"):
+                collect(tainted[word.split("/", 1)[0]], hits, open_)     # a remote, or a variable read as a word
+        if language:
+            for name in set(_IDENTIFIER_RE.findall(fragment)) & tainted.keys():
+                collect(tainted[name], hits, open_)
+        if hits:
+            return PrCode(_HEAD, sorted(hits))
+        return PrCode(_UNRESOLVED, sorted(open_)) if open_ else PrCode(_BASE)
+
+    def note(found: PrCode) -> None:
+        collect(found, head, unresolved)
+
+    queue = [(line, 0) for line in script_lines(text, powershell="pwsh" in shell or "powershell" in shell)]
+    while queue:
+        raw_line, depth = queue.pop(0)
+        line = _strip_comment(raw_line) if not language else raw_line
+        placeholders: list[str] = []
+
+        def hold(expression: str) -> str:
+            placeholders.append(expression)
+            return f"\x00{len(placeholders) - 1}\x00"
+
+        def put_back(fragment: str) -> str:
+            return _PLACEHOLDER_RE.sub(
+                lambda m: placeholders[int(m.group(1))] if int(m.group(1)) < len(placeholders) else m.group(0), fragment)
+
+        words = None if language else _shell_words(_sub_expressions(line, hold))
+        commands: list[tuple[str, str | None, list]] = []
+        if words is not None:
+            for command in _commands(words):
+                tool, skip = _fetching(command)
+                piece = put_back(" ".join(word for k, word in enumerate(command) if k not in skip))
+                commands.append((piece, tool, [put_back(word) for word in command]))
+                if depth < 2:
+                    for k, word in enumerate(command):
+                        if any(c.isspace() for c in word) and ("$(" in word or "`" in word or (k and (
+                                _SCRIPT_OPTION_RE.match(command[k - 1]) or command[k - 1] == "eval"))):
+                            queue.insert(0, (put_back(word), depth + 1))
+        if words is None:
+            # Split roughly: quotes, backquotes, brackets and commas dropped, operators set apart, each
+            # `${{ }}` one word. In a script language `git` counts anywhere (`subprocess.run(['git',
+            # 'fetch', ...])`, `execSync(`git fetch ...`)`); in a shell line that could not be split, only
+            # where a command starts.
+            rough = _sub_expressions(line, lambda expression: " EXPR ")
+            rough = re.sub(r"(&&|\|\||[;&|<>])", r" \1 ", re.sub(r"[\"'`(),\[\]{}+]|\bf(?=[\"'])", " ", rough))
+            found = [(_fetching(command, anywhere=language)[0], command) for command in _commands(rough.split())]
+            tool = next((t for t, _ in found if t), None)
+            # One entry for the line, so what it sets is recorded whether or not it fetches.
+            commands.append((line, tool, next((c for t, c in found if t), rough.split())))
+        for piece, tool, command in commands:
+            if tool == "gh pr checkout":
+                head.add("gh pr checkout")
+            elif tool in _DOWNLOADERS or tool == "gh api":
+                # A download brings code in when it fetches an archive, contents or a diff: written in the
+                # line, or read from the pull request's patch or diff address.
+                found = read(piece)
+                if _FETCHED_RE.search(piece) or any(_FETCHED_RE.search(r) for r in found.reads):
+                    note(found)
+            elif tool:
+                note(read(piece))
+            # What this command sets or writes, for the commands after it.
+            remote = _remote(command)
+            assigned = [m.group(1) for m in _ASSIGN_RE.finditer(piece)] + \
+                       [a or b for a, b in _READ_RE.findall(piece)]
+            written = [name for name in _WRITES_RE.findall(piece) if not name.startswith("/dev/")]
+            if remote or assigned or written:
+                found = read(remote[1] if remote else piece)
+                if found.state != _BASE:
+                    for name in assigned + ([remote[0]] if remote else []):
+                        tainted[name] = found
+                    for name in written:
+                        files[name] = found
+    script = as_text(step.with_.get("script") or "") if github_script else ""
+    matches = list(_SCRIPT_API_RE.finditer(script))
+    for k, match in enumerate(matches):
+        if match.group(1):
+            # Contents or an archive, read from the call's own arguments (written over several lines,
+            # and never past the next call): at the pull request's head, it is its code; without a
+            # ref, the default branch's. An argument that is a name is read where it is defined.
+            limit = matches[k + 1].start() if k + 1 < len(matches) else len(script)
+            call = _call_text(script, match.end(), limit)
+            found = read(call)
+            if found.state == _BASE:
+                for name in list(dict.fromkeys(_IDENTIFIER_RE.findall(call)))[:20]:
+                    defined = _definition(script, name)
+                    if defined:
+                        found = read(defined)
+                        if found.state != _BASE:
+                            break
+            note(found)
+        elif re.search(r"['\"`](apply|am)['\"`]|\bgit\s+(apply|am)\b|\bpatch\s+-p", script):
+            # The pull request's diff or patch, applied in the same script.
+            head.add(one_line(match.group(0), 60))
+    if head:
+        return PrCode(_HEAD, sorted(head))
+    if unresolved:
+        return PrCode(_UNRESOLVED, sorted(unresolved))
+    return PrCode(_BASE)
 
 
 def _balanced(toks: list) -> bool:
@@ -563,6 +1212,18 @@ class Step:
         input as a command with the network limited. A local copy (`./actions/egress`) is any
         repository's own action and is not taken for it."""
         return (self.action or "").lower() == EGRESS_ACTION
+
+    def scripts(self) -> str:
+        """Everything a step runs as a command line: `agent_text()` (the run script, a github-script
+        script and the command OBAAF's egress action runs) and a `docker://` step's `entrypoint` and
+        `args`, which GitHub hands to the container as its command."""
+        parts = [self.agent_text()]
+        if self.uses and self.uses.strip().lower().startswith("docker://"):
+            for key in ("entrypoint", "args"):
+                given = self.with_.get(key)
+                if isinstance(given, str):
+                    parts.append(given)
+        return "\n".join(p for p in parts if p)
 
     def agent_text(self) -> str:
         """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,
