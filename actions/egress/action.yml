@@ -75,9 +75,9 @@ outputs:
     value: ${{ steps.run.outputs.removed }}
   refused:
     description: >-
-      Set when the action refused to run anything: "credential" when a
-      checkout in the workspace kept its token, "input" for any other input
-      it refused.
+      "credential" when the action refused to run anything because a checkout
+      in the workspace kept its token. (Inputs refused by the first step, such
+      as allow, env and model-keys, leave it empty; that step fails first.)
     value: ${{ steps.run.outputs.refused }}
   exit-code:
     description: >-
