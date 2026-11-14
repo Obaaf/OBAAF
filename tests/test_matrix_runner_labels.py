@@ -118,6 +118,15 @@ class MatrixDefaultTest(unittest.TestCase):
                                                   "    strategy:\n      matrix:\n        o\u017f: [self-hosted]\n"),
             "a dotless i": ("${{ matrix.ci || 'ubuntu-latest' }}",
                             "    strategy:\n      matrix:\n        c\u0131: [self-hosted]\n"),
+            # Found by the second review: a merge key is merged by this reader and is a key of its own to a
+            # YAML 1.2 reader.
+            "a merge key in an include entry": (
+                "${{ matrix.os || 'my-runner' }}",
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        py: ['3.12']\n"
+                "        include:\n          - &w {os: windows-latest}\n          - {<<: *w, py: '3.11'}\n"),
+            "a merge key in the matrix": (
+                "${{ matrix.os || 'ubuntu-latest' }}",
+                "    strategy:\n      matrix: {<<: [{os: [windows-latest]}], py: ['3.12']}\n"),
             # A value YAML 1.2 reads as the number 0, which is false, so GitHub would use the default.
             "a value that is zero to YAML 1.2": ("${{ matrix.os || 'my-runner' }}",
                                                  "    strategy:\n      matrix:\n        os: [ubuntu-latest, 0o0]\n"),
@@ -143,6 +152,14 @@ class MatrixDefaultTest(unittest.TestCase):
         text = agent_workflow("      - run: python -m agents.fix", runs_on="${{ matrix.True || 'ubuntu-24.04-firewall' }}",
                               job_extra=strategy)
         self.assertNotEqual(verdict(egress(run_check(text, policy=FIREWALL))), "verified")
+        merged = "    strategy:\n      matrix: {<<: [{os: [ubuntu-24.04-firewall]}], py: ['3.12']}"
+        text = agent_workflow("      - run: python -m agents.fix", runs_on="${{ matrix.os }}", job_extra=merged)
+        self.assertNotEqual(verdict(egress(run_check(text, policy=FIREWALL))), "verified")
+        # A value YAML 1.2 reads as zero leaves the firewall "cannot tell", where one leg off it was "not met".
+        zero = "    strategy:\n      matrix:\n        os: [ubuntu-24.04-firewall, 0o0]"
+        text = agent_workflow("      - run: python -m agents.fix",
+                              runs_on="${{ matrix.os || 'ubuntu-24.04-firewall' }}", job_extra=zero)
+        self.assertEqual(verdict(egress(run_check(text, policy=FIREWALL))), "cannot tell")
 
 
 if __name__ == "__main__":

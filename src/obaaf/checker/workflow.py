@@ -574,7 +574,8 @@ class Job:
         fewer. The values of `x` computed when the job runs, an `include` or an `include` entry computed
         when the job runs, a key written in another case (GitHub compares property names without
         regard to case), a key that is not plain ASCII text with no expression, a value YAML 1.2 could
-        read as other than text, or any other expression leaves the labels unresolved."""
+        read as other than text, a YAML merge key (`<<`) anywhere in the file, or any other expression
+        leaves the labels unresolved."""
         labels = self.runs_on
         expr = [label for label in labels if "${{" in label]
         if not expr:
@@ -599,6 +600,8 @@ class Job:
                     or "||" not in body or not body.rstrip().endswith("'")):
                 return None
             default = rest[2][1]
+        if self.workflow.has_merge_key:
+            return None         # a matrix read two ways (found by the second review of 2d.7)
         strategy = self.raw.get("strategy")
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
         if not isinstance(matrix, dict):
@@ -782,6 +785,21 @@ class Workflow:
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list = field(default_factory=list)  # IdleDeclaration: declarations in the file that do nothing
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
+
+    @property
+    def has_merge_key(self) -> bool:
+        """Whether the file has a YAML merge key (`<<`) anywhere: this reader (YAML 1.1) merges it away,
+        and a YAML 1.2 reader takes it for a key of that name, so what a mapping holds is read two ways.
+        Read once, from the composed nodes; a file that cannot be composed counts as having one."""
+        cached = self.__dict__.get("_has_merge_key")
+        if cached is None:
+            from obaaf.checker.egress import _has_merge_key
+            try:
+                cached = _has_merge_key(self.text)
+            except Exception:       # a file the reader cannot compose: say yes, so nothing is resolved from it
+                cached = True
+            self.__dict__["_has_merge_key"] = cached
+        return cached
 
     @property
     def triggers(self) -> dict[str, Any]:
