@@ -6,10 +6,10 @@
   <meta name="description" content="OBAAF checks what an agent or release job can reach in a GitHub Actions workflow, and reports the evidence. Release 0.3.0 reads files. It does not edit them, set a merge gate, or certify a repository.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>OBAAF: what an agent or release job can reach</title>
-  <link rel="canonical" href="https://obaaf.github.io/OBAAF/">
+  <link rel="canonical" href="https://www.obaaf.com/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="OBAAF">
-  <meta property="og:url" content="https://obaaf.github.io/OBAAF/">
+  <meta property="og:url" content="https://www.obaaf.com/">
   <meta property="og:title" content="OBAAF: what an agent or release job can reach">
   <meta property="og:description" content="An open framework and command-line toolchain. Release 0.3.0 checks workflow files and reports findings. It does not certify a repository.">
   <meta name="twitter:card" content="summary">
@@ -37,7 +37,7 @@
       <p class="eyebrow">Open Build and Agent Assurance Framework</p>
       <h1 id="hero-title">What an agent job can reach.</h1>
       <p class="lede">OBAAF is an open framework and command-line toolchain. For a job that runs an AI agent or publishes a release, release 0.3.0 reads the workflow file and reports what that job can reach, with the evidence in the finding.</p>
-      <p>It is not the only tool that asks this. In the measured comparison of 2026-11-13, ci-agent-audit and OBAAF both reported token-permission and egress findings on two agent fixtures, and ci-agent-audit reported a prompt input OBAAF did not. For other mistakes in workflow files, the project's position is zizmor first, CodeQL where code scanning is on, actionlint for plain mistakes, and poutine for scripts piped into a shell. OBAAF does not replace them. The record is in the <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md">landscape</a>.</p>
+      <p>It is not the only tool that asks this. In the measured comparison of 2026-11-13, the OBAAF run was 0.4.0.dev0 at commit c04d811. ci-agent-audit and that run both reported token-permission and egress findings on two agent fixtures, and ci-agent-audit reported a prompt input that run did not. The same two fixture files, checked with obaaf 0.3.0, each report OBAAF-GHA-003 and OBAAF-GHA-020. For other mistakes in workflow files, the project's position is zizmor first, CodeQL where code scanning is on, actionlint for plain mistakes, and poutine for scripts piped into a shell. OBAAF does not replace them. The record is in the <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md">landscape</a>.</p>
       <div class="actions">
         <a class="button" href="#try">See a real check</a>
         <a href="https://github.com/Obaaf/OBAAF">View on GitHub</a>
@@ -54,8 +54,8 @@ obaaf check pinned.yml --fail-on low</code></pre>
     </div>
   </section>
 
-  <section class="section wrap" aria-labelledby="session-title">
-    <h2 id="session-title">The finding, and the fix.</h2>
+  <section class="section wrap" aria-labelledby="finding-title">
+    <h2 id="finding-title">The finding, and the fix.</h2>
     <p class="large">One line changed. A movable tag became a 40-character commit SHA. Pinning selects a revision. It does not prove that revision is safe.</p>
     <div class="pair">
       <div>
@@ -64,7 +64,7 @@ obaaf check pinned.yml --fail-on low</code></pre>
      9  LOW    OBAAF-GHA-008  Action or container not pinned to a full digest  [job build]
         Action 'actions/checkout@v6.0.0' is pinned to 'v6.0.0', not a full commit SHA.
         Requirement: G2.1, R6
-        Fix: Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot propose updates to the pin.
+        Fix: Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep the version in a comment (for example `uses: actions/checkout@&lt;sha&gt; # v7.0.1`). Let Dependabot propose updates to the pin.
 
 1 workflow file(s) checked.
 Authority findings: 0 high, 0 medium, 0 low.
@@ -75,7 +75,7 @@ Hygiene findings: 0 high, 0 medium, 1 low.</code></pre>
         <pre><code>1 workflow file(s) checked.
 Authority findings: 0 high, 0 medium, 0 low.
 Hygiene findings: 0 high, 0 medium, 0 low.</code></pre>
-        <p class="caption">This is the whole of what obaaf 0.3.0 printed for the pinned file. A medium threshold would not have failed the low finding. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. The SHA used here is the one recorded for the v6.0.0 pin in the website truth table. This session did not resolve the tag.</p>
+        <p class="caption">This is the whole of what obaaf 0.3.0 printed for the pinned file. A medium threshold would not have failed the low finding. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. The SHA is the one the website truth table records for the v6.0.0 pin. The tag was not resolved again for this page.</p>
       </div>
     </div>
     <details>
@@ -104,57 +104,55 @@ jobs:
         with:
           persist-credentials: false</code></pre>
       </div>
-      <p class="caption">Written in this session to the shape recorded for that example: <code>on: push</code>, top-level <code>permissions: contents: read</code>, <code>persist-credentials: false</code>, and one action. They are not a byte copy of an earlier session's unpublished temporary files. The finding fell on line 9 in both this run and that record.</p>
+      <p class="caption">Each file is one job: <code>on: push</code>, top-level <code>permissions: contents: read</code>, <code>persist-credentials: false</code>, and one action. The finding fell on line 9.</p>
     </details>
-    <p>The same two files, checked with obaaf 0.4.0.dev0 at commit <code>dbef2b7</code>, also exited 1 and then 0, with the same finding text. That report adds lines the 0.3.0 report does not have, including "Accepted risk: none" and a count of other findings. Those lines are development only. They are not part of release 0.3.0.</p>
+    <p>The same two files, checked with obaaf 0.4.0.dev0, also exited 1 and then 0, with the same finding text. That report adds lines the 0.3.0 report does not have, including "Accepted risk: none" and a count of other findings. Those lines are development only. They are not part of release 0.3.0.</p>
     <div class="boundary">
-      <p>An older hosted demonstration, using OBAAF 0.1, rated this class of finding medium and, after the status was required, GitHub reported the pull request blocked. Those runs were not fetched again. A local exit does not demonstrate branch protection. <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/checker-demonstration.md">The demonstration record</a> names the runs and the exception in them, which expires on 2027-01-09.</p>
+      <p>An older hosted demonstration, using OBAAF 0.1, rated this class of finding medium and, after the status was required, GitHub reported the pull request blocked. A local exit does not demonstrate branch protection. <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/checker-demonstration.md">The demonstration record</a> names the runs and the exception in them, which expires on 2027-01-09.</p>
     </div>
   </section>
 
   <section class="section wrap" id="ideas" aria-labelledby="ideas-title">
     <h2 id="ideas-title">Three ideas.</h2>
+    <p>Isolate the build. Record what goes into a release. Give agents only the access each task needs.</p>
     <div class="ideas">
       <article class="idea">
-        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-reach-title idea-reach-desc">
-          <title id="idea-reach-title">What a job can reach</title>
-          <desc id="idea-reach-desc">A job box with three lines leaving it, toward a token, a secret, and the network. The network line stops short.</desc>
-          <rect x="16" y="48" width="72" height="52" fill="none" stroke="currentColor" stroke-width="2"/>
-          <text x="52" y="78" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Job</text>
-          <path d="M88 62 H150" fill="none" stroke="currentColor" stroke-width="2"/>
-          <path d="M88 74 H150" fill="none" stroke="currentColor" stroke-width="2"/>
-          <path d="M88 98 H132" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 4"/>
-          <text x="158" y="66" fill="currentColor" font-family="Consolas, monospace" font-size="12">token</text>
-          <text x="158" y="78" fill="currentColor" font-family="Consolas, monospace" font-size="12">secret</text>
-          <text x="140" y="102" fill="currentColor" font-family="Consolas, monospace" font-size="12">not watched</text>
+        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-isolate-h" aria-describedby="idea-isolate-desc">
+          <desc id="idea-isolate-desc">A build box on its own. A cache sits apart, and the line between them is broken.</desc>
+          <rect x="18" y="40" width="88" height="64" fill="none" stroke="currentColor" stroke-width="2"/>
+          <text x="62" y="77" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Build</text>
+          <path d="M106 72 H132" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M148 72 H174" fill="none" stroke="currentColor" stroke-width="2"/>
+          <rect x="174" y="48" width="84" height="48" fill="none" stroke="currentColor" stroke-width="2"/>
+          <text x="216" y="77" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Cache</text>
         </svg>
-        <h3>What a job can reach</h3>
-        <p>A job can hold a token, a secret, and a way off the machine. Release 0.3.0 reads those facts in the workflow file. It does not watch the job run.</p>
+        <h3 id="idea-isolate-h">Isolate the build</h3>
+        <p>The source tree of release 0.3.0 has the release-lane workflow templates. obaaf templates install copies them when it is run from a clone of that release. The wheel does not carry those files. It reports a release job that an untrusted trigger can start (OBAAF-GHA-015) and a release job that can read a shared cache (OBAAF-GHA-006). The check reads the workflow file. It does not run the build, and it does not place the job on its own machine.</p>
       </article>
       <article class="idea">
-        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-control-title idea-control-desc">
-          <title id="idea-control-title">Whether a control is real</title>
-          <desc id="idea-control-desc">A document marked named, separated by a gap from a second mark, checked. The two do not touch.</desc>
-          <rect x="20" y="28" width="100" height="96" fill="none" stroke="currentColor" stroke-width="2"/>
-          <text x="70" y="78" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Named</text>
-          <path d="M128 76 H158" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 4"/>
-          <rect x="166" y="46" width="92" height="60" fill="none" stroke="currentColor" stroke-width="2"/>
-          <text x="212" y="80" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Checked</text>
+        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-record-h" aria-describedby="idea-record-desc">
+          <desc id="idea-record-desc">A record card listing source, tools, and artifact. It does not say signed.</desc>
+          <rect x="36" y="18" width="208" height="114" fill="none" stroke="currentColor" stroke-width="2"/>
+          <text x="140" y="48" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Record</text>
+          <text x="52" y="78" fill="currentColor" font-family="Consolas, monospace" font-size="14">source</text>
+          <text x="52" y="98" fill="currentColor" font-family="Consolas, monospace" font-size="14">tools</text>
+          <text x="52" y="118" fill="currentColor" font-family="Consolas, monospace" font-size="14">artifact</text>
         </svg>
-        <h3>Whether a control is real</h3>
-        <p>A name in the file is not a check that the control holds. The checker in release 0.3.0 says it reads workflow files and repository settings that live in files, naming CODEOWNERS and agent instruction files, and that it runs locally and sends nothing over the network. This session did not trace that. There is no <code>obaaf audit</code> command in that release, so branch protection and rulesets are outside it, and it does not watch the job run.</p>
+        <h3 id="idea-record-h">Record what goes into a release</h3>
+        <p>Release 0.3.0 has <code>obaaf attest</code>, including a build record, and <code>obaaf manifest</code>. <code>obaaf attest</code> writes an in-toto statement. It does not sign it, and it signs no agent run. A separate configured job can sign a statement through GitHub's Sigstore. The command does not establish a model identity.</p>
       </article>
       <article class="idea">
-        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-finding-title idea-finding-desc">
-          <title id="idea-finding-title">What a finding can and cannot say</title>
-          <desc id="idea-finding-desc">A report card. Beside it, the word certificate is crossed out.</desc>
-          <rect x="18" y="28" width="120" height="96" fill="none" stroke="currentColor" stroke-width="2"/>
-          <text x="78" y="78" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Report</text>
-          <text x="160" y="78" fill="currentColor" font-family="Georgia, serif" font-size="16">Certificate</text>
-          <path d="M156 70 L262 86" fill="none" stroke="currentColor" stroke-width="2"/>
+        <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-access-h" aria-describedby="idea-access-desc">
+          <desc id="idea-access-desc">An agent job with a line to one secret. A second secret is crossed out.</desc>
+          <rect x="16" y="46" width="84" height="56" fill="none" stroke="currentColor" stroke-width="2"/>
+          <text x="58" y="78" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Agent</text>
+          <path d="M100 66 H148" fill="none" stroke="currentColor" stroke-width="2"/>
+          <text x="156" y="70" fill="currentColor" font-family="Consolas, monospace" font-size="14">one secret</text>
+          <text x="156" y="102" fill="currentColor" font-family="Consolas, monospace" font-size="14">other secret</text>
+          <path d="M152 96 L248 108" fill="none" stroke="currentColor" stroke-width="2"/>
         </svg>
-        <h3>What a finding can and cannot say</h3>
-        <p>The finding above is one low report about one action in one file. A passing check is not a certification. The checker does not scan application source for vulnerabilities.</p>
+        <h3 id="idea-access-h">Give agents only the access each task needs</h3>
+        <p>Release 0.3.0 treats a job as an agent job from the action or command it runs, or from a lane declaration. It reports write permission (OBAAF-GHA-003), a request for an OIDC token (OBAAF-GHA-004), and a secret the job can read (OBAAF-GHA-005). A secret listed under <code>protected_secrets</code> and used outside the named environment is OBAAF-GHA-024. The check does not take the access away. The fix text for OBAAF-GHA-005 says to keep the model credential in an inference proxy. OBAAF ships none. An action that wraps the agent's command and can restrict it is development only, and no released commit of it is listed.</p>
       </article>
     </div>
   </section>
@@ -163,54 +161,56 @@ jobs:
     <div class="section-grid">
       <div>
         <p class="section-label">How the three fit</p>
-        <h2 id="rel-title">Check, audit, and enforcement are not the same command.</h2>
-        <p>The dashes move along the line that joins the three, and only there, so they stay visibly separate. If you asked for less motion, the line is solid and still. The labels are the explanation. This page has not been checked in a browser yet. That is a later slice.</p>
+        <h2 id="rel-title">Check, audit, and enforcement are not the same thing.</h2>
+        <p>Release 0.3.0 is the check. Audit, and the one control that enforces a limit on a command, are development only.</p>
       </div>
-      <figure class="rel-figure">
-        <svg viewBox="0 0 640 200" role="img" aria-labelledby="rel-svg-title rel-svg-desc">
-          <title id="rel-svg-title">Check, then audit, then enforcement</title>
-          <desc id="rel-svg-desc">Three separate marks. A dashed line travels from check to audit to enforcement when motion is allowed. Release 0.3.0 is only the first.</desc>
-          <path class="flow-line" d="M70 78 H570"/>
-          <circle cx="70" cy="78" r="8" fill="currentColor"/>
-          <circle cx="320" cy="78" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
-          <circle cx="570" cy="78" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
-          <text x="70" y="116" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="18">Check</text>
-          <text x="70" y="140" text-anchor="middle" fill="currentColor" font-family="Consolas, monospace" font-size="11">in 0.3.0</text>
-          <text x="320" y="116" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="18">Audit</text>
-          <text x="320" y="140" text-anchor="middle" fill="currentColor" font-family="Consolas, monospace" font-size="11">development only</text>
-          <text x="570" y="116" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="18">Enforcement</text>
-          <text x="570" y="140" text-anchor="middle" fill="currentColor" font-family="Consolas, monospace" font-size="11">a person, or a caller</text>
-        </svg>
-      </figure>
+      <div class="rel" role="group" aria-label="Check, audit, and enforcement">
+        <article>
+          <h3>Check</h3>
+          <p>In release 0.3.0. It reads files and reports.</p>
+        </article>
+        <article>
+          <h3>Audit</h3>
+          <p>Development only. Not a command in release 0.3.0.</p>
+        </article>
+        <article>
+          <h3>Enforcement</h3>
+          <p>The egress action, development only. It is not in release 0.3.0.</p>
+        </article>
+      </div>
     </div>
     <div class="cmds">
       <article class="cmd">
         <h3><code>obaaf check</code></h3>
-        <p>In release 0.3.0 it reads GitHub Actions workflows, Jenkinsfiles as an advisory auditor, CODEOWNERS, and recognized agent instruction files. <code>obaaf check --help</code> in that release lists text, JSON, and SARIF. It does not edit the files and it does not configure a merge gate. The checks on this page were given local files. For Jenkins, exit 0 is not a conformance decision: controller settings are not in a Jenkinsfile, and what the checker cannot see is unknown.</p>
+        <p>In release 0.3.0 it reads GitHub Actions workflows, Jenkinsfiles as an advisory auditor, CODEOWNERS, and recognized agent instruction files. <code>obaaf check --help</code> in that release lists text, JSON, and SARIF. It does not edit the files and it does not configure a merge gate. For Jenkins, exit 0 is not a conformance decision: controller settings are not in a Jenkinsfile, and what the checker cannot see is unknown.</p>
       </article>
       <article class="cmd">
         <h3><code>obaaf audit</code></h3>
-        <p>Development only, not in release 0.3.0. It reads repository settings it can see and compares them with the workflows. What it cannot read is "cannot tell", and cannot tell is not a pass. This page is not a live audit.</p>
+        <p>Development only, not in release 0.3.0. It reads repository settings it can see and compares them with the workflows. What it cannot read is "cannot tell", and cannot tell is not a pass.</p>
       </article>
+    </div>
+    <h2 id="records-title" class="records-title">Records, and a caller's exit, are not enforcement.</h2>
+    <div class="cmds">
       <article class="cmd">
         <h3><code>obaaf attest</code></h3>
-        <p>Writes an in-toto statement. A separate configured job signs it through GitHub's Sigstore. The command does not sign every agent run, and it does not by itself establish a model identity. No hosted signing was run for this page.</p>
+        <p>Writes an in-toto statement. It does not sign that statement, and it signs no agent run. A separate configured job can sign a statement through GitHub's Sigstore. The command does not by itself establish a model identity.</p>
       </article>
       <article class="cmd">
         <h3><code>obaaf verify</code></h3>
         <p>Exits so a caller can refuse a release or a proposal. The command does not upload, and it does not block some other upload path. "No provenance, no upload" is true only when the upload step is written to stop on that failure.</p>
       </article>
     </div>
-    <p class="caption">The install and the two checks above were run in this session, on obaaf 0.3.0 and again on 0.4.0.dev0. <code>obaaf check --help</code> was read on 0.3.0. Attest, verify, and audit were not run here. Audit is not a command in 0.3.0's help. The attest and verify sentences follow the website truth table, including its record that a local agent-run statement had no signatures field and that verify's exit does not itself upload. Direct dependencies of the package are PyYAML and jsonschema. Cryptography is installed with the keys extra. Transitive packages are additional, and installation downloads them.</p>
+    <p class="caption">Direct dependencies of the package are PyYAML and jsonschema. Cryptography is installed with the keys extra. Transitive packages are additional, and installation downloads them.</p>
   </section>
 
   <section class="section wrap" id="scope" aria-labelledby="scope-title">
     <h2 id="scope-title">What this release does not do.</h2>
     <div class="boundary">
-      <p>OBAAF ships no inference proxy. An optional egress action in the development checkout can restrict the command it wraps, where someone configures it. A name under an allowed name can still be queried. With a real model key, the provider can still be asked to fetch a URL or reach a remote server. The test of that path used made-up keys, which the providers refused. That action is not in release 0.3.0.</p>
-      <p>On the development checker, OBAAF-GHA-020 can be cleared when the job runs on <code>ubuntu-24.04-firewall</code> and <code>.github/egress-firewall.yaml</code> sets <code>mode: enforce</code>, with a token that can read the file. OBAAF's own action stays "cannot tell" until a released commit of it is listed, and none is listed. A model key placed behind AWF's API proxy does not clear OBAAF-GHA-005. That proxy is not OBAAF's inference proxy, and OBAAF ships none. OBAAF-GHA-005 still cannot be cleared. None of this clearing behaviour is in release 0.3.0.</p>
-      <p>An acceptance with an owner, a reason, and an expiry date is development only. An acceptance is a recorded decision, not proof that a risk was removed.</p>
-      <p>There is one documented adopter, and it is a project of one of the authors. This page does not say that pilot teams are using it, and it does not say how long a person takes to read a result.</p>
+      <p>OBAAF ships no inference proxy. With a real model key, the provider can still be asked to fetch a URL or reach a remote server. An optional egress action in this checkout can restrict the command it wraps, where someone configures it. A name under an allowed name can still be queried. That action is not in release 0.3.0, and no released commit of it is listed.</p>
+      <p>Release 0.3.0 does not report OBAAF-GHA-020 for an agent job that has a <code>step-security/harden-runner</code> step with <code>egress-policy: block</code> and no <code>if</code>. On 2026-11-14, obaaf 0.3.0 checked a job whose first step was <code>step-security/harden-runner@v2.12.0</code> with that setting: the report had no OBAAF-GHA-020. Two OBAAF-GHA-008 findings remained, because the actions were not pinned to a commit. The same step behind <code>if: github.ref == 'refs/heads/main'</code> still produced OBAAF-GHA-020. That release does not look at the action's version, at <code>disable-sudo-and-containers</code>, or at whether the step is first. The checker in this checkout still reports OBAAF-GHA-020 on that same v2.12.0 file. The control is not met, because sudo and containers are kept. A further file, whose first step was step-security/harden-runner pinned to fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 (the commit this checkout lists as v2.16.0), with egress-policy: block and disable-sudo-and-containers: true, and whose agent action was also pinned, made obaaf 0.3.0 print no findings and exit 0. This checkout still reports OBAAF-GHA-020 on that file. It says it cannot tell, because whether the repository is covered by a Harden-Runner tier is not in the workflow. Cannot tell is not a pass. A step of that name is not, in this checkout, enough to drop the finding.</p>
+      <p>On this checkout, OBAAF-GHA-020 can be cleared when the job runs on <code>ubuntu-24.04-firewall</code> and <code>.github/egress-firewall.yaml</code> sets <code>mode: enforce</code>, with a token that can read the file. That clearing is not in release 0.3.0. A model key placed behind AWF's API proxy does not clear OBAAF-GHA-005. That proxy is not an inference proxy shipped by OBAAF. OBAAF-GHA-005 still cannot be cleared.</p>
+      <p>Release 0.3.0 already ignores a finding when an ignore entry has a reason and an <code>until</code> date that has not passed. Requiring an owner, and refusing a reason the checker judges too short, are not in that release. An acceptance is a recorded decision, not proof that a risk was removed.</p>
+      <p>There is one documented adopter, and it is a project of one of the authors. This page does not say that several teams are using it, and it does not say how long a person takes to read a result.</p>
     </div>
   </section>
 
@@ -223,7 +223,7 @@ jobs:
       </div>
       <div>
         <p>Thirty-four questions, answered yes, no, unknown, or, where the item allows it, not applicable. The tier names are Accounted, Controlled, Verified, and Assured. They describe the rubric and the supplied answers, not controls OBAAF has verified. Game studios are the worked example.</p>
-        <p class="caption">The questionnaire this site builds is from the development checkout, 0.4.0.dev0, not from release 0.3.0. Its note says it is a development version and not a release. It does not say "pilot teams". The form in release 0.3.0 does, and this page does not adopt that sentence. The generated form still says "Thirty-four yes-or-no questions" and "A tier describes controls in place", and its script can say "Would have prevented". The truth table cuts or narrows those. Changing the form is not this slice. Reassessing after 90 days is a suggestion in the adoption guide, not a result the tool measured.</p>
+        <p class="caption">The questionnaire linked here still says "Thirty-four yes-or-no questions", says a tier describes controls in place, and can say "Would have prevented". Those are not claims the evidence supports. <a href="https://github.com/Obaaf/OBAAF/issues/152">Issue 152</a> tracks the form. Reassessing after 90 days is a suggestion in the adoption guide, not a result the tool measured.</p>
       </div>
     </div>
   </section>
@@ -233,10 +233,10 @@ jobs:
     <div class="cards">
       <a class="paper" href="https://doi.org/10.5281/zenodo.23622566"><span class="kicker">Paper 1</span><strong>Untrusted Text, Trusted Tokens</strong><p class="caption">The manuscript that states R1 to R8. Not presented here as peer-reviewed or as an adopted standard.</p></a>
       <a class="paper" href="https://doi.org/10.5281/zenodo.23622802"><span class="kicker">Paper 2</span><strong>Securing the Game Build</strong><p class="caption">A profile mapping SSDF and SLSA onto game-studio builds. A crosswalk is not a certification.</p></a>
-      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md"><span class="kicker">Comparison</span><h3>Where OBAAF stands</h3><p class="caption">The landscape, including measured runs dated 2026-11-13. The comparison page itself is not built yet.</p></a>
-      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/site-truth-table.md"><span class="kicker">Evidence</span><h3>Claims and their sources</h3><p class="caption">The table this page was written against, plus the runs named above.</p></a>
+      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md"><span class="kicker">Comparison</span><h3>Where OBAAF stands</h3><p class="caption">The landscape, including the measured runs dated 2026-11-13. The OBAAF run in that comparison was 0.4.0.dev0 at c04d811.</p></a>
+      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/site-truth-table.md"><span class="kicker">Evidence</span><h3>Claims and their sources</h3><p class="caption">The table this page was written against.</p></a>
     </div>
-    <p class="caption">The catalogue maps documented cases to controls that might matter. A mapping is not a test that a control would have prevented the case. Quickstart, rule catalogue, comparison, case study, and papers as their own pages are a later slice.</p>
+    <p class="caption">The catalogue maps documented cases to controls that might matter. A mapping is not a test that a control would have prevented the case.</p>
   </section>
 
   <section class="section wrap" id="involved" aria-labelledby="involved-title">
@@ -247,13 +247,13 @@ jobs:
       <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/CONTRIBUTING.md"><span class="kicker">Contribute</span><h3>Contributing guide</h3><p class="caption">A control, a check, or a documentation change.</p></a>
       <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/SECURITY.md"><span class="kicker">Disclosure</span><h3>Security policy</h3><p class="caption">Vulnerabilities go here, not to a public issue.</p></a>
     </div>
-    <p class="caption">A contact link is <a href="mailto:hello@obaaf.com">hello@obaaf.com</a>. Delivery of that mailbox was not tested. The development package also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/LICENSING.md">Licensing</a>.</p>
+    <p class="caption">Contact: <a href="mailto:hello@obaaf.com">hello@obaaf.com</a>. The development package also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/LICENSING.md">Licensing</a>.</p>
   </section>
 </main>
 <footer class="wrap">
   <div>
     <strong>OBAAF</strong>
-    <p>Sean led the research. Ofonna handled implementation, testing, and GitHub integration, with Sean contributing across the project.</p>
+    <p>Osita Sean Keluo-Udeke led the research. Ofonna Nweze handled implementation, testing, and GitHub integration, with Osita Sean Keluo-Udeke contributing across the project.</p>
   </div>
   <div>
     <p>Release 0.3.0 on PyPI. This site is built from 0.4.0.dev0.</p>
