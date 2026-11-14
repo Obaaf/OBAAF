@@ -664,21 +664,7 @@ class Job:
         """The text of the job's environment name as written in the file, and its quoting style
         (None for a plain value), read from the composed YAML; None where it cannot be found (a
         merge key, a job reached another way)."""
-        root = self.workflow.composed()
-        def get(node, key):
-            found = None
-            if isinstance(node, yamlutil.yaml.MappingNode):
-                for k, v in node.value:
-                    if isinstance(k, yamlutil.yaml.ScalarNode) and k.value == key:
-                        found = v
-            return found
-        job = get(get(root, "jobs"), self.id)
-        env = get(job, "environment")
-        if isinstance(env, yamlutil.yaml.MappingNode):
-            env = get(env, "name")
-        if isinstance(env, yamlutil.yaml.ScalarNode):
-            return env.value, env.style
-        return None
+        return self.workflow.environment_sources().get(self.id)
 
     @property
     def environment(self) -> str | None:
@@ -980,6 +966,35 @@ class Workflow:
             except Exception:       # anything the reader refuses: the source is simply not known
                 self.__dict__["_composed"] = None
         return self.__dict__["_composed"]
+
+    def environment_sources(self) -> dict:
+        """Job id (as written) -> (text, style) of its environment name, for every job whose name is
+        a plain mapping entry in the composed file. Built once, so asking for every job costs one
+        walk of the file."""
+        if "_environment_sources" in self.__dict__:
+            return self.__dict__["_environment_sources"]
+        yaml = yamlutil.yaml
+
+        def get(node, key):
+            found = None
+            if isinstance(node, yaml.MappingNode):
+                for k, v in node.value:
+                    if isinstance(k, yaml.ScalarNode) and k.value == key:
+                        found = v
+            return found
+
+        out: dict = {}
+        jobs = get(self.composed(), "jobs")
+        for key, job in (jobs.value if isinstance(jobs, yaml.MappingNode) else []):
+            if not isinstance(key, yaml.ScalarNode):
+                continue
+            env = get(job, "environment")
+            if isinstance(env, yaml.MappingNode):
+                env = get(env, "name")
+            if isinstance(env, yaml.ScalarNode):
+                out[key.value] = (env.value, env.style)
+        self.__dict__["_environment_sources"] = out
+        return out
 
     @property
     def callable(self) -> bool:

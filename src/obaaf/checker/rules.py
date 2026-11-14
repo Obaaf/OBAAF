@@ -323,7 +323,8 @@ class WorkflowRules:
                          "checker cannot tell GitHub reads as {need}: it is a number or true or false, whose text "
                          "YAML readers do not agree on, or it differs from that name only in the case of letters "
                          "outside ASCII.", job, severity="medium", kind="environment-unsure",
-                         declared=Fact(value_identity(declared), shown_value(declared)), **values)
+                         declared=Fact(value_identity(source if source is not None else declared),
+                                       shown_value(source if source is not None else declared)), **values)
             elif state == "unreadable":
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} with an environment written as {declared}, "
@@ -332,8 +333,10 @@ class WorkflowRules:
             elif state in ("literal", "scalar"):
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} in environment '{declared}', not {need}.",
-                         job, kind="other-environment",
-                         declared=source if source is not None else shown_value(declared).strip("'"), **values)
+                         job, kind="other-environment", declared=(
+                             declared if state == "literal" else source if source is not None
+                             else as_text(declared).lower() if isinstance(declared, bool) else as_text(declared)),
+                         **values)
             else:
                 self.add("OBAAF-GHA-024", job.line,
                          "Job '{job}' uses protected secret {secret}{via} without declaring {need}, so it "

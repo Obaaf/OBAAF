@@ -189,6 +189,21 @@ class ProtectedSecretsTest(unittest.TestCase):
         self.assertEqual(self.run_case({"PYPI_TOKEN": "0o10"}, "    environment: '0o10'\n"), [])
         self.assertIn("environment 'true'", self.run_case({"PYPI_TOKEN": "x1"}, "    environment: true\n")[0].message)
 
+    def test_two_long_names_are_two_findings(self):
+        # Found by the third review: the fact was the shortened display text for a while.
+        long_a, long_b = "staging-" + "x" * 70 + "-a", "staging-" + "x" * 70 + "-b"
+        facts = [self.run_case({"PYPI_TOKEN": "release"}, f"    environment: {name}\n")[0].facts["declared"]
+                 for name in (long_a, long_b, "\"'quoted'\"", "quoted")]
+        self.assertEqual(facts, [long_a, long_b, "'quoted'", "quoted"])
+
+    def test_many_jobs_are_read_once(self):
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    environment: e{n}\n    steps:\n"
+                       f"      - run: x\n        env:\n          T: ${{{{ secrets.PYPI_TOKEN }}}}\n" for n in range(300))
+        config = checker.Config.from_data({"protected_secrets": {"PYPI_TOKEN": "release"}}, "test")
+        with TempDir() as tmp:
+            result = check(tmp, "on: push\npermissions: {}\njobs:\n" + jobs, config=config)
+        self.assertEqual(len(of(result, "OBAAF-GHA-024")), 300)
+
     def test_a_blank_or_missing_name_is_no_environment(self):
         for job in ("    environment: ''\n", "    environment: ' '\n", "    environment: {url: x}\n",
                     "    environment: {name: ''}\n"):
