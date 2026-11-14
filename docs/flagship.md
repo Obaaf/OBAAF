@@ -128,11 +128,12 @@ The settings audit (2b) is new code in its own module, so it is not marked core;
 | H1 Dependency lock for the three Dependabot pull requests | nothing | done (#113); the Dependabot pull requests and #97 are closed (F-91) |
 | H2 The comparison tools no session could install | nothing | done (#122); #98 stays open for its other items |
 
-**Reserved for the Grok sessions** (decision F-112; the rules are [above](#work-handed-to-the-chatgpt-and-grok-sessions)). The scheduled runs do not take these, and a ChatGPT session does not either. Sean lists a slice here when he gives it to a Grok session; until one is listed, none is reserved.
+**Reserved for the Grok sessions** (decision F-112; the rules are [above](#work-handed-to-the-chatgpt-and-grok-sessions)). The scheduled runs do not take these, and a ChatGPT session does not either. Sean reserved 4.2 and 4.3 on 2026-11-14; he gives each Grok session one of them.
 
 | Slice | Needs | Issue |
 | --- | --- | --- |
-| _none reserved yet — Sean assigns one here_ | | |
+| 4.2 Website: home page | 4.1 (done) | #91 |
+| 4.3 Website: pages | 4.1, 3.7 (done) | #92 |
 
 ## Where OBAAF stood on 2026-11-11
 
