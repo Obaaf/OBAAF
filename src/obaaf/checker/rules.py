@@ -777,35 +777,46 @@ class WorkflowRules:
 
     # A command that installs packages with a JavaScript package manager, with `sudo` and its short
     # options before it (slice 2c.8). What follows it is read token by token in `_installs_only`.
-    _INSTALL_RE = re.compile(r"(?:sudo(?:[ \t]+-[A-Za-z]+)*[ \t]+)?"
-                             r"(?:npm[ \t]+(?:install|i|add)|pnpm[ \t]+(?:add|install|i)|yarn[ \t]+global[ \t]+add"
+    _INSTALL_RE = re.compile(r"(?:sudo(?:[ \t]+-[EHn]+)*[ \t]+)?"
+                             r"(npm[ \t]+(?:install|i|add)|pnpm[ \t]+(?:add|install|i)|yarn[ \t]+global[ \t]+add"
                              r"|bun[ \t]+(?:add|install|i))((?:[ \t]+[^ \t]+)+)")
-    _INSTALL_OPTION_RE = re.compile(r"--?[A-Za-z][A-Za-z0-9-]*")
+    # Options that take no value and run nothing (found by the review of 2c.8: `--script-shell`,
+    # `--userconfig` and `--prefix` take a path, and a value can be a listed package's name).
+    _INSTALL_OPTIONS = frozenset({"-g", "--global", "--no-fund", "--no-audit", "--ignore-scripts", "--silent"})
+    # Commands that fetch a package and run it.
+    _PACKAGE_RUNNER_RE = re.compile(r"\b(?:npx|bunx)\b|\bnpm[ \t]+(?:exec|x)\b|\bpnpm[ \t]+(?:dlx|exec)\b"
+                                    r"|\byarn[ \t]+dlx\b|\bbun[ \t]+x\b")
     # Characters that let a shell line do more than its words say: substitutions, pipes, redirections,
     # groups, background jobs, quotes, globs, escapes and comments after a command. A script that has
     # any of them is not read as installs only.
     _SHELL_MORE_RE = re.compile(r"[`$|<>(){}&'\"\\*?!#\[\]]")
 
-    def _installs_only(self, step: Step) -> bool:
+    def _installs_only(self, job: Job, step: Step) -> bool:
         """Whether a step does nothing but install agents' packages (`agent_installs` in detection.yaml) and print their
         CLIs' versions, read from its shell script (slice 2c.8): `sudo npm install -g
         @anthropic-ai/claude-code` and then `claude --version`, for one. Each line, and each command
         on it separated by `&&` or `;`, must be one of those two and nothing else; comment lines are
         skipped. Anything else makes it False, as does a script in another shell, an action, or a
         key of the step beyond the plain ones, so a step that runs an agent the patterns would miss
-        is never read as an install."""
+        is never read as an install. Each install must be global and name a listed package, with only
+        options that take no value, and `sudo` only with `-E`, `-H` or `-n`. The step may have no `env`
+        or `working-directory`, and neither the job nor the workflow may set `defaults.run`: each can
+        make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`, `PATH`, a shell of the
+        author's choosing, a directory whose `.npmrc` is read). Found by the review of 2c.8."""
         packages = self.detection.get("agent_installs") or {}
         if not packages or step.uses is not None or not isinstance(step.raw.get("run"), str):
             return False
-        if set(step.raw) - {"name", "id", "run", "shell", "if", "env", "timeout-minutes", "continue-on-error",
-                            "working-directory"}:
+        if set(step.raw) - {"name", "id", "run", "shell", "if", "timeout-minutes", "continue-on-error"}:
             return False
+        for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
+            if defaults is not None and not (isinstance(defaults, dict) and "run" not in defaults):
+                return False
         shell = step.raw.get("shell")
         if shell is not None and shell not in ("bash", "sh"):
             return False
         clis = {str(cli) for cli in packages.values()}
         names = {str(name) for name in packages}
-        version_re = re.compile(rf"(?:{'|'.join(re.escape(cli) for cli in sorted(clis))})[ \t]+(?:--version|-v|-V)")
+        version_re = re.compile(rf"(?:{'|'.join(re.escape(cli) for cli in sorted(clis))})[ \t]+--version")
         installed = False
         for line in step.run.splitlines():
             line = line.strip()
@@ -820,8 +831,12 @@ class WorkflowRules:
                 found = self._INSTALL_RE.fullmatch(command)
                 if not found:
                     return False
-                for token in found.group(1).split():
-                    if self._INSTALL_OPTION_RE.fullmatch(token):
+                tokens = found.group(2).split()
+                if not found.group(1).startswith("yarn") and not {"-g", "--global"} & set(tokens):
+                    return False        # a local install brings in the whole project's packages and scripts
+                named = False
+                for token in tokens:
+                    if token in self._INSTALL_OPTIONS:
                         continue
                     if token.startswith("@"):
                         rest, at, version = token[1:].partition("@")
@@ -830,8 +845,24 @@ class WorkflowRules:
                         name, at, version = token.partition("@")
                     if name not in names or (at and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.^~_-]*", version)):
                         return False
-                    installed = True
+                    named = True
+                if not named:
+                    return False        # options alone install the project, and run its scripts
+                installed = True
         return installed
+
+    def _package_mention_only(self, step: Step) -> bool:
+        """Whether the only thing that makes the checker take a step for running an agent is the name of
+        a package in `agent_installs`, with no command that fetches and runs a package (`npx`, `npm
+        exec`, `pnpm dlx`, `yarn dlx`, `bunx`) and no other agent pattern. Such a step, when it is not
+        read as an install, is "cannot tell" rather than an agent outside (slice 2c.8)."""
+        packages = {str(name) for name in (self.detection.get("agent_installs") or {})}
+        text = step.agent_text()
+        if not packages or not text or self._PACKAGE_RUNNER_RE.search(text):
+            return False
+        patterns = list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())
+        others = [re.compile(p, re.M) for p in patterns if p not in packages]
+        return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
 
     def _reads_output(self, step: Step, ids: set) -> list[str]:
         """Where a step refers to what a confined command could write: an `outputs.workspace` or
@@ -1182,9 +1213,13 @@ class WorkflowRules:
             why = self._agent_step(step, step.agent_text())
             before = (step.index < first and not step.background and not concurrent
                       and (step.group is None or step.group not in groups))
-            if (why == "runs an agent CLI" and before and step.index not in job.agent_script_steps
-                    and self._installs_only(step)):
-                continue        # it installs the agent's CLI, which the confined command then runs (2c.8)
+            if why == "runs an agent CLI" and before and step.index not in job.agent_script_steps:
+                if self._installs_only(job, step):
+                    continue    # it installs the agent's CLI, which the confined command then runs (2c.8)
+                if self._package_mention_only(step):
+                    unsure.append(f"step '{one_line(step.name, 80)}', before it, names an agent's package in a "
+                                  "script the checker reads as neither an install it can vouch for nor a run")
+                    continue
             if why or step.index in job.agent_script_steps:
                 agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
         # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
