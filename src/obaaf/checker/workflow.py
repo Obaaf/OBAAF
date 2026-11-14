@@ -766,7 +766,8 @@ _RESERVED = frozenset({"if", "then", "else", "elif", "fi", "case", "esac", "for"
 _DENIED_NAMES = frozenset({"exit", "return", "exec", "eval", "source", ".", "builtin", "command", "trap", "shopt",
                            "alias", "unalias", "hash", "enable", "unset", "declare", "typeset", "readonly", "local",
                            "mapfile", "readarray", "logout", "set", "ulimit", "kill", "suspend", "wait", "fg", "bg",
-                           "disown", "getopts", "let", "printf", "read", "export", "cd", "pushd", "popd", "time"})
+                           "disown", "getopts", "let", "printf", "read", "export", "cd", "pushd", "popd", "time",
+                           "shift"})
 # Variables that change what a name runs or how the shell starts.
 _SHELL_VARIABLE_RE = re.compile(r"(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|BASH_FUNC\w*|GITHUB_PATH)(\+?=|$)")
 
@@ -784,6 +785,68 @@ _SHELL_STATE_ANYWHERE_RE = re.compile(
     r"|\$\{#?[A-Za-z_]\w*\[(?![@*]\])|\$\{#?[A-Za-z_]\w*:(?![-+=?])|\$\{!|^\[\[$|^[A-Za-z_]\w*\[")
 
 
+# Variables bash evaluates as arithmetic when assigned, or that steer the shell (fifth review).
+_SPECIAL_VARIABLE_RE = re.compile(
+    r"(RANDOM|SRANDOM|OPTIND|OPTERR|SECONDS|LINENO|HISTCMD|TMOUT|COLUMNS|LINES|FUNCNEST|MAILCHECK|GROUPS|DIRSTACK|"
+    r"PIPESTATUS|FUNCNAME|BASH\w*|HIST\w*|EPOCH\w*|COMP_\w*|READLINE_\w*)(\[[^\]]*\])?\+?=")
+_SIMPLE_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+
+
+def _expansions_allowed(word: str) -> bool:
+    """Whether every expansion in a word is one that cannot evaluate a value as arithmetic (fifth review:
+    an allow-list). Allowed: `$NAME`, a special parameter read (`$1`, `$@`, `$?`), `$(...)` (it runs in a
+    subshell, so nothing it does reaches this shell), and `${...}` as `${NAME}`, `${#NAME}`, `${NAME[@]}`,
+    `${NAME[*]}`, `${#NAME[@]}`, or `${NAME` followed by `-`, `:-`, `+`, `:+`, `#`, `##`, `%` or `%%` and a
+    word whose own expansions are allowed. Anything else (a subscript, an offset, `${!...}`, `$((`, `$[`)
+    is not."""
+    i = 0
+    while True:
+        j = word.find("$", i)
+        if j < 0:
+            return True
+        rest = word[j + 1:]
+        if rest.startswith("(("):
+            return False
+        if rest.startswith("("):
+            depth, k = 0, j + 1
+            while k < len(word):
+                if word[k] == "(":
+                    depth += 1
+                elif word[k] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            if k >= len(word):
+                return False
+            i = k + 1
+            continue
+        if rest.startswith("{"):
+            depth, k = 0, j + 1
+            while k < len(word):
+                if word[k] == "{":
+                    depth += 1
+                elif word[k] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            if k >= len(word):
+                return False
+            inner = word[j + 2:k]
+            m = re.fullmatch(r"#?(" + _SIMPLE_NAME + r")(\[[@*]\])?", inner)
+            if not m:
+                m2 = re.match(r"(" + _SIMPLE_NAME + r")(:?[-+]|##?|%%?)", inner)
+                if not m2 or not _expansions_allowed(inner[m2.end():]):
+                    return False
+            i = k + 1
+            continue
+        if re.match(_SIMPLE_NAME + r"|[0-9@*#?$!-]", rest) or not rest:
+            i = j + 1
+            continue
+        return False
+
+
 def _assignment(word: str) -> bool:
     return bool(_ASSIGN_WORD_RE.match(word))
 
@@ -793,7 +856,8 @@ def _safe_command(words: list[tuple[str, bool]], allowed: frozenset = frozenset(
     command named by a plain word (no quote, no expansion) that is not denied (except names in
     `allowed`), with no word naming a shell variable, a reserved word or a substitution that is not
     quoted."""
-    if any(_SHELL_STATE_ANYWHERE_RE.search(word) for word, _quoted in words):
+    if any(_SHELL_STATE_ANYWHERE_RE.search(word) or _SPECIAL_VARIABLE_RE.match(word) or not _expansions_allowed(word)
+           for word, _quoted in words):
         return False
     i = 0
     while i < len(words) and _assignment(words[i][0]) and not words[i][0].startswith(("$", "`")):
@@ -803,7 +867,7 @@ def _safe_command(words: list[tuple[str, bool]], allowed: frozenset = frozenset(
         if word.endswith("=") and i + 1 < len(words) and words[i + 1][0] == "(":
             j = i + 2
             while j < len(words) and words[j][0] != ")":
-                if words[j][0] in _OPERATORS and not words[j][1]:
+                if words[j][0] in _OPERATORS and not words[j][1] or words[j][0].startswith("["):
                     return False
                 j += 1
             if j >= len(words):
@@ -814,6 +878,8 @@ def _safe_command(words: list[tuple[str, bool]], allowed: frozenset = frozenset(
     if i >= len(words):
         return True
     name, quoted = words[i]
+    if name in ("[", "test") and any(w == "-v" for w, _q in words[i + 1:]):
+        return False            # `-v 'a[x]'` evaluates the subscript
     if quoted or not re.fullmatch(r"[A-Za-z0-9_][\w.+-]*|\[|\[\[|:", name) or name in _RESERVED or (
             name in _DENIED_NAMES and name not in allowed):
         return False
@@ -964,7 +1030,7 @@ def binding_commands(text: str, errexit: bool, pipefail: bool) -> tuple[list[lis
                         pipefail = pipefail or change[1]
                     continue
                 if name in readers:
-                    if any(_SHELL_VARIABLE_RE.match(w) for w in plain[name_at + 1:]) \
+                    if any(_SHELL_VARIABLE_RE.match(w) or "[" in w for w in plain[name_at + 1:]) \
                             or any(w.startswith("-") and set(w[1:]) - set("rasneptd") for w in plain[name_at + 1:]):
                         return out, False
                     if name in ("read", "printf") and any("v" in w[1:] or "C" in w or "u" in w[1:]
@@ -997,6 +1063,9 @@ def _check_line(tokens: list[tuple[str, bool]], pipefail: bool) -> list[str] | N
     command = words[start:i]
     rest = tokens[i:]
     if UNKNOWN_EXPRESSION in " ".join(command):
+        return None
+    # The command's own words are expanded before `obaaf` is looked up, so they may not change it either.
+    if any(_SHELL_STATE_ANYWHERE_RE.search(w) or not _expansions_allowed(w) for w in words):
         return None
     if not rest:
         return command

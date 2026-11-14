@@ -157,6 +157,16 @@ class BindingReaderTest(unittest.TestCase):
         "a substring offset": 'a=PA; b=TH; x="$a$b=5"\necho "${s:x}"\n' + VERIFY,
         "double brackets": f'a=PA; b=TH; x="$a$b=5"\n[[ x -eq 5 ]]\n{VERIFY}',
         "an indirect expansion": 'x="y[PATH=5]"\necho "${!x}"\n' + VERIFY,
+        # The fifth pass: expansions before a check are an allow-list.
+        "a subscript in an array literal": f'a=PA; b=TH; x="$a$b=5"\ny=([x]=1)\n{VERIFY}',
+        "an offset on the positional parameters": 'a=PA; b=TH; x="$a$b=5"\necho "${@:x}"\n' + VERIFY,
+        "an offset on $0": 'a=PA; b=TH; x="$a$b=5"\necho "${0:x}"\n' + VERIFY,
+        "an offset after [@]": 'arr=(a b c); x=1\necho "${arr[@]:x}"\n' + VERIFY,
+        "RANDOM assigned": f'a=PA; b=TH; x="$a$b=5"\nRANDOM=x\n{VERIFY}',
+        "OPTIND assigned": f'a=PA; b=TH; x="$a$b=5"\nOPTIND=x\n{VERIFY}',
+        "read into a subscript": f'a=PA; b=TH; x="$a$b=5"\nread -r "y[x]" <<< 1\n{VERIFY}',
+        "test -v of a subscript": f'a=PA; b=TH; x="$a$b=5"\n[ -v "y[x]" ]\n{VERIFY}',
+        "an offset in the check's own words": 'a=PA; b=TH; x="$a$b=5"\n' + VERIFY + ' "${s:x}"',
     }
 
     BREAKS = {"carriage return": "\r", "vertical tab": "\v", "form feed": "\f", "file separator": "\x1c",

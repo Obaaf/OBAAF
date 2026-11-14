@@ -461,20 +461,22 @@ rules:
       backslash but at the end of a line, or expression whose value could hold shell syntax), or a plain
       `if ...; then`, `while ...; do`, `for NAME in ...; do`, `else`, `fi` or `done` line. No word
       before the check may name `PATH`, `BASH_CMDS`, `BASH_ENV` or the like, assign `PYTHONPATH`,
-      `LD_PRELOAD` or another variable an interpreter reads at start, or hold an arithmetic expansion, a
-      `${NAME:=...}`, an array subscript other than `@` or `*`, a substring offset, an indirect
-      expansion or `[[` (each can evaluate a variable's value as arithmetic that assigns); and no
-      earlier step may name `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH` (a search of its text, not a
-      guarantee). Given `--help` or `--version` it is no check; with `--pre-approval` it is a provenance
-      check. When a step names a check the reader cannot vouch for, the finding is kind `cannot-tell`
-      (still high): write the check on a line of its own, early in a bash step. A check in PowerShell,
-      cmd, Python, `actions/github-script`, a `docker://` step, a subshell, or on a runner that may be
-      Windows does not count, and neither does a needed job with `continue-on-error`. Every upload step
-      is checked, not only the first. Not read: what commands and actions earlier in the job, in this
-      step or before it, do to the runner (replace the `obaaf` it runs, rewrite the policy it reads,
-      export a variable through a file command the checker does not see); a `setup-obaaf` from a
-      repository named `obaaf` is trusted to install the real `obaaf`; and whether the files verified
-      are the files uploaded.
+      `LD_PRELOAD` or another variable an interpreter reads at start, assign a variable bash evaluates
+      as arithmetic (`RANDOM`, `OPTIND` and the like), or hold an expansion other than `$NAME`, a
+      special parameter, a `$(...)` (a subshell), or `${NAME}` with nothing but `[@]`, `[*]`, a length,
+      a default (`-`, `:-`, `+`, `:+`) or a pattern removed (`#`, `%`), since any other form (a
+      subscript, an offset, `${!...}`, `$((`, `[[`) can evaluate a value as arithmetic that assigns; the
+      check's own words are held to the same; and no earlier step may name `BASH_ENV`, `BASH_FUNC` or
+      `GITHUB_PATH` (a search of its text, not a guarantee). Given `--help` or `--version` it is no
+      check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot
+      vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own,
+      early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://`
+      step, a subshell, or on a runner that may be Windows does not count, and neither does a needed job
+      with `continue-on-error`. Every upload step is checked, not only the first. Not read: what
+      commands and actions earlier in the job, in this step or before it, do to the runner (replace the
+      `obaaf` it runs, rewrite the policy it reads, export a variable through a file command the checker
+      does not see); a `setup-obaaf` from a repository named `obaaf` is trusted to install the real
+      `obaaf`; and whether the files verified are the files uploaded.
     fix: >-
       Add `obaaf verify release` as a step before the upload, in the same job or in a job the upload
       job needs, and let a failure stop the job: no `|| true`, `continue-on-error` or `if: always()`.
