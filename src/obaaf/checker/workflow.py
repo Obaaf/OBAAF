@@ -408,9 +408,19 @@ _READ_RE = re.compile(r"\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+
 _WRITES_RE = re.compile(r"(?:>>?|(?<![\w-])-o|--output(?:=|\s)|\btee(?:\s+-a)?|-OutFile)\s*['\"]?([^\s'\";&|<>]+)", re.I)
 _PATH_WORD_RE = re.compile(r"[^\s'\"`;&|<>(){}\[\],+]+")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
-# Words that may come before a command's name without being one (`sudo git fetch`, `env A=1 git ...`).
-_PREFIXES = frozenset({"|", "(", "{", "!", "sudo", "exec", "xargs", "env", "time", "nice", "nohup", "command",
-                       "builtin", "then", "do", "else", "elif", "if", "while", "until", "-u", "-E"})
+# Words after which a command starts (`a | git ...`, `then git ...`).
+_COMMAND_STARTS = frozenset({"|", "(", "{", "!", "then", "do", "else", "elif", "if", "while", "until", "time"})
+# Commands that run the command after them, with the options of theirs that take a value as the next word;
+# for `timeout`, the duration is a word of its own too (`sudo -u runner git ...`, `timeout 300 git ...`).
+_RUNNERS = {
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T"}, "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir"}, "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"}, "nohup": set(), "stdbuf": {"-i", "-o", "-e"},
+    "xargs": {"-n", "-I", "-L", "-P", "-s", "-a", "-d", "-E", "--max-args", "--replace", "--delimiter"},
+    "time": set(), "command": set(), "builtin": set(), "exec": {"-a"}, "chronic": set(), "unbuffer": set(),
+    "runuser": {"-u", "-g"}, "setsid": set(), "flock": {"-w", "-E"}, "retry": {"-t", "--times", "-d", "--delay"},
+}
+_TAKES_DURATION = frozenset({"timeout", "flock"})
 # Shells and the option that hands them a script: a quoted script after it is read again.
 _SCRIPT_OPTION_RE = re.compile(r"-[a-zA-Z]*c\Z")
 
@@ -471,18 +481,61 @@ def _base(word: str) -> str:
 _CREATE_FLAGS = frozenset({"-c", "-C", "-b", "-B", "--create", "--force-create", "--orphan"})
 
 
+def _command_name(word: str) -> str:
+    """The name of the command a word starts: its base name, after a `NAME=` assignment, a backquote
+    or `$(` that open it (`` OUT=`git ``)."""
+    head, sep, tail = word.partition("=")
+    if sep and _IDENTIFIER_RE.fullmatch(head):
+        word = tail
+    return _base(word.lstrip("`$("))
+
+
+def _command_positions(words: list[str]) -> set[int]:
+    """Where a command's name stands among a command's words: the first word, the word after `|`, `(`,
+    `then` and the like, after `NAME=value` words, and after a command that runs the next one (`sudo`,
+    `env`, `timeout 300`, `xargs -r`) and its options; and any word a backquote or `$(` opens."""
+    positions, expecting, i = set(), True, 0
+    while i < len(words):
+        word = words[i]
+        if word.startswith(("`", "$(")) and len(word) > 2:
+            positions.add(i)
+        if not expecting:
+            expecting = word in _COMMAND_STARTS
+            i += 1
+            continue
+        if word in _COMMAND_STARTS:
+            i += 1
+            continue
+        head, sep, _ = word.partition("=")
+        if sep and _IDENTIFIER_RE.fullmatch(head) and "`" not in word and "$(" not in word:
+            i += 1                                   # an assignment before the command
+            continue
+        name = _command_name(word)
+        positions.add(i)
+        if name in _RUNNERS:
+            options, i = _RUNNERS[name], i + 1
+            while i < len(words) and (words[i].startswith("-") or (name == "env" and "=" in words[i])):
+                i += 2 if words[i] in options else 1
+            if name in _TAKES_DURATION and i < len(words) and words[i][:1].isdigit():
+                i += 1
+            continue                                 # still expecting the command it runs
+        expecting = False
+        i += 1
+    return positions
+
+
 def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set[int]]:
     """What brings code in among a command's words, if anything ("git SUBCOMMAND", "gh pr checkout",
     which needs nothing else to be the pull request's code, "patch", "gh repo clone", "gh api", or a
     downloader), and the words not to read for what it brings in: the name of a branch that `git
     switch -c NAME` or `git checkout -b NAME` creates, which names nothing fetched. A name counts only
-    where a command starts (at the start, after `|`, `sudo` and the like, or after `NAME=value`
-    words), unless `anywhere` (for a script in another language, split roughly)."""
+    where a command starts (see `_command_positions`), unless `anywhere` (for a script in another
+    language, split roughly), where `patch` is not looked for: it is a word of HTTP and of APIs."""
     found, skip = None, set()
-    for i, word in enumerate(words):
-        if not anywhere and i > 0 and words[i - 1] not in _PREFIXES and "=" not in words[i - 1]:
-            continue
-        name = _base(word)
+    positions = range(len(words)) if anywhere else _command_positions(words)
+    for i in sorted(positions):
+        word = words[i]
+        name = _command_name(word)
         if name in ("git", "git.exe"):
             j = i + 1
             while j < len(words) and words[j].startswith("-"):
@@ -499,8 +552,6 @@ def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set
                         if not starts:
                             continue        # a new branch at the current commit brings nothing in
                 return f"git {sub}", skip
-        elif anywhere:
-            continue
         elif name in ("gh", "gh.exe"):
             subs, j = [], i + 1
             while j < len(words) and len(subs) < 2 and words[j] not in ("|", "(", ")", "<", ">"):
@@ -515,7 +566,7 @@ def _fetching(words: list[str], anywhere: bool = False) -> tuple[str | None, set
                 found = found or "gh repo clone"
             if subs[:1] == ["api"]:
                 found = found or "gh api"
-        elif name == "patch":
+        elif name == "patch" and not anywhere:
             return "patch", skip
         elif name in _DOWNLOADERS:
             found = found or name
@@ -553,21 +604,41 @@ def digest_of(value: Any) -> str:
     return hashlib.sha256(written.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
-def _call_text(script: str, start: int) -> str:
+def _call_text(script: str, start: int, limit: int | None = None) -> str:
     """The argument list of a call whose name ends at `start`: from its `(` to the `)` that closes
-    it (or the end of the script)."""
-    begin = script.find("(", start)
+    it, and never past `limit` (the next call), so reading every call reads the script once."""
+    limit = len(script) if limit is None else limit
+    begin = script.find("(", start, limit)
     if begin == -1:
         return ""
     depth = 0
-    for i in range(begin, len(script)):
+    for i in range(begin, limit):
         if script[i] == "(":
             depth += 1
         elif script[i] == ")":
             depth -= 1
             if depth == 0:
                 return script[begin:i + 1]
-    return script[begin:]
+    return script[begin:limit]
+
+
+def _definition(script: str, name: str) -> str:
+    """Where a script defines a name (`const NAME = ...`, `let`, `var`, or a plain assignment): the
+    value, to the end of its brackets when it opens one, else to the end of the line."""
+    match = re.search(rf"(?:\b(?:const|let|var)\s+|^\s*){re.escape(name)}\s*=\s*", script, re.M)
+    if not match:
+        return ""
+    rest = script[match.end():match.end() + 4000]
+    if rest[:1] in "{[(":
+        closer = {"{": "}", "[": "]", "(": ")"}[rest[0]]
+        depth = 0
+        for i, ch in enumerate(rest):
+            depth += ch == rest[0]
+            depth -= ch == closer
+            if depth == 0:
+                return rest[:i + 1]
+        return rest
+    return rest.split("\n", 1)[0]
 
 
 def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
@@ -642,16 +713,6 @@ def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
     def note(found: PrCode) -> None:
         collect(found, head, unresolved)
 
-    script = as_text(step.with_.get("script") or "") if github_script else ""
-    for match in _SCRIPT_API_RE.finditer(script):
-        if match.group(1):
-            # Contents or an archive, read from the call's own arguments (written over several lines):
-            # at the pull request's head, it is its code. Without a ref it is the default branch's.
-            note(read(_call_text(script, match.end())))
-        elif re.search(r"['\"`](apply|am)['\"`]|\bgit\s+(apply|am)\b|\bpatch\s+-p", script):
-            # The pull request's diff or patch, applied in the same script.
-            head.add(one_line(match.group(0), 60))
-
     queue = [(line, 0) for line in script_lines(text, powershell="pwsh" in shell or "powershell" in shell)]
     while queue:
         raw_line, depth = queue.pop(0)
@@ -675,8 +736,8 @@ def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
                 commands.append((piece, tool, [put_back(word) for word in command]))
                 if depth < 2:
                     for k, word in enumerate(command):
-                        if k and (_SCRIPT_OPTION_RE.match(command[k - 1]) or command[k - 1] == "eval") \
-                                and any(c.isspace() for c in word):
+                        if any(c.isspace() for c in word) and ("$(" in word or "`" in word or (k and (
+                                _SCRIPT_OPTION_RE.match(command[k - 1]) or command[k - 1] == "eval"))):
                             queue.insert(0, (put_back(word), depth + 1))
         if words is None:
             # Split roughly: quotes, backquotes, brackets and commas dropped, operators set apart, each
@@ -712,6 +773,27 @@ def pr_fetch(step: "Step", env: "Env", shell: str = "") -> PrCode:
                         tainted[name] = found
                     for name in written:
                         files[name] = found
+    script = as_text(step.with_.get("script") or "") if github_script else ""
+    matches = list(_SCRIPT_API_RE.finditer(script))
+    for k, match in enumerate(matches):
+        if match.group(1):
+            # Contents or an archive, read from the call's own arguments (written over several lines,
+            # and never past the next call): at the pull request's head, it is its code; without a
+            # ref, the default branch's. An argument that is a name is read where it is defined.
+            limit = matches[k + 1].start() if k + 1 < len(matches) else len(script)
+            call = _call_text(script, match.end(), limit)
+            found = read(call)
+            if found.state == _BASE:
+                for name in list(dict.fromkeys(_IDENTIFIER_RE.findall(call)))[:20]:
+                    defined = _definition(script, name)
+                    if defined:
+                        found = read(defined)
+                        if found.state != _BASE:
+                            break
+            note(found)
+        elif re.search(r"['\"`](apply|am)['\"`]|\bgit\s+(apply|am)\b|\bpatch\s+-p", script):
+            # The pull request's diff or patch, applied in the same script.
+            head.add(one_line(match.group(0), 60))
     if head:
         return PrCode(_HEAD, sorted(head))
     if unresolved:

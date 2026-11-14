@@ -55,7 +55,7 @@ rules:
       commit, the pull request's number (from which `refs/pull/N/...` is built) and `refs/pull/` written
       out are the pull request's code. A `ref` or `repository` taken from anything else the checker cannot
       read to a value (a step's or job's output, an input, a variable, a matrix, an `env` name set nowhere
-      in the file, inputs written as one expression) is reported at medium as "cannot tell",. Scripts
+      in the file, inputs written as one expression) is reported at medium as "cannot tell". Scripts
       (`run`, a `docker://` step's `entrypoint` and `args`, the command OBAAF's egress action runs, and a
       quoted script given to `sh -c`, `bash -c` or `eval`) are split as a shell splits them, comments
       dropped, command by command (a pipeline is one command): a command that brings code in (git, after
@@ -66,19 +66,22 @@ rules:
       `env`, from the event file, `gh pr view` or `gh pr diff`, by its number, through a variable set
       earlier in the step (`NAME=`, `export`, `read`, `for NAME in`, `mapfile`), through a file an earlier
       command wrote from one of these, or through a git remote added with the head's address. A command
-      counts only where a command starts. The name of a branch that `git switch -c` or `git checkout -b`
-      creates is not read. A script in another language (`shell: python`, `node`, PowerShell) and an
-      `actions/github-script` script are split roughly, and git counts anywhere in them, also inside a
-      string; their variables count by name. In a github-script script a REST call for contents or an
-      archive is read from its own arguments, and a call for the diff or patch counts when the script
-      applies it. Such a command with a step's or job's output, or a field an outsider writes, is "cannot
-      tell"; a "cannot tell" finding is identified with everything in the file the value can depend on
-      (the workflow's and job's env, the job's strategy, its earlier steps, and the jobs it needs). The
-      job's and step's `if:` are part of the finding. Not followed: values passed between steps through
-      `GITHUB_ENV`, `GITHUB_OUTPUT` or files; shell functions, arrays and aliases, and a variable set in a
-      `while read` loop fed from its end; actions other than actions/checkout that check out code (local,
-      composite or marketplace actions); a reusable workflow called from such a workflow, whose checkout
-      is read with its own triggers; and commands the list above does not name.
+      counts only where a command starts: at the start, after `|`, `then` and the like, after
+      `NAME=value`, after `sudo`, `env`, `timeout`, `xargs` or another command that runs the next (with
+      its options), and inside a backquote or `$(`. The name of a branch that `git switch -c` or `git
+      checkout -b` creates is not read. A script in another language (`shell: python`, `node`, PowerShell)
+      and an `actions/github-script` script are split roughly, and git, gh and downloads count anywhere in
+      them, also inside a string; their variables count by name. In a github-script script a REST call for
+      contents or an archive is read from its own arguments, and a name given to it from where the script
+      defines it, and a call for the diff or patch counts when the script applies it. Such a command with
+      a step's or job's output, or a field an outsider writes, is "cannot tell"; a "cannot tell" finding
+      is identified with everything in the file the value can depend on (the workflow's and job's env, the
+      job's strategy, its earlier steps, and the jobs it needs). The job's and step's `if:` are part of
+      the finding. Not followed: values passed between steps through `GITHUB_ENV`, `GITHUB_OUTPUT` or
+      files; shell functions, arrays and aliases, and a variable set in a `while read` loop fed from its
+      end; actions other than actions/checkout that check out code (local, composite or marketplace
+      actions); a reusable workflow called from such a workflow, whose checkout is read with its own
+      triggers; and commands the list above does not name.
     fix: >-
       Build pull-request code in a pull_request workflow, which runs with a read-only token and no
       secrets. If a privileged step must follow, pass results through artifacts and treat them as

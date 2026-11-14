@@ -643,6 +643,68 @@ class SecondReviewTest(unittest.TestCase):
         self.assertEqual([f.kind for f in found], ["fetch"])
 
 
+class ThirdReviewTest(unittest.TestCase):
+    """What the third review pass found: commands after another command that runs them, and the
+    commands of a script language other than git."""
+
+    def run_step(self, step, on="pull_request_target"):
+        return (f"on: {on}\npermissions: {{contents: read}}\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - uses: {CHECKOUT}\n        with:\n          persist-credentials: false\n{step}")
+
+    def test_a_command_run_by_another(self):
+        scripts = ['timeout 300 git fetch origin pull/${{ github.event.number }}/head:pr',
+                   '/usr/bin/env git fetch origin "refs/pull/${{ github.event.number }}/head"',
+                   'sudo -u runner git fetch origin pull/${{ github.event.number }}/head',
+                   'OUT=`git fetch origin pull/${{ github.event.number }}/head 2>&1`',
+                   'echo "$(git fetch origin pull/${{ github.event.number }}/head)"',
+                   'jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH" | xargs -r git fetch origin']
+        with TempDir() as tmp:
+            for script in scripts:
+                with self.subTest(script=script):
+                    step = "      - run: |\n" + "".join(f"          {line}\n" for line in script.splitlines())
+                    found = of(check(tmp, self.run_step(step)), "OBAAF-GHA-002")
+                    self.assertEqual([(f.severity, f.kind) for f in found], [("high", "fetch")])
+
+    def test_other_commands_in_a_script_language(self):
+        env = "        env:\n          N: ${{ github.event.number }}\n"
+        steps = [f"      - shell: pwsh\n{env}        run: gh pr checkout $env:N\n",
+                 "      - shell: pwsh\n        run: |\n"
+                 "          Invoke-WebRequest -Uri \"${{ github.event.pull_request.diff_url }}\" -OutFile pr.diff\n"
+                 "          git apply pr.diff\n",
+                 f"      - shell: python\n{env}        run: |\n          import os\n"
+                 "          os.system('gh pr checkout ' + os.environ['N'])\n",
+                 f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                 "            await exec.exec('gh', ['pr', 'checkout', String(context.issue.number)])\n"]
+        with TempDir() as tmp:
+            for step in steps:
+                with self.subTest(step=step[:60]):
+                    found = of(check(tmp, self.run_step(step, on="issue_comment")), "OBAAF-GHA-002")
+                    self.assertEqual([f.kind for f in found], ["fetch"])
+
+    def test_a_github_script_call_given_a_name(self):
+        shorthand = (f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                     "            const ref = context.payload.pull_request.head.sha;\n"
+                     "            const { owner, repo } = context.repo;\n"
+                     "            await github.rest.repos.getContent({ owner, repo, path: 'CLAUDE.md', ref });\n")
+        params = (f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n"
+                  "            const params = {\n              owner: context.repo.owner, repo: context.repo.repo,\n"
+                  "              path: 'CLAUDE.md', ref: context.payload.pull_request.head.sha,\n            };\n"
+                  "            await github.rest.repos.getContent(params);\n")
+        with TempDir() as tmp:
+            for step in (shorthand, params):
+                with self.subTest(step=step[-50:]):
+                    found = of(check(tmp, self.run_step(step)), "OBAAF-GHA-002")
+                    self.assertEqual([f.kind for f in found], ["fetch"])
+
+    def test_many_unclosed_calls_are_read_in_linear_time(self):
+        script = "".join("            getContent(\n" for _ in range(9000))
+        step = f"      - uses: actions/github-script@{SHA}\n        with:\n          script: |\n{script}"
+        with TempDir() as tmp:
+            started = time.monotonic()
+            check(tmp, self.run_step(step))
+            self.assertLess(time.monotonic() - started, 10)
+
+
 class ReaderUnitTest(unittest.TestCase):
     def test_pr_code_states(self):
         self.assertEqual(pr_code("${{ github.event.pull_request.head.sha }}").state, "head")
