@@ -46,7 +46,9 @@ outputs:
       is in it as data: do not run or load anything from it in a later step.
     value: ${{ steps.run.outputs.workspace }}
   scratch:
-    description: The scratch directory that holds the copy, the command's home and TMPDIR.
+    description: >-
+      The scratch directory that holds the copy, the command's home and TMPDIR.
+      Only regular files and directories are left in it.
     value: ${{ steps.run.outputs.scratch }}
   log-dir:
     description: The proxy's log, outside the scratch directory.
@@ -63,8 +65,25 @@ outputs:
   dns-log:
     description: The log of the proxy's resolver, outside the scratch directory.
     value: ${{ steps.run.outputs.dns-log }}
+  removed:
+    description: >-
+      Symbolic links, pipes, sockets and device files the action deleted from
+      the scratch directory after the run, relative to it, separated by commas
+      (the first 200). The copy holds only regular files and directories, so a
+      later step that reads or uploads it cannot be pointed at the runner's
+      own files.
+    value: ${{ steps.run.outputs.removed }}
+  refused:
+    description: >-
+      "credential" when the action refused to run anything because a checkout
+      in the workspace kept its token; "input" when the run step refused
+      another input. (Inputs refused by the first step, such as allow, env and
+      model-keys, leave it empty; that step fails first.)
+    value: ${{ steps.run.outputs.refused }}
   exit-code:
-    description: The command's exit status.
+    description: >-
+      AWF's exit status, which is the command's own unless AWF itself failed
+      after the probe held.
     value: ${{ steps.run.outputs.exit-code }}
   confined:
     description: >-

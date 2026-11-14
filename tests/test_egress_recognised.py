@@ -963,9 +963,11 @@ class ReleaseDataTest(unittest.TestCase):
         self.assertEqual(checker.load().detection["egress_action_releases"], [])
 
     def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
-        """Only a commit at or after the merge of slice 2c.4 may be listed: the checker reads the
-        action's model-keys input and describes its resolver, both of which exist from there (slice
-        2c.5). Checked against the repository's history, which CI's test job fetches in full."""
+        """Only a commit at or after the floor may be listed: the checker reads the action's
+        model-keys input and describes its resolver, both of which exist from the merge of slice 2c.4
+        (slice 2c.5), and the runner's sockets in /tmp and links left in the copy are dealt with from
+        slice 2c.6's last change to the action. Checked against the repository's history, which CI's
+        test job fetches in full."""
         detection = checker.load().detection
         self.assertEqual(detection["egress_action_floor"], FLOOR)
         self.assertEqual(floor_problems(detection["egress_action_releases"], FLOOR), [])
@@ -981,9 +983,9 @@ class ReleaseDataTest(unittest.TestCase):
         self.assertEqual(lists_differ(AFTER_FLOOR), "")
 
 
-FLOOR = "f0bfbd79398a5950bb3c72860e98dfdaa66c929f"          # the merge of #128, slice 2c.4
-AFTER_FLOOR = "31bf6d106ad0070edd1078b716579afebeab2734"    # `flagship` when slice 2c.5 began
-BEFORE_FLOOR = "209fb5990e2273408b53619487acd883fe96fc0e"   # the merge of #119, slice 2c.2: before 2c.4
+FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"          # slice 2c.6's last change to the action
+AFTER_FLOOR = "1f5fccb560c8ab33274589e81590adc4b5d9b065"    # slice 2c.6's branch, merged with 2c.5
+BEFORE_FLOOR = "f0bfbd79398a5950bb3c72860e98dfdaa66c929f"   # the merge of #128, slice 2c.4: before 2c.6
 
 
 def has_history(commit):
@@ -1017,7 +1019,7 @@ def floor_problems(releases, floor):
             problems.append(f"{sha[:12]} could not be checked ({exc})")
             continue
         if found.returncode != 0:
-            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the merge of slice 2c.4")
+            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the floor (slice 2c.6's last change to the action)")
             continue
         differs = lists_differ(sha)
         if differs:

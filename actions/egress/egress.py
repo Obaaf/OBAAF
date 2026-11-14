@@ -28,7 +28,13 @@ wrapper adds, and why, is in docs/egress-control.md:
   printed, and the step fails if the runner's GITHUB_ENV, GITHUB_PATH,
   GITHUB_OUTPUT, GITHUB_STATE or GITHUB_STEP_SUMMARY files changed;
 * the hosts the proxy refused are listed in the job summary, and the proxy's
-  log is kept outside the scratch directory.
+  log is kept outside the scratch directory;
+* sockets and named pipes in the runner's /tmp that the command could open
+  (a .NET program's diagnostic socket, for one) are made unwritable while it
+  runs, and the probe fails if it can still write one (slice 2c.6);
+* after the run, every symbolic link, pipe, socket and device file in the
+  scratch directory is deleted, so a later step that reads or uploads the
+  copy cannot be pointed at the runner's own files (slice 2c.6).
 
 Only the Python standard library is used.
 """
@@ -41,6 +47,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -86,6 +93,14 @@ FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Exit status of the step when the sandbox did not hold or did not start.
 EXIT_NOT_CONFINED = 3
+
+# Where the probe looks, inside the sandbox, for sockets and named pipes the
+# command could write (slice 2c.6). The runner's /tmp is mounted into the
+# sandbox; the others hold the places such endpoints usually live.
+ENDPOINT_PLACES = "/tmp /run /var /home /etc"
+# Where the action looks, on the runner, for sockets and named pipes to make
+# unwritable while the command runs: the runner's /tmp, which AWF mounts.
+ENDPOINT_ROOT = "/tmp"
 
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOST_RE = re.compile(rf"^(?:{_LABEL}\.)+[a-z](?:[a-z0-9-]{{0,61}}[a-z0-9])?$")
@@ -174,7 +189,14 @@ PROBE_HOSTS = ("example.com", "example.net", "example.org")
 
 
 class UsageError(Exception):
-    """A problem with the step's inputs. Reported as an error; exit 2."""
+    """A problem with the step's inputs. Reported as an error; exit 2.
+
+    ``reason`` goes to the step's ``refused`` output, so a workflow (and the
+    escape tests) can tell a refusal from another failure."""
+
+    def __init__(self, message: str, reason: str = "input"):
+        super().__init__(message)
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +681,17 @@ attempt "unlisted host {blocked_host} through the proxy" curl -sS --max-time 10 
 attempt "unlisted host {blocked_host} without the proxy" curl -sS --noproxy '*' --max-time 5 -o /dev/null https://{blocked_host}/
 attempt "sudo" sudo -n true
 attempt "Docker socket" bash -c "curl -sS --max-time 5 --unix-socket /var/run/docker.sock http://localhost/_ping || curl -sS --max-time 5 --unix-socket /run/docker.sock http://localhost/_ping"
+# Sockets and named pipes the command could write: a program on the runner
+# that listens on one (a .NET program's diagnostic socket in /tmp, for one)
+# would act for the command outside the sandbox. The action makes those in
+# the runner's /tmp unwritable before the run; any left writable stops it.
+endpoints="$(find {ENDPOINT_PLACES} \\( -path '{scratch}' -o -path /proc \\) -prune -o \\( -type s -o -type p \\) -writable -print 2>/dev/null | head -5 | tr '\\n' ' ')"
+if [ -n "$endpoints" ]; then
+  echo "obaaf-egress: probe: sockets or pipes it could write ($endpoints) GOT OUT"
+  failed=1
+else
+  echo "obaaf-egress: probe: sockets and pipes outside the scratch directory blocked"
+fi
 if [ "$failed" -ne 0 ]; then
   echo "obaaf-egress: the sandbox did not hold; the command was not run"
   exit {EXIT_NOT_CONFINED}
@@ -726,11 +759,16 @@ def _runner_file_hashes(environ: dict[str, str]) -> dict[str, str | None]:
 
 
 def _denied_hosts(log_dir: Path) -> list[str]:
-    """Hosts the proxy refused, from Squid's access log.
+    """Hosts the proxy refused, from Squid's access log, as plain text.
 
     AWF v0.29.13 writes the log in its format ``firewall_detailed``:
-    ``time client:port host dest:port version method status code:hierarchy url "agent"``,
-    where ``host`` is the request's Host header (``name:443`` for CONNECT).
+    ``time client:port host dest:port version method status code:hierarchy url "agent"``.
+    ``host`` is the Host header the command sent, which it can set to any
+    text; the host is taken from ``url`` instead (``name:443`` for CONNECT,
+    ``http://name/...`` otherwise), which is what the proxy was asked for and
+    refused. Either way the command chose it, so anything but the characters
+    of a host name and port is replaced: a later step that pastes the output
+    into a script must not run what the command wrote (slice 2c.6).
     """
     hosts: list[str] = []
     for log in sorted(log_dir.rglob("access*.log")):
@@ -742,8 +780,10 @@ def _denied_hosts(log_dir: Path) -> list[str]:
             fields = line.split()
             if len(fields) < 9 or "DENIED" not in fields[7]:
                 continue
-            host = fields[2] if fields[2] != "-" else fields[8].split("://", 1)[-1].split("/", 1)[0]
+            target = fields[8] if fields[8] != "-" else fields[2]
+            host = target.split("://", 1)[-1].split("/", 1)[0]
             host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+            host = re.sub(r"[^A-Za-z0-9._:\[\]-]", "?", host)[:120]
             if host and host not in hosts:
                 hosts.append(host)
     return hosts
@@ -858,6 +898,181 @@ def _summary(environ: dict[str, str], text: str) -> None:
             handle.write(text)
 
 
+# ---------------------------------------------------------------------------
+# What the command could reach on the runner's disk (slice 2c.6)
+# ---------------------------------------------------------------------------
+
+_INCLUDE_RE = re.compile(r"^\s*\[\s*include(?:if)?\b", re.IGNORECASE | re.MULTILINE)
+# A remote URL with a user and a password: https://x-access-token:<token>@host/...
+_URL_CREDENTIAL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]*:[^\s/@]+@", re.IGNORECASE)
+_GIT_CONFIG_NAMES = ("config", "config.worktree")
+
+
+def git_credentials(workspace: Path) -> str | None:
+    """Why the copy of ``workspace`` would carry a checkout's credential, or None.
+
+    actions/checkout before v6 wrote the token into ``.git/config`` as an
+    ``http.<url>.extraheader``; v6 and later write an ``includeIf`` there that
+    names a file holding it, under ``RUNNER_TEMP`` (its CHANGELOG, v6.0.0:
+    "Persist creds to a separate file"). Either, in the configuration of any
+    repository in the tree (a second checkout, a submodule's directory under
+    ``.git/modules``), means the token was persisted. Both are refused: the
+    first is copied with the workspace, and the second points git, run in the
+    copy by a later step, at the file.
+    """
+    for dirpath, _dirnames, filenames in os.walk(workspace):
+        parts = Path(dirpath).relative_to(workspace).parts
+        if ".git" not in parts:
+            continue
+        for filename in _GIT_CONFIG_NAMES:
+            if filename not in filenames:
+                continue
+            config = Path(dirpath) / filename
+            name = config.relative_to(workspace)
+            try:
+                with config.open("rb") as handle:
+                    text = handle.read(1 << 20).decode("utf-8", errors="replace")
+            except OSError as error:
+                return f"{name} could not be read ({error.strerror})"
+            if "extraheader" in text.lower():
+                return f"{name} holds a credential (an extraheader)"
+            if _INCLUDE_RE.search(text):
+                return f"{name} includes another file, which is where actions/checkout v6 and later keep the token"
+            if _URL_CREDENTIAL_RE.search(text):
+                return f"{name} holds a credential in a remote URL"
+    return None
+
+
+def _quiet(argv: list[str], extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run a helper with a fixed PATH and nothing else of the environment."""
+    env = {"PATH": FIXED_PATH}
+    env.update(extra_env or {})
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False, env=env)
+
+
+def split_null_list(data: bytes, root: Path) -> list[str]:
+    """Paths printed by ``find -print0`` under ``root``, relative to it, as plain text."""
+    names: list[str] = []
+    for raw in data.split(b"\0"):
+        if not raw:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        prefix = str(root).rstrip("/") + "/"
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+        # The command chose these names, and a later step may paste the output
+        # into a script: only the characters of a plain path are kept.
+        names.append(re.sub(r"[^A-Za-z0-9._/+=@%-]", "?", text)[:200])
+    return names
+
+
+def lock_endpoints(root: str, skip: Path) -> tuple[list[tuple[str, int, int]], str | None]:
+    """Make every socket and named pipe under ``root`` that this user could
+    write unwritable to it, for the length of the run.
+
+    The command runs as the runner's own user, without capabilities, and sees
+    the runner's /tmp read-only. A read-only mount does not stop it from
+    connecting to a socket there, and a program on the runner that listens on
+    one acts for it outside the sandbox: every .NET program (the runner's own
+    Runner.Listener and Runner.Worker among them) listens on
+    ``/tmp/dotnet-diagnostic-<pid>-...-socket`` unless told not to, and that
+    socket can make the program write a core dump of its memory, where the
+    job's secrets are, or load a library. Write permission is what connect(2)
+    and opening a pipe need, and the command cannot change a mode on a
+    read-only mount. Returns the locked endpoints (path, mode, owner) and a
+    problem, or None.
+    """
+    found = _quiet(["sudo", "-n", "find", root, "-xdev", "(", "-type", "s", "-o", "-type", "p", ")", "-print0"])
+    if found.returncode not in (0, 1) or (found.returncode == 1 and not found.stdout):
+        return [], f"could not list the sockets and pipes under {root} (find status {found.returncode})"
+    locked: list[tuple[str, int, int]] = []
+    problems: list[str] = []
+    skip_prefix = str(skip).rstrip("/") + "/"
+    for raw in found.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = os.fsdecode(raw)
+        if path.startswith(skip_prefix):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue  # gone since find saw it
+        if not (stat.S_ISSOCK(info.st_mode) or stat.S_ISFIFO(info.st_mode)):
+            continue
+        if not os.access(path, os.W_OK):
+            continue  # this user cannot reach it, and neither can the command
+        mode = stat.S_IMODE(info.st_mode)
+        if info.st_uid == os.getuid():
+            try:
+                os.chmod(path, 0)
+            except OSError:
+                pass
+        else:
+            _quiet(["sudo", "-n", "chmod", "000", "--", path])
+        locked.append((path, mode, info.st_uid))
+        if os.access(path, os.W_OK):
+            problems.append(path)
+    if problems:
+        return locked, f"could not make {', '.join(problems[:5])} unwritable"
+    return locked, None
+
+
+def unlock_endpoints(locked: list[tuple[str, int, int]]) -> None:
+    """Give the endpoints lock_endpoints changed their modes back."""
+    for path, mode, owner in locked:
+        try:
+            if owner != os.getuid():
+                raise PermissionError
+            os.chmod(path, mode)
+        except OSError:
+            _quiet(["sudo", "-n", "chmod", f"{mode:o}", "--", path])
+
+
+def running_containers(home: Path) -> set[str] | None:
+    """IDs of the containers running on the runner, or None if Docker did not answer."""
+    done = _quiet(["docker", "ps", "-q", "--no-trunc"], {"HOME": str(home)})
+    if done.returncode != 0:
+        return None
+    return set(done.stdout.decode(errors="replace").split())
+
+
+def remove_special_files(scratch: Path) -> tuple[list[str], str | None]:
+    """Delete every entry under ``scratch`` that is not a regular file or a
+    directory: symbolic links, named pipes, sockets and device files.
+
+    The scratch directory is the action's output, and a later step reads or
+    uploads it with the runner's full access. A link the command left there
+    would point that step at the runner's own files: actions/upload-artifact
+    or a step that reads the copy would take ``/proc/self/environ`` or a file
+    under ``RUNNER_TEMP`` through it. ``find`` runs as root (the command may
+    leave a directory it cannot read) and does not follow links. Returns the
+    deleted entries, relative to ``scratch``, and a problem, or None.
+    """
+    argv = ["sudo", "-n", "find", str(scratch), "-xdev", "!", "-type", "f", "!", "-type", "d"]
+    done = _quiet(argv + ["-print0", "-delete"])
+    removed = split_null_list(done.stdout, scratch)
+    left = _quiet(argv + ["-print", "-quit"])
+    if done.returncode != 0 or left.returncode != 0 or left.stdout.strip():
+        return removed, (f"could not delete every link, pipe, socket and device file under {scratch} "
+                         f"(find status {done.returncode}, then {left.returncode})")
+    return removed, None
+
+
+def read_marker(marker: Path) -> str | None:
+    """The probe's marker, read without following a link or blocking on a pipe."""
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 256).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
 def run(environ: dict[str, str]) -> int:
     """Run the workflow's command under AWF. Returns the step's exit status."""
     allow = parse_allow_list(environ.get("INPUT_ALLOW", ""))
@@ -887,10 +1102,11 @@ def run(environ: dict[str, str]) -> int:
     for sub in ("home", "tmp", "workspace"):
         (scratch / sub).mkdir()
     workspace = Path(environ.get("GITHUB_WORKSPACE") or os.getcwd())
-    git_config = workspace / ".git" / "config"
-    if git_config.is_file() and "extraheader" in git_config.read_text(errors="replace").lower():
+    credential = git_credentials(workspace)
+    if credential:
         shutil.rmtree(scratch, ignore_errors=True)
-        raise UsageError("the workspace's .git/config holds a credential (actions/checkout without persist-credentials: false); the copy the command works on would carry it")
+        raise UsageError(f"the workspace's {credential}: check out with persist-credentials: false, so the copy the command works on carries no token",
+                         reason="credential")
     copy = scratch / "workspace"
     shutil.copytree(workspace, copy, symlinks=True, dirs_exist_ok=True)
 
@@ -952,6 +1168,28 @@ def run(environ: dict[str, str]) -> int:
     argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner),
                     dns_server)
 
+    # Sockets and pipes in the runner's /tmp the command could write, made
+    # unwritable for the run, and the containers already running, so that one
+    # AWF leaves behind is found (slice 2c.6).
+    locked, problem = lock_endpoints(ENDPOINT_ROOT, scratch)
+    containers_before = running_containers(private)
+    if containers_before is None and not problem:
+        problem = "Docker did not list its running containers"
+    if problem:
+        print(f"::error::obaaf-egress: {problem}; the command was not run")
+        unlock_endpoints(locked)
+        stop_resolver(resolver)
+        for path in sorted(private.iterdir()):
+            if path not in (logs, dns_log):
+                _remove(path)
+        _set_output(environ, "dns-log", str(dns_log))
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
+    if locked:
+        shown = [re.sub(r"[^\x21-\x7e]", "?", path)[:120] for path, _, _ in locked[:10]]
+        print(f"obaaf-egress: made {len(locked)} socket(s) or pipe(s) in {ENDPOINT_ROOT} unwritable for the run: "
+              + ", ".join(shown) + (", ..." if len(locked) > 10 else ""))
+
     before = _runner_file_hashes(environ)
     token = secrets.token_hex(16)
     print(f"obaaf-egress: AWF {AWF_VERSION}; allowed: {', '.join(allow)}")
@@ -975,6 +1213,30 @@ def run(environ: dict[str, str]) -> int:
     resolver_died = resolver is not None and resolver.poll() is not None
     stop_resolver(resolver)
     dns_refused = _dns_refused(dns_log)
+    # A container AWF left running could still write to the scratch
+    # directory after the clean-up below, so none may be left.
+    # If Docker does not answer, nothing shows that no container is left, and
+    # the endpoints stay unwritable for the rest of the job (which harms
+    # nothing) and the step fails. The same if an exception ends the run
+    # above: AWF may not have stopped its containers.
+    containers_after = running_containers(private)
+    stray = sorted((containers_after or set()) - (containers_before or set()))
+    if stray:
+        _quiet(["docker", "rm", "-f", *stray], {"HOME": str(private)})
+        containers_after = running_containers(private)
+        stray = sorted(set(stray) & containers_after) if containers_after is not None else stray
+    if containers_after is None:
+        print("::error::obaaf-egress: Docker did not list its containers after the run, so it is not known that none is left; the step fails")
+        stray = stray or ["unknown"]
+    elif stray:
+        print(f"::error::obaaf-egress: containers started for the run are still running ({', '.join(c[:12] for c in stray)}); the step fails")
+    else:
+        # Only now, with nothing of the run left running, may the endpoints
+        # be writable again.
+        unlock_endpoints(locked)
+    removed, special_problem = remove_special_files(scratch)
+    if special_problem:
+        print(f"::error::obaaf-egress: {special_problem}; the step fails")
     try:
         env_file.unlink()
     except OSError:
@@ -1000,10 +1262,7 @@ def run(environ: dict[str, str]) -> int:
     after = _runner_file_hashes(environ)
     changed = [name for name in before if before[name] != after.get(name)]
 
-    try:
-        probe_ok = marker.read_text().strip() == nonce
-    except OSError:
-        probe_ok = False
+    probe_ok = (read_marker(marker) or "").strip() == nonce
 
     denied = _denied_hosts(logs)
     _set_output(environ, "workspace", str(copy))
@@ -1013,6 +1272,7 @@ def run(environ: dict[str, str]) -> int:
     _set_output(environ, "exit-code", str(status))
     _set_output(environ, "denied", ",".join(denied))
     _set_output(environ, "dns-refused", ",".join(dns_refused))
+    _set_output(environ, "removed", ",".join(name.replace(",", "?") for name in removed[:200]))
 
     lines = ["### OBAAF egress control\n\n",
              f"- AWF {AWF_VERSION}, allowed: {', '.join('`' + h + '`' for h in allow)}\n",
@@ -1026,6 +1286,9 @@ def run(environ: dict[str, str]) -> int:
         lines.append("- refused by the proxy: none logged\n")
     if dns_refused:
         lines.append(f"- names the proxy's resolver refused (they did not leave the runner): {', '.join('`' + h + '`' for h in dns_refused[:50])}\n")
+    if removed:
+        lines.append(f"- links, pipes, sockets and device files deleted from the scratch directory: {len(removed)}"
+                     f" ({', '.join('`' + n + '`' for n in removed[:20])}{', ...' if len(removed) > 20 else ''})\n")
     if resolver_died:
         lines.append("- **the action's resolver stopped before the command ended**\n")
     if not probe_ok:
@@ -1042,7 +1305,7 @@ def run(environ: dict[str, str]) -> int:
         print(f"::error::The runner's {', '.join(changed)} changed while the command ran; the step fails")
         _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
-    if changed_left:
+    if changed_left or stray or special_problem:
         _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
     if not probe_ok:
@@ -1072,6 +1335,7 @@ def main(argv: list[str]) -> int:
         return run(dict(os.environ))
     except UsageError as error:
         print(f"::error::{error}")
+        _set_output(dict(os.environ), "refused", error.reason)
         return 2
 
 

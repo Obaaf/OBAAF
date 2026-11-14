@@ -75,6 +75,31 @@ ATTEMPTS: dict[str, dict] = {
     "dns-default-dig": {"labels": ["digdefault"]},
 }
 
+# Slice 2c.6: counts the attempts script reports as "RESULT <id> <bad> <total>",
+# where <bad> must be 0 inside the sandbox; outside, a non-zero <bad> is the
+# control. A runner where nothing listens outside makes the attempt "not
+# testable here", recorded and not failed: whether the hosted runner's .NET
+# programs listen in /tmp is what the attempt finds out.
+ENDPOINT_ATTEMPTS = {
+    "tmp-socket-connect": "sockets in the runner's /tmp accepted a connection",
+    "tmp-pipe-writable": "named pipes in the runner's /tmp were writable",
+    "dotnet-diagnostics": ".NET diagnostic sockets answered a request",
+}
+
+# Entries the attempts script makes inside the scratch directory, which the
+# action must delete after the run and list in its removed output (relative
+# to the scratch directory).
+SPECIAL_PLANTED = [
+    "workspace/escape-link-environ",
+    "workspace/escape-link-runner-temp",
+    "workspace/escape-link-relative",
+    "workspace/escape-dir/escape-link-root",
+    "workspace/escape-fifo",
+    "workspace/escape-socket",
+    "home/.cache/escape-link-home",
+    "workspace/escape-locked/escape-link-hidden",
+]
+
 # Files a confined command must not be able to create or change.
 PLANTED = [
     "~/.local/bin/git",
@@ -227,6 +252,65 @@ def judge(args: argparse.Namespace) -> int:
             verdict = "blocked"
         rows.append((attempt, "got out" if control else "did not get out", verdict, inside_status))
 
+    # Programs on the runner that listen in /tmp (slice 2c.6).
+    def _counts(results: dict[str, list[str]], key: str) -> tuple[int, int] | None:
+        value = results.get(key, [])
+        try:
+            return int(value[0]), int(value[1])
+        except (IndexError, ValueError):
+            return None
+
+    for attempt, what in ENDPOINT_ATTEMPTS.items():
+        inside, outside = _counts(in_results, attempt), _counts(out_results, attempt)
+        control = f"{outside[0]} of {outside[1]}" if outside else "not run"
+        status = f"{inside[0]} of {inside[1]}" if inside else " ".join(in_results.get(attempt, ["not run"]))
+        if inside is None:
+            verdict = "not attempted inside (the confined command did not run it)"
+            failures.append(f"{attempt} was not attempted inside the sandbox")
+        elif inside[0] > 0:
+            verdict = f"GOT OUT: {inside[0]} of {inside[1]}"
+            failures.append(f"{attempt}: {inside[0]} of {inside[1]} {what} from inside the sandbox")
+        elif not outside or outside[0] == 0:
+            verdict = "not testable here (none outside)"
+        else:
+            verdict = "blocked"
+        rows.append((attempt, control, verdict, status))
+
+    # The capture must have seen the run at all: the listed host was reached
+    # from inside (asserted below), so packets to or from one of its addresses
+    # must be in the inside capture. Without it, an empty capture would judge
+    # every attempt blocked. (A lookup of the name is not enough: the action's
+    # resolver asks for it once before AWF starts.)
+    api_addresses = set(resolved.get("api.github.com", []))
+    api_addresses |= _answers(in_headers, ["api.github.com"])["api.github.com"]
+    api_addresses |= _answers(out_headers, ["api.github.com"])["api.github.com"]
+    if not (api_addresses & in_seen):
+        failures.append("the capture taken while the attempts ran inside shows no packet to or from the listed "
+                        "host api.github.com, so it may have captured nothing")
+
+    # Links, pipes, sockets and device files in the scratch directory (slice 2c.6).
+    special_left: list[str] = []
+    if args.scratch:
+        found = subprocess.run(["sudo", "-n", "find", args.scratch, "!", "-type", "f", "!", "-type", "d", "-print0"],
+                               capture_output=True, check=False)
+        prefix = args.scratch.rstrip("/") + "/"
+        special_left = [p.decode(errors="replace").removeprefix(prefix) for p in found.stdout.split(b"\0") if p]
+        if found.returncode != 0:
+            failures.append(f"the judge could not list the scratch directory (find status {found.returncode})")
+        if special_left:
+            failures.append("links, pipes or sockets are left in the scratch directory after the run: "
+                            + ", ".join(special_left[:10]))
+        removed = set((args.removed or "").split(","))
+        missing = [name for name in SPECIAL_PLANTED if name not in removed]
+        if missing:
+            failures.append("the action's removed output does not list " + ", ".join(missing))
+        planted = in_results.get("plant-special", ["0"])[0]
+        if planted != str(len(SPECIAL_PLANTED)):
+            failures.append(f"the attempts made {planted} of the {len(SPECIAL_PLANTED)} links, pipes and sockets, "
+                            "so the test does not show them all removed")
+    else:
+        failures.append("the judge was not given the scratch directory, so it could not check what is left in it")
+
     # Anything else to a forbidden address, whichever attempt sent it.
     stray = sorted(ip for ip in forbidden if ip in in_seen)
     if stray:
@@ -301,6 +385,10 @@ def judge(args: argparse.Namespace) -> int:
             " ".join(in_results.get("host-mismatch", ["not run"])),
         "files the confined command reported writing outside the scratch directory (the judge checks the runner's copies above)":
             ", ".join(planted_ok) or "none",
+        "entries the action deleted from the scratch directory (its removed output)":
+            args.removed or "none",
+        "programs whose .NET diagnostic socket answered outside the sandbox (answered, total, names)":
+            " ".join(out_results.get("dotnet-diagnostics", ["not run"])),
     }
 
     facts = []
@@ -355,6 +443,8 @@ def main() -> int:
     j.add_argument("--summary")
     j.add_argument("--json-out")
     j.add_argument("--dns-refused", default="")
+    j.add_argument("--scratch", default="")
+    j.add_argument("--removed", default="")
     args = parser.parse_args()
     if args.mode == "snapshot":
         return snapshot(Path(args.out))

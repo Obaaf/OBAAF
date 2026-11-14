@@ -356,7 +356,7 @@ rules:
       one named in `env` or written in `run` (also through `${{ env.KEY }}`) is passed to the command;
       a name the action refuses in a way the checker reads is "not met", and a credential it cannot
       place is "cannot tell". OBAAF lists no released commit
-      of the action yet, and lists only commits at or after the merge of flagship slice 2c.4. Harden-Runner is "cannot tell" at best, because the
+      of the action yet, and lists only commits at or after the last change flagship slice 2c.6 made to it. Harden-Runner is "cannot tell" at best, because the
       repository's tier is not in the workflow, and "not met" at a listed release before v2.16.0 or
       with `sudo` and containers left to the job; its version is read only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell".
       A policy declared in `OBAAF_EGRESS`, or a control behind a condition, is reported too, so it is
