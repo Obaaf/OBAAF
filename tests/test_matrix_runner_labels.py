@@ -135,6 +135,11 @@ class MatrixDefaultTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(gha013(workflow(runs_on, strategy)), [("medium", "other-labels")])
 
+    def test_a_label_ending_in_a_line_break_is_not_a_hosted_label(self):
+        """Found by the review of 2d.7, older than it: the hosted-label pattern ended in `$`."""
+        strategy = '    strategy:\n      matrix:\n        os: ["ubuntu-latest\\n"]\n'
+        self.assertEqual(gha013(workflow("${{ matrix.os }}", strategy)), [("medium", "other-labels")])
+
     def test_a_plain_matrix_value_is_read_as_before(self):
         strategy = "    strategy:\n      matrix:\n        os: [ubuntu-latest, self-hosted]\n"
         self.assertEqual(gha013(workflow("${{ matrix.os }}", strategy)), [("high", "self-hosted")])
