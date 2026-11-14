@@ -409,7 +409,7 @@ _WRITES_RE = re.compile(r"(?:>>?|(?<![\w-])-o|--output(?:=|\s)|\btee(?:\s+-a)?|-
 _PATH_WORD_RE = re.compile(r"[^\s'\"`;&|<>(){}\[\],+]+")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 # Words after which a command starts (`a | git ...`, `then git ...`).
-_COMMAND_STARTS = frozenset({"|", "(", "{", "!", "then", "do", "else", "elif", "if", "while", "until", "time"})
+_COMMAND_STARTS = frozenset({"|", "|&", "(", ")", "{", "!", "then", "do", "else", "elif", "if", "while", "until"})
 # Commands that run the command after them, with the options of theirs that take a value as the next word;
 # for `timeout`, the duration is a word of its own too (`sudo -u runner git ...`, `timeout 300 git ...`).
 _RUNNERS = {
@@ -417,10 +417,15 @@ _RUNNERS = {
     "env": {"-u", "-C", "-S", "--unset", "--chdir"}, "timeout": {"-s", "-k", "--signal", "--kill-after"},
     "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"}, "nohup": set(), "stdbuf": {"-i", "-o", "-e"},
     "xargs": {"-n", "-I", "-L", "-P", "-s", "-a", "-d", "-E", "--max-args", "--replace", "--delimiter"},
-    "time": set(), "command": set(), "builtin": set(), "exec": {"-a"}, "chronic": set(), "unbuffer": set(),
+    "time": {"-f", "-o", "--format", "--output"}, "command": set(), "builtin": set(), "exec": {"-a"}, "chronic": set(), "unbuffer": set(),
     "runuser": {"-u", "-g"}, "setsid": set(), "flock": {"-w", "-E"}, "retry": {"-t", "--times", "-d", "--delay"},
 }
-_TAKES_DURATION = frozenset({"timeout", "flock"})
+# Runners whose first word after their options is theirs, not the command's: a duration or a count
+# (`timeout 300`, `retry 3`), or a lock file (`flock /tmp/x.lock`).
+_TAKES_NUMBER = frozenset({"timeout", "retry"})
+_TAKES_WORD = frozenset({"flock"})
+# `docker exec [options] CONTAINER COMMAND`: the options of `docker exec` that take a value.
+_DOCKER_EXEC_OPTIONS = frozenset({"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"})
 # Shells and the option that hands them a script: a quoted script after it is read again.
 _SCRIPT_OPTION_RE = re.compile(r"-[a-zA-Z]*c\Z")
 
@@ -516,9 +521,16 @@ def _command_positions(words: list[str]) -> set[int]:
             options, i = _RUNNERS[name], i + 1
             while i < len(words) and (words[i].startswith("-") or (name == "env" and "=" in words[i])):
                 i += 2 if words[i] in options else 1
-            if name in _TAKES_DURATION and i < len(words) and words[i][:1].isdigit():
+            if (name in _TAKES_NUMBER and i < len(words) and words[i][:1].isdigit()) or (
+                    name in _TAKES_WORD and i < len(words) and words[i] not in _COMMAND_STARTS):
                 i += 1
             continue                                 # still expecting the command it runs
+        if name in ("docker", "podman") and i + 1 < len(words) and words[i + 1] == "exec":
+            i += 2
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _DOCKER_EXEC_OPTIONS else 1
+            i += 1                                   # the container
+            continue
         expecting = False
         i += 1
     return positions

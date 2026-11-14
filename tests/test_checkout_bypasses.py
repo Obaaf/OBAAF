@@ -657,7 +657,13 @@ class ThirdReviewTest(unittest.TestCase):
                    'sudo -u runner git fetch origin pull/${{ github.event.number }}/head',
                    'OUT=`git fetch origin pull/${{ github.event.number }}/head 2>&1`',
                    'echo "$(git fetch origin pull/${{ github.event.number }}/head)"',
-                   'jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH" | xargs -r git fetch origin']
+                   'jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH" | xargs -r git fetch origin',
+                   'flock /tmp/git.lock git fetch origin pull/${{ github.event.number }}/head',
+                   'retry 3 git fetch origin pull/${{ github.event.number }}/head',
+                   'time -p git fetch origin pull/${{ github.event.number }}/head',
+                   'case "$X" in pr) git fetch origin pull/${{ github.event.number }}/head;; esac',
+                   'docker exec -w /src builder git fetch origin pull/${{ github.event.number }}/head',
+                   'echo ok |& git apply <(gh pr diff ${{ github.event.number }})']
         with TempDir() as tmp:
             for script in scripts:
                 with self.subTest(script=script):
