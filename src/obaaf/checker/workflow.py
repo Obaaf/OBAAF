@@ -49,6 +49,19 @@ PERMISSION_SCOPES = {
 }
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+# What pins an action or a reusable workflow: a full commit SHA as github.com writes one, 40 hex
+# digits in lower case and nothing else (flagship slice 2d.2f). github.com has no SHA-256
+# repositories, so a 64-digit ref can only be a tag or a branch, which can move; `$` also matched
+# before a line break at the end.
+COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+# An image pinned by digest: `name@sha256:` and 64 hex digits, at the end (the OCI grammar's only
+# registered SHA-256 form). A shorter or longer digest, or text after it, is not taken for a pin.
+IMAGE_DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}\Z")
+
+
+def is_local_reference(uses) -> bool:
+    """`./path` or `$/path`: an action or reusable workflow in the workflow's own repository."""
+    return isinstance(uses, str) and uses.startswith(("./", "$/"))
 
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
@@ -1693,12 +1706,19 @@ class Step:
     @property
     def uses(self) -> str | None:
         value = self.raw.get("uses")
-        return str(value) if value is not None else None
+        return as_text(value) if value is not None else None
+
+    @property
+    def is_local(self) -> bool:
+        """Whether the step uses an action from the workflow's own repository: `./path` (in the
+        workspace as the job has left it) or `$/path` (the repository at the running commit, GitHub's
+        self-repository syntax of 2026-07-30). Neither has a ref of its own to pin."""
+        return is_local_reference(self.uses)
 
     @property
     def run(self) -> str:
         value = self.raw.get("run")
-        return str(value) if value is not None else ""
+        return as_text(value) if value is not None else ""
 
     @property
     def with_(self) -> dict:
@@ -1726,7 +1746,7 @@ class Step:
     @property
     def action(self) -> str | None:
         """'owner/repo[/path]' for a remote action, without the ref."""
-        if not self.uses or self.uses.startswith(("./", "docker://")):
+        if not self.uses or self.is_local or self.uses.startswith("docker://"):
             return None
         action = self.uses.split("@", 1)[0]
         # Flagship slice 2d.2e: `actions/cache/save/../restore` is read as the path it names, whether or
@@ -1766,7 +1786,7 @@ class Step:
         """Everything a step runs as a command line: `agent_text()` (the run script, a github-script
         script and the command OBAAF's egress action runs) and a `docker://` step's `entrypoint` and
         `args`, which GitHub hands to the container as its command."""
-        parts = [self.agent_text()]
+        parts = [self._command_text()]
         if self.uses and self.uses.strip().lower().startswith("docker://"):
             for key in ("entrypoint", "args"):
                 given = self.with_.get(key)
@@ -1774,14 +1794,76 @@ class Step:
                     parts.append(given)
         return "\n".join(p for p in parts if p)
 
-    def agent_text(self) -> str:
-        """What an agent CLI is looked for in: `text()`, and the command OBAAF's egress action runs,
-        which is an agent's command line like any other."""
+    def _command_text(self) -> str:
+        """`text()`, and the command OBAAF's egress action runs, which is an agent's command line like
+        any other."""
         parts = [self.text()]
         if self.confines:
             given = self.with_.get("run")
             parts.append(given if isinstance(given, str) else "")
         return "\n".join(p for p in parts if p)
+
+    def agent_text(self, commands=None) -> str:
+        """What an agent CLI is looked for in, read the widest way (flagship slice 2d.2f): the run script,
+        a github-script script and the command OBAAF's egress action runs, as before, each also with lines
+        continued by a backslash joined and with quotes and backslashes taken out (`cl''aude -p`); and,
+        from every other place a step can give a command line (every input of any other action, a fork
+        or copy of OBAAF's egress action included, a `docker://` step's entrypoint and arguments, the
+        step's `shell`, its `env` values), each command whose first word, after assignments and wrappers
+        such as `sudo` or `npx`, is one `commands` (compiled patterns; the catalog's `agent_commands` by
+        default) match. Free text in an input ("vous aider", "works with cline") is not a command and is
+        not read as one (found by the review of 2d.2f). Before, only the first three were read, so an
+        agent given to another action was in no lane and got no agent rule."""
+        if commands is None:
+            commands = [re.compile(p, re.M) for p in load_catalog().detection.get("agent_commands", [])]
+        own = self._command_text()
+        found: list[str] = []
+        lines: list = []
+        if self.uses and self.uses.strip().lower().startswith("docker://"):
+            entry, args = self.with_.get("entrypoint"), self.with_.get("args")
+            lines.append(" ".join(v for v in (entry, args) if isinstance(v, str)))
+        elif self.uses and not self.confines:
+            for name, given in self.with_.items():
+                if isinstance(given, str) and not (name == "script" and self.uses_action("actions/github-script")):
+                    lines.append(given)
+        shell = self.raw.get("shell")
+        if isinstance(shell, str):
+            lines.append(shell)
+        lines.extend(v for v in self.env.values() if isinstance(v, str))
+        for value in lines:
+            for variant in _readings(value):
+                if any(rx.match(candidate) for segment in command_segments(variant)
+                       for candidate in _first_word_forms(segment) for rx in commands):
+                    # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
+                    found.append(variant)
+                    break
+        # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in, read
+        # as commands like an input, so prose in an env value (`--notes "$NOTES"`) is not an agent.
+        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
+        if env and own and "$" in own:
+            put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
+            if put != own:
+                for variant in _readings(put):
+                    if any(rx.match(candidate) for segment in command_segments(variant)
+                           for candidate in _first_word_forms(segment) for rx in commands):
+                        found.append(variant)
+                        break
+        text = "\n".join(p for p in [own, *found] if p)
+        return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
+
+    @property
+    def clean_action(self) -> str | None:
+        """The action as written, `owner/repo[/path]` in lower case, when its path has no `.`, `..` or
+        empty part; else None. Used where a step is trusted for what it is (only actions/upload-artifact
+        may run after a confined command): `actions/upload-artifact/../../x` is not taken for it, since
+        where GitHub resolves such a path is not established (flagship slice 2d.2f)."""
+        if not self.uses or self.is_local or self.uses.lower().startswith("docker://"):
+            return None
+        action = self.uses.split("@", 1)[0]
+        parts = action.split("/")
+        if any(part in ("", ".", "..") for part in parts) or "\\" in action:
+            return None
+        return action.lower()
 
 
 @dataclass
@@ -2129,7 +2211,7 @@ class Job:
     @property
     def reusable(self) -> str | None:
         value = self.raw.get("uses")
-        return str(value) if value else None
+        return as_text(value) if value else None
 
     @property
     def needs(self) -> list[str]:
@@ -2184,15 +2266,28 @@ class Job:
             for prefix in actions:
                 if step.uses_action(prefix):
                     return f"uses {step.action}"
-            text = step.agent_text()
+            text = step.agent_text(commands)
             for rx in commands:
                 if text and rx.search(text):
                     return f"runs an agent CLI in '{step.name}'"
+        # The default shell a `run` step is given (flagship slice 2d.2f, from its review): `shell: claude -p
+        # {0}` under `defaults.run` runs the agent with every script.
+        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
+            run = defaults.get("run") if isinstance(defaults, dict) else None
+            shell = run.get("shell") if isinstance(run, dict) else None
+            if isinstance(shell, str) and any(self.steps_run()) and any(
+                    rx.match(form) for variant in _readings(shell) for segment in command_segments(variant)
+                    for form in _first_word_forms(segment) for rx in commands):
+                return "runs an agent CLI as the default shell"
         if self.reusable:
             for prefix in actions:
                 if self.reusable.lower().startswith(prefix.lower()):
                     return f"calls {self.reusable}"
         return None
+
+    def steps_run(self) -> list[Step]:
+        """The steps that run a script (`run:`), which the default shell runs."""
+        return [step for step in self.steps if step.raw.get("run") is not None and step.raw.get("shell") is None]
 
     def upload_steps(self, detection: dict) -> list[Step]:
         actions = detection.get("upload_actions", [])
@@ -2229,6 +2324,79 @@ class Job:
             elif step.text() and any(rx.search(step.text()) for rx in rxs):
                 out.append(step)
         return out
+
+
+def _readings(text: str) -> list[str]:
+    """`upload_readings`, and the last of them with each backslash before a character taken out, as the
+    shell takes it out (`cl\\aude` runs claude)."""
+    readings = upload_readings(text)
+    readings.append(re.sub(r"\\(?=[^\n])", "", readings[-1]))
+    return readings
+
+
+_SEGMENT_SPLIT_RE = re.compile(r"\$\(|[;&|`(){}\n]")
+_WRAPPERS = frozenset({"sudo", "env", "exec", "nohup", "time", "xargs", "npx", "bunx", "command", "builtin", "nice",
+                       "stdbuf", "setsid", "doas", "ionice", "chrt", "taskset", "script", "unbuffer"})
+_TWO_WORD_WRAPPERS = {("pnpm", "dlx"), ("pnpm", "exec"), ("yarn", "dlx"), ("npm", "exec"), ("npm", "x"), ("bun", "x")}
+# Options of a wrapper that take the next word as their value (`sudo -u runner`, `nice -n 10`).
+_WRAPPER_VALUE_OPTIONS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group", "--chdir"},
+    "doas": {"-u", "-C"}, "nice": {"-n", "--adjustment"}, "env": {"-u", "-C", "-S", "--unset", "--chdir"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"}, "stdbuf": {"-i", "-o", "-e"}, "ionice": {"-c", "-n", "-p"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"}, "npx": {"-p", "--package"}, "script": {"-c"},
+    "taskset": set(), "chrt": set(),
+}
+# Shells whose `-c` argument is itself a command line (`bash -c "claude -p x"`, `sh -lc ...`).
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"})
+
+
+def command_segments(text: str, _depth: int = 0) -> list[str]:
+    """The commands a line of text holds, split where a shell starts a new one (`;`, `&`, `|`, a line break,
+    a substitution, a group), each without the assignments, wrappers (`sudo -u runner`, `env`, `npx`,
+    `nice -n 10`, `timeout -s KILL 5m`) and their options before its first word. A shell's `-c` argument
+    is read again as commands (`bash -c "claude -p x"`; quotes are taken out by the caller's readings).
+    Word by word, so linear in the length of the text."""
+    out: list[str] = []
+    for segment in _SEGMENT_SPLIT_RE.split(text or ""):
+        words = segment.split()
+        i, wrapper, duration = 0, "", False
+        while i < len(words):
+            word = words[i]
+            base = word.rsplit("/", 1)[-1]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", word):
+                i += 1
+            elif base in _WRAPPERS or base == "timeout":
+                wrapper, duration = base, base == "timeout"
+                i += 1
+            elif word.startswith("-") and wrapper:
+                i += 2 if word in _WRAPPER_VALUE_OPTIONS.get(wrapper, ()) else 1
+            elif duration and re.fullmatch(r"[0-9.]+[smhd]?", word):
+                duration = False
+                i += 1
+            elif i + 1 < len(words) and (word, words[i + 1]) in _TWO_WORD_WRAPPERS:
+                wrapper = word
+                i += 2
+            elif base in _SHELLS and _depth < 3:
+                flag = next((n for n in range(i + 1, min(i + 4, len(words)))
+                             if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", words[n])), None)
+                if flag is None:
+                    break       # a shell running a script file: the shell is the command
+                out.extend(command_segments(" ".join(words[flag + 1:]), _depth + 1))
+                i = len(words)
+            else:
+                break
+        if i < len(words):
+            out.append(" ".join(words[i:]))
+    return out
+
+
+def _first_word_forms(segment: str) -> list[str]:
+    """A command as written, and with its first word's directories taken off (`/usr/local/bin/claude`),
+    unless the word is a package name (`@scope/name`)."""
+    first, _, rest = segment.partition(" ")
+    if "/" in first and not first.startswith("@"):
+        return [segment, f"{first.rsplit('/', 1)[-1]} {rest}".rstrip()]
+    return [segment]
 
 
 def upload_readings(text: str) -> list[str]:
@@ -2402,14 +2570,40 @@ def parse(path: str, text: str) -> Workflow:
     problem = permissions_problem(raw.get("permissions"), "the workflow")
     if problem:
         workflow.problems.append(problem)
+    if workflow.has_merge_key:
+        # Flagship slice 2d.2f: this reader (YAML 1.1) merges `<<` away, so a merged `permissions`,
+        # `env` or `runs-on` is read as written in the mapping; a YAML 1.2 reader takes `<<` for a key
+        # of that name and merges nothing. Which GitHub does is not established, so the checker cannot
+        # tell what GitHub reads, and says so rather than reading one way.
+        workflow.problems.append("uses a YAML merge key (<<), which this checker's YAML reader merges and a YAML 1.2 "
+                                 "reader takes for a key of that name, so the checker cannot tell what GitHub reads; "
+                                 "write the keys out, or use an anchor and alias for a whole value")
     for job_id, job_raw in jobs.items():
+        shown_id = job_id if isinstance(job_id, str) else _group_text(job_id)
+        if not isinstance(job_id, str):
+            # `null:`, `true:` or `1:` is the text `null`, `true` or `1` to GitHub; this reader gives None,
+            # True or 1, whose text (`None`, `True`) can be another job's id, and the second would replace
+            # the first and take it out of every rule (flagship slice 2d.2f).
+            workflow.problems.append(f"has a job id written as {shown_value(job_id)}, which this checker's YAML "
+                                     "reader takes for a value other than text; write the id in quotes or rename it")
+        if shown_id in workflow.jobs:
+            workflow.problems.append(f"has two jobs the checker reads as '{one_line(shown_id, 60)}', so it cannot tell "
+                                     "them apart; rename one")
+            n = 2
+            while f"{shown_id} ({n})" in workflow.jobs:
+                n += 1
+            shown_id = f"{shown_id} ({n})"
         if not isinstance(job_raw, dict):
-            workflow.problems.append(f"job '{job_id}' is not a mapping, so the checker cannot check what it does")
+            workflow.problems.append(f"job '{shown_id}' is not a mapping, so the checker cannot check what it does")
             continue
-        problem = permissions_problem(job_raw.get("permissions"), f"job '{job_id}'")
+        problem = permissions_problem(job_raw.get("permissions"), f"job '{shown_id}'")
         if problem:
             workflow.problems.append(problem)
-        job = Job(id=str(job_id), raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
+        uses = job_raw.get("uses")
+        if uses is not None and not isinstance(uses, str):
+            workflow.problems.append(f"job '{one_line(shown_id, 60)}' has uses written as {shown_value(uses)}, which is "
+                                     "not text, so the checker cannot tell which workflow it calls")
+        job = Job(id=shown_id, raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")
         if isinstance(steps, list):
             _add_steps(workflow, job, steps)
@@ -2452,6 +2646,12 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
         problem = _input_problem(raw)
         if problem:
             workflow.problems.append(f"job '{job.id}', step {number} {problem}")
+        uses = raw.get("uses")
+        if uses is not None and not isinstance(uses, str):
+            # A number, a list or a mapping names no action the checker can look up (flagship slice 2d.2f;
+            # a number of thousands of digits ended the run with a traceback before).
+            workflow.problems.append(f"job '{job.id}', step {number} has uses written as {shown_value(uses)}, which "
+                                     "is not text, so the checker cannot tell which action it runs")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "
@@ -2474,7 +2674,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
             workflow.problems.append(f"job '{job.id}', step {number} has no 'run' or 'uses' and is not a step form "
                                      "the checker knows, so it cannot check what the step does")
-        background = str(step_raw.get("background", "")).strip().lower() not in ("", "false")
+        background = as_text(step_raw.get("background", "")).strip().lower() not in ("", "false")
         job.steps.append(Step(index=len(job.steps), raw=step_raw, line=line, background=background))
 
 
@@ -2558,16 +2758,60 @@ def bounded(text: str, quoted: bool = False) -> str:
 _LANE_VARIABLE = "OBAAF_LANE"
 
 
+# Letters from other scripts that look like the Latin capitals of OBAAF_LANE (Cyrillic and Greek), and
+# the digits that do, mapped to them before a name is compared (flagship slice 2d.2f).
+_LOOKALIKES = str.maketrans({
+    "\u0410": "A", "\u0430": "A", "\u0391": "A", "\u03b1": "A", "\u0392": "B", "\u0412": "B", "\u0432": "B",
+    "\u03b2": "B", "\u0415": "E", "\u0435": "E", "\u0395": "E", "\u03b5": "E", "\u041e": "O", "\u043e": "O",
+    "\u039f": "O", "\u03bf": "O", "\u0424": "F", "\u0492": "F", "\u03dc": "F", "\u039d": "N", "\u03bd": "N",
+    "\u041d": "N", "\u043d": "N", "\u0399": "L", "\u04c0": "L", "\u2113": "L", "0": "O", "1": "L", "3": "E",
+    "8": "B", "4": "A",
+})
+_LANE_SKELETON = "OBAAFLANE"
+
+
+def lane_variable_skeleton(name: str) -> str:
+    """A name reduced to what it looks like: compatibility forms folded (NFKC), invisible format
+    characters taken out, look-alike letters and digits mapped to the Latin capitals, and everything
+    but letters dropped, in upper case."""
+    import unicodedata
+    text = unicodedata.normalize("NFKC", name)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf").translate(_LOOKALIKES).upper()
+    return "".join(ch for ch in text if "A" <= ch <= "Z")
+
+
+def _within_one_edit(a: str, b: str) -> bool:
+    """Whether `a` becomes `b` by at most one insertion, deletion, substitution or swap of neighbours."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                                  and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    i = 0
+    while i < len(short) and short[i] == long_[i]:
+        i += 1
+    return short[i:] == long_[i + 1:]
+
+
+def is_lane_variable_spelling(name) -> bool:
+    """Whether a name is OBAAF_LANE in another spelling (flagship slice 2d.2f): what it looks like is
+    `OBAAFLANE` or one edit from it, once case, spaces, separators, invisible characters and look-alike
+    letters are set aside (`obaaf-lane`, `OBAAF.LANE`, `OBAAF_LANES`, `OBAAF LANE` with a zero-width
+    space, a Cyrillic `О`). Before, only case, spaces and `-` or a space for `_` were set aside."""
+    if not isinstance(name, str) or name == _LANE_VARIABLE:
+        return False
+    return _within_one_edit(lane_variable_skeleton(name), _LANE_SKELETON)
+
+
 def misnamed_lane_variables(env) -> list:
-    """The names in an `env` that are OBAAF_LANE in another spelling: other case, spaces round it, a
-    hyphen or a space for the underscore. The variable is read under its exact name only, as a
-    runner's shell would read it, so such a name declares nothing."""
-    out = []
-    for name in (env if isinstance(env, dict) else ()):
-        if isinstance(name, str) and name != _LANE_VARIABLE and \
-                re.sub(r"[\s_-]+", "_", name.strip()).upper() == _LANE_VARIABLE:
-            out.append(name)
-    return out
+    """The names in an `env` that are OBAAF_LANE in another spelling (`is_lane_variable_spelling`). The
+    variable is read under its exact name only, as a runner's shell would read it, so such a name
+    declares nothing."""
+    return [name for name in (env if isinstance(env, dict) else ()) if is_lane_variable_spelling(name)]
 
 
 @dataclass(frozen=True)
@@ -2592,6 +2836,7 @@ class IdleDeclaration:
     service: str = ""             # the service whose env holds it
     name: str = ""                # the variable as it is written, when that is not OBAAF_LANE
     name_shown: str = ""          # and as a report prints it
+    where: str = ""               # for `elsewhere`: the place it is written, as a path of keys
     # The Jenkins stages whose steps the declaration reaches, by label. Steps outside any stage are
     # the empty label, which no stage can have.
     stages: tuple = ()
@@ -2686,13 +2931,26 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
         job.settle_lane(trusted_why or "default")
         for found in _stray_declarations(workflow, job, {id(workflow.raw.get("env")), id(job.raw.get("env"))}):
             problem(found)
+    # Outside the jobs: the variable anywhere but the workflow's env (flagship slice 2d.2f), for example as
+    # an input of `workflow_dispatch` or under `defaults`.
+    top = {key: value for key, value in workflow.raw.items() if key not in ("jobs", "env")}
+    for found in _declarations_elsewhere(workflow, top, None, 1, {id(workflow.raw.get("env"))}, {}):
+        problem(found)
+    env = workflow.raw.get("env")
+    if isinstance(env, str) and _names_lane_variable(env):
+        problem(IdleDeclaration.of("workflow-elsewhere", env, path=workflow.path, line=key_line(workflow.raw, "env", 1),
+                                   name=_LANE_VARIABLE, name_shown=_LANE_VARIABLE,
+                                   where="env (written as one expression)"))
 
 
 def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     """Where a job sets OBAAF_LANE in an `env` the checker does not read it from: a step's, the
     container's, a service's. `read` holds the identities of the two env mappings that are read for
     this job (its own and the workflow's), so an env shared with one of them through a YAML anchor
-    is not reported."""
+    is not reported. From flagship slice 2d.2f, also the variable under another spelling there, and the
+    name anywhere else in the job (`elsewhere`): a key of a step's `with`, of the matrix or of a called
+    workflow's `with`, an `env` written as one expression that names it, and a script that writes it to
+    `GITHUB_ENV`, none of which the checker reads as a declaration."""
     def stray(env) -> bool:
         return isinstance(env, dict) and "OBAAF_LANE" in env and id(env) not in read
 
@@ -2715,7 +2973,83 @@ def _stray_declarations(workflow: Workflow, job: Job, read: set) -> list:
     for name, service in (services.items() if isinstance(services, dict) else ()):
         if isinstance(service, dict) and stray(service.get("env")):
             out.append(found("service-env", service["env"], job.line, service=bounded(str(name))))
+    step_names = {id(step.raw): step.name for step in job.steps}
+    skip = set(read) | {id(job.raw.get("env"))}
+    # The envs whose exact OBAAF_LANE is reported above, as step-env, container-env or service-env.
+    handled = {id(step.raw.get("env")) for step in job.steps}
+    handled |= {id(group.get("env")) for group in (steps if isinstance(steps, list) else ()) if isinstance(group, dict)}
+    if isinstance(container, dict):
+        handled.add(id(container.get("env")))
+    handled |= {id(service.get("env")) for service in (services.values() if isinstance(services, dict) else ())
+                if isinstance(service, dict)}
+    handled.discard(id(None))
+    out += _declarations_elsewhere(workflow, job.raw, job.id, job.line, skip, step_names, handled=handled)
     return list(dict.fromkeys(out))
+
+
+# `OBAAF_LANE=` as a script writes it, in any spelling the name check allows, for `GITHUB_ENV`.
+_LANE_ASSIGNMENT_RE = re.compile(r"([^\s=;&|'\"`$({]{4,64})\s*=")
+
+
+def _declarations_elsewhere(workflow: Workflow, raw: dict, job_id: str | None, owner_line: int, skip: set,
+                            step_names: dict, where: str = "", handled: set = frozenset()) -> list:
+    """The lane variable, in any spelling, written where nothing reads it as a declaration: a key in a
+    mapping the caller does not read for lanes (an exact OBAAF_LANE in a step's, container's or
+    service's env is reported by the caller), an `env` written as one expression that names it, and a
+    script that writes it to `GITHUB_ENV` (flagship slice 2d.2f)."""
+    out: list = []
+    seen: set = set()
+
+    def report(path: str, name: str, value, line: int, step: str | None) -> None:
+        out.append(IdleDeclaration.of("elsewhere" if job_id is not None else "workflow-elsewhere", value,
+                                      path=workflow.path, job=job_id, step=step, line=line,
+                                      name=bounded(name), name_shown=one_line(name, 60),
+                                      where=bounded(path)))
+
+    def visit(value, path: str, line: int, step: str | None) -> None:
+        if isinstance(value, (dict, list)):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+        if isinstance(value, dict):
+            step = step_names.get(id(value), step)
+            if hasattr(value, "line") and id(value) in step_names:
+                line = getattr(value, "line", line) or line
+            for key, sub in value.items():
+                name = key if isinstance(key, str) else as_text(key)
+                here = f"{path}.{name}" if path else name
+                # A key with a value: a mapping or a list of mappings under the name (an input's
+                # definition under `workflow_call`) declares nothing and is not a declaration's form.
+                declares = not isinstance(sub, dict) and not (isinstance(sub, list)
+                                                              and any(isinstance(v, (dict, list)) for v in sub))
+                if id(value) not in skip and declares:
+                    exact_env_handled = name == _LANE_VARIABLE and id(value) in handled
+                    if (name == _LANE_VARIABLE and not exact_env_handled) or is_lane_variable_spelling(name):
+                        report(path or "the top level", name, sub, key_line(value, key, line), step)
+                if path.rsplit(".", 1)[-1] == "with" and isinstance(sub, (dict, list)):
+                    continue    # an input is text to GitHub; one written as a mapping or a list is not read
+                if name == "env" and isinstance(sub, str) and _names_lane_variable(sub):
+                    report(here + " (written as one expression)", _LANE_VARIABLE, sub, key_line(value, key, line), step)
+                elif name == "run" and isinstance(sub, str) and "GITHUB_ENV" in sub.upper():
+                    for match in _LANE_ASSIGNMENT_RE.finditer(sub):
+                        candidate = match.group(1)
+                        if candidate == _LANE_VARIABLE or is_lane_variable_spelling(candidate):
+                            rest = sub[match.end():].split("\n", 1)[0].strip().strip("'\"")
+                            report(here + " (written to GITHUB_ENV)", candidate, rest.split()[0] if rest.split() else "",
+                                   key_line(value, key, line), step)
+                visit(sub, here, line, step)
+        elif isinstance(value, list):
+            for n, sub in enumerate(value):
+                visit(sub, f"{path}[{n}]", line, step)
+
+    visit(raw, where, owner_line, None)
+    return out
+
+
+def _names_lane_variable(text: str) -> bool:
+    """Whether a value names the lane variable in any spelling the name check allows."""
+    return any(token == _LANE_VARIABLE or is_lane_variable_spelling(token)
+               for token in re.findall(r"[^\s'\"`(){}\[\],:=]{4,64}", text))
 
 
 # An environment whose name says where releases go, anywhere in the name (AppProd, awsprod, app-store,
@@ -2788,7 +3122,10 @@ def discover(root: Path) -> list[Path]:
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
         return []
-    return sorted(p for p in wf_dir.iterdir() if p.suffix in (".yml", ".yaml") and p.is_file())
+    # Any letter case of the extension, and a file named only `.yml` or `.yaml`, whose `suffix` Python
+    # gives as empty (flagship slice 2d.2f). Whether GitHub runs `ci.YML` or `.yml` is not established;
+    # a file the checker skips while GitHub runs it would drop every finding in it without a word.
+    return sorted(p for p in wf_dir.iterdir() if p.name.lower().endswith((".yml", ".yaml")) and p.is_file())
 
 
 def locate(target: Path) -> tuple[Path, list[Path]]:

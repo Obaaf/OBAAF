@@ -14,15 +14,31 @@ from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
-    FULL_SHA_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
+    COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, scalar_environment_match, shown_value, upload_readings, value_identity,
+    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
-PLACEHOLDER_RE = re.compile(r"OBAAF_OWNER|@" + PLACEHOLDER_SHA)
+_OWNER_PLACEHOLDER_RE = re.compile(r"obaaf_owner", re.I)
+_SHA_PLACEHOLDER_RE = re.compile(r"@0{40}(?![0-9a-fA-F])")
+
+
+# Where a shell line starts another command (`_fetches_over` reads a fetch and its target in one command).
+_COMMAND_SPLIT_RE = re.compile(r"\$\(|[;&|`\n]")
+
+
+def _placeholders_in(text: str, where: str) -> list[str]:
+    """The template placeholders a value holds: `OBAAF_OWNER` in any letter case, and the all-zero SHA
+    after `@` (or as the whole ref of a `uses`)."""
+    out = []
+    if _OWNER_PLACEHOLDER_RE.search(text):
+        out.append("OBAAF_OWNER")
+    if _SHA_PLACEHOLDER_RE.search(text) or (where.rsplit(".", 1)[-1] == "uses" and text.strip() == PLACEHOLDER_SHA):
+        out.append(PLACEHOLDER_SHA)
+    return out
 
 
 VERIFIED, NOT_MET, CANNOT_TELL = "verified", "not met", "cannot tell"
@@ -295,11 +311,66 @@ class WorkflowRules:
 
     # -------------------------------------------------------------- GHA-023
     def placeholders(self) -> None:
-        match = PLACEHOLDER_RE.search(self.wf.text)
-        if match:
-            line = self.wf.text.count("\n", 0, match.start()) + 1
-            self.add("OBAAF-GHA-023", line, "Template placeholder '{placeholder}' is still present.",
-                     placeholder=match.group(0).lstrip('@'))
+        """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
+        The values are read as YAML gives them, so an escape (`OBAAF\\x5FOWNER`, a line joined inside
+        double quotes) is the placeholder it spells, and a comment, which GitHub never reads, is not.
+        `OBAAF_OWNER` is found in any letter case (GitHub owner names are compared without regard to
+        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros."""
+        seen: set = set()
+        found: list = []
+
+        def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
+            if isinstance(value, (dict, list)):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
+            if isinstance(value, str):
+                for placeholder in _placeholders_in(value, where):
+                    found.append((line, job, step, where, placeholder))
+            elif isinstance(value, dict):
+                for key, sub in value.items():
+                    name = as_text(key)
+                    for placeholder in _placeholders_in(name, where):
+                        found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
+                    sub_line = line
+                    if hasattr(value, "line_of"):
+                        try:
+                            sub_line = max(int(value.line_of(key) or 0), line)
+                        except (TypeError, ValueError):
+                            pass
+                    visit(sub, f"{where}.{name}" if where else name, sub_line, job, step)
+            elif isinstance(value, list):
+                for n, sub in enumerate(value):
+                    visit(sub, f"{where}[{n}]", line, job, step)
+
+        jobs_raw = self.wf.raw.get("jobs")
+        for key, sub in self.wf.raw.items():
+            if key != "jobs":
+                visit({key: sub}, "", 1, None, None)
+        by_raw = {id(job.raw): job for job in self.wf.jobs.values()}
+        if isinstance(jobs_raw, dict):
+            for key, job_raw in jobs_raw.items():
+                job = by_raw.get(id(job_raw))
+                if job is None:
+                    visit({key: job_raw}, "jobs", 1, None, None)
+                    continue
+                steps = {id(step.raw): step for step in job.steps}
+                for name, sub in job_raw.items():
+                    if name == "steps" and isinstance(sub, list):
+                        for n, step_raw in enumerate(sub):
+                            step = steps.get(id(step_raw))
+                            visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
+                    else:
+                        visit({name: sub}, "", job.line, job, None)
+        done: set = set()
+        for line, job, step, where, placeholder in found:
+            key = (job.id if job else None, step.index if step else None, where, placeholder)
+            if key in done:
+                continue        # the placeholder in a key and in its value is one place
+            done.add(key)
+            self.add("OBAAF-GHA-023", line, "Template placeholder '{placeholder}' is still present in {where}.",
+                     job, step, placeholder=placeholder, where=Fact(where, f"'{one_line(where, 80)}'"),
+                     legacy="Template placeholder '{placeholder}' is still present.")
 
     # -------------------------------------------------------------- GHA-009
     def permissions_declared(self, job: Job) -> None:
@@ -1191,7 +1262,9 @@ class WorkflowRules:
         firewall = egress_mod.FIREWALL_LABEL
         # Read as OBAAF-GHA-013's hosted list reads it (`is_hosted_label`: any letter case, no space
         # trimmed), so the two rules agree on what runs the job (flagship slice 2d.9, issue #172).
-        on = [s for s in (sets or []) if len(s) == 1 and is_hosted_label(s[0]) and s[0].lower() == firewall]
+        # The same label written twice is one requirement to GitHub, so it is read once (flagship slice 2d.2f).
+        on = [s for s in (sets or []) if len({label.lower() for label in s}) == 1 and is_hosted_label(s[0])
+              and s[0].lower() == firewall]
         policy = self.firewall
         if not on:
             # A larger runner can be in a runner group (`group:`), which the checker otherwise counts as
@@ -1248,9 +1321,10 @@ class WorkflowRules:
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             listed = ", ".join(policy.allow) or "nothing"
-            listed += " and nothing else" if policy.no_defaults else " and GitHub's default endpoints"
+            listed += " and nothing else" if policy.no_defaults else f" and the firewall's defaults ({egress_mod.DEFAULT_ENDPOINTS})"
             detail = (f"the job runs on {firewall} and {egress_mod.FIREWALL_POLICY} sets mode: enforce, allowing "
-                      f"{one_line(listed, 160)}. The firewall is a technical preview, and anything sent to an allowed host, "
+                      f"{one_line(listed, 300)}. The firewall is a technical preview, the runner is taken at its label (a "
+                      "self-hosted runner given that label would have no firewall), and anything sent to an allowed host, "
                       "printed to the job's log or saved as an artifact is not blocked")
         else:
             detail = egress_mod.joined(problems or unsure)
@@ -1320,6 +1394,65 @@ class WorkflowRules:
                     if "github.token" not in found:
                         found.append("github.token")
         return found
+
+    # A name that says it holds a credential: `ANTHROPIC_API_KEY`, `deploy-token`, `DB_PASSWORD`; not
+    # `author` or `cache-key` (found by the review of 2d.2f).
+    _CREDENTIAL_NAME_RE = re.compile(
+        r"api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw|credential|bearer|cookie|authorization"
+        r"|(?:^|[_-])auth(?:$|[_-])|(?:anthropic|openai|gemini|claude|codex|model|llm)[_-]?key", re.I)
+
+    def _credential_like(self, value) -> list[str]:
+        """Values a part of the workflow is given that are not secrets but whose name says they may be a
+        credential: `vars.X`, `inputs.X`, `github.event.inputs.X`, `needs.J.outputs.X` and
+        `steps.S.outputs.X`, with X named like a key, a token or a password, and an `env` name of a model
+        key (`MODEL_KEYS`, `WITHHELD_BY_AWF`) given text that is not a secret."""
+        found: list[str] = []
+        for body in expressions(value):
+            for ref in expr_mod.refs(body):
+                path = ref.path
+                names = [part.value for part in path if part.kind == expr_mod.NAME]
+                if not names:
+                    continue
+                head = names[0].lower()
+                routed = head in ("vars", "inputs") or (head == "github" and len(names) > 2
+                                                        and names[1].lower() == "event"
+                                                        and names[2].lower() == "inputs") \
+                    or (head in ("needs", "steps") and len(names) > 2 and names[2].lower() == "outputs")
+                last = names[-1] if len(names) > 1 else ""
+                whole = len(names) < (4 if head in ("needs", "steps") or (head == "github") else 2)
+                if routed and (whole or self._CREDENTIAL_NAME_RE.search(last)):
+                    shown = ".".join(one_line(n, 40) for n in names[:4])
+                    if shown not in found:
+                        found.append(shown)
+        keys = set(egress_mod.MODEL_KEYS) | set(egress_mod.WITHHELD_BY_AWF)
+
+        def envs(item, depth=0) -> None:
+            if depth > 6:
+                return
+            if isinstance(item, dict):
+                env = item.get("env")
+                if isinstance(env, dict):
+                    for name, given in env.items():
+                        if isinstance(name, str) and name.upper() in keys and given not in (None, "") and \
+                                not self._credentials(given) and f"env.{name}" not in found:
+                            found.append(f"env.{one_line(name, 40)}")
+                for key, sub in item.items():
+                    if key != "env":
+                        envs(sub, depth + 1)
+            elif isinstance(item, list):
+                for sub in item:
+                    envs(sub, depth + 1)
+        envs(value)
+        return found
+
+    def _agent_patterns(self) -> list:
+        """The agent command patterns, the catalog's and the configuration's, compiled once."""
+        cached = self.__dict__.get("_agent_patterns_cache")
+        if cached is None:
+            cached = [re.compile(p, re.M) for p in
+                      list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
+            self.__dict__["_agent_patterns_cache"] = cached
+        return cached
 
     def _agent_step(self, step: Step, text: str) -> str | None:
         """Why the checker takes the step to run an agent, or None."""
@@ -1423,7 +1556,7 @@ class WorkflowRules:
         exec`, `pnpm dlx`, `yarn dlx`, `bunx`) and no other agent pattern. Such a step, when it is not
         read as an install, is "cannot tell" rather than an agent outside (slice 2c.8)."""
         packages = {str(name) for name in (self.detection.get("agent_installs") or {})}
-        text = step.agent_text()
+        text = step.agent_text(self._agent_patterns())
         if not packages or not text or self._PACKAGE_RUNNER_RE.search(text):
             return False
         if any(f"{name}/" in text for name in packages):
@@ -1443,8 +1576,11 @@ class WorkflowRules:
 
         def refers(text: str) -> bool:
             # The scratch directory is /tmp/obaaf-egress.<random>, so a step that names /tmp can reach it
-            # through a pattern (`/tmp/obaaf*`, `/tmp/*`) as well as by its name.
-            if "obaaf-egress" in text.lower() or "/tmp" in text:
+            # through a pattern (`/tmp/obaaf*`, `/tmp/*`) as well as by its name. Read the widest way
+            # (flagship slice 2d.2f): also with quotes and backslashes taken out and slashes collapsed,
+            # a top-level path written as a pattern or built from a variable (`/t[m]p`, `/t?p`, `/*/`,
+            # `/$D`), and a temporary directory asked for by name (`mktemp`, `TMPDIR`, `tempfile`).
+            if egress_mod.names_temporary(text):
                 return True
             return any(expr_mod.reaches(ref.path[:len(pattern)], pattern, ref.extracted or len(ref.path) > len(pattern))
                        for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
@@ -1758,6 +1894,15 @@ class WorkflowRules:
             names = self._credentials(step.raw)
             if names:
                 outside.append(f"step '{one_line(step.name, 80)}' is given {', '.join(names[:3])}")
+        # A key can reach a step by a route that is not a secret: a variable, an input, another step's or
+        # job's output (flagship slice 2d.2f). The checker cannot see what such a value holds, so one
+        # whose name says it is a credential, given outside the confined command, is "cannot tell".
+        for label, value in [("the workflow's env", {"env": self.wf.raw.get("env")}), ("the job", rest)] + \
+                [(f"step '{one_line(step.name, 80)}'", step.raw) for step in others]:
+            names = self._credential_like(value)
+            if names:
+                unsure.append(f"{label} is given {', '.join(names[:3])}, which by its name may be a credential the "
+                              "checker cannot see into, so the agent may run outside the confined command with it")
         # Credentials no expression hands over: every step can ask for an OIDC token when the job may
         # (and turn it into a cloud credential, a model provider's included), and every action is given
         # the job's token without being asked, which calls GitHub Models when the token has `models`.
@@ -1778,7 +1923,7 @@ class WorkflowRules:
         concurrent = any(step.background for step in confined)
         agents_outside = []
         for step in others:
-            why = self._agent_step(step, step.agent_text())
+            why = self._agent_step(step, step.agent_text(self._agent_patterns()))
             before = (step.index < first and not step.background and not concurrent
                       and (step.group is None or step.group not in groups))
             if why == "runs an agent CLI" and before and step.index not in job.agent_script_steps:
@@ -1807,7 +1952,7 @@ class WorkflowRules:
             problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
                             "(the checker tells where an agent runs by where its key goes)")
         elif not agents_outside and not any(place.reaches for place in placements):
-            recognised = [step for step in confined if self._agent_step(step, step.agent_text())
+            recognised = [step for step in confined if self._agent_step(step, step.agent_text(self._agent_patterns()))
                           or step.index in job.agent_script_steps]
             if not recognised:
                 unsure.append("no credential reaches the confined command or AWF's API proxy, no other step is given "
@@ -1842,7 +1987,7 @@ class WorkflowRules:
                                 "saves after the job), from which a later run can load it")
                 continue
             if not before:
-                if step.uses_action("actions/upload-artifact"):
+                if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge"):
                     continue
                 after.append(where)
             elif refs:
@@ -2293,7 +2438,7 @@ class WorkflowRules:
                         or (holder.group is not None and step.group == holder.group)):
                     nearby[step.index] = step
         evidence = any(place.reaches for place in placements) or any(
-            self._agent_step(step, step.agent_text()) or step.index in job.agent_script_steps for step in confined)
+            self._agent_step(step, step.agent_text(self._agent_patterns())) or step.index in job.agent_script_steps for step in confined)
         first = min(holder.index for holder in keyed) if keyed else 0
         agent_seen = False           # an agent recognised in a step before or beside a key, said as "not met"
         for step in sorted(nearby.values(), key=lambda s: s.index):
@@ -2311,7 +2456,7 @@ class WorkflowRules:
                                   "lists as released, before or beside the step that holds the key, and what that "
                                   "version's own steps do outside the sandbox is not established")
                 continue
-            why = self._agent_step(step, step.agent_text())
+            why = self._agent_step(step, step.agent_text(self._agent_patterns()))
             plain_before = step.index < first and not step.background and step.group is None
             if why == "runs an agent CLI" and plain_before and step.index not in job.agent_script_steps:
                 if self._installs_only(job, step):
@@ -2884,47 +3029,272 @@ class WorkflowRules:
                      "cache-mode: {mode}.", job, triggers=sorted(privileged), mode=value)
 
     # -------------------------------------------------------------- GHA-008
+    # Where a job's images are written: the container, and each service. Read by one function, so a form
+    # the checker does not know is "cannot tell" rather than nothing (flagship slice 2d.2f).
+    _IMAGE_KEYS = ("container", "services", "image", "uses")
+
     def unpinned(self, job: Job) -> None:
         permissions = job.permissions
+        # A called workflow's triggers are its callers', which this file does not show: its job is taken
+        # to be startable by anything, so it is never low (flagship slice 2d.2f; a caller on
+        # pull_request_target made the called job low before).
         privileged = (not permissions or not permissions.declared or permissions.write_scopes()
                       or permissions.oidc or job.secret_names()
-                      or job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS)
+                      or job.triggers() & PRIVILEGED_UNTRUSTED_TRIGGERS or self.wf.callable)
         severity = ("high" if any(job.in_lane(lane) for lane in ("release", "agent", "effect")) else
                     "medium" if privileged else "low")
-        refs = [(s, s.uses, s.line) for s in job.steps if s.uses]
-        if job.reusable and not job.reusable.startswith("./"):
+        refs = [(s, s.uses, s.line) for s in job.steps if s.uses is not None]
+        if job.reusable is not None and isinstance(job.raw.get("uses"), str):
             refs.append((None, job.reusable, job.line))
         for step, uses, line in refs:
-            if uses.startswith("./"):
+            what = "Reusable workflow" if step is None else "Action"
+            if is_local_reference(uses):
+                if step is not None and uses.startswith("./"):
+                    self._local_from_elsewhere(job, step, severity)
                 continue
-            if uses.startswith("docker://"):
-                if "@sha256:" not in uses:
+            if uses.lower().startswith("docker://"):
+                if not IMAGE_DIGEST_RE.search(uses):
                     self.add("OBAAF-GHA-008", line, "Container '{uses}' is not pinned to a sha256 digest.", job,
                              step, severity, kind="container", uses=uses)
                 continue
             ref = uses.split("@", 1)[1] if "@" in uses else ""
-            if not FULL_SHA_RE.match(ref):
-                what = "Reusable workflow" if step is None else "Action"
+            if not COMMIT_SHA_RE.fullmatch(ref):
                 self.add("OBAAF-GHA-008", line,
                          what + " '{uses}' is pinned to '{ref}', not a full commit SHA.", job, step,
                          severity, kind="reusable-workflow" if step is None else "action", uses=uses,
                          ref=Fact(ref, ref or 'nothing'))
-        images = []
-        container = job.raw.get("container")
-        if isinstance(container, str):
-            images.append(container)
-        elif isinstance(container, dict) and container.get("image"):
-            images.append(str(container["image"]))
-        services = job.raw.get("services")
-        if isinstance(services, dict):
-            for svc in services.values():
-                if isinstance(svc, dict) and svc.get("image"):
-                    images.append(str(svc["image"]))
-        for image in images:
-            if "${{" in image or "@sha256:" in image:
+        for where, image, line in self._images(job):
+            if image is None:
+                self.add("OBAAF-GHA-008", line,
+                         "Job '{job}' gives {where} an image the checker cannot read, so it cannot tell whether it "
+                         "is pinned to a sha256 digest.", job, severity=severity, kind="image-unreadable",
+                         where=where)
                 continue
-            self.add("OBAAF-GHA-008", job.line, "Image '{image}' is not pinned to a sha256 digest.", job,
-                     severity=severity, kind="image", image=image)
+            for value in self._image_values(job, image):
+                if value is not None and not value.strip():
+                    continue    # an empty image is no container (a matrix row run on the runner itself)
+                if value is None:
+                    self.add("OBAAF-GHA-008", line,
+                             "Image '{image}' of {where} is computed when the job runs, so the checker cannot tell "
+                             "whether it is pinned to a sha256 digest.", job, severity=severity,
+                             kind="image-expression", image=image, where=where)
+                elif not IMAGE_DIGEST_RE.search(value):
+                    self.add("OBAAF-GHA-008", line, "Image '{image}' is not pinned to a sha256 digest.", job,
+                             severity=severity, kind="image", image=value)
+
+    def _images(self, job: Job) -> list:
+        """(where, image, line) for the job's container and every service: the image as text, or None
+        when it is written in a form the checker does not read (not text, a mapping without `image`, a
+        key in another letter case, services not written as a mapping). GitHub may refuse some of these
+        forms; which, is not established, and none is taken for no image."""
+        out: list = []
+        raw = job.raw
+        for key in raw:
+            if isinstance(key, str) and key != key.lower() and key.lower() in ("container", "services"):
+                out.append((f"'{one_line(key, 40)}'", None, raw.line_of(key) if hasattr(raw, "line_of") else job.line))
+
+        def one(where: str, value, line: int) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                out.append((where, value, line))
+                return
+            if isinstance(value, dict):
+                odd = [k for k in value if isinstance(k, str) and k != "image" and k.lower() == "image"]
+                image = value.get("image")
+                if odd or not isinstance(image, str):
+                    out.append((where, None, line))
+                else:
+                    out.append((where, image, line))
+                return
+            out.append((where, None, line))
+
+        one("its container", raw.get("container"), job.line)
+        services = raw.get("services")
+        if isinstance(services, dict):
+            for name, service in services.items():
+                one(f"service '{one_line(as_text(name), 60)}'", service, job.line)
+        elif services is not None:
+            out.append(("its services", None, job.line))
+        return out
+
+    def _image_values(self, job: Job, image: str) -> list:
+        """The images a value names: itself when it has no expression; each value of a matrix written out
+        in the file when it is exactly `${{ matrix.x }}`; otherwise [None], computed when the job runs."""
+        if "${{" not in image:
+            return [image]
+        text = image.strip()
+        bodies = expr_mod.bodies(text)
+        if (len(bodies) == 1 and text.startswith(expr_mod.OPEN) and text.endswith("}}")
+                and len(expr_mod.OPEN) + len(bodies[0]) + 2 == len(text)):
+            toks = expr_mod.tokens(bodies[0])
+            if len(toks) == 3 and toks[0] == ("id", "matrix") and toks[1] == ("op", ".") and toks[2][0] == "id":
+                values = job._matrix_values(toks[2][1])
+                if values:
+                    return list(dict.fromkeys(values))
+        return [None]
+
+    def _local_from_elsewhere(self, job: Job, step: Step, severity: str) -> None:
+        """A `./` action is the files at that path in the workspace when the step runs. Where an earlier
+        step put code from outside the run's own commit there, the action is that code, which can move
+        (flagship slice 2d.2f): a checkout with `repository:` whose `path` holds the action's path, at a ref
+        that is not a full commit SHA (`local-from-checkout`); an artifact downloaded from another run or
+        repository, or a cache restored, over that path; or a script line that clones or downloads
+        (`git clone`, `gh repo clone`, `git worktree add`, `git submodule add`, `curl`, `wget`,
+        `gh release download`, `gh run download`, `degit`, `tar x`, `unzip`, `bsdtar`, `7z`) and names
+        the action's top directory (`local-after-download`). Paths are compared after `.` and `..` are
+        resolved; an absolute path, or one written with an expression or a variable, is taken to hold
+        the action."""
+        target = self._workspace_path(step.uses[2:])
+        if target is None:
+            return
+        top = target.split("/", 1)[0]
+        for earlier in reversed(job.steps[:step.index]):
+            if earlier.uses_action("actions/checkout"):
+                given = earlier.with_
+                if not self._covers(given.get("path", ""), target):
+                    continue
+                repository = given.get("repository")
+                repo_text = as_text(repository).strip() if repository is not None else ""
+                if not repo_text or re.fullmatch(r"\$\{\{\s*github\.repository\s*\}\}", repo_text, re.I):
+                    return      # the workflow's own repository: what a `./` action normally is
+                ref = given.get("ref")
+                ref_text = as_text(ref).strip() if ref is not None else ""
+                if COMMIT_SHA_RE.fullmatch(ref_text):
+                    return
+                self.add("OBAAF-GHA-008", step.line,
+                         "Action '{uses}' is taken from {repository}, which step '{checkout}' checks out at "
+                         "{ref}, not a full commit SHA.", job, step, severity, kind="local-from-checkout",
+                         uses=step.uses, repository=Fact(repo_text, f"'{one_line(repo_text, 80)}'"),
+                         checkout=Fact(earlier.name, one_line(earlier.name, 80)),
+                         ref=Fact(ref_text, f"'{one_line(ref_text, 60)}'" if ref_text else "its default branch"))
+                return
+            if self._fetches_over(earlier, target, top):
+                self.add("OBAAF-GHA-008", step.line,
+                         "Action '{uses}' runs from the workspace after step '{clone}' puts code from outside this "
+                         "run's commit there, so the checker cannot tell which repository and commit the action "
+                         "comes from.", job, step, severity, kind="local-after-download", uses=step.uses,
+                         clone=Fact(earlier.name, one_line(earlier.name, 80)))
+                return
+
+    # A download that can bring another run's or repository's files: actions/download-artifact given a run,
+    # a repository or a token, and any other repository's download-artifact action.
+    _CROSS_RUN_INPUTS = ("run-id", "repository", "github-token")
+    # Words that clone, download or unpack code on a script line (`_fetches_over`), as whole words.
+    _FETCH_WORDS = frozenset({"curl", "wget", "degit", "unzip", "bsdtar", "7z", "unrar"})
+
+    def _fetches_over(self, earlier: Step, target: str, top: str) -> bool:
+        if earlier.uses_action("actions/cache") or earlier.uses_action("actions/cache/restore"):
+            paths = as_text(earlier.with_.get("path", "") or "")
+            return any(self._covers(line, target, literal_only=True) for line in paths.splitlines() if line.strip())
+        action = (earlier.action or "").lower()
+        if action.endswith("download-artifact") or "/download-artifact" in action:
+            given = earlier.with_
+            if action == "actions/download-artifact" and not any(given.get(k) for k in self._CROSS_RUN_INPUTS):
+                return False    # this run's own artifact
+            return self._covers(given.get("path", ""), target)
+        if not top:
+            return False        # `uses: ./`: a download's target is not read for the workspace root (stated)
+        for line in earlier.scripts().splitlines():
+            if top not in line:
+                continue        # cheap test first: the line must name the action's top directory
+            for command in _COMMAND_SPLIT_RE.split(line):
+                if top in command and self._fetches_into(command, top):
+                    return True
+        return False
+
+    # Options of `git clone` that take the next word as their value.
+    _CLONE_VALUE_OPTIONS = frozenset({"--depth", "-b", "--branch", "-o", "--origin", "--reference",
+                                      "--reference-if-able", "-c", "--config", "--filter", "-j", "--jobs",
+                                      "--separate-git-dir", "--template", "-u", "--upload-pack", "--shallow-since",
+                                      "--shallow-exclude", "--server-option", "--bundle-uri", "--revision"})
+
+    def _fetches_into(self, command: str, top: str) -> bool:
+        """Whether one command (no `;`, `&&`, `|` in it) clones or downloads into a workspace path at or
+        under `top`, or clones a repository named `top` with no folder given."""
+        words = [w for w in re.split(r"[\s()`'\"]+", command) if w]
+        fetches = bool(self._FETCH_WORDS & set(words))
+        clone_into = None
+        for n, word in enumerate(words[:-1]):
+            nxt = words[n + 1]
+            if word == "git" and "clone" in words[n + 1:n + 4]:
+                fetches = True
+                rest, k = [], words.index("clone", n) + 1
+                while k < len(words):
+                    if words[k] in self._CLONE_VALUE_OPTIONS:
+                        k += 2
+                    elif words[k].startswith("-"):
+                        k += 1
+                    else:
+                        rest.append(words[k])
+                        k += 1
+                if len(rest) == 1:      # no folder named: git makes one from the repository's name
+                    clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                break
+            if word == "gh" and words[n + 1:n + 3] == ["repo", "clone"]:
+                fetches = True
+                rest = []
+                for w in words[n + 3:]:
+                    if w == "--":
+                        break
+                    if not w.startswith("-"):
+                        rest.append(w)
+                if len(rest) == 1:
+                    clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                break
+            if (word == "git" and any(w in ("worktree", "submodule") for w in words[n + 1:n + 4])) \
+                    or (word == "gh" and nxt in ("repo", "release", "run")
+                        and any(w in ("download", "clone") for w in words[n + 1:n + 4])) \
+                    or (word == "tar" and re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*|--extract|--get", nxt)):
+                fetches = True
+                break
+        if not fetches:
+            return False
+        if clone_into == top:
+            return True
+        for word in words:
+            # A path in the workspace, written as a word or as an option's value (`--output=x`); not a
+            # URL, an absolute path, a home path or one built from a variable.
+            value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+            if "://" in value or value.startswith(("/", "~", "$", "-")):
+                continue
+            path = self._workspace_path(value)
+            if path is not None and (path == top or path.startswith(top + "/")):
+                return True
+        return False
+
+    def _covers(self, path, target: str, literal_only: bool = False) -> bool:
+        """Whether files put at `path` (as a step's input gives it) can be the action at `target`: the
+        workspace root, the target or a folder above it, after `.` and `..` are resolved. An absolute
+        path, `~`, or one with an expression or a variable is taken to hold the action, unless
+        `literal_only` (a cache's paths), where it is taken not to (a cache path is usually outside the
+        workspace, `~/.cargo`)."""
+        text = as_text(path).strip() if path is not None else ""
+        for prefix in ("${{ github.workspace }}/", "$GITHUB_WORKSPACE/", "${GITHUB_WORKSPACE}/"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+        if text.startswith(("/", "~")) or "${{" in text or "$" in text or "*" in text:
+            return not literal_only
+        root = self._workspace_path(text)
+        if root is None:
+            return False        # outside the workspace
+        return root == "" or target == root or target.startswith(root + "/")
+
+    @staticmethod
+    def _workspace_path(text: str) -> str | None:
+        """A path in the workspace as written in a step, with `.` and `..` resolved and no slashes at its
+        ends; None when it points outside the workspace."""
+        parts: list[str] = []
+        for part in str(text).replace("\\", "/").split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not parts:
+                    return None
+                parts.pop()
+            else:
+                parts.append(part)
+        return "/".join(parts)
 
     # -------------------------------------------------------------- GHA-011
     def persisted_credentials(self, job: Job) -> None:

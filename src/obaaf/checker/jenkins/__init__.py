@@ -22,7 +22,7 @@ from obaaf.checker.jenkins import parser as parser_mod
 from obaaf.checker.jenkins import rules as rules_mod
 from obaaf.checker.jenkins.model import CR_NO, CR_POSSIBLE, CR_YES
 from obaaf.checker.jenkins.rules import ALL, RULES, Unknown, stage_label
-from obaaf.checker.workflow import IdleDeclaration, declared_lane
+from obaaf.checker.workflow import IdleDeclaration, bounded, declared_lane, one_line
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "Library", "Intermediate", "Saved",
              "DerivedDataCache", ".godot", "Binaries", "build", "dist", "target", ".gradle", ".idea", "vendor"}
@@ -137,6 +137,11 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
             result.lane_problems.append(IdleDeclaration(kind="jenkins-computed", **where))
         elif declared_lane(value) is None:
             result.lane_problems.append(IdleDeclaration.of("jenkins-not-a-lane", value, **where))
+    for kind, name, value, line, stage in dict.fromkeys(pipeline.unread_lanes):
+        # Flagship slice 2d.2f: the variable under another spelling, and an assignment to env in a script.
+        result.lane_problems.append(IdleDeclaration.of(
+            kind, value if value is not None else "a value computed when the build runs", path=rel, line=line,
+            stages=(stage,), name=bounded(name), name_shown=one_line(name, 60)))
     return result
 
 

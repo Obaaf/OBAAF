@@ -30,6 +30,21 @@ from obaaf.checker.rules import FIXED, Finding
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
+def _same_as_read(root: Path, rel: str) -> bool:
+    """Whether a file is one the checker reads under another spelling, which a file system that ignores
+    letter case gives for `.github/obaaf.yml` (`.github/OBAAF.yml` on macOS or Windows)."""
+    for location in CONFIG_LOCATIONS:
+        try:
+            if (root / location).is_file() and os.path.samefile(root / location, root / rel):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+# Names a checker configuration may be given by mistake, in any letter case, at the root or in .github
+# (flagship slice 2d.2f): the checker refuses to run beside one it would not read.
+_CONFIG_LOOKALIKES = frozenset({"obaaf.yml", "obaaf.yaml", ".obaaf.yml", ".obaaf.yaml"})
 # Words in a job id or name that suggest it runs an AI agent, used only to warn
 # when such a job is not in the agent lane (never to classify it).
 _AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|cline|\bllm\b|\bai[-_ ]|autofix|auto[- ]fix",
@@ -242,6 +257,26 @@ class Config:
     @classmethod
     def load(cls, root: Path, explicit: str | None = None) -> "Config":
         candidates = [Path(explicit)] if explicit else [root / rel for rel in CONFIG_LOCATIONS]
+        if not explicit:
+            # Only the first would be read, and every lane, acceptance and protected secret in the others
+            # would be dropped without a word (flagship slice 2d.2f; D-044 named it as unreported).
+            present = [rel for rel in CONFIG_LOCATIONS if (root / rel).is_file()]
+            if len(present) > 1:
+                raise ConfigError(f"{root}: more than one checker configuration ({', '.join(present)}); the checker "
+                                  f"reads one, so keep one of them")
+            # A file named like a configuration where the checker does not look would be ignored without a
+            # word, its lanes and protected secrets with it.
+            for folder in ("", ".github"):
+                try:
+                    names = os.listdir(root / folder) if (root / folder).is_dir() else []
+                except OSError:
+                    names = []
+                for name in names:
+                    rel = f"{folder}/{name}" if folder else name
+                    if name.lower() in _CONFIG_LOOKALIKES and rel not in CONFIG_LOCATIONS and (root / rel).is_file() \
+                            and not _same_as_read(root, rel):
+                        raise ConfigError(f"{root}: {rel} looks like a checker configuration, and the checker does not "
+                                          f"read it (it reads {', '.join(CONFIG_LOCATIONS)}); rename or remove it")
         for path in candidates:
             if path.is_file():
                 try:
@@ -587,9 +622,20 @@ _IDLE_TEMPLATES = {
     "jenkins-not-a-lane": f"For the steps in {{stages}}, OBAAF_LANE is set to {{value}}, {_NOT_A_LANE}.",
     "jenkins-computed": "For the steps in {stages}, OBAAF_LANE is set to a value computed when the build runs, "
                         "which the checker cannot read as a lane, so the declaration changes nothing.",
+    "jenkins-misnamed": "{name} is set to {value} (written in {stages}). The variable that declares a lane is "
+                        "OBAAF_LANE, spelled exactly so, so the declaration changes nothing.",
+    "jenkins-scripted": "A script assigns {value} to the environment variable {name} (written in {stages}), which "
+                        "the checker does not read as a lane declaration (it reads OBAAF_LANE in an environment "
+                        "block or a withEnv), so the declaration changes nothing.",
     "step-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in the env of step '{{step}}', {_NOT_READ}.",
     "container-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in container.env, {_NOT_READ}.",
     "service-env": f"Job '{{job}}' sets OBAAF_LANE to {{value}} in services.{{service}}.env, {_NOT_READ}.",
+    "elsewhere": "Job '{job}' sets {name} to {value} in {where}, where the checker does not read a lane "
+                 "declaration (it reads OBAAF_LANE, spelled exactly so, in the job's env and the workflow's env), "
+                 "so the declaration changes nothing.",
+    "workflow-elsewhere": "The workflow sets {name} to {value} in {where}, where the checker does not read a lane "
+                          "declaration (it reads OBAAF_LANE, spelled exactly so, in the job's env and the workflow's "
+                          "env), so the declaration changes nothing.",
     "entry-not-a-lane": f"lanes: '{{entry}}' is set to {{value}}, {_NOT_A_LANE}.",
     "entry-no-job": "lanes: '{entry}' (set to {value}) names a job that {file} does not have, so the declaration "
                     "changes nothing.",
@@ -749,6 +795,8 @@ class _LaneDeclarations:
                 values["service"] = rules_mod.Fact(found.service, wf_mod.one_line(found.service, 60))
             if found.name:
                 values["name"] = rules_mod.Fact(found.name, f"'{found.name_shown}'")
+            if found.kind in ("elsewhere", "workflow-elsewhere"):
+                values["where"] = rules_mod.Fact(found.where, f"'{wf_mod.one_line(found.where, 80)}'")
             if found.kind.startswith("jenkins-"):
                 # The labels are the checker's own, as `--lanes` prints them: a stage by its name, a
                 # stage in a stage as `Outer > Inner`, a method as `name()`, a post block as `post always`.

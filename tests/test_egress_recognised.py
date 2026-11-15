@@ -159,7 +159,8 @@ class NativeFirewallTest(unittest.TestCase):
                 self.assertEqual(verdict(f), CANNOT_TELL)
 
     def test_the_detail_says_whether_githubs_defaults_are_allowed(self):
-        self.assertIn("GitHub's default endpoints", detail(self.firewall()))
+        # Flagship slice 2d.2f: the defaults are named, github.com first, since anything sent there passes.
+        self.assertIn("the firewall's defaults (github.com, codeload.github.com", detail(self.firewall()))
         f = self.firewall(policy="mode: enforce\nno-default-urls: true\nallow: [github.com]\n")
         self.assertEqual(verdict(f), VERIFIED)
         self.assertIn("github.com and nothing else", detail(f))

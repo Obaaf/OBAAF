@@ -17,9 +17,10 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | 2d.2c | What a run checks out: OBAAF-GHA-002, 011, 012, 019 | 2026-11-14 | `tests/test_checkout_bypasses.py` |
 | **2d.2d** | **Triggers, scripts and release jobs: OBAAF-GHA-010, 013, 015** | **2026-11-14** | `tests/test_trigger_script_release_bypasses.py` |
 | **2d.2e** | **Release and effect jobs: OBAAF-GHA-006, 007, 014, 016, 017, 021, 022** | **2026-11-14** | `tests/test_release_effect_bypasses.py` |
-| Still open | The rest of 2d.2: see [the plan](flagship.md) | | |
+| **2d.2f** | **Pins, egress and declarations: OBAAF-GHA-008, 009, 020, 023, OBAAF-CFG-001** | **2026-11-15** | `tests/test_pins_egress_declaration_bypasses.py` |
+| Still open | The rest of 2d.2: the Jenkins rules, the repository and instruction-file rules, the settings rules; see [the plan](flagship.md) | | |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs) and [2d.2e](#2d2e-release-and-effect-jobs).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs) and [2d.2f](#2d2f-pins-egress-and-declarations).
 
 ## 2d.2b: what a job can reach
 
@@ -715,3 +716,414 @@ What the checker reported for these seven rules on each attempt's workflow, with
 | 242 | nothing | OBAAF-GHA-016 high cannot-tell |
 | 243 | nothing | OBAAF-GHA-016 high cannot-tell |
 | 244 | nothing | OBAAF-GHA-016 high cannot-tell |
+
+## 2d.2f: pins, egress and declarations
+
+Run `shoveler`, 2026-11-15, on a copy of `flagship` at `1a8075b`. Two Opus 5.5 reviewers that did not write the code attacked the five workflow rules no earlier tranche took, in parallel: reviewer A OBAAF-GHA-008, 009 and 023 (147 attempts: 38 ways past, 14 of them not verified, 3 weaker cases, 8 false positives, 5 tracebacks, 93 held), reviewer B OBAAF-GHA-020 and OBAAF-CFG-001 (160 attempts: 50 ways past, 14 of them not verified, 1 false positive, 109 held). The classes were then fixed, and every attempt was run again with the old and the new checker; the two tables at the end of this section are that run, generated from the attempt directories. Expectrail at `8321b17` (a read-only copy of `.github` and `AGENTS.md`, `fresh-*` left out unread) gives the same 43 findings, with the same identities, with both.
+
+GitHub's documentation was read for the workflow syntax and contexts (by reviewer A). Two facts were read on 2026-11-15 from primary pages, and both changed the work: the native egress firewall's README ([github-early-access/actions-native-egress-firewall](https://github.com/github-early-access/actions-native-egress-firewall)) describes enforcement in its technical preview ("Deny all by default in `enforce` mode"), exactly three policy keys (`mode`, `allow`, `no-default-urls`), a format that "may change", and default endpoints that include `github.com`; and GitHub's changelog of [2026-07-30](https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax) introduced `uses: $/path`, the workflow's own repository at the running commit. Reviewer B had found only a third-party page that called the firewall audit-only; that page is out of date, and the README was read before anything was credited or withdrawn.
+
+### OBAAF-GHA-008 Action, reusable workflow or image not pinned
+
+**Got through, now fixed.**
+
+- **An image written as an expression was skipped** (025 to 030, 032, 133): `container: ${{ matrix.image }}`, `node:${{ matrix.v }}`, an image with `${{ '' }}` at its end, a service's image from `vars`. Every image is now read. One that is exactly `${{ matrix.x }}` with the matrix written out in the file is read value by value (the reader 2d.7 wrote for runner labels); any other is reported as kind `image-expression`, at the job's severity.
+- **Forms of `container` and `services` that were not read** (033, 034, 037, 128, 129, 131, 147): a service written as text, `Image:`, `Container:` or `Services:` in another letter case, a number, services as a list. One function now reads the container and every service; text is an image, and anything else is kind `image-unreadable`. GitHub may refuse some of these files (not verified); none is taken for "no image".
+- **A 64-digit ref counted as a commit** (004, 005, 006): github.com has no SHA-256 repositories, so such a ref can only be a tag or a branch. A pin is now 40 hexadecimal digits in lower case, matched in full (the old pattern's `$` also took a ref ending in a line break, 009). An image's digest must be `@sha256:` and 64 hexadecimal digits at its end; before, the text `@sha256:` anywhere counted.
+- **A `./` action loaded from another repository** (013, 014, 145): a checkout of `someorg/actions` at `main` (or at its default branch) into `ext`, then `uses: ./ext/deploy`, runs that repository's code at a ref that moves, and was taken for the workflow's own. It is now kind `local-from-checkout`, with the repository and the ref as facts, unless the checkout's `ref` is a full commit SHA (146 is the control); paths are compared after `.` and `..` are resolved, and an absolute path or one with an expression is taken to hold the action. A `./` action after an artifact from another run or repository (`actions/download-artifact` given `run-id`, `repository` or `github-token`, or another repository's download-artifact action), a cache restored at a workspace path that holds it, or a script line that clones or downloads (`git clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`, `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar`, `7z`) and names a workspace path at or under the action's top directory (not a URL), or clones a repository of that name, is kind `local-after-download`. Not followed: `git fetch` and `git merge`, `git am`, `git apply`, a target on another line or in `working-directory`, downloads before `uses: ./`, an artifact of the same run, and a cache restored at a path written with `~`, an absolute path, a glob or an expression.
+- **A called workflow's severity** (050, 053, 135, weaker cases): a job in a workflow that only `workflow_call` starts was low with read-only permissions, though its callers may be started by `pull_request_target`. It is now never low.
+- **Tracebacks** (138 to 142): a number of thousands of hexadecimal digits as an image or a `uses` ended the run in Python's integer-to-text limit, and one such file lost every other file's findings. Values are now turned to text with `as_text`, and a `uses` that is not text is an error of the file.
+
+**False positives fixed.** `uses: $/.github/actions/build` and `uses: $/.github/workflows/x.yml` (011, 012), reported as "pinned to nothing"; `Docker://` in another letter case (018), reported as an action.
+
+**False positives kept** (failing closed, not verified): a commit SHA in upper case (008), and a digest by another algorithm (`sha512`, 019).
+
+**Under stated limits** (now in the rule's description): a local composite action's own `uses` (015, slice 2d.4), impostor commits (a SHA that exists only in a fork of the repository), a tag named like a 40-digit SHA, and what a pinned action fetches when it runs.
+
+### OBAAF-GHA-009 Token permissions not declared
+
+Every odd `permissions` value already failed the file; keys in another case, look-alike keys and keys in the wrong place were reported. **Got through, now fixed**, all classes shared with every rule:
+
+- **Job ids that collide as text** (044, 045, 092, 103): `null:` and `None:`, `true:` and `"True"`. This YAML reader (1.1) gives `None` and `True`, whose text is the other job's id, so the first job was replaced and vanished from every rule and from `--lanes`. A job id that is not text, and two ids the checker reads as one, are now errors of the file; both jobs are checked (`null` is named as YAML writes it).
+- **Workflow files the checker did not find** (074, 075, 104, 120): `.github/workflows/.yml` (Python gives it no suffix) and `wf.YML`. Files are now found with the extension in any letter case. Whether GitHub runs them is not verified.
+- **A merge key** (082, 083, 038): `<<: {permissions: {}}` at the top was merged by this reader, and a YAML 1.2 reader would take it for a key named `<<`. A merge key anywhere in a workflow is now an error of the file.
+
+**Kept, on purpose** (127): an acceptance of OBAAF-GHA-009 for a push-only job still covers it after `pull_request_target` is added. The finding is the missing declaration; what a trigger adds is reported by the rules about triggers, with their own identities, and adding the triggers here would make every existing acceptance new for no new risk.
+
+### OBAAF-GHA-023 Template placeholder left in a workflow
+
+**Got through, now fixed.** The rule searched the file's text. A placeholder written with an escape (`OBAAF\x5FOWNER`, `_`, `\U0000005F`, `\x30` in the SHA, `\x40` for `@`, 106 to 112, 123), split by a backslash at the end of a line inside double quotes (108, 110), or in lower case (113) was not found. Values are now read as YAML gives them, `OBAAF_OWNER` in any case and the all-zero SHA as exactly 40 zeros after `@` or as a `uses` ref.
+
+**Acceptance** (124, 125): one finding per file, named only by the placeholder, so a baseline written while the placeholder was in a comment covered a real `uses: OBAAF_OWNER/...` added later. Each placeholder is now its own finding, with the job, the step and the key (`steps[1].uses`) as facts.
+
+**False positives fixed.** A placeholder in a comment (114), which GitHub never reads, and 41 zeros (116). **Kept:** a placeholder in a script's text (115), which may be a value the script uses.
+
+### OBAAF-GHA-020 Agent job without an egress restriction
+
+**Got through, now fixed.**
+
+- **The agent was not found, so there was no finding at all** (279 to 285): the egress action with a trailing or doubled slash, from a fork, or copied into the repository; an agent CLI in another action's `command` input; in a `docker://` step's arguments; spelt `cl''aude -p` or `cl\aude -p`. Only the run script, a github-script script and the `run` of OBAAF's own action were read. The agent is now looked for in each command in any input a step gives an action, a `docker://` step's entrypoint and arguments, the step's `shell` and `env` values and the default shell, where the command's first word (after assignments, wrappers such as `sudo -u user`, `npx`, `nice -n 10` or `timeout 5m`, and a shell's `-c`) is an agent's, and the run script with the step's env values put in (`$AGENT -p`); and the scripts read before are also read with lines joined and quotes and backslashes taken out. A fork or copy of the action is not OBAAF's, so the finding is reported plainly; it never clears.
+- **The firewall's policy read narrowly** (211 to 214): `mode: enforce` beside `MODE: log`, `Allow:` beside `allow:`, `allow-ips`, `overrides`. A key other than the README's three, or one of them in another letter case, is now "cannot tell".
+- **What may follow the confined command** (236): `actions/upload-artifact/../../../evil/act/v1@v4` was taken for upload-artifact (the path was normalised, then matched by prefix). Only `actions/upload-artifact` or `actions/upload-artifact/merge`, at a path with no `.`, `..` or empty part, may follow now.
+- **The scratch directory named by a pattern** (237, 239): `/t[m]p/obaaf-e*` in a cache's path and `$(dirname $(mktemp -u))` in an earlier step. A value names /tmp now also when quotes, backslashes and repeated slashes are taken out, when a top-level part of a path is a pattern or an expansion, and when it asks for a temporary directory by name (`mktemp`, `TMPDIR`, `tempfile`).
+- **Processes left running** (241 to 245): `pm2`, `ssh -f`, `sudo -b`, `os.fork()` in Python, `systemctl start`, `dockerd`. The list now has service and process managers, `ssh -f` and `-N`, `ssh-agent`, `socat`, `sudo -b`, the container daemons, `crontab`, and the words a script language forks or spawns with, in any letter case. It is still a list.
+- **The agent outside the confined command, with a key by another route** (251, 252, 254, 360): `vars.ANTHROPIC_API_KEY`, a job output, a `docker://` step, github-script. An agent the checker now recognises there is "not met" (252 by the backslash reading, 254 by the arguments); a value given outside the confined command whose name says it may be a credential (`vars.*KEY*`, a job's or step's output named like a token, `toJSON(vars)`, an `env` name of a model key given text) is "cannot tell".
+
+**False positive fixed.** The firewall's label written twice (209) was "cannot tell".
+
+**Not fixed, and stated in the rule's description:** a self-hosted runner given the firewall's label (228; a cleared finding now says the label is taken at its word), an agent run by `npm run` (287), a remote reusable workflow (295) or a local composite action (296, slice 2d.4), code in an earlier action's post step that does not name /tmp, what a later job does with the uploaded artifact (356; OBAAF-GHA-021 and 022), and upload-artifact pinned to an impostor commit (357). **Not a way past:** the firewall's default endpoints (215) are GitHub-managed URLs from its `/meta` endpoint, not a wildcard over Azure storage (README, 2026-11-15); a cleared finding now names them, `github.com` first.
+
+### OBAAF-CFG-001 Lane declaration that does nothing
+
+**Got through, now fixed.**
+
+- **Other spellings** (305 to 311): a zero-width space, a Cyrillic `О`, `OBAAFLANE`, `OBAAF.LANE`, `OBAAF_LANES`, `OBAAF_LANE_`. A name is now another spelling when what it looks like (compatibility forms folded, invisible characters out, look-alike letters and digits mapped, only letters kept, in upper case) is `OBAAFLANE` or one edit from it. `MY_OBAAF_LANE`, `OBAAF_STEP` and `OBAAF_EGRESS` are not.
+- **Other spellings where the variable is not read** (313 to 315): a step's, container's or service's env. Reported as `elsewhere`.
+- **Places the list did not name** (317 to 320): an `env` written as one expression, a step's `with`, a matrix key, a called workflow's `with`; also a script that writes it to `GITHUB_ENV` (2d.2a's item 4). The whole workflow is walked for the name, and each is the new case `elsewhere` (`workflow-elsewhere` outside the jobs). A definition under the name (a `workflow_call` input written as a mapping) is not a declaration.
+- **A configuration file ignored without a word** (335, 337, and 336 weak): `.github/obaaf.yml` beside `obaaf.yml` or `.github/obaaf.yaml`, and `.obaaf.yml`. Two configurations, or a file named like one where the checker does not look, are a configuration error (exit status 2).
+- **Jenkins** (347, 348, 350): `environment { obaaf_lane = ... }`, `withEnv(['OBAAF-LANE=...'])` and `script { env.OBAAF_LANE = ... }`. The first two are `jenkins-misnamed`, the third `jenkins-scripted`; D-044 had named them as unreported.
+
+**Changed from 2a.4's tests.** Two tests encoded what was a way past: `OBAAF_LANES` and `OBAAFLANE` were "not a spelling", and an action input named `OBAAF_LANE` was "not an env". They now expect the findings.
+
+### Review
+
+One Opus 5.5 reviewer that did not write the code reviewed the slice. Its first pass found the full suite green, Expectrail's 43 findings unchanged, and six blocking findings, each fixed and tested in `tests/test_pins_egress_declaration_bypasses.py`:
+
+1. **Slow paths.** The first version's download pattern (`\bgit\b[^\n]*\b(clone|...)`) and the new `ssh` and `sudo` parts of the process pattern were quadratic: 37 s on a 12 KB line repeating `gh repo`, 10 s on 96 KB of `ssh `. Both are now read word by word on each line; the same inputs take under a second.
+2. **False positives of `local-after-download`** on common workflows: a cache with a multi-line path (`~/.cargo/registry`), `unzip` into `$HOME/.local`, `git checkout -b`, `git submodule update`, `git config ... safe.directory`, and any artifact download. The rule now names only what can bring code from outside the run's commit over the action's path (see above).
+3. **False positives of the agent reading**: every action input was searched with the agent patterns, and `aider` and `cline` are ordinary words ("vous aider bientôt" in a French comment made a stale-bot job an agent job, high OBAAF-GHA-003). Inputs are now read as commands, and only a command whose first word is an agent's counts.
+4. **Paths not resolved** in `local-from-checkout`: `path: ./ext/../ext2`, an absolute path, and `uses: ./.github/../ext/deploy` got past it.
+5. **A document claim the code contradicted**: the description said "clones, downloads or unpacks", and `curl -o`, `gh release download`, `degit` and another repository's artifact were not reported. The commands are now listed in the description, and those named are reported.
+6. **An empty image** (`include: [{container: ''}]`, the usual way to run some matrix rows on the runner) was reported as unpinned. It is no container now; that GitHub reads it so is not verified.
+
+Also fixed from its non-blocking points: `_credential_like` no longer takes `author` or `cache-key` for a credential; the process words are matched as written (lower case), and `org.gradle.daemon=false` is not a daemon; an agent as a step's `shell`, the default shell or an `env` value run as `$AGENT` is found; the job-id test now has a finding in the second job; a placeholder in both a key and its value is one finding; a single `.github/OBAAF.yml` on a file system that ignores case is the file the checker reads, not a look-alike; a name of any length is compared. Kept, and stated: `echo "no daemon here"` and `--grep spawn` count as leaving a process (failing closed); Cherokee look-alike letters are not mapped.
+
+A second pass, on the fixes, found the full suite green, Expectrail unchanged, every first-pass case answered, and three blocking findings, each fixed and tested: (1) `uses: ./` after any download was `local-after-download` (the top directory was empty, and the empty text is in every line); downloads before an action at the workspace root are now not read, and say so; (2) a top directory found inside a URL (`https://raw.githubusercontent.com/myorg/.github/...`) counted; only a workspace path at or under it counts now, or a clone of a repository of that name; (3) an agent behind `bash -c`, `sh -lc` in a `docker://` step, `sudo -u runner`, `nice -n 10` or `timeout -s KILL 5m` was in no lane: a shell's `-c` argument is read again as commands, and the values of a wrapper's options are skipped. Also from its non-blocking points: `run: $AGENT -p` with `env: {AGENT: claude}` is found (the step's env put into the script); the guide says configured agent patterns count only at the start of a command outside scripts. Kept, and stated: a line of free text that begins with an agent's name and the words its pattern needs (`aider and cline are supported` at the start of a release body) is read as a command; a cache path written as a glob, and a download's target on another line, are not followed. A third pass, on those fixes, found two blocking findings, fixed and tested: `git clone --depth 1 URL` and `git clone -b main URL` got past the clone check (an option's value was taken for a folder), so the values of git's value-taking options are skipped and `gh repo clone` is read the same way; and the step's env values put into its script were searched anywhere, so prose in an env value (`--notes "$NOTES"` with "works with aider and cline") made an agent job: the result is now read as commands, like an input. From its non-blocking points, a fetch and its target are paired within one command, not one line. Kept, and stated: only the step's own `env` is put into its script, and a fourth nested `bash -c` is not read. A fourth pass found nothing blocking: every earlier case answered, the substituted script adding matches and never removing one, no slow path in the new readers (400 KB lines in under 2 s), the full suite green and Expectrail unchanged. Left from it, not blocking: `git clone --ref-format reftable URL` (an option that takes a value and is not on the list) gets past the clone-by-name check, and `env: {MODEL: claude}` with `llm --model $MODEL -p` is not an agent job. Found, outside this slice: a 105 KB `run:` of `claude ` repeated takes 23 s with the old checker and this one, in the catalog's agent patterns, and a 48 KB line of `curl actions/x; ` repeated takes 3.2 s in the upload patterns, with the old checker too: issue #179.
+
+### What changed for adopters
+
+- A gate can fail where it passed: a 64-digit ref, an image written as an expression, a service written as text, a `./` action from another repository, a called workflow's unpinned action at medium, a placeholder with an escape or in lower case, an agent given to another action or spelt with quotes, a firewall policy with another key, a step after the egress action that is not exactly upload-artifact, a cache or process that may reach the scratch directory, a key-named variable outside the confined command, a lane variable in another spelling or place, a second configuration, a merge key or a job id that is not text.
+- Every v0.2 acceptance of OBAAF-GHA-023 needs accepting again: the place is now a fact. Acceptances of the other four rules keep their identity where the finding did not change.
+- Some findings go away: `$/` references, a placeholder in a comment, 41 zeros, the firewall label written twice.
+- No change on this repository or on Expectrail.
+
+#### Every attempt of reviewer A (OBAAF-GHA-008, 009, 023), before and after the fixes
+
+What the checker reported for the attempt's rule on each attempt's workflow, with the checker before slice 2d.2f and after it, review fixes included. "(cannot-tell)" and "(fixed)" are the finding's state; "+ file error" means the file is also reported as an error, which fails the check. The attempt numbers are the ones used above.
+
+| # | Rule | Before | Now |
+| --- | --- | --- | --- |
+| 001 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 002 | GHA-008 | OBAAF-GHA-008 high action | OBAAF-GHA-008 high action |
+| 003 | GHA-008 | nothing | nothing |
+| 004 | GHA-008 | nothing | OBAAF-GHA-008 medium action |
+| 005 | GHA-008 | nothing | OBAAF-GHA-008 high action |
+| 006 | GHA-008 | nothing | OBAAF-GHA-008 medium reusable-workflow |
+| 007 | GHA-008 | OBAAF-GHA-008 medium reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
+| 008 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 009 | GHA-008 | nothing | OBAAF-GHA-008 medium action |
+| 010 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 011 | GHA-008 | OBAAF-GHA-008 medium action | nothing |
+| 012 | GHA-008 | OBAAF-GHA-008 low reusable-workflow | nothing |
+| 013 | GHA-008 | nothing | OBAAF-GHA-008 medium local-from-checkout |
+| 014 | GHA-008 | nothing | OBAAF-GHA-008 medium local-from-checkout |
+| 015 | GHA-008 | nothing | nothing |
+| 016 | GHA-008 | OBAAF-GHA-008 medium container | OBAAF-GHA-008 medium container |
+| 017 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium container |
+| 018 | GHA-008 | OBAAF-GHA-008 medium action | nothing |
+| 019 | GHA-008 | OBAAF-GHA-008 medium container | OBAAF-GHA-008 medium container |
+| 020 | GHA-008 | nothing | nothing |
+| 021 | GHA-008 | nothing | OBAAF-GHA-008 medium container |
+| 022 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 023 | GHA-008 | nothing | OBAAF-GHA-008 medium container |
+| 024 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 025 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 026 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 027 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 028 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 029 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 030 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 031 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 032 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 033 | GHA-008 | nothing | OBAAF-GHA-008 medium image |
+| 034 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 035 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 036 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 037 | GHA-008 | nothing | OBAAF-GHA-008 medium image-unreadable |
+| 038 | GHA-008 | nothing | OBAAF-GHA-008 medium image + file error |
+| 039 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 040 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 041 | GHA-008 | nothing | nothing |
+| 042 | GHA-008 | nothing | OBAAF-GHA-008 medium image |
+| 043 | GHA-008 | OBAAF-GHA-008 medium image | OBAAF-GHA-008 medium image |
+| 044 | GHA-008 | nothing | OBAAF-GHA-008 medium action + file error |
+| 045 | GHA-008 | nothing | OBAAF-GHA-008 medium action + file error |
+| 046 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 047 | GHA-008 | nothing | nothing |
+| 048 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 049 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 050 | GHA-008 | OBAAF-GHA-008 low action | OBAAF-GHA-008 medium action |
+| 051 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 052 | GHA-008 | OBAAF-GHA-008 low action | OBAAF-GHA-008 low action |
+| 053 | GHA-008 | OBAAF-GHA-008 low image | OBAAF-GHA-008 medium image |
+| 054 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 055 | GHA-008 | OBAAF-GHA-008 low action | OBAAF-GHA-008 low action |
+| 056 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 057 | GHA-008 | OBAAF-GHA-008 medium reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
+| 058 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 059 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 060 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 061 | GHA-008 | nothing + file error | nothing + file error |
+| 062 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 063 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 064 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 065 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 066 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action + file error |
+| 067 | GHA-008 | nothing + file error | nothing + file error |
+| 068 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action + file error |
+| 069 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 070 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 071 | GHA-008 | nothing + file error | nothing + file error |
+| 072 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 073 | GHA-008 | OBAAF-GHA-008 medium container | OBAAF-GHA-008 medium container |
+| 074 | GHA-008 | nothing | OBAAF-GHA-008 medium action |
+| 075 | GHA-008 | nothing | OBAAF-GHA-008 medium action |
+| 076 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 077 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 078 | GHA-008 | nothing + file error | nothing + file error |
+| 079 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 080 | GHA-009 | nothing | nothing |
+| 081 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 082 | GHA-009 | nothing | nothing + file error |
+| 083 | GHA-009 | nothing | nothing + file error |
+| 084 | GHA-009 | nothing | nothing |
+| 085 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 086 | GHA-009 | nothing + file error | nothing + file error |
+| 087 | GHA-009 | nothing + file error | nothing + file error |
+| 088 | GHA-009 | nothing + file error | nothing + file error |
+| 089 | GHA-009 | nothing | nothing |
+| 090 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 091 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 092 | GHA-009 | nothing | OBAAF-GHA-009 medium + file error |
+| 093 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 094 | GHA-009 | nothing | nothing |
+| 095 | GHA-009 | nothing | nothing |
+| 096 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 097 | GHA-009 | nothing + file error | nothing + file error |
+| 098 | GHA-009 | nothing + file error | nothing + file error |
+| 099 | GHA-009 | nothing + file error | nothing + file error |
+| 100 | GHA-009 | nothing | nothing |
+| 101 | GHA-009 | nothing | nothing |
+| 102 | GHA-009 | nothing + file error | nothing + file error |
+| 103 | GHA-009 | nothing | OBAAF-GHA-009 medium + file error |
+| 104 | GHA-009 | nothing | OBAAF-GHA-009 medium |
+| 105 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 106 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 107 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 108 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 109 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 110 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 111 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 112 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 113 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 114 | GHA-023 | OBAAF-GHA-023 high | nothing |
+| 115 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 116 | GHA-023 | OBAAF-GHA-023 high | nothing |
+| 117 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 118 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 119 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 120 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 121 | GHA-023 | nothing | nothing |
+| 122 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 123 | GHA-023 | nothing | OBAAF-GHA-023 high |
+| 124 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 125 | GHA-023 | OBAAF-GHA-023 high | OBAAF-GHA-023 high |
+| 126 | GHA-008 | OBAAF-GHA-008 medium action | OBAAF-GHA-008 medium action |
+| 127 | GHA-009 | OBAAF-GHA-009 medium | OBAAF-GHA-009 medium |
+| 128 | GHA-008 | nothing | OBAAF-GHA-008 medium image-unreadable |
+| 129 | GHA-008 | nothing | OBAAF-GHA-008 medium image-unreadable |
+| 130 | GHA-008 | nothing | nothing |
+| 131 | GHA-008 | nothing | OBAAF-GHA-008 medium image-unreadable |
+| 132 | GHA-008 | nothing + file error | nothing + file error |
+| 133 | GHA-008 | nothing | OBAAF-GHA-008 medium image-expression |
+| 134 | GHA-008 | nothing | OBAAF-GHA-008 medium image |
+| 135 | GHA-008 | OBAAF-GHA-008 low reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
+| 136 | GHA-008 | OBAAF-GHA-008 medium reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
+| 137 | GHA-008 | nothing | OBAAF-GHA-008 medium container |
+| 138 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
+| 139 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
+| 140 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
+| 141 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | nothing + file error |
+| 142 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
+| 143 | GHA-008 | nothing | nothing |
+| 144 | GHA-008 | nothing + file error | nothing + file error |
+| 145 | GHA-008 | nothing | OBAAF-GHA-008 medium local-after-download |
+| 146 | GHA-008 | nothing | nothing |
+| 147 | GHA-008 | nothing | OBAAF-GHA-008 medium image-unreadable |
+
+#### Every attempt of reviewer B (OBAAF-GHA-020, OBAAF-CFG-001), before and after the fixes
+
+What the checker reported for the attempt's rule on each attempt's workflow, with the checker before slice 2d.2f and after it, review fixes included. "(cannot-tell)" and "(fixed)" are the finding's state; "+ file error" means the file is also reported as an error, which fails the check. The attempt numbers are the ones used above.
+
+| # | Rule | Before | Now |
+| --- | --- | --- | --- |
+| 201 | GHA-020 | nothing | nothing |
+| 202 | GHA-020 | nothing | nothing |
+| 203 | GHA-020 | OBAAF-GHA-020 low none | OBAAF-GHA-020 low none |
+| 204 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 205 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 206 | GHA-020 | OBAAF-GHA-020 low firewall-runner | OBAAF-GHA-020 low firewall-runner |
+| 207 | GHA-020 | OBAAF-GHA-020 low firewall-runner | OBAAF-GHA-020 low firewall-runner |
+| 208 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 209 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | nothing |
+| 210 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 211 | GHA-020 | nothing | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 212 | GHA-020 | nothing | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 213 | GHA-020 | nothing | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 214 | GHA-020 | nothing | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 215 | GHA-020 | nothing | nothing |
+| 216 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 217 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 218 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 219 | GHA-020 | nothing | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 220 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 221 | GHA-020 | nothing | nothing |
+| 222 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 223 | GHA-020 | nothing | nothing |
+| 224 | GHA-020 | OBAAF-GHA-020 low firewall-runner | OBAAF-GHA-020 low firewall-runner |
+| 225 | GHA-020 | nothing | nothing |
+| 226 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 227 | GHA-020 | nothing | nothing |
+| 228 | GHA-020 | nothing | nothing |
+| 229 | GHA-020 | nothing | nothing |
+| 230 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 231 | GHA-020 | OBAAF-GHA-020 low firewall-runner (cannot-tell) | OBAAF-GHA-020 low firewall-runner (cannot-tell) |
+| 232 | GHA-020 | nothing | nothing |
+| 233 | GHA-020 | nothing | nothing |
+| 234 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 235 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 236 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 237 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 238 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 239 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action |
+| 240 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 241 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 242 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 243 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 244 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 245 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 246 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 247 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 248 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 249 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 250 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 251 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 252 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action |
+| 253 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 254 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action |
+| 255 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 256 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 257 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 258 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 259 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 260 | GHA-020 | nothing | nothing |
+| 261 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 262 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 263 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 264 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 265 | GHA-020 | nothing | nothing |
+| 266 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 267 | GHA-020 | nothing | nothing |
+| 268 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 269 | GHA-020 | OBAAF-GHA-020 low egress-action (cannot-tell) | OBAAF-GHA-020 low egress-action (cannot-tell) |
+| 270 | GHA-020 | nothing | nothing |
+| 271 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 272 | GHA-020 | nothing | nothing |
+| 273 | GHA-020 | nothing + file error | nothing + file error |
+| 274 | GHA-020 | nothing | nothing |
+| 275 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 276 | GHA-020 | nothing | nothing |
+| 277 | GHA-020 | nothing | nothing |
+| 278 | GHA-020 | nothing | nothing |
+| 279 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 280 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 281 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 282 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 283 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 284 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 285 | GHA-020 | nothing | OBAAF-GHA-020 low none |
+| 286 | GHA-020 | OBAAF-GHA-020 low none | OBAAF-GHA-020 low none |
+| 287 | GHA-020 | nothing | nothing |
+| 288 | GHA-020 | OBAAF-GHA-020 low none | OBAAF-GHA-020 low none |
+| 289 | GHA-020 | nothing | nothing |
+| 290 | GHA-020 | nothing | nothing |
+| 291 | GHA-020 | OBAAF-GHA-020 low unverified-monitor (cannot-tell) | OBAAF-GHA-020 low unverified-monitor (cannot-tell) |
+| 292 | GHA-020 | OBAAF-GHA-020 low unverified-monitor (cannot-tell) | OBAAF-GHA-020 low unverified-monitor (cannot-tell) |
+| 293 | GHA-020 | OBAAF-GHA-020 low declared | OBAAF-GHA-020 low declared |
+| 294 | GHA-020 | OBAAF-GHA-020 low awf (cannot-tell) | OBAAF-GHA-020 low awf (cannot-tell) |
+| 295 | GHA-020 | nothing | nothing |
+| 296 | GHA-020 | nothing | nothing |
+| 297 | GHA-020 | OBAAF-GHA-020 low firewall-runner | OBAAF-GHA-020 low firewall-runner |
+| 298 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 299 | GHA-020 | OBAAF-GHA-020 low firewall-runner | OBAAF-GHA-020 low firewall-runner |
+| 300 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
+| 301 | CFG-001 | OBAAF-CFG-001 high job-not-a-lane | OBAAF-CFG-001 high job-not-a-lane |
+| 302 | CFG-001 | OBAAF-CFG-001 high job-not-a-lane | OBAAF-CFG-001 high job-not-a-lane |
+| 303 | CFG-001 | OBAAF-CFG-001 high job-not-a-lane | OBAAF-CFG-001 high job-not-a-lane |
+| 304 | CFG-001 | OBAAF-CFG-001 high job-misnamed | OBAAF-CFG-001 high job-misnamed |
+| 305 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 306 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 307 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 308 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 309 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 310 | CFG-001 | nothing | OBAAF-CFG-001 high job-misnamed |
+| 311 | CFG-001 | nothing | OBAAF-CFG-001 high workflow-misnamed |
+| 312 | CFG-001 | OBAAF-CFG-001 high step-env | OBAAF-CFG-001 high step-env |
+| 313 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 314 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 315 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 316 | CFG-001 | OBAAF-CFG-001 high container-env | OBAAF-CFG-001 high container-env |
+| 317 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 318 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 319 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 320 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 321 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 322 | CFG-001 | nothing | nothing |
+| 323 | CFG-001 | nothing | nothing |
+| 324 | CFG-001 | OBAAF-CFG-001 high job-not-a-lane | OBAAF-CFG-001 high job-not-a-lane |
+| 325 | CFG-001 | OBAAF-CFG-001 low step-env | OBAAF-CFG-001 low step-env |
+| 326 | CFG-001 | OBAAF-CFG-001 high entry-no-job | OBAAF-CFG-001 high entry-no-job |
+| 327 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
+| 328 | CFG-001 | OBAAF-CFG-001 high entry-not-a-lane | OBAAF-CFG-001 high entry-not-a-lane |
+| 329 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
+| 330 | CFG-001 | OBAAF-CFG-001 high entry-no-job | OBAAF-CFG-001 high entry-no-job |
+| 331 | CFG-001 | OBAAF-CFG-001 high entry-no-job | OBAAF-CFG-001 high entry-no-job |
+| 332 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
+| 333 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
+| 334 | CFG-001 | OBAAF-CFG-001 high entry-not-a-lane | OBAAF-CFG-001 high entry-not-a-lane |
+| 335 | CFG-001 | nothing | configuration error, exit 2 |
+| 336 | CFG-001 | nothing | configuration error, exit 2 |
+| 337 | CFG-001 | nothing | configuration error, exit 2 |
+| 338 | CFG-001 | nothing | nothing |
+| 339 | CFG-001 | nothing | OBAAF-CFG-001 high workflow-elsewhere + file error |
+| 340 | CFG-001 | nothing | nothing |
+| 341 | CFG-001 | OBAAF-CFG-001 low step-env | OBAAF-CFG-001 low step-env |
+| 342 | CFG-001 | nothing | nothing |
+| 343 | CFG-001 | OBAAF-CFG-001 high step-env | OBAAF-CFG-001 high step-env |
+| 344 | CFG-001 | OBAAF-CFG-001 high entry-no-file | nothing |
+| 345 | CFG-001 | OBAAF-CFG-001 high job-misnamed | OBAAF-CFG-001 high job-misnamed |
+| 346 | CFG-001 | OBAAF-CFG-001 high jenkins-not-a-lane | OBAAF-CFG-001 high jenkins-not-a-lane |
+| 347 | CFG-001 | nothing | OBAAF-CFG-001 high jenkins-misnamed |
+| 348 | CFG-001 | nothing | OBAAF-CFG-001 high jenkins-scripted |
+| 349 | CFG-001 | OBAAF-CFG-001 high jenkins-computed | OBAAF-CFG-001 high jenkins-computed |
+| 350 | CFG-001 | nothing | OBAAF-CFG-001 high jenkins-misnamed |
+| 351 | CFG-001 | OBAAF-CFG-001 high step-env | OBAAF-CFG-001 high step-env |
+| 352 | CFG-001 | nothing | OBAAF-CFG-001 high elsewhere |
+| 353 | CFG-001 | nothing | nothing |
+| 354 | CFG-001 | OBAAF-CFG-001 low job-misnamed | OBAAF-CFG-001 low job-misnamed |
+| 355 | CFG-001 | OBAAF-CFG-001 high job-not-a-lane; OBAAF-CFG-001 high step-env | OBAAF-CFG-001 high job-not-a-lane; OBAAF-CFG-001 high step-env |
+| 356 | GHA-020 | nothing | nothing |
+| 357 | GHA-020 | nothing | nothing |
+| 358 | GHA-020 | nothing | nothing |
+| 359 | GHA-020 | nothing | nothing |
+| 360 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
