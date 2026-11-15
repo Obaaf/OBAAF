@@ -839,21 +839,22 @@ def _stops(run: _Run):
         for file in run.files():
             path = file["path"]
             loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
-            remote = any(job["actions"] for job in file["jobs"])
+            # An action from another repository, or a reusable workflow from one (the third review of 2d.2g).
+            remote = any(job["actions"] or (job["calls"] and not called_path(job)) for job in file["jobs"])
             if value.get("enabled") is False:
                 stopped[path] = "GitHub Actions is turned off for the repository"
+            elif value.get("sha_pinning_required") is True and loose and not run.usage.get("actions_lock"):
+                stopped[path] = (f"the repository requires actions pinned to a full commit and it uses "
+                                 f"{_names([_q(a, 100) for a in loose], 2)}, so GitHub refuses it")
+            elif value.get("sha_pinning_required") is True and loose:
+                maybe[path] = (f"the repository requires actions pinned to a full commit and it uses "
+                               f"{_names([_q(a, 100) for a in loose], 2)}; .github/workflows/actions.lock may pin "
+                               "them, and it is not read")
             elif value.get("allowed_actions") == "local_only" and remote:
                 # GitHub's own words for this value, by the second review of slice 2d.2g, are "Allow OWNER actions
                 # and reusable workflows": which owner's actions that lets through is not matched here.
-                maybe[path] = ("the repository allows only some owners' actions (allowed_actions: local_only), "
-                               "which is not matched against the actions it uses")
-            elif value.get("sha_pinning_required") is True and loose:
-                why = (f"the repository requires actions pinned to a full commit and it uses "
-                       f"{_names([_q(a, 100) for a in loose], 2)}")
-                if run.usage.get("actions_lock"):
-                    maybe[path] = why + "; .github/workflows/actions.lock may pin them, and it is not read"
-                else:
-                    stopped[path] = why + ", so GitHub refuses it"
+                maybe[path] = ("the repository allows only some owners' actions and reusable workflows "
+                               "(allowed_actions: local_only), which is not matched against those it uses")
     policies, whole = run.got("actions_policies")
     if policies is None or not whole:
         unread.append(run.why("actions_policies"))
@@ -867,12 +868,14 @@ def _stops(run: _Run):
             if policy["enforcement"] == "evaluate" or file["path"] in stopped:
                 continue            # evaluate mode blocks nothing
             lists = _event_rules(policy)
-            if lists is not None and all(events <= set(allowed) for allowed in lists):
+            if lists and all(events <= set(allowed) for allowed in lists):
                 continue            # whatever it applies to, it allows every event the file uses
             maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
                                            "understand, may block its events")
     # A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
     # slice 2d.2g): the whole calling file is taken as one GitHub may not run, until nothing changes.
+    # A called file that is missing, or was not read (one GitHub refuses among them), counts the same.
+    read = {file["path"] for file in run.files()}
     changed = True
     while changed:
         changed = False
@@ -881,9 +884,10 @@ def _stops(run: _Run):
                 continue
             for job in file["jobs"]:
                 target = called_path(job)
-                if target and (target in stopped or target in maybe):
+                if target and (target in stopped or target in maybe or target not in read):
                     maybe[file["path"]] = (f"it calls {plain(target, 120)}, which GitHub "
-                                           f"{'does not run' if target in stopped else 'may not run'}")
+                                           + ("does not run" if target in stopped else "may not run" if target in maybe
+                                              else "may not run: it is not among the workflow files that were read"))
                     changed = True
                     break
     return stopped, maybe, blocked, unread

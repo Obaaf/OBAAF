@@ -252,14 +252,18 @@ def _file(path: str, text: str) -> dict:
     # Every problem but those about the names of a step's inputs makes the file one GitHub may read otherwise or
     # refuse (the second review of slice 2d.2g: a step that is text, or has neither run nor uses, a job whose
     # uses is not text, are refused by GitHub, and a list of words to include missed them).
-    doubt = [p for p in problems if not any(word in p for word in HARMLESS_PROBLEMS)]
+    doubt = [p for p in problems if not HARMLESS_PROBLEM_RE.match(p)]
     return {"path": path, "error": None, "problems": problems, "doubt": doubt,
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
 
 # The checker's problems with a file that are about which input an action gets, not about whether GitHub runs
 # the file or which jobs and names it has. Every other problem makes the file doubtful.
-HARMLESS_PROBLEMS = ("has an input name with a letter outside ASCII", "gives the same input twice")
+# Matched on the problem's whole shape, never on a phrase alone, because other problems quote what the author
+# wrote (the third review of slice 2d.2g: `on: [pull_request, 'gives the same input twice']`). GitHub's job ids
+# hold only letters, digits, `_` and `-`.
+HARMLESS_PROBLEM_RE = re.compile(r"job '[A-Za-z0-9_-]+', step \d+ (?:has an input name with a letter outside ASCII "
+                                 r"\(|gives the same input twice under two spellings \()")
 # Filters that GitHub's workflow syntax says cannot be used together on one event.
 EXCLUSIVE_FILTERS = (("branches", "branches-ignore"), ("tags", "tags-ignore"), ("paths", "paths-ignore"))
 

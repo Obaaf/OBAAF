@@ -473,6 +473,16 @@ class FilesGitHubMayReadOtherwiseTest(unittest.TestCase):
         found = assess(requiring("build"), {"ci.yml": wf(PR, job("build") + "  other:\n    uses: 5\n")})
         self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
 
+    def test_a_problem_that_quotes_the_harmless_words_still_counts(self):
+        for text in ("name: W\non: [pull_request, 'gives the same input twice']\npermissions: {}\njobs:\n" + job("build"),
+                     wf(PR, job("build"), permissions="permissions:\n  contents: 'gives the same input twice'\n")):
+            self.assertEqual(answered(assess(requiring("build"), {"ci.yml": text}), "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_problem_about_a_steps_input_names_does_not_count(self):
+        steps = "      - uses: " + PIN + "\n        with:\n          ref: a\n          REF: b\n"
+        found = assess(requiring("build"), {"ci.yml": wf(PR, job("build", steps=steps))})
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "no-finding")
+
     def test_a_caller_of_such_a_file_and_a_linked_directory(self):
         caller = wf(PR, "  ci:\n    uses: ./.github/workflows/r.yml\n")
         callee = wf("  workflow_call:\n", job("build"))
@@ -593,6 +603,22 @@ class SettingsThatStopEveryRunTest(unittest.TestCase):
         entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
         found = assess(entries, {"ci.yml": wf(PR, job("test", MATRIX_313, steps=f"      - uses: {PIN}\n"))})
         self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_remote_reusable_workflow_under_local_only(self):
+        entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        files = {"ci.yml": wf(PR, job("lint") + "  scan:\n    uses: someone-else/tools/.github/workflows/scan.yml@"
+                              + "a" * 40 + "\n")}
+        self.assertEqual(answered(assess(requiring("lint", entries=entries), files), "OBAAF-SET-006"), "cannot-tell")
+
+    def test_pinning_is_weighed_before_local_only(self):
+        entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only",
+                                                      "sha_pinning_required": True})
+        found = assess(entries, {"ci.yml": wf(PR, job("test", MATRIX_313, steps="      - uses: actions/checkout@v4\n"))})
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "finding medium")
+
+    def test_a_caller_of_a_missing_workflow(self):
+        files = {"ci.yml": wf(PR, job("lint") + "  ci:\n    uses: ./.github/workflows/r.yml\n")}
+        self.assertEqual(answered(assess(requiring("lint"), files), "OBAAF-SET-006"), "cannot-tell")
 
     def test_a_caller_of_a_refused_workflow(self):
         files = {"ci.yml": wf(PR, "  ci:\n    uses: ./.github/workflows/r.yml\n"),
