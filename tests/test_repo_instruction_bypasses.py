@@ -695,7 +695,10 @@ class ThirdReviewTest(unittest.TestCase):
             start = time.monotonic()
             findings, _ = found(tmp, "OBAAF-INS-001")
             self.assertLess(time.monotonic() - start, 20)
-            self.assertEqual(len(findings), 401)
+            # One finding for the file, naming the 400 other names it is read by (the sixth review's
+            # re-review: one finding for each name made a 2 GB report).
+            self.assertEqual([f.path for f in findings], [".claude/big.md"])
+            self.assertEqual(len(findings[0].facts["names"]), 400)
 
     def test_the_listing_does_not_depend_on_the_current_folder(self):
         """Finding 4: from `/`, every git was refused and untracked files counted."""

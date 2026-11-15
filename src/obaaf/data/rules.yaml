@@ -1141,7 +1141,8 @@ rules:
       eight, or at least eight and more than one in 64, is a NUL, another control character or a byte
       that is part of no UTF-8 character); otherwise it is read like any other file.
       The finding is each character with a digest of its line; for a direction control, of its
-      paragraph. Limits: soft hyphens, right-to-left marks, ideographic variation selectors and
+      paragraph. A file is reported once, on its own path when that is an instruction file, otherwise on
+      the first name an agent reads it by, with the other names. Limits: soft hyphens, right-to-left marks, ideographic variation selectors and
       Mongolian selectors in ordinary text, and Malayalam's old chillu spelling, are reported too; text
       hidden by Markdown (HTML comments, collapsed sections) and space characters are not; a joiner
       between two emoji, or a joiner or non-joiner between two letters of a script that joins, can still

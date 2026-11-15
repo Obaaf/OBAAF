@@ -3804,23 +3804,32 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
         except repo_checks.UnreadableFile as exc:
             errors.append(str(exc))
 
-    # Each file is read and scanned once, however many names an agent finds it by (a link to a folder
-    # gives every file in it another name; the third review of slice 2d.2h found 400 links to one large
-    # file took 66 s when each name was read again). Each name kept (one for each file and link that
-    # leads to it) gets its own finding.
-    examined: dict[tuple, list | None] = {}
+    # Each file is read and scanned once, and reported once, however many names an agent finds it by
+    # (a link to a folder gives every file in it another name; the third review of slice 2d.2h found
+    # 400 links to one large file took 66 s when each name was read again, and the sixth's re-review
+    # that 300 links to a file of 100,000 hidden characters made a 2 GB report when each name was a
+    # finding). The finding is on the file's own path when that is an instruction file, otherwise on
+    # the first name that leads to it; the message names the others.
+    groups: dict[tuple, list[str]] = {}
     for entry in entries:
         if entry.outside:
             continue
         rel = entry.rel
         source = entry.real or rel
-        # By the name the agent reads: `CLAUDE.md -> notes.pdf` is read as text whatever it begins
-        # with (the fifth review of slice 2d.2h).
         binary_name = Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or \
             Path(rel).name.lower() in repo_checks.BINARY_NAMES
-        if (source, binary_name) not in examined:
-            examined[(source, binary_name)] = _examine_instruction_file(root, rel, source, binary_name, errors)
-        for line, template, kind, values in examined[(source, binary_name)] or []:
+        groups.setdefault((source, binary_name), []).append(rel)
+    for (source, binary_name), names in sorted(groups.items()):
+        names = sorted(set(names))
+        rel = source if source in names else names[0]
+        others = [n for n in names if n != rel]
+        results = _examine_instruction_file(root, rel, source, binary_name, errors)
+        for line, template, kind, values in results or []:
+            if others and "more" in values:
+                shown = ", ".join(one_line(n, 80) for n in others[:3]) + (", ..." if len(others) > 3 else "")
+                values = {**values, "names": Fact(others, ""),
+                          "more": Note(f"{values['more']} (an agent also reads the file as {len(others)} other "
+                                       f"name(s): {shown})")}
             add("OBAAF-INS-001", rel, line, template, kind=kind, **values)
     return findings
 
