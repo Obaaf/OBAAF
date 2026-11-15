@@ -135,7 +135,11 @@ CASES = {
  "w04_as": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            [TOKEN].each { t ->\n              sh \"curl -H Authorization:${t as String} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
  "w06_nested_gstring": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            [TOKEN].each { t ->\n              sh \"curl -H Authorization:${\"${t}\".trim()} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
  "v01_plain": "\npipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        script {\n          def creds = [string(credentialsId: \"api\", variable: \"TOKEN\")]\n          withCredentials(creds) { sh \"curl -H Authorization:${TOKEN} https://example.com\" }\n        }\n      }\n    }\n  }\n}\n",
- "v03_echo_size": "\npipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        script {\n          def creds = [string(credentialsId: \"api\", variable: \"TOKEN\")]\n          echo \"bindings: ${creds.size()}\"\n          echo creds.size().toString()\n          withCredentials(creds) { sh \"curl -H Authorization:${TOKEN} https://example.com\" }\n        }\n      }\n    }\n  }\n}\n"
+ "v03_echo_size": "\npipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        script {\n          def creds = [string(credentialsId: \"api\", variable: \"TOKEN\")]\n          echo \"bindings: ${creds.size()}\"\n          echo creds.size().toString()\n          withCredentials(creds) { sh \"curl -H Authorization:${TOKEN} https://example.com\" }\n        }\n      }\n    }\n  }\n}\n",
+ "x04_nested_dollar_nobrace": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"curl -H Authorization:${\"$t\".trim()} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "x07_nested_dollar_plus": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"curl -H ${\"Authorization:$t\"} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "x03_tool_interp": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"${tool \"m-${v}\"}/bin/mvn deploy\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "x05_nested_words": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"echo ${\"build-${v}-done\".toUpperCase()}\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n"
 }
 
 # (case, rule, what the adapter must say: a finding, "unknown" (never a pass) or nothing, severity)
@@ -257,6 +261,10 @@ EXPECT = [
     ('w06_nested_gstring', 'OBAAF-JEN-013', 'unknown', None),
     ('v01_plain', 'OBAAF-JEN-013', 'finding', 'medium'),
     ('v03_echo_size', 'OBAAF-JEN-013', 'unknown', None),
+    ('x04_nested_dollar_nobrace', 'OBAAF-JEN-013', 'unknown', None),
+    ('x07_nested_dollar_plus', 'OBAAF-JEN-013', 'unknown', None),
+    ('x03_tool_interp', 'OBAAF-JEN-013', 'none', None),
+    ('x05_nested_words', 'OBAAF-JEN-013', 'none', None),
 ]
 
 A018 = b'// Review pipeline\rpipeline {\r  agent any\r  stages {\r    stage(\'Review\') {\r      steps {\r        withCredentials([string(credentialsId: \'gh-token\', variable: \'GH_TOKEN\')]) {\r          sh \'claude -p "review this change"\'\r        }\r      }\r    }\r  }\r}\r'

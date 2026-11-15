@@ -126,10 +126,20 @@ _QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
 _NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+(?!(?:as|in|instanceof)\b)[\"'\w$])")
 
 
+_INTERPOLATION = re.compile(r"\$\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}|\$([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+
+
 def _unquoted(expr: str) -> str:
-    """The expression with quoted text that interpolates nothing replaced by a placeholder; text that does
-    interpolate is kept, without its quotes, so the names it reads are read (the third review of 2d.2i)."""
-    return _QUOTED.sub(lambda m: f" {m.group(0)[1:-1]} " if "$" in m.group(0) else " _q_ ", expr)
+    """The expression with each quoted text replaced by what it interpolates (`"a-${v}"` and `"a-$v"` by `v`),
+    so the names it reads are read and its words are not; single-quoted text interpolates nothing (the third
+    and fourth reviews of 2d.2i)."""
+    def inner(m) -> str:
+        text = m.group(0)
+        if not text.startswith('"') or "$" not in text:
+            return " _q_ "
+        parts = [g1 or g2 for g1, g2 in _INTERPOLATION.findall(text[1:-1]) if g1 or g2]
+        return " " + " ; ".join(_unquoted(p) for p in parts) + " " if parts else " _q_ "
+    return _QUOTED.sub(inner, expr)
 # Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
 _JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
                     "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace",
