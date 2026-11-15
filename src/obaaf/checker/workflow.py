@@ -1837,6 +1837,12 @@ class Step:
                     # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
                     found.append(variant)
                     break
+        # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in.
+        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
+        if env and own and "$" in own:
+            put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
+            if put != own:
+                found.append(put)
         text = "\n".join(p for p in [own, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 
@@ -2325,27 +2331,53 @@ def _readings(text: str) -> list[str]:
 
 _SEGMENT_SPLIT_RE = re.compile(r"\$\(|[;&|`(){}\n]")
 _WRAPPERS = frozenset({"sudo", "env", "exec", "nohup", "time", "xargs", "npx", "bunx", "command", "builtin", "nice",
-                       "stdbuf", "setsid"})
+                       "stdbuf", "setsid", "doas", "ionice", "chrt", "taskset", "script", "unbuffer"})
 _TWO_WORD_WRAPPERS = {("pnpm", "dlx"), ("pnpm", "exec"), ("yarn", "dlx"), ("npm", "exec"), ("npm", "x"), ("bun", "x")}
+# Options of a wrapper that take the next word as their value (`sudo -u runner`, `nice -n 10`).
+_WRAPPER_VALUE_OPTIONS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group", "--chdir"},
+    "doas": {"-u", "-C"}, "nice": {"-n", "--adjustment"}, "env": {"-u", "-C", "-S", "--unset", "--chdir"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"}, "stdbuf": {"-i", "-o", "-e"}, "ionice": {"-c", "-n", "-p"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"}, "npx": {"-p", "--package"}, "script": {"-c"},
+    "taskset": set(), "chrt": set(),
+}
+# Shells whose `-c` argument is itself a command line (`bash -c "claude -p x"`, `sh -lc ...`).
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"})
 
 
-def command_segments(text: str) -> list[str]:
+def command_segments(text: str, _depth: int = 0) -> list[str]:
     """The commands a line of text holds, split where a shell starts a new one (`;`, `&`, `|`, a line break,
-    a substitution, a group), each without the assignments, wrappers (`sudo`, `env`, `npx`, `timeout 5m`)
-    and their options before its first word. Word by word, so linear in the length of the text."""
+    a substitution, a group), each without the assignments, wrappers (`sudo -u runner`, `env`, `npx`,
+    `nice -n 10`, `timeout -s KILL 5m`) and their options before its first word. A shell's `-c` argument
+    is read again as commands (`bash -c "claude -p x"`; quotes are taken out by the caller's readings).
+    Word by word, so linear in the length of the text."""
     out: list[str] = []
     for segment in _SEGMENT_SPLIT_RE.split(text or ""):
         words = segment.split()
-        i = 0
+        i, wrapper, duration = 0, "", False
         while i < len(words):
             word = words[i]
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", word) or word in _WRAPPERS or \
-                    (word.startswith("-") and i > 0):
+            base = word.rsplit("/", 1)[-1]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", word):
                 i += 1
-            elif word == "timeout" and i + 1 < len(words):
-                i += 2
+            elif base in _WRAPPERS or base == "timeout":
+                wrapper, duration = base, base == "timeout"
+                i += 1
+            elif word.startswith("-") and wrapper:
+                i += 2 if word in _WRAPPER_VALUE_OPTIONS.get(wrapper, ()) else 1
+            elif duration and re.fullmatch(r"[0-9.]+[smhd]?", word):
+                duration = False
+                i += 1
             elif i + 1 < len(words) and (word, words[i + 1]) in _TWO_WORD_WRAPPERS:
+                wrapper = word
                 i += 2
+            elif base in _SHELLS and _depth < 3:
+                flag = next((n for n in range(i + 1, min(i + 4, len(words)))
+                             if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", words[n])), None)
+                if flag is None:
+                    break       # a shell running a script file: the shell is the command
+                out.extend(command_segments(" ".join(words[flag + 1:]), _depth + 1))
+                i = len(words)
             else:
                 break
         if i < len(words):

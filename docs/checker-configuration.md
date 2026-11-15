@@ -114,6 +114,8 @@ The line is the line the declaration is written on. One that reaches a job or a 
 
 **Not reported.** A lane variable set by a command the checker does not read as writing `GITHUB_ENV`, or written in a file a step sources. (Until flagship slice 2d.2f, a Jenkinsfile's other spellings and `env.OBAAF_LANE = ...` were not reported either, and a second configuration file was ignored without a word.)
 
+**Agent command patterns** (`agents.commands`) are searched anywhere in a `run` script, a github-script script and the `run` of OBAAF's egress action. In other places a step can give a command (another action's inputs, a `docker://` step's entrypoint and arguments, `shell`, `env` values), a pattern counts only where it matches at the start of a command, after assignments, wrappers such as `sudo` or `npx`, and a shell's `-c` (flagship slice 2d.2f), so that free text in an input is not taken for an agent.
+
 **One configuration file.** The checker reads `.github/obaaf.yml`, `.github/obaaf.yaml` or `obaaf.yml` at the root. Two of them, or a file named like a configuration where the checker does not look (`.obaaf.yml`, `obaaf.yaml` at the root, `OBAAF.yml` in any letter case, at the root or in `.github`), stop the check with a configuration error (exit status 2), because the lanes, acceptances and protected secrets in the file it does not read would otherwise be dropped without a word.
 
 `obaaf check . --lanes` shows the first lane a job is in, in the order agent, effect, release, untrusted, and names the others after it: `ci.yml#ship: agent (uses openai/codex-action; also release: uploads or publishes artifacts)`.

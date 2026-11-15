@@ -260,11 +260,13 @@ rules:
       checked out at (`local-from-checkout`), and one after an artifact downloaded from another run or
       repository, a cache restored at a workspace path that holds it, or a script line that runs `git
       clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`,
-      `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names the action's top directory, is
-      reported as one the checker cannot place (`local-after-download`). An empty image is no container.
-      Not followed: code merged or patched into the workspace (`git fetch` and `git merge`, `git am`,
-      `git apply`), an artifact of the same run, a cache restored at a path written with `~`, an absolute
-      path or an expression, the actions a local composite action or a called workflow uses (they are
+      `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names a workspace path at or under
+      the action's top directory (not in a URL), or that clones a repository of that name, is reported as
+      one the checker cannot place (`local-after-download`). An empty image is no container. Not followed:
+      code merged or patched into the workspace (`git fetch` and `git merge`, `git am`, `git apply`), a
+      download whose target is on another line or in `working-directory`, downloads before an action at
+      the workspace root (`uses: ./`), an artifact of the same run, a cache restored at a path written
+      with `~`, an absolute path, a glob or an expression, the actions a local composite action or a called workflow uses (they are
       checked where their own files are), whether a pinned commit is on the repository's own branches or
       only in a fork of it, and what a pinned action fetches or runs when it runs.
     fix: >-
@@ -609,8 +611,10 @@ rules:
       key) is "cannot tell". The agent is looked for in the run script, a github-script script and the
       action's `run`, also with quotes and backslashes taken out, and in each command in any other input
       of an action, a `docker://` step's entrypoint and arguments, the step's `shell`, its `env` values
-      and the default shell, whose first word (after assignments and wrappers such as `sudo` or `npx`) is
-      an agent's; free text in an input is not a command. Not followed, and so never a reason the finding clears: an agent run by a
+      and the default shell, whose first word (after assignments, wrappers such as `sudo -u user`, `npx`,
+      `nice -n 10` or `timeout 5m`, and a shell's `-c`) is an agent's, the step's env values also put into
+      its run script; free text in an input is not a command, unless a line of it begins with an agent's
+      name and the words its pattern needs. Not followed, and so never a reason the finding clears: an agent run by a
       package script (`npm run`), a called workflow or a local composite action; code an earlier action
       runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a

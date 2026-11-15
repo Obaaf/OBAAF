@@ -3189,21 +3189,41 @@ class WorkflowRules:
             if action == "actions/download-artifact" and not any(given.get(k) for k in self._CROSS_RUN_INPUTS):
                 return False    # this run's own artifact
             return self._covers(given.get("path", ""), target)
+        if not top:
+            return False        # `uses: ./`: a download's target is not read for the workspace root (stated)
         for line in earlier.scripts().splitlines():
             if top not in line:
                 continue        # cheap test first: the line must name the action's top directory
-            words = re.split(r"[\s;&|()`'\"]+", line)
+            words = [w for w in re.split(r"[\s;&|()`'\"]+", line) if w]
             fetches = bool(self._FETCH_WORDS & set(words))
+            clone_into = None
             for n, word in enumerate(words[:-1]):
                 nxt = words[n + 1]
-                if (word == "git" and any(w in ("clone", "worktree", "submodule") for w in words[n + 1:n + 4])) \
-                        or (word == "gh" and nxt in ("repo", "release", "run") and "download" in words[n + 1:n + 4]) \
-                        or (word == "gh" and nxt == "repo" and "clone" in words[n + 1:n + 4]) \
+                if word == "git" and "clone" in words[n + 1:n + 4]:
+                    fetches = True
+                    rest = [w for w in words[words.index("clone", n) + 1:] if not w.startswith("-")]
+                    if len(rest) == 1:      # no folder named: git makes one from the repository's name
+                        clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                    break
+                if (word == "git" and any(w in ("worktree", "submodule") for w in words[n + 1:n + 4])) \
+                        or (word == "gh" and nxt in ("repo", "release", "run")
+                            and any(w in ("download", "clone") for w in words[n + 1:n + 4])) \
                         or (word == "tar" and re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*|--extract|--get", nxt)):
                     fetches = True
                     break
-            if fetches and any(top in re.split(r"[/=]", word) or word.rstrip("/") == top for word in words):
+            if not fetches:
+                continue
+            if clone_into == top:
                 return True
+            for word in words:
+                # A path in the workspace, written as a word or as an option's value (`--output=x`); not a
+                # URL, an absolute path, a home path or one built from a variable.
+                value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+                if "://" in value or value.startswith(("/", "~", "$", "-")):
+                    continue
+                path = self._workspace_path(value)
+                if path is not None and (path == top or path.startswith(top + "/")):
+                    return True
         return False
 
     def _covers(self, path, target: str, literal_only: bool = False) -> bool:

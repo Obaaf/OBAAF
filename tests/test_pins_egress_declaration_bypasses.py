@@ -155,6 +155,7 @@ class LocalActionTest(unittest.TestCase):
                 (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions, ref: main, "
                  "path: /home/runner/work/r/r/ext}\n", "local-from-checkout"),
                 (f"      - uses: actions/download-artifact@{SHA}\n", None),
+                ("      - run: curl -sSfL https://raw.githubusercontent.com/myorg/ext/main/x.sh -o /tmp/x.sh\n", None),
                 (f"      - uses: actions/cache@{SHA}\n        with:\n          key: k\n          path: |\n"
                  "            ~/.cargo/registry\n            ~/.cargo/git\n", None),
                 ("      - run: curl -o /tmp/p.zip https://example.com/p.zip && unzip /tmp/p.zip -d $HOME/.local\n", None),
@@ -169,6 +170,16 @@ class LocalActionTest(unittest.TestCase):
             with self.subTest(checkout=checkout), TempDir() as tmp:
                 result = check(tmp, job(checkout + "      - uses: ./ext/deploy\n"))
                 self.assertEqual([f.kind for f in of(result, "OBAAF-GHA-008")], [kind] if kind else [])
+
+    def test_a_download_before_an_action_at_the_workspace_root_is_not_read(self):
+        # `uses: ./` in an action's own repository, after a setup step that downloads a tool (review of 2d.2f).
+        with TempDir() as tmp:
+            result = check(tmp, job(f"      - uses: actions/checkout@{SHA}\n"
+                                    "      - run: curl -sSfL https://example.com/tool -o /tmp/tool && chmod +x /tmp/tool\n"
+                                    "      - uses: ./\n"))
+            cloned = check(tmp, job("      - run: git clone https://github.com/someorg/ext\n      - uses: ./ext/deploy\n"))
+        self.assertEqual(of(result, "OBAAF-GHA-008"), [])
+        self.assertEqual([f.kind for f in of(cloned, "OBAAF-GHA-008")], ["local-after-download"])
 
     def test_a_path_with_dots_in_the_action_is_resolved(self):
         steps = (f"      - uses: actions/checkout@{SHA}\n      - uses: actions/checkout@{SHA}\n"
@@ -348,6 +359,22 @@ class AgentFoundTest(unittest.TestCase):
             with self.subTest(name), TempDir() as tmp:
                 result = check(tmp, job(body))
                 self.assertEqual(of(result, "OBAAF-GHA-020"), [])
+
+    def test_an_agent_behind_a_shell_or_a_wrapper_with_options(self):
+        cases = {
+            "bash -c": f"      - uses: some/run-action@{SHA}\n        with: {{command: 'bash -c \"claude -p triage\"'}}\n",
+            "sh -lc in docker": (f"      - uses: docker://node@sha256:{'a' * 64}\n"
+                                 "        with: {entrypoint: /bin/sh, args: '-lc \"npx -y @anthropic-ai/claude-code -p t\"'}\n"),
+            "env value with bash -c": "      - run: $AGENT\n        env: {AGENT: \"bash -c 'claude -p triage'\"}\n",
+            "sudo -u": f"      - uses: some/run-action@{SHA}\n        with: {{command: sudo -u runner claude -p triage}}\n",
+            "nice -n": f"      - uses: some/run-action@{SHA}\n        with: {{command: nice -n 10 claude -p triage}}\n",
+            "timeout -s": f"      - uses: some/run-action@{SHA}\n        with: {{command: timeout -s KILL 5m claude -p t}}\n",
+            "the command in env, its options in run": "      - run: $AGENT -p triage\n        env: {AGENT: claude}\n",
+        }
+        for name, body in cases.items():
+            with self.subTest(name), TempDir() as tmp:
+                result = check(tmp, job(body))
+                self.assertEqual(len(of(result, "OBAAF-GHA-020")), 1)
 
     def test_an_agent_as_the_shell_or_in_an_env_value(self):
         cases = {
