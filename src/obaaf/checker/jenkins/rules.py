@@ -126,20 +126,80 @@ _QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
 _NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+(?!(?:as|in|instanceof)\b)[\"'\w$])")
 
 
-_INTERPOLATION = re.compile(r"\$\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}|\$([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+def _skip_quoted(expr: str, i: int, depth: int = 0) -> int:
+    """The index just after the quoted text that starts at `i`, following `${...}` inside double quotes."""
+    n = len(expr)
+    triple = expr.startswith(expr[i] * 3, i)
+    q = expr[i] * 3 if triple else expr[i]
+    j = i + len(q)
+    while j < n and not expr.startswith(q, j):
+        if expr[j] == "\\":
+            j += 2
+        elif q[0] == '"' and expr.startswith("${", j) and depth < 50:
+            j = _skip_braces(expr, j + 2, depth + 1)
+        else:
+            j += 1
+    return min(j + len(q), n)
 
 
-def _unquoted(expr: str) -> str:
-    """The expression with each quoted text replaced by what it interpolates (`"a-${v}"` and `"a-$v"` by `v`),
-    so the names it reads are read and its words are not; single-quoted text interpolates nothing (the third
-    and fourth reviews of 2d.2i)."""
-    def inner(m) -> str:
-        text = m.group(0)
-        if not text.startswith('"') or "$" not in text:
-            return " _q_ "
-        parts = [g1 or g2 for g1, g2 in _INTERPOLATION.findall(text[1:-1]) if g1 or g2]
-        return " " + " ; ".join(_unquoted(p) for p in parts) + " " if parts else " _q_ "
-    return _QUOTED.sub(inner, expr)
+def _skip_braces(expr: str, k: int, depth: int = 0) -> int:
+    """The index just after the `}` that closes a `${` whose body starts at `k`."""
+    n, level = len(expr), 1
+    while k < n and level:
+        ch = expr[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if ch in "\"'" and depth < 50:
+            k = _skip_quoted(expr, k, depth + 1)
+            continue
+        level += 1 if ch == "{" else -1 if ch == "}" else 0
+        k += 1
+    return k
+
+
+def _unquoted(expr: str, depth: int = 0) -> str:
+    """The expression with each quoted text replaced by what it interpolates (`"a-${v}"` and `"a-$v"` by `v`,
+    each read the same way again), and text that interpolates nothing by a placeholder; quotes and `${...}` are
+    followed together, so a quote inside `${...}` does not end the text (the third to fifth reviews of
+    2d.2i). Past 50 levels the rest is left as it is, so its names are still read."""
+    if depth > 50:
+        return expr
+    out: list[str] = []
+    i, n = 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c == "'":
+            # A placeholder that reads as an argument: `tool 'maven'` is a step called with one.
+            i = _skip_quoted(expr, i, depth)
+            out.append(" _q_ ")
+            continue
+        if c == '"':
+            q = '"""' if expr.startswith('"""', i) else '"'
+            j = i + len(q)
+            parts: list[str] = []
+            while j < n and not expr.startswith(q, j):
+                if expr[j] == "\\":
+                    j += 2
+                elif expr.startswith("${", j):
+                    k = _skip_braces(expr, j + 2, depth + 1)
+                    body = expr[j + 2:k - 1] if k <= n and expr[k - 1:k] == "}" else expr[j + 2:k]
+                    parts.append(_unquoted(body, depth + 1))
+                    j = k
+                elif expr[j] == "$" and j + 1 < n and (expr[j + 1].isalpha() or expr[j + 1] == "_"):
+                    m = re.match(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", expr[j + 1:])
+                    parts.append(m.group(0))
+                    j += 1 + m.end()
+                else:
+                    j += 1
+            i = min(j + len(q), n)
+            # What it interpolates, ended by `;` so a name after it is not read as a step call; a text that
+            # interpolates nothing reads as an argument, as above.
+            out.append(" " + " ; ".join(parts) + " ; " if parts else " _q_ ")
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 # Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
 _JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
                     "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace",

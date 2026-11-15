@@ -139,7 +139,10 @@ CASES = {
  "x04_nested_dollar_nobrace": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"curl -H Authorization:${\"$t\".trim()} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
  "x07_nested_dollar_plus": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"curl -H ${\"Authorization:$t\"} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
  "x03_tool_interp": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"${tool \"m-${v}\"}/bin/mvn deploy\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
- "x05_nested_words": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"echo ${\"build-${v}-done\".toUpperCase()}\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n"
+ "x05_nested_words": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            [TOKEN].each { t ->\n              sh \"echo ${\"build-${v}-done\".toUpperCase()}\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "y04_inner_quote_upper": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            def a = 'x'\n            [TOKEN].each { t ->\n              sh \"curl -H ${\"Bearer ${t ?: \"X\"}\"} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "y05_inner_replace_upper": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            def a = 'x'\n            [TOKEN].each { t ->\n              sh \"curl -H ${\"Bearer ${t.replace(\"A\", \"B\")}\"} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "y08_triple": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def v = '3'\n            def a = 'x'\n            [TOKEN].each { t ->\n              sh \"curl -H ${\"\"\"Bearer ${t}\"\"\"} https://example.com\"\n            }\n          }\n        }\n      }\n    }\n  }\n}\n"
 }
 
 # (case, rule, what the adapter must say: a finding, "unknown" (never a pass) or nothing, severity)
@@ -265,6 +268,9 @@ EXPECT = [
     ('x07_nested_dollar_plus', 'OBAAF-JEN-013', 'unknown', None),
     ('x03_tool_interp', 'OBAAF-JEN-013', 'none', None),
     ('x05_nested_words', 'OBAAF-JEN-013', 'none', None),
+    ('y04_inner_quote_upper', 'OBAAF-JEN-013', 'unknown', None),
+    ('y05_inner_replace_upper', 'OBAAF-JEN-013', 'unknown', None),
+    ('y08_triple', 'OBAAF-JEN-013', 'unknown', None),
 ]
 
 A018 = b'// Review pipeline\rpipeline {\r  agent any\r  stages {\r    stage(\'Review\') {\r      steps {\r        withCredentials([string(credentialsId: \'gh-token\', variable: \'GH_TOKEN\')]) {\r          sh \'claude -p "review this change"\'\r        }\r      }\r    }\r  }\r}\r'
