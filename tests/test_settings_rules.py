@@ -1284,8 +1284,10 @@ class CommandTest(unittest.TestCase):
     def test_every_rule_has_a_line_and_fixes_can_be_left_out(self):
         _, out, _ = audit_command(ADMIN, INCIDENT_REPO, token=True)
         for rule in rules.RULES:
+            found = assess(ADMIN)
+            # One line under RULES, and one under each of FINDINGS and CANNOT TELL that has a result of it.
             self.assertEqual(sum(1 for line in out.splitlines() if line.startswith(f"  {rule.id}  ")),
-                             2 if of(assess(ADMIN), rule.id) else 1, rule.id)
+                             1 + bool(of(found, rule.id, "finding")) + bool(of(found, rule.id, "cannot-tell")), rule.id)
         self.assertIn("    Fix: ", out)
         self.assertNotIn("    Fix: ", audit_command(ADMIN, INCIDENT_REPO, "--no-fixes", token=True)[1])
 

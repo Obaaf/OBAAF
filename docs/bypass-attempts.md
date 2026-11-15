@@ -18,9 +18,10 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2d** | **Triggers, scripts and release jobs: OBAAF-GHA-010, 013, 015** | **2026-11-14** | `tests/test_trigger_script_release_bypasses.py` |
 | **2d.2e** | **Release and effect jobs: OBAAF-GHA-006, 007, 014, 016, 017, 021, 022** | **2026-11-14** | `tests/test_release_effect_bypasses.py` |
 | **2d.2f** | **Pins, egress and declarations: OBAAF-GHA-008, 009, 020, 023, OBAAF-CFG-001** | **2026-11-15** | `tests/test_pins_egress_declaration_bypasses.py` |
-| Still open | The rest of 2d.2: the Jenkins rules, the repository and instruction-file rules, the settings rules; see [the plan](flagship.md) | | |
+| **2d.2g** | **The settings rules: OBAAF-SET-001 to OBAAF-SET-015** | **2026-11-15** | `tests/test_settings_bypasses.py` |
+| Still open | The rest of 2d.2: the Jenkins rules, the repository and instruction-file rules; see [the plan](flagship.md) | | |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs) and [2d.2f](#2d2f-pins-egress-and-declarations).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations) and [2d.2g](#2d2g-the-settings-rules).
 
 ## 2d.2b: what a job can reach
 
@@ -1127,3 +1128,432 @@ What the checker reported for the attempt's rule on each attempt's workflow, wit
 | 358 | GHA-020 | nothing | nothing |
 | 359 | GHA-020 | nothing | nothing |
 | 360 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
+
+## 2d.2g: the settings rules
+
+Run `wryneck`, 2026-11-15, on a copy of `flagship` at `0aa319a`. Two Opus 5.5 reviewers that did not write the settings audit attacked its fifteen rules in parallel: reviewer A OBAAF-SET-001, 002, 003, 009, 010, 011, 012, 014 and 015 (166 attempts: 9 ways past, 5 false positives, 2 slow cases, 14 under a stated limit, 136 held), reviewer B OBAAF-SET-004, 005, 006, 007, 008 and 013 (149 attempts: 22 ways past, 7 false positives, 2 slow cases, 10 under a stated limit, 108 held). A way past here is a shape GitHub's API returns, or a workflow its author writes, for which a rule said "no finding" or "does not apply" (or a lower severity than its description gives) where the settings show the problem. Every attempt was built from the hand-written `admin-token` recording (GitHub's REST reference examples) with one answer changed, and a small tree of workflow files; nothing was run against GitHub. Every way past that is fixed is a test in `tests/test_settings_bypasses.py` (62 tests after the three reviews; of the first 42, 28 of the 38 that are not about time failed on the old code and the other 10 check that ordinary cases still read as before, and of the four about time three fail on it (a RecursionError on 1,500 chained jobs, 2.8 s on the called matrix, a method it lacks) while the 40-job ladder did not finish in two minutes).
+
+Pages read in the session (reviewer A): GitHub's reference for deployment branch policies (Ruby's `File.fnmatch`, wildcards do not match `/`, `type` is branch or tag), the changelog of 2026-11-02 on `pull_request_target` (public repositories only), the reference for Actions permissions (`sha_pinning_required`, the three approval policies, the read and write defaults), the page on reusing workflows ("can be only downgraded"), the changelogs of 2025-08-15 (SHA pinning) and 2026-10-28 (workflow lockfiles); reviewer B read the changelog of 2025-11-07 (`GITHUB_SHA` for `pull_request_target` is the default branch's latest commit). Not read, because the session's requests for them were not answered: GitHub's reference for Actions policies, "Managing GitHub Actions settings for a repository", the events page and the REST rules page. Everything else the record marks "not verified" rests on what the reviewers know.
+
+### OBAAF-SET-001 and OBAAF-SET-002: environments
+
+**Got through, now fixed.**
+
+- **An environment named by a number** (A004, A028, A048): `environment: {name: 010}` was compared as `"8"` (YAML 1.1 octal) and `environment: 0o10` as `"0o10"`, where YAML 1.2, GitHub's reader, gives 10 and 8. `OBAAF-SET-001` reported the wrong name as missing, and `OBAAF-SET-002` said nothing. The audit now takes the checker's own reading of the environment, so a number, `true` or `false`, plainly or under `name:`, is "cannot tell" for both rules; a quoted name is read as written.
+- **An audited branch was trusted without its rules being read** (A016, A017): the "cannot tell" for an environment limited to a branch that was not audited asked for `--branch`, and naming the branch turned it into "no finding", even when the branch had no rule at all or did not exist. A branch that was audited now counts only for what its rules show: with no rule requiring an approval, anyone with write access can push a job there that names the environment, which is a finding when the environment has no reviewers (medium, low with no secret); a limit on who may push (a ruleset's `update` rule, classic restrictions, `lock_branch`) or a `required_deployments` rule is "cannot tell", because who that lets push is not compared with who can push (the review's first pass found that the first version called such a branch closed); where the rules were not read in full (A017: the branch does not exist, and what GitHub sends for it is not read as a rule) it is "cannot tell". This holds for the default branch too, which is how the first adopter's `main-only` environment is now reported (see below).
+- **A backslash in a branch policy** (A037): `ma\in` is `main` to Ruby's `File.fnmatch`, which GitHub's reference names; the rule compared names as text. A backslash now makes a policy a pattern. The case is contrived; the fix costs nothing.
+
+**Under stated limits:** a pattern other than all stars is medium whatever it admits (A008), a tag pattern likewise (A009), a pattern with reviewers is not reported (A010), and an environment with no secret is low (A042).
+
+### OBAAF-SET-003: where a secret is stored
+
+**Got through, now fixed** (A053, recorded by the reviewer under a stated limit, fixed because it is the rule's own risk): a protected secret copied into a second environment that any branch may use and that asks nobody was reported by no rule, because no job named that environment. Any job on any branch can name it. It is now high. A copy in an environment with a branch pattern of only `*` and `/` counts as open too (the review's first pass); a copy in an environment with another limit or with reviewers is still not reported (stated in the rule's description).
+
+### OBAAF-SET-004: who can bypass a branch's rules
+
+**Got through, now fixed.**
+
+- **The GitHub Actions app as a bypass actor** (B002, B030): an `Integration` actor with id 15368 that may always bypass lets any workflow's token push past the ruleset, and anyone who can push a branch can add a workflow there that asks for `contents: write`. It was medium; it is now high, with that reason. That the app's id is the actor's id was not verified against GitHub.
+- **"exempt" read as the narrower bypass** (B011, recorded under a stated limit, fixed because the limit was wrong): GitHub's `current_user_can_bypass` says "exempt" for a bypass that is not even shown. Only "pull_requests_only" is narrower now; "always", "exempt" and any other word are the wider one.
+
+**False positive fixed** (B017): a classic rule that requires no check and no review, not holding administrators, was reported as letting them skip "its required checks and reviews".
+
+**Under stated limits:** a bypass only when merging a pull request is low (B003, B024, B026), a classic review allowance is medium (B004), a role counts only for exactly that role (B006).
+
+### OBAAF-SET-005 and OBAAF-SET-013: approvals
+
+All 32 attempts held. These rules read GitHub's answer for the rules in force on a branch, never a ruleset's `conditions`, so the ref-pattern attempts (`~DEFAULT_BRANCH`, `~ALL`, excludes, rulesets in evaluate mode) do not reach them.
+
+### OBAAF-SET-006 to OBAAF-SET-008: required checks
+
+**Got through, now fixed.**
+
+- **Settings that stop every run were not read** (B152 to B155): with GitHub Actions turned off, with the only reporting job in a workflow GitHub refuses (the repository requires pinned actions and it uses `actions/checkout@v4`; `OBAAF-SET-015` said so itself), or with an enforced policy that blocks `pull_request` for the file (`OBAAF-SET-009` said so itself), `OBAAF-SET-006` said the required check is reported and `OBAAF-SET-007` that it reports on every pull request. They now read those settings: such a job reports nothing, a blocked event starts nothing, and a file GitHub may refuse or not start is never counted as reporting: an unpinned action beside a lockfile, which is not read; another repository's action or reusable workflow where `allowed_actions` is `local_only` (GitHub words it as allowing the owner's actions and reusable workflows, by the second review, not verified); a file whose events an enforced policy the audit does not understand may block; and a file that calls one GitHub does not or may not run, or one that was not read (the second and third reviews found callers of refused and missing files still counted). A finding for a check whose only job GitHub does not run needs, like every other `OBAAF-SET-006` finding, that no job's token may write checks or statuses, unless Actions is off. Where the settings were not read, the rules take every file as running, and their line in the report says so ("assumed: ..."), whatever their answers; this one is not a "cannot tell", because the settings need an administrator's token and without one every check rule would answer nothing (decision D-066).
+- **Names the two YAML readers read differently** (B072 to B076, B095, B142): `name: 0` and `name: false` made the checker fall back to the job's id; `name: 012` is 10 here and 12 to GitHub, `12:30` is 750 here and text there, a matrix value `08` is text here and 8 there. A `name` that is not text, and a name or matrix value whose source YAML 1.2 reads otherwise, are now names that cannot be written out ("cannot tell"); whole numbers written plainly and quoted values are read as before.
+- **Files GitHub may read otherwise** (B081 to B084): the only reporting job in `ci.YML`, in a file named `.yml`, in a symbolic link, or named through a merge key (which the checker reports as a problem of the file, and no settings rule read). Such a file's jobs are never counted as reporting now, nor is a caller of such a file, nor a file in a linked `.github` or `.github/workflows` directory; every problem the checker reports in a file counts, except one about the names of a step's inputs (the first version kept only four kinds, and the second review showed that it dropped steps and jobs GitHub refuses). Whether GitHub runs `ci.YML` or follows a link is not verified; the answer is right either way.
+- **`pull_request_target` counted as reporting on the pull request** (B106): that event runs on the latest commit of the default branch (changelog of 2025-11-07, read), so its check is not on the commit the requirement waits on. Whether GitHub counts it anyway is not established, so a required check that only such a job reports is "cannot tell" for `OBAAF-SET-007`. For `OBAAF-SET-008` such a job counts as any other: a check nobody requires fails without blocking a merge whether or not it counts on the pull request (the first version made it "cannot tell" there too, which the review showed hid the incident fixture's `scan.yml#scan` finding).
+- **Two jobs that report one check name** (B132, B133): GitHub weighs one check run of a name (not verified), so a failing job can be hidden by a passing one. `OBAAF-SET-008` is "cannot tell" for a required name that more than one job that may run on pull requests into the branch reports; a name nobody requires is still a finding for each job.
+- **A classic rule's checks folded to one app per name** (B098, B125): a check required from another app and from GitHub Actions lost the other app's requirement. Every app is kept now. Whether GitHub lets one classic rule list a check twice is not verified.
+
+**False positives fixed.** A plain job that `if:` skips on pull requests, or that needs such a job, was reported by `OBAAF-SET-007` as never reporting; a skipped job reports as passed, as the rule's own fix says. Reviewer B's own attempts (B103, B104) used a matrix job, and the review showed that the verdict was wrong for them: `if:` is decided before a matrix expands, so a skipped matrix job (or caller) reports its bare name and the required `test (3.13)` stays pending. Those two still give findings, correctly (not verified against GitHub). A called workflow's job with `continue-on-error: true` (B135) was asked to be required. **Kept:** a job with `if: false` (B143) and a called job that `if:` skips on pull requests (B147) are still counted by `OBAAF-SET-008`, now in the rule's description.
+
+**Under stated limits:** the few refusals the audit knows (B080, B093), an unfiltered push counted as every pull request (B105, B119), and `concurrency` (B117, counted as a way past by the reviewer's judgement; now in the description).
+
+### OBAAF-SET-009 and OBAAF-SET-010: Actions policies
+
+**Got through, now fixed** (A108; and A076, a false positive): a policy's `repository_name` and `repository_id` conditions were accepted and never read, so an organisation policy that allows `pull_request_target` everywhere but this repository counted as allowing it here, and one aimed at another repository counted as blocking events here. A repository condition other than "every repository" now makes the policy "cannot tell". Whether GitHub lists such a policy for a repository it leaves out is not verified.
+
+**Under stated limits:** how a path pattern is matched (A071, A074, A112), a `workflow_call` beside other events (A080), a policy that also restricts actors (A110).
+
+### OBAAF-SET-011, OBAAF-SET-012 and OBAAF-SET-014
+
+`OBAAF-SET-011` and `OBAAF-SET-014` held (`OBAAF-SET-014` under its stated limits: whether the repository has self-hosted runners, A167, A171). **False positives fixed** in `OBAAF-SET-012` (A144, A145): a called job whose only caller grants `contents: read`, and a caller whose called workflow declares its permissions, were reported as getting the repository's write default; GitHub's page on reusing workflows (read) says the called workflow "can be only downgraded". A workflow nothing here calls may be called from elsewhere and is still reported.
+
+### OBAAF-SET-015: pinning
+
+**Got through, now fixed** (A182, A183): the audit judged pins with the checker's old pattern, which took a 64-digit ref (a tag or a branch on github.com) and a SHA followed by a line break. It now uses the checker's pin, 40 lower-case hex digits and nothing else. **False positives fixed:** `$/path` (A186) is local; with `.github/workflows/actions.lock` (A188; GitHub's changelog of 2026-10-28, read) an action that is not pinned in the file is "cannot tell", because the lockfile may pin it and is not read. **Under stated limits:** the actions inside a local composite action (A185) or a called workflow (A194).
+
+### Time
+
+- **`Job.triggers` followed `needs` afresh on every path** (A200, A201, B150): 22 jobs that each need every earlier one (3 KB) took 4.5 s, 24 took 19 s, and each further job doubled it, in `obaaf audit` and in `obaaf check`, which uses the same method. Each job's answer is now worked out once per workflow, its needed jobs first and without recursion (1,500 chained jobs are read), and in a file whose `needs` form a cycle, which GitHub refuses, no job is narrowed by the jobs it needs. A 40-job ladder now takes well under a second.
+- **Called matrix names were written out before the cap dropped them** (B151): 4 callers with 256 matrix combinations calling 60 jobs of 256 each took 3 s (18 s at 36 KB). The names are now counted first.
+
+### What changed for the first adopter
+
+Expectrail at `f7bce42` (a read-only copy of `.github` and `AGENTS.md`; nothing under `fresh-*` was read): `obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes` gives the same findings, errors and notes with the old and the new code. `obaaf audit` against GitHub's own answers recorded for it on 2026-11-13 (with and without the token the workflow had) gives one new finding: `OBAAF-SET-001`, medium, environment `main-only`, limited to `main`, which requires no approval and does not limit who may push, so any account with write access can merge an unreviewed pull request whose job names `main-only` and reads its keys. That is the same environment the brief's first incident was about, closed one level further down; whether `main` still requires no approval was not read live. No other result changed, and `OBAAF-SET-006`'s line now says ("assumed: ...") that it took every workflow file as running, because the recordings hold no Actions permissions.
+
+### Review
+
+One Opus 5.5 sub-agent that wrote none of it reviewed the slice. It checked the memoised `Job.triggers` against the old code on 9,000 random workflows without a cycle (the same answer every time, whatever order the jobs were asked in) and 2,000 with one (only ever wider), and that the cache cannot go stale or be shared between workflows.
+
+- **First pass: 8 blocking findings**, all fixed and tested:
+  1. `OBAAF-SET-007` took a skipped matrix job or caller for one that reports.
+  2. A limit on who may push made a branch "closed" without reading who it lets push.
+  3. A lockfile, and a policy the audit does not understand, left files counted as running.
+  4. The doubt about a file did not reach its callers, nor files in a linked directory.
+  5. The "taken as running" note vanished whenever the rule had any result; it is now its own field, `assumed`, shown on the rule's line whatever the answer.
+  6. `OBAAF-SET-008` turned an unrequired `pull_request_target` check into "cannot tell".
+  7. `OBAAF-SET-008` did the same for a shared name nobody requires.
+  8. The finding for a stopped file skipped the test that no token may write checks.
+
+  Of 9 non-blocking findings, these were fixed: a quadratic walk of the jobs' nodes, doubt from every checker problem (narrowed, then widened again in the second pass), `allowed_actions`, SET-003's idea of "open", two bypass modes in the docs, a muddled changelog line, and `required_deployments` read as no gate. Two are now stated limits: approvals a push does not dismiss, and job ids YAML 1.2 reads as numbers.
+- **Second pass** (a fresh Opus 5.5 sub-agent, given the first pass's findings): seven of the eight fixes held, and one held only for its case. It found 4 blocking defects, all now fixed and tested:
+  1. `allowed_actions: local_only` was read as "this repository only", but GitHub's own wording allows the owner's actions; it now marks the file as one GitHub may refuse.
+  2. A caller of a refused file still counted as reporting.
+  3. `pull_request_target` filtered by a branch pattern counted as running on every pull request.
+  4. Doubt kept only four kinds of checker problem, which dropped steps and jobs GitHub refuses.
+
+  Of 3 non-blocking findings, two were fixed: an evaluate-mode policy, or one whose events cover the file, no longer makes the file doubtful; a code owner's review makes a branch "cannot tell" for `OBAAF-SET-001`. One is left: `OBAAF-SET-007` leaves out a paths-filtered reporter in a file GitHub may not run, so that finding moves to `OBAAF-SET-006`'s "cannot tell".
+- **Third pass** (a fresh Opus 5.5 sub-agent, on the second pass's fixes only): all four held for the cases named. It found 3 more blocking defects, all fixed and tested:
+  1. The exemption for problems about a step's input names matched a phrase, which a workflow can quote in a trigger or a permission. It now matches the start of the problem as the checker writes it (the job id, the step number, then the phrase). Only a job id that GitHub refuses could still forge a match, and the audit does not check job ids (issue #182).
+  2. Under `local_only`, a reusable workflow from another repository was not counted as remote.
+  3. A caller of a workflow file that is missing, or was not read, still counted as reporting.
+
+  Two non-blocking findings were also fixed. The pinning requirement is now weighed before `local_only`, so a refused file is refused. A policy whose enforcement value is not understood, and whose rules are only about actors, no longer counts as covering every event; an enforced policy of actors only is still not compared, as before.
+- **Fourth pass** (a fresh Opus 5.5 sub-agent, on the third pass's fixes only): no blocking defect; every change moves an answer towards "cannot tell" or a finding, and ordinary cases read as before. Its non-blocking findings are in issue #182: `uses: ./` alone and `$/` calls are not compared, job ids are not checked against GitHub's form, an empty list of selected actions is not read as blocking, and the caller loop is quadratic in the length of a chain of calls (1.2 s for 1,500). Wording it found too strong was corrected; the last commit after it changes only wording.
+
+#### Every attempt of reviewer A, before and after the fixes
+
+| Attempt | Rule | What was tried | GitHub's basis, as the reviewer gave it | Before | After | Reviewer's verdict (before) |
+| --- | --- | --- | --- | --- | --- | --- |
+| A001 | SET-001 | env open to any branch, no reviewers, holds secrets | none needed (the rule's own reading) | finding high | finding high | held |
+| A002 | SET-001 | job names the env in upper case | env names case-insensitive (not verified) | finding high | finding high | held |
+| A003 | SET-001 | env as mapping with name and url | none needed (the rule's own reading) | finding high | finding high | held |
+| A004 | SET-001 | `environment: {name: 010}`; open env "010" exists; rule reads "8" | YAML 1.2 core schema reads `010` as 10 and `0o10` as 8; YAML 1.1 reads `010` as 8 (yaml.org, not verified); what GitHub's reader does is not verified | finding medium | cannot tell | way past |
+| A005 | SET-001 | env named by `${{ inputs.target }}` | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A006 | SET-001 | custom branch policy `*` | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | finding high | finding high | held |
+| A007 | SET-001 | custom branch policy `**/*` | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | finding high | finding high | held |
+| A008 | SET-001 | custom branch policy `?*`, no reviewers | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | finding medium | finding medium | under a stated limit |
+| A009 | SET-001 | tag policy `*`, no reviewers | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | finding medium | finding medium | under a stated limit |
+| A010 | SET-001 | `release/*` with required reviewers | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | no finding | no finding | under a stated limit |
+| A011 | SET-001 | `protected_branches: true` | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | cannot tell | cannot tell | held |
+| A012 | SET-001 | custom policies with zero entries | no branch may deploy (not verified) | no finding | no finding | held |
+| A013 | SET-001 | wait timer only, no reviewers | none needed (the rule's own reading) | finding high | finding high | held |
+| A014 | SET-001 | reviewers, self-review allowed, admins may bypass | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A015 | SET-001 | limited to unaudited branch `feature-x` | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | cannot tell | cannot tell | held |
+| A016 | SET-001 | limited to `release`, audited with --branch, release unprotected | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified); push by anyone with write access to an unprotected branch (not verified) | no finding | finding medium | way past |
+| A017 | SET-001 | limited to `release`, audited, branch does not exist (404) | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified); anyone with write access can create a branch (not verified) | no finding | cannot tell | way past |
+| A018 | SET-001 | job names an env the settings lack | GitHub creates a referenced env (not verified) | finding medium | finding medium | held |
+| A019 | SET-001 | env named in a workflow_call-only file | none needed (the rule's own reading) | finding high | finding high | held |
+| A020 | SET-001 | env name with trailing space in quotes | trimming not established (not verified) | finding medium | finding medium | held |
+| A021 | SET-001 | env named only by protected_secrets | none needed (the rule's own reading) | finding high | finding high | held |
+| A022 | SET-001 | `main` branch + `v*` tag policy, no reviewers | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | finding medium | finding medium | held |
+| A023 | SET-001 | env secrets refused (403) | none needed (the rule's own reading) | finding high | finding high | held |
+| A024 | SET-001 | branch policies refused (403) | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A025 | SET-001 | env name via YAML anchor/alias | YAML anchors supported since 2025-09 (not verified) | finding high | finding high | held |
+| A026 | SET-001 | bare `environment: 010` | YAML 1.2 core schema reads `010` as 10 and `0o10` as 8; YAML 1.1 reads `010` as 8 (yaml.org, not verified); what GitHub's reader does is not verified | cannot tell | cannot tell | held |
+| A027 | SET-001 | policy `main` with no `type` field (as REST example) | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) | no finding | no finding | held |
+| A028 | SET-001 | bare `environment: 0o10`; open env "8" exists | YAML 1.2 core schema reads `010` as 10 and `0o10` as 8; YAML 1.1 reads `010` as 8 (yaml.org, not verified); what GitHub's reader does is not verified | finding medium | cannot tell | way past |
+| A030 | SET-002 | pull_request_target job names open env | [changelog 2025-11-07](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/) (not verified) | finding high | finding high | held |
+| A031 | SET-002 | `on: issue_comment` as text | none needed (the rule's own reading) | finding high | finding high | held |
+| A032 | SET-002 | `on: {workflow_run: null}` flow mapping | none needed (the rule's own reading) | finding high | finding high | held |
+| A033 | SET-002 | `if: github.event_name == 'PUSH'` on [push, issues] | GitHub expressions compare strings ignoring case (not verified) | does not apply | does not apply | held |
+| A034 | SET-002 | `if: github.event_name != 'Push'` on [push, issues] | GitHub expressions compare strings ignoring case (not verified) | finding high | finding high | held |
+| A035 | SET-002 | env limited to default branch `main` | [changelog 2025-11-07](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/) (not verified) | finding high | finding high | held |
+| A036 | SET-002 | env limited to `release` only | [changelog 2025-11-07](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/) (not verified) | no finding | no finding | held |
+| A037 | SET-002 | policy `ma\in` (fnmatch escape of `main`) | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified) names Ruby File.fnmatch; GitHub's flags not verified | no finding | finding high | way past |
+| A038 | SET-002 | policy `{main,release}` (braces) | [branch-policies ref](https://docs.github.com/ko/enterprise-cloud@latest/rest/deployments/branch-policies) (verified); braces need FNM_EXTGLOB (not verified) | no finding | no finding | held |
+| A039 | SET-002 | tag policy named `main` | [changelog 2025-11-07](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/) (not verified) | no finding | no finding | held |
+| A040 | SET-002 | env `protected_branches: true` | none needed (the rule's own reading) | finding high | finding high | held |
+| A041 | SET-002 | env with required reviewers | none needed (the rule's own reading) | no finding | no finding | held |
+| A042 | SET-002 | env holds no secret, job reads none | none needed (the rule's own reading) | no finding | no finding | under a stated limit |
+| A043 | SET-002 | PRT caller -> local reusable job names env | none needed (the rule's own reading) | finding high | finding high | held |
+| A044 | SET-002 | PRT caller -> remote reusable workflow | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A045 | SET-002 | `needs` + `if: always()` keeps PRT | none needed (the rule's own reading) | finding high | finding high | held |
+| A046 | SET-002 | `workflow_run.event == 'PUSH'` | GitHub expressions compare strings ignoring case (not verified) | does not apply | does not apply | held |
+| A047 | SET-002 | env secrets refused, job reads none | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A048 | SET-002 | A004's `{name: 010}` in a PRT job | YAML 1.2 core schema reads `010` as 10 and `0o10` as 8; YAML 1.1 reads `010` as 8 (yaml.org, not verified); what GitHub's reader does is not verified | no finding | cannot tell | way past |
+| A050 | SET-003 | incident: protected `*_API_KEY` also a repo secret | none needed (the rule's own reading) | finding high | finding high | held |
+| A051 | SET-003 | protected pattern in lower case | secret names are case-insensitive, stored upper case (not verified) | finding high | finding high | held |
+| A052 | SET-003 | list-form protected name stored as org secret | none needed (the rule's own reading) | finding high | finding high | held |
+| A053 | SET-003 | protected secret copied into a second open env no job names | none needed (the rule's own reading) | no finding | finding high | under a stated limit |
+| A054 | SET-003 | no config; env+repo copy, read as `secrets['X']` | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A055 | SET-003 | no config; env+org copy, `secrets: inherit` | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A056 | SET-003 | no config; read as `secrets.model_api_key` | secret names are case-insensitive, stored upper case (not verified) | finding medium | finding medium | held |
+| A057 | SET-003 | config env in another case | none needed (the rule's own reading) | finding high | finding high | held |
+| A058 | SET-003 | config names an env that does not exist | none needed (the rule's own reading) | finding high | finding high | held |
+| A059 | SET-003 | org secrets refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A060 | SET-003 | protected pattern with `?` | none needed (the rule's own reading) | finding high | finding high | held |
+| A061 | SET-003 | env-only secret read by a job | none needed (the rule's own reading) | no finding | no finding | held |
+| A062 | SET-003 | one env's secrets refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A063 | SET-003 | repo secret listed in lower case | secret names are case-insensitive, stored upper case (not verified) | finding high | finding high | held |
+| A064 | SET-003 | secret read by computed index | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A065 | SET-003 | configuration that does not load | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A070 | SET-009 | incident: policy allows PRT+dispatch, workflow adds workflow_run | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A071 | SET-009 | exclude `.github/*.yml` (Python `*` crosses `/`) | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | no finding | no finding | under a stated limit |
+| A072 | SET-009 | include `.github/workflows/*.yml` | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding medium | finding medium | held |
+| A073 | SET-009 | include with leading `/` | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding medium | finding medium | held |
+| A074 | SET-009 | include with leading `./` | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | no finding | no finding | under a stated limit |
+| A075 | SET-009 | `.yaml` file | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A076 | SET-009 | org policy whose repository_name names another repo | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding medium | cannot tell | false positive |
+| A077 | SET-009 | `on: workflow_run` as text | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A078 | SET-009 | `on:` as list | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A079 | SET-009 | `on:` mapping with an anchor | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A080 | SET-009 | workflow_call beside PRT | none needed (the rule's own reading) | no finding | no finding | under a stated limit |
+| A081 | SET-009 | policy in evaluate mode | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding low | finding low | held |
+| A082 | SET-009 | policy disabled | none needed (the rule's own reading) | no finding | no finding | held |
+| A083 | SET-009 | event rule + actor rule | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding medium | finding medium | held |
+| A084 | SET-009 | allowed_events empty | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A085 | SET-009 | `schedule` not allowed | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A086 | SET-009 | enforcement `Active` (case) | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A087 | SET-009 | policy with no rules | none needed (the rule's own reading) | no finding | no finding | held |
+| A088 | SET-009 | conditions null | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A089 | SET-009 | organisation policy over ~ALL | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | finding medium | finding medium | held |
+| A090 | SET-009 | policies refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A091 | SET-009 | allowed_events holds a number | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A092 | SET-009 | two enforced policies, one allows | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A100 | SET-010 | public, PRT, no policy | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | finding medium | finding medium | held |
+| A101 | SET-010 | active policy allows PRT for the file | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | no finding | no finding | held |
+| A102 | SET-010 | allowing policy in evaluate mode | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | cannot tell | cannot tell | held |
+| A103 | SET-010 | allowing policy disabled | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | finding medium | finding medium | held |
+| A104 | SET-010 | private repository | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | does not apply | does not apply | held |
+| A105 | SET-010 | internal repository | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | does not apply | does not apply | held |
+| A106 | SET-010 | policies refused | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | cannot tell | cannot tell | held |
+| A107 | SET-010 | allowing policy targets another file | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | finding medium | finding medium | held |
+| A108 | SET-010 | org policy allows PRT, repository_name excludes this repo | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified); whether such a policy is listed for the repo: not verified | no finding | cannot tell | way past |
+| A109 | SET-010 | `on: |` block scalar gives `pull_request_target\n` | GitHub's handling of the name not verified | does not apply | does not apply | held |
+| A110 | SET-010 | allowing policy also restricts actors | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | no finding | no finding | under a stated limit |
+| A111 | SET-010 | workflow file `t.YAML` | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A112 | SET-010 | allowing policy path `*` | [control workflow execution](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution) (verified; no path syntax given); [policies REST ref](https://docs.github.com/en/rest/actions/policies) (could not fetch) | no finding | no finding | under a stated limit |
+| A113 | SET-010 | only-push policy for another file | [changelog 2026-11-02](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2) (verified) | finding medium | finding medium | held |
+| A120 | SET-011 | incident: env-only secret passed to reusable workflow | [reusing workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations) (verified) | finding medium | finding medium | held |
+| A121 | SET-011 | passed as input under `with:` | [reusing workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations) (verified) | finding medium | finding medium | held |
+| A122 | SET-011 | passed name in lower case | secret names are case-insensitive, stored upper case (not verified) | finding medium | finding medium | held |
+| A123 | SET-011 | `secrets: inherit`, called job reads it without env | [reusing workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations) (verified) | finding medium | finding medium | held |
+| A124 | SET-011 | inherit, called job declares `Release` | none needed (the rule's own reading) | no finding | no finding | held |
+| A125 | SET-011 | inherit, called env by expression | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A126 | SET-011 | inherit to remote workflow | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A127 | SET-011 | computed secret name passed | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A128 | SET-011 | nested inherit | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A129 | SET-011 | secret also an org secret | none needed (the rule's own reading) | no finding | no finding | held |
+| A130 | SET-011 | env secrets refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A131 | SET-011 | `secrets: Inherit` | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A132 | SET-011 | inherit, called job declares another env | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A133 | SET-011 | inherit, read in called workflow's `env:` | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A140 | SET-012 | default write, job with no permissions | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding medium | finding medium | held |
+| A141 | SET-012 | workflow `permissions: {}` | none needed (the rule's own reading) | does not apply | does not apply | held |
+| A142 | SET-012 | job `permissions:` null | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A143 | SET-012 | workflow `read-all` | none needed (the rule's own reading) | does not apply | does not apply | held |
+| A144 | SET-012 | called workflow w/o permissions; only caller grants read | [reusing workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations) (verified) ("can be only downgraded") | finding medium | does not apply | false positive |
+| A145 | SET-012 | caller w/o permissions; called workflow declares read | [reusing workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations) (verified) | finding medium | does not apply | false positive |
+| A146 | SET-012 | default `Write` | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | cannot tell | cannot tell | held |
+| A147 | SET-012 | workflow permissions refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A148 | SET-012 | job `write-all` | none needed (the rule's own reading) | does not apply | does not apply | held |
+| A149 | SET-012 | default read | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | no finding | no finding | held |
+| A150 | SET-012 | permissions via merge key `<<` | merge keys unsupported by GitHub: [frenck.dev](https://frenck.dev/github-actions-yaml-anchors-aliases-merge-keys/) (search result only, not verified) | does not apply | does not apply | held |
+| A160 | SET-014 | public, first_time_contributors, self-hosted | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A161 | SET-014 | all_external_contributors | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | no finding | no finding | held |
+| A162 | SET-014 | first_time_contributors_new_to_github | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A163 | SET-014 | `[Self-Hosted, linux]` | none needed (the rule's own reading) | finding high | finding high | held |
+| A164 | SET-014 | runner group only | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A165 | SET-014 | matrix runner incl. self-hosted | none needed (the rule's own reading) | finding high | finding high | held |
+| A166 | SET-014 | `"self-hosted, linux"` one label | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A167 | SET-014 | hosted runners only | none needed (the rule's own reading) | cannot tell | cannot tell | under a stated limit |
+| A168 | SET-014 | private, fork PRs run and get secrets | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A169 | SET-014 | private, fork PRs get write token | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A170 | SET-014 | private, fork PRs do not run | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | no finding | no finding | held |
+| A171 | SET-014 | private, fork PRs run unapproved on self-hosted | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | no finding | no finding | under a stated limit |
+| A172 | SET-014 | internal, fork PRs get secrets | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A173 | SET-014 | unknown approval value | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | finding high | finding high | held |
+| A174 | SET-014 | `runs-on: {labels: self-hosted}` | none needed (the rule's own reading) | finding high | finding high | held |
+| A175 | SET-014 | self-hosted job in a workflow_call file | none needed (the rule's own reading) | finding high | finding high | held |
+| A176 | SET-014 | approval setting refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A177 | SET-014 | private fork settings refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A178 | SET-014 | runner by `${{ inputs.runner }}` | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A179 | SET-014 | custom labels only `[linux, x64, gpu]` | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A180 | SET-015 | pinning required, tag ref | [changelog 2025-08-15](https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/) (verified) | finding medium | finding medium | held |
+| A181 | SET-015 | short SHA | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) | finding medium | finding medium | held |
+| A182 | SET-015 | 64-hex ref (a tag or branch on github.com) | [changelog 2025-08-15](https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/) (verified); [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (tags refused) | no finding | finding medium | way past |
+| A183 | SET-015 | 40-hex SHA + `\n` in a quoted string | [changelog 2025-08-15](https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/) (verified) | no finding | finding medium | way past |
+| A184 | SET-015 | `docker://` step | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) | does not apply | does not apply | held |
+| A185 | SET-015 | local composite action using a tag inside | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (refused) | no finding | no finding | under a stated limit |
+| A186 | SET-015 | `$/` self-repository action | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (passes) | finding medium | no finding | false positive |
+| A187 | SET-015 | reusable workflow at a tag | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (passes) | no finding | no finding | held |
+| A188 | SET-015 | tags locked by .github/workflows/actions.lock | [changelog 2026-10-28](https://github.blog/changelog/2026-10-28-github-actions-workflow-lockfiles-are-generally-available/) (verified); repo-settings docs page (could not fetch); [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (passes) | finding medium | cannot tell | false positive |
+| A189 | SET-015 | not required, all pinned | none needed (the rule's own reading) | finding low | finding low | held |
+| A190 | SET-015 | `sha_pinning_required` absent | [Actions permissions REST ref](https://docs.github.com/en/rest/actions/permissions) (verified) | cannot tell | cannot tell | held |
+| A191 | SET-015 | Actions permissions refused | none needed (the rule's own reading) | cannot tell | cannot tell | held |
+| A192 | SET-015 | upper-case 40-hex SHA | GitHub's acceptance not verified | finding medium | finding medium | held |
+| A193 | SET-015 | tag inside a `parallel` step group | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A194 | SET-015 | remote reusable workflow at SHA using tags inside | [classmethod test](https://dev.classmethod.jp/en/articles/github-actions-require-sha-pinning/) (read; third party, not GitHub) (refused) | no finding | no finding | under a stated limit |
+| A195 | SET-015 | tag in a local called workflow | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A196 | SET-015 | 40-hex SHA + trailing space | none needed (the rule's own reading) | finding medium | finding medium | held |
+| A200 | SET-002 | 22 jobs, each `needs` all before (3 KB) | none needed (the rule's own reading) | does not apply (4.5 s) | does not apply | traceback / hang |
+| A201 | SET-012 | 31 jobs, each `needs` the two before (2.6 KB) | none needed (the rule's own reading) | finding medium (7.3 s) | finding medium | traceback / hang |
+| A202 | SET-002 | chain of 60 local reusable workflows from PRT | none needed (the rule's own reading) | finding high | finding high | held |
+| A203 | SET-015 | 400-step anchor aliased by 150 jobs (25 KB) | none needed (the rule's own reading) | finding medium | finding medium | held |
+
+#### Every attempt of reviewer B, before and after the fixes
+
+| Attempt | Rule | What was tried | GitHub's basis, as the reviewer gave it | Before | After | Reviewer's verdict (before) |
+| --- | --- | --- | --- | --- | --- | --- |
+| B001 | SET-004 | recorded incident: OrganizationAdmin always, one admin account | https://docs.github.com/en/rest/repos/rules (not verified); recording | finding high | finding high | held |
+| B002 | SET-004 | Integration 15368 (GitHub Actions app) always; 1 admin + 2 write. Any author can push a workflow whose GITHUB_TOKEN pushes to main | https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets (not verified): apps can be bypass actors; a job's GITHUB_TOKEN acts as the GitHub Actions app | finding medium | finding high | way past (medium; description says high when everyone who can push can bypass) |
+| B003 | SET-004 | Integration 15368, bypass_mode pull_request | https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets (not verified) | finding low | finding low | under a stated limit (docs: a pull-request-only bypass is low) |
+| B004 | SET-004 | classic bypass_pull_request_allowances.apps = github-actions | https://docs.github.com/en/rest/branches/branch-protection (not verified) | finding medium | finding medium | under a stated limit (docs: a classic allowance is medium) |
+| B005 | SET-004 | DeployKey actor, actor_id null, always | https://docs.github.com/en/rest/repos/rules (not verified) | finding medium | finding medium | held |
+| B006 | SET-004 | RepositoryRole write (4) always; admins exist beside | https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets (not verified) | finding medium | finding medium | under a stated limit (docs: whether a role extends to higher roles is not established) |
+| B007 | SET-004 | maintain + write roles always, accounts exactly 1 maintain + 1 write | https://docs.github.com/en/rest/repos/rules (not verified) | finding high | finding high | held |
+| B008 | SET-004 | custom repository role id 81234 always | https://docs.github.com/en/rest/repos/rules (not verified) | finding medium | finding medium | held (medium; coverage unknowable) |
+| B009 | SET-004 | bypass_mode exempt on admin + write roles | https://docs.github.com/en/rest/repos/rules (not verified) | finding high | finding high | held |
+| B010 | SET-004 | bypass_mode null | - | finding high | finding high | held |
+| B011 | SET-004 | list withheld, current_user_can_bypass = exempt | https://docs.github.com/en/rest/repos/rules (not verified) | finding low | finding medium | under a stated limit (docs: words other than always/never read as narrower; exempt is the wider mode) |
+| B012 | SET-004 | only required_deployments (gate) + deletion | https://docs.github.com/en/rest/repos/rules (not verified) | finding high | finding high | held |
+| B013 | SET-004 | only an update rule | https://docs.github.com/en/rest/repos/rules (not verified) | does not apply | does not apply | held |
+| B014 | SET-004 | unknown rule type is the ruleset's only rule | - | cannot tell | cannot tell | held |
+| B015 | SET-004 | empty bypass_actors [] | https://docs.github.com/en/rest/repos/rules (not verified) | cannot tell | cannot tell | held |
+| B016 | SET-004 | rule from org ruleset 77 not in the repository's list | https://docs.github.com/en/rest/repos/rules (not verified) | cannot tell | cannot tell | held |
+| B017 | SET-004 | classic rule with no checks and no reviews (only force-push/deletion), enforce_admins false | https://docs.github.com/en/rest/branches/branch-protection (not verified) | finding medium | no finding | false positive (medium; a ruleset of the same content is not-applicable, and the message claims checks and reviews that do not exist) |
+| B018 | SET-004 | classic enforce_admins false, all pushers admins | https://docs.github.com/en/rest/branches/branch-protection (not verified) | finding high | finding high | held |
+| B019 | SET-004 | classic allowances present and empty | https://docs.github.com/en/rest/branches/branch-protection (not verified) | no finding | no finding | held |
+| B020 | SET-004 | classic allowances without teams | https://docs.github.com/en/rest/branches/branch-protection (not verified) | cannot tell | cannot tell | held |
+| B021 | SET-004 | OrganizationAdmin always, two admins | - | finding medium | finding medium | held |
+| B022 | SET-004 | Team always | - | finding medium | finding medium | held |
+| B023 | SET-004 | EnterpriseOwner always | - | finding medium | finding medium | held |
+| B024 | SET-004 | every push role in pull_request mode (every author can merge their own PR unreviewed) | https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets (not verified) | finding low | finding low | under a stated limit (docs: pull-request-only bypass is low) |
+| B025 | SET-004 | user-owned repo, sole admin, admin role always | - | finding high | finding high | held |
+| B026 | SET-004 | OrganizationAdmin pull_request mode, sole owner | - | finding low | finding low | under a stated limit |
+| B027 | SET-004 | list withheld, current_user_can_bypass = always | - | finding medium | finding medium | held |
+| B028 | SET-004 | ruleset conditions exclude refs/heads/main but GitHub lists its rules for main | https://docs.github.com/en/rest/repos/rules (not verified): rules for a branch are GitHub's own evaluation | finding high | finding high | held (the rules use GET rules/branches, not conditions) |
+| B029 | SET-004 | collaborators unread, OrganizationAdmin always | - | finding medium | finding medium | held |
+| B030 | SET-004 | Integration 15368 always, default token read-only | https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets (not verified) | finding medium | finding high | way past (same class as B002) |
+| B158 | SET-004 | list withheld, current_user_can_bypass = pull_requests_only | - | finding low | finding low | held |
+| B031 | SET-005 | recorded incident: 1 approval, 1 account | recording | finding medium | finding medium | held |
+| B032 | SET-005 | admin + write, 1 approval | https://docs.github.com/en/rest/collaborators/collaborators (not verified) | no finding | no finding | held |
+| B033 | SET-005 | admin + triage + read | https://docs.github.com/en/rest/collaborators/collaborators (not verified) | finding medium | finding medium | held |
+| B034 | SET-005 | classic 2 + ruleset 1, two accounts | https://docs.github.com/en/rest/branches/branch-protection (not verified) | finding medium | finding medium | held |
+| B035 | SET-005 | classic reviews without a count | https://docs.github.com/en/rest/branches/branch-protection (not verified) | cannot tell | cannot tell | held |
+| B036 | SET-005 | require_code_owner_review, 1 approval | https://docs.github.com/en/rest/repos/rules (not verified) | cannot tell | cannot tell | held |
+| B037 | SET-005 | 0 approvals + require_last_push_approval | https://docs.github.com/en/rest/repos/rules (not verified) | cannot tell | cannot tell | held |
+| B038 | SET-005 | required_reviewers team minimum 2 | https://docs.github.com/en/rest/repos/rules (not verified) | cannot tell | cannot tell | held |
+| B039 | SET-005 | pull_request rule without parameters | - | cannot tell | cannot tell | held |
+| B040 | SET-005 | count as text "1" | - | cannot tell | cannot tell | held |
+| B041 | SET-005 | count -1 | - | cannot tell | cannot tell | held |
+| B042 | SET-005 | collaborators refused | - | cannot tell | cannot tell | held |
+| B043 | SET-005 | collaborators' second page fails (partial read) | https://docs.github.com/en/rest/collaborators/collaborators (not verified) | cannot tell | cannot tell | held |
+| B044 | SET-005 | unknown pull_request parameter | - | cannot tell | cannot tell | held |
+| B045 | SET-005 | classic protection refused | - | cannot tell | cannot tell | held |
+| B046 | SET-005 | repository ruleset 1 + organisation ruleset 3, three accounts | https://docs.github.com/en/rest/repos/rules (not verified) | finding medium | finding medium | held |
+| B047 | SET-005 | update rule beside 1 approval | - | cannot tell | cannot tell | held |
+| B048 | SET-005 | classic push restrictions beside 1 approval | - | cannot tell | cannot tell | held |
+| B159 | SET-005 | outside collaborator with write access | https://docs.github.com/en/rest/collaborators/collaborators (not verified) | no finding | no finding | held |
+| B050 | SET-013 | workflows may approve, 1 approval | https://docs.github.com/en/rest/actions/permissions (not verified) | finding medium | finding medium | held |
+| B051 | SET-013 | workflows may approve, 0 approvals | - | no finding | no finding | held |
+| B052 | SET-013 | 1 approval + code owner | - | cannot tell | cannot tell | held |
+| B053 | SET-013 | 2 approvals + code owner | - | finding medium | finding medium | held |
+| B054 | SET-013 | approvals only from a classic rule | - | finding medium | finding medium | held |
+| B055 | SET-013 | classic reviews with no count | - | cannot tell | cannot tell | held |
+| B056 | SET-013 | workflow permissions refused | - | cannot tell | cannot tell | held |
+| B057 | SET-013 | 1 approval + require_last_push_approval | - | finding medium | finding medium | held |
+| B058 | SET-013 | 0 by count, team minimum 1 on every file | - | cannot tell | cannot tell | held |
+| B059 | SET-013 | workflows may not approve | - | no finding | no finding | held |
+| B060 | SET-013 | branch rules refused | - | cannot tell | cannot tell | held |
+| B061 | SET-013 | classic refused, ruleset asks 2 | - | finding medium | finding medium | held |
+| B062 | SET-013 | classic 1 approval + code owners only | - | cannot tell | cannot tell | held |
+| B070 | SET-006 | recorded matrix job reports "test (3.13)" | recording | no finding | no finding | held |
+| B071 | SET-006 | required "Build", job "build" (letter case) | https://docs.github.com/en/rest/branches/branch-protection (not verified): how GitHub compares context case is not established | finding medium | finding medium | held (if GitHub compares exactly; otherwise a false positive) |
+| B072 | SET-006 | job id build with `name: 0`: audit falls back to the id | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified): the check is the job's name; 0 is a value, not an absent name | no finding | cannot tell | way past |
+| B073 | SET-006 | job id build with `name: false` | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified) | no finding | cannot tell | way past |
+| B074 | SET-006 | `name: 012` read as octal 10 (YAML 1.1); GitHub reads YAML 1.2 (OBAAF's yamlutil says so for booleans) | https://yaml.org/spec/1.2.2/#1032-tag-resolution (not verified) | no finding | cannot tell | way past |
+| B075 | SET-006 | matrix value 08: PyYAML keeps text "08", YAML 1.2 gives 8; required "test (08)" | https://yaml.org/spec/1.2.2/#1032-tag-resolution (not verified); https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified) | no finding | cannot tell | way past (depends on GitHub typing 08 as a number) |
+| B076 | SET-006 | same matrix, required "test (8)" | https://yaml.org/spec/1.2.2/#1032-tag-resolution (not verified) | finding medium | cannot tell | false positive (same cause as B075) |
+| B077 | SET-006 | matrix of decimals 3.10 | - | cannot tell | cannot tell | held |
+| B078 | SET-006 | computed job name | - | cannot tell | cannot tell | held |
+| B079 | SET-006 | caller ci / called test | https://docs.github.com/en/actions/sharing-automations/reusing-workflows (not verified) | no finding | no finding | held |
+| B080 | SET-006 | caller calls a local file without on.workflow_call (GitHub refuses the caller) | https://docs.github.com/en/actions/sharing-automations/reusing-workflows (not verified) | no finding | no finding | under a stated limit (workflows.py _refused: "what it does not know is read as a file that runs") |
+| B081 | SET-006 | only reporter is in ci.YML | checker/workflow.py discover(): "Whether GitHub runs ci.YML ... is not established" | no finding | cannot tell | way past (not established is read as runs) |
+| B082 | SET-006 | only reporter is in a file named .yml | as B081 | no finding | cannot tell | way past (as B081) |
+| B083 | SET-006 | only reporter is a symlink to a file outside .github/workflows | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified): GitHub reads the committed blob; a link's blob is its target path | no finding | cannot tell | way past |
+| B084 | SET-006 | job name merged in through `<<: *base` | checker/workflow.py:2573 says what GitHub makes of `<<` is not established | no finding | cannot tell | way past (read merged; the checker's own problem note is dropped) |
+| B085 | SET-006 | only reporter in .github/workflows/sub/ | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified) | finding medium | finding medium | held |
+| B086 | SET-006 | only reporter in an uncalled workflow_call-only file | - | finding medium | finding medium | held |
+| B087 | SET-006 | a job may write checks | - | cannot tell | cannot tell | held |
+| B088 | SET-006 | default token unread, a job declares no permissions | - | cannot tell | cannot tell | held |
+| B089 | SET-006 | job name with a trailing space | not verified | finding medium | finding medium | held (if GitHub keeps the space) |
+| B090 | SET-006 | `On:` instead of `on:` | - | finding medium | finding medium | held |
+| B091 | SET-006 | required with no app | - | cannot tell | cannot tell | held |
+| B092 | SET-006 | flow mappings, folded block scalar name, comment | - | no finding | no finding | held |
+| B093 | SET-006 | unknown job key (timeout: 10), GitHub refuses the file | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified) | no finding | no finding | under a stated limit (_refused knows few refusals) |
+| B094 | SET-006 | matrix of a number and a text axis | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified) | no finding | no finding | held |
+| B095 | SET-006 | `name: 12:30` read as 750 (YAML 1.1 sexagesimal) | https://yaml.org/spec/1.2.2/#1032-tag-resolution (not verified) | no finding | cannot tell | way past (same class as B074) |
+| B096 | SET-006 | matrix caller and matrix callee | https://docs.github.com/en/actions/sharing-automations/reusing-workflows (not verified) | no finding | no finding | held |
+| B097 | SET-006 | own repository called by full name at a ref | - | cannot tell | cannot tell | held |
+| B098 | SET-006 | classic checks: "build" from app 999 and from Actions; folded to one app per context | https://docs.github.com/en/rest/branches/branch-protection (not verified): whether one classic rule can list a context under two apps is not established | no finding | cannot tell | way past (only for an app id below 15368) |
+| B099 | SET-006 | same two requirements in a ruleset | - | cannot tell | cannot tell | held |
+| B125 | SET-006 | same folding through the public branch view | not verified | no finding | cannot tell | way past (as B098) |
+| B127 | SET-006 | duplicate key in the workflow | - | cannot tell | cannot tell | held |
+| B128 | SET-006 | integration_id as text "15368" | - | cannot tell | cannot tell | held |
+| B129 | SET-006 | job id `true:` with no name | - | no finding | cannot tell | held |
+| B151 | SET-006 | 4 matrix callers x 60 matrix jobs (14 KB) | - | finding medium (2.9 s) | finding medium | hang (about 3 s; 36 KB took 18 s) |
+| B152 | SET-006 | Actions disabled for the repository (enabled: false) | https://docs.github.com/en/rest/actions/permissions (not verified) | no finding | finding medium | way past (snapshot holds the setting; the check rules do not read it) |
+| B154 | SET-006 | sha_pinning_required and the reporting job uses actions/checkout@v4 | https://docs.github.com/en/rest/actions/permissions (not verified); OBAAF-SET-015's own message: "GitHub refuses a workflow that uses an action that is not pinned" | no finding | finding medium | way past (OBAAF-SET-015 reports the refusal; OBAAF-SET-006 still counts the check) |
+| B157 | SET-006 | classic contexts only, no checks list | https://docs.github.com/en/rest/branches/branch-protection (not verified) | cannot tell | cannot tell | held |
+| B100 | SET-007 | recorded pull_request workflow | - | no finding | no finding | held |
+| B101 | SET-007 | paths filter | - | finding medium | finding medium | held |
+| B102 | SET-007 | types [labeled] | - | finding medium | finding medium | held |
+| B103 | SET-007 | reporting job skipped by `if: github.event_name == 'push'` on pull requests | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified): a skipped job reports success; the rule's own fix text says so | finding medium | finding medium | false positive |
+| B104 | SET-007 | reporting job needs a job that `if:` skips | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified) | finding medium | finding medium | false positive |
+| B105 | SET-007 | only `on: push` (fork PRs never get the check) | docs/settings-audit.md:187 and :247 | no finding | no finding | under a stated limit |
+| B106 | SET-007 | only pull_request_target | https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/ (verified: "GITHUB_SHA will point to the latest commit on that branch", the default branch); that a run's checks attach to its GITHUB_SHA is not verified | no finding | cannot tell | way past |
+| B107 | SET-007 | workflow_run | - | finding medium | finding medium | held |
+| B108 | SET-007 | workflow_dispatch | - | cannot tell | cannot tell | held |
+| B109 | SET-007 | merge_group only, no queue | - | finding medium | finding medium | held |
+| B110 | SET-007 | branches [main] | - | no finding | no finding | held |
+| B111 | SET-007 | branches ['releases/**'] | - | cannot tell | cannot tell | held |
+| B112 | SET-007 | branches-ignore [main] | - | finding medium | finding medium | held |
+| B113 | SET-007 | branches with a ! entry | - | cannot tell | cannot tell | held |
+| B114 | SET-007 | types [opened, synchronize] | - | no finding | no finding | held |
+| B115 | SET-007 | types: opened (text) | - | finding medium | finding medium | held |
+| B116 | SET-007 | pull_request filters through an alias with paths | - | finding medium | finding medium | held |
+| B117 | SET-007 | workflow concurrency group shared by every PR, cancel-in-progress | https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs (not verified): a queued run cancels the pending one in its group | no finding | no finding | way past (judgement: a cause the description does not list) |
+| B118 | SET-007 | `if: false` on the reporting job (always skipped = success) | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified) | no finding | no finding | held |
+| B119 | SET-007 | pull_request paths-ignore beside an unfiltered push | docs/settings-audit.md:247 | no finding | no finding | under a stated limit |
+| B120 | SET-007 | types [labeled] beside push branches-ignore | - | cannot tell | cannot tell | held |
+| B121 | SET-007 | job limited by `if:` to pull_request_target in a workflow with pull_request (skipped = success on the head) | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified) | no finding | cannot tell | held |
+| B122 | SET-007 | caller job in a paths-filtered workflow | - | finding medium | finding medium | held |
+| B123 | SET-007 | `Pull_Request:` beside workflow_dispatch | - | cannot tell | does not apply | held |
+| B124 | SET-007 | same name from a PR workflow and a push-only workflow | - | no finding | no finding | held |
+| B126 | SET-007 | folded classic apps seen by 007 | - | finding medium | finding medium | held |
+| B153 | SET-007 | Actions disabled (enabled: false) | https://docs.github.com/en/rest/actions/permissions (not verified) | no finding | does not apply | way past (as B152) |
+| B155 | SET-007 | active Actions policy allows only push for ci.yml | https://docs.github.com/en/rest/actions/policies (not verified); OBAAF-SET-009's own message: "fails at startup with no job" | no finding | finding medium | way past (OBAAF-SET-009 reports the block; OBAAF-SET-007 says every PR) |
+| B130 | SET-008 | unrequired lint job | - | finding medium | finding medium | held |
+| B131 | SET-008 | lint with continue-on-error: true | - | no finding | no finding | held |
+| B132 | SET-008 | two workflows, two jobs reporting "test (3.13)"; the requirement waits on the latest check run of a name | https://docs.github.com/en/rest/checks/runs (not verified): check runs are filtered by name, latest by default | no finding | cannot tell | way past |
+| B133 | SET-008 | two jobs in one workflow with the same name | https://docs.github.com/en/rest/checks/runs (not verified) | no finding | cannot tell | way past (as B132) |
+| B134 | SET-008 | matrix, one of two values required | - | finding medium | finding medium | held |
+| B135 | SET-008 | called workflow's lint job has continue-on-error: true | https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax (not verified): a job that calls a reusable workflow cannot set continue-on-error | finding medium | no finding | false positive (minor) |
+| B136 | SET-008 | deploy job skipped by `if:` on PRs | - | no finding | no finding | held |
+| B137 | SET-008 | branch pattern decides | - | cannot tell | cannot tell | held |
+| B138 | SET-008 | continue-on-error as an expression | - | finding medium | finding medium | held |
+| B139 | SET-008 | lint required only from app 999 | - | cannot tell | cannot tell | held |
+| B140 | SET-008 | unknown required_status_checks parameter | - | cannot tell | cannot tell | held |
+| B141 | SET-008 | no required check at all | - | finding medium | finding medium | held |
+| B142 | SET-008 | job named 012 (octal 10), "10" required | https://yaml.org/spec/1.2.2/#1032-tag-resolution (not verified) | no finding | cannot tell | way past (as B074) |
+| B143 | SET-008 | job with `if: false` (never runs) counted | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified) | finding medium | finding medium | false positive (minor) |
+| B144 | SET-008 | unrequired lint on pull_request_target | - | finding medium | finding medium | held |
+| B145 | SET-008 | lint with an `if:` on draft | - | finding medium | finding medium | held |
+| B146 | SET-008 | classic checks read in full, app null | - | finding medium | finding medium | held |
+| B147 | SET-008 | called workflow's deploy job is skipped by `if:` on PRs, counted as unrequired | https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/using-conditions-to-control-job-execution (not verified) | finding medium | finding medium | false positive (minor) |
+| B150 | SET-008 | 30 jobs each needing the two before (2.5 KB) | - | finding medium (4.0 s) | finding medium | hang (about 4 s; 31 jobs about 7 s; x1.6 per job) |
+| B156 | SET-008 | unrequired lint in a workflow refused for an unpinned action | - | finding medium | no finding | held (either way it fails without blocking) |
+
