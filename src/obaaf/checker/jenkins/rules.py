@@ -261,21 +261,32 @@ class JenkinsRules:
     # ------------------------------------------------------------------ classification
     def classify(self) -> None:
         defined = self.p.local_names
+        # A method of the file called many times records the same step once per call; what a step is
+        # depends only on its call, so it is worked out once (flagship slice 2d.2i: a 2.9 KB file of
+        # nested calls took 7.5 seconds).
+        seen: dict[int, tuple] = {}
         for index, use in enumerate(self.p.steps):
             info = Info(use, index)
             call = use.call
             name = use.name
             if name in SHELL_STEPS:
                 info.shell = True
-                info.script, info.exprs, info.dynamic = script_parts(shell_script(call))
                 if _truthy(step_arg(call, "returnStatus")):
                     info.swallowed = "returnStatus: true"
             if use.ctx.swallowed:
                 info.swallowed = use.ctx.swallowed
-            info.ai = self._ai(info)
-            info.publish = self._publish(info)
-            info.verify = self._verify(info)
-            info.push = bool(info.shell and GIT_PUSH.search(info.script))
+            hit = seen.get(id(call))
+            if hit is not None and hit[0] is call and hit[1] == name:
+                info.script, info.exprs, info.dynamic, info.ai, info.publish, info.verify, info.push = hit[2:]
+            else:
+                if info.shell:
+                    info.script, info.exprs, info.dynamic = script_parts(shell_script(call))
+                info.ai = self._ai(info)
+                info.publish = self._publish(info)
+                info.verify = self._verify(info)
+                info.push = bool(info.shell and GIT_PUSH.search(info.script))
+                seen[id(call)] = (call, name, info.script, info.exprs, info.dynamic, info.ai, info.publish,
+                                  info.verify, info.push)
             if name == "build":
                 job = named_arg(call, "job") or first_arg(call)
                 info.trigger = literal(job) or "a computed job name"
@@ -975,22 +986,82 @@ class JenkinsRules:
                      "the build when verification fails.", first.ctx.stage)
 
     # ------------------------------------------------------------------ JEN-013
+    def secret_names(self, variables: set) -> set:
+        """The secret's variables and every variable of this file whose assigned values read one of them,
+        transitively: `def t = TOKEN`, `def cmd = "curl ${TOKEN}"`, a method parameter given TOKEN,
+        withEnv(["T2=${TOKEN}"]) (flagship slice 2d.2i)."""
+        names = set(variables)
+        changed = True
+        while changed:
+            changed = False
+            for name, refs in self.p.refs.items():
+                if name not in names and refs & names:
+                    names.add(name)
+                    changed = True
+        return names
+
     def secret_interpolation(self) -> None:
         if any(info.ctx.creds for info in self.infos):
             self.applicable.add("OBAAF-JEN-013")
         for info in self.infos:
-            if not info.shell or not info.ctx.creds:
+            if not info.ctx.creds:
                 continue
-            variables = {v for b in info.ctx.creds for v in b.variables if v not in b.paths}
-            used = sorted({w for e in info.exprs for w in re.findall(r"[A-Za-z_]\w*", e) if w in variables})
+            exprs = info.exprs
+            if not info.shell:
+                # The arguments of docker.image(...).inside/withRun/run and withDockerContainer become the
+                # `docker run` command line (flagship slice 2d.2i).
+                name = info.use.name
+                if not (name.endswith((".inside", ".withRun", ".run")) and name.startswith("docker.") or
+                        name == "withDockerContainer"):
+                    continue
+                exprs = [e for a in list(info.use.call.args) + [v for _, v in info.use.call.named]
+                         for e in source_texts(a)]
+            variables = {v for b in info.ctx.creds for v in b.variables if v not in b.paths and v != "?"}
+            secrets = self.secret_names(variables)
+            used = sorted({w for e in exprs for w in re.findall(r"[A-Za-z_]\w*", e) if w in secrets})
+            if not used and any(re.search(r"\benv\s*(\[\s*[^'\"\s\]]|\.getProperty\s*\(\s*[^'\"\s)])", e)
+                                for e in exprs):
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates an environment variable whose "
+                             "name is computed, inside a credential binding; the checker cannot tell whether it is the "
+                             "secret")
+                continue
+            if not used and any(b.variables == () or "?" in b.variables for b in info.ctx.creds) and exprs:
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates values inside a credential "
+                             "binding whose variables the Jenkinsfile does not name; the checker cannot tell whether "
+                             "one of them is the secret")
+                continue
             if used:
+                where = "script" if info.shell else "arguments"
+                fix = ("Reference it as a shell variable inside single quotes." if info.shell else
+                       "Pass it as `-e NAME` with no value, so docker takes it from the environment.")
                 self.add("OBAAF-JEN-013", info.line,
                          f"The {info.use.name} step at line {info.line} puts secret variable(s) {', '.join(used)} into "
-                         "its script with Groovy interpolation, so the secret appears in the command line, where other "
-                         "processes on the agent can read it. Reference it as a shell variable inside single quotes.",
+                         f"its {where} with Groovy interpolation, so the secret appears in the command line, where "
+                         f"other processes on the agent can read it. {fix}",
                          info.ctx.stage)
 
     # ------------------------------------------------------------------ JEN-014
+    def publishes_near(self, stage: tuple) -> bool:
+        """The stage, or the stage a `post` block belongs to, publishes (flagship slice 2d.2i: a publish
+        in `post { success { } }` did not make a signing finding high)."""
+        base = base_stage(stage)
+        return any(base_stage(s) == base and self.stage_publishes(s) for s in self.stages())
+
+    def script_text(self, info: Info) -> str:
+        """The script as the shell reads it: backslash-continued lines joined, and `${name}` placeholders
+        for variables of this file that hold a literal replaced by it (flagship slice 2d.2i)."""
+        text = info.script
+        for _ in range(3):
+            changed = re.sub(r"\$\{([A-Za-z_]\w*)\}", lambda m: (
+                self.p.literals[m.group(1)].text() if m.group(1) in self.p.literals and
+                not self.p.literals[m.group(1)].interpolated else m.group(0)), text)
+            if changed == text:
+                break
+            text = changed
+        return re.sub(r"\\\r?\n[ \t]*", " ", text)
+
     def signing_keys(self) -> None:
         patterns = [re.compile(x, re.I) for x in self.detection.get("signing_secret_patterns", [])]
         commands = [re.compile(x, re.M) for x in self.detection.get("signing_commands", [])]
@@ -1000,29 +1071,78 @@ class JenkinsRules:
         for b, infos in scopes.items():
             names = [n for n in list(b.ids) + list(b.variables) if n != "?"]
             hits = [n for n in names if any(p.search(re.sub(r"[-.]", "_", n)) for p in patterns)]
+            # A certificate binding is a PKCS#12 keystore: signing material whatever it is called.
+            if b.how.endswith(":certificate") or "CertificateMultiBinding" in b.how:
+                hits.append(f"certificate binding {self.ids(b)}")
             if hits:
                 stage = infos[0].ctx.stage if infos else ()
-                severity = "high" if any(self.stage_publishes(i.ctx.stage) for i in infos) else "medium"
+                severity = "high" if any(self.publishes_near(i.ctx.stage) for i in infos) else "medium"
                 self.add("OBAAF-JEN-014", b.line,
                          f"Signing material ({', '.join(sorted(set(hits)))}) is bound by {b.how} for the steps of "
                          f"stage '{stage_label(stage)}', so any build step there can read the key.", stage,
                          severity=severity)
         for info in self.infos:
-            if info.shell and any(rx.search(info.script) for rx in commands):
-                severity = "high" if self.stage_publishes(info.ctx.stage) else "medium"
+            if info.shell and any(rx.search(self.script_text(info)) for rx in commands):
+                severity = "high" if self.publishes_near(info.ctx.stage) else "medium"
                 self.add("OBAAF-JEN-014", info.line,
                          f"The step at line {info.line} loads a signing key into the build environment.",
                          info.ctx.stage, severity=severity)
 
 
     # ------------------------------------------------------------------ JEN-015
+    def resolve_text(self, node, depth: int = 0) -> str | None:
+        """The text of an expression built only from literals written in this file: a string, a variable
+        whose last assignment is one, `+` of those, `.trim()` and similar; None otherwise."""
+        if node is None or depth > 20:
+            return None
+        if isinstance(node, Str):
+            if not node.interpolated:
+                return node.text()
+            parts = []
+            for kind, value in node.tok.parts:
+                if kind == "lit":
+                    parts.append(value)
+                else:
+                    inner = self.p.literals.get(value.strip().removeprefix("env.")) if \
+                        re.fullmatch(r"\s*(env\.)?[A-Za-z_]\w*\s*", value) else None
+                    text = self.resolve_text(inner, depth + 1) if inner is not None else None
+                    if text is None:
+                        return None
+                    parts.append(text)
+            return "".join(parts)
+        if isinstance(node, Binary) and node.op == "+":
+            left, right = self.resolve_text(node.left, depth + 1), self.resolve_text(node.right, depth + 1)
+            return None if left is None or right is None else left + right
+        if isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args and \
+                node.callee.name in ("trim", "toString", "stripIndent"):
+            text = self.resolve_text(node.callee.target, depth + 1)
+            return text.strip() if text is not None and node.callee.name == "trim" else text
+        p = path_of(node)
+        if p:
+            name = p.removeprefix("env.")
+            value = self.p.literals.get(name)
+            if value is None:
+                env = self.p.env_values.get(name)
+                value = env if env is not None else None
+            return self.resolve_text(value, depth + 1) if value is not None else None
+        return None
+
     def webhook_tokens(self) -> None:
         for trig in self.p.triggers:
             self.applicable.add("OBAAF-JEN-015")
-            if not trig.token:
+            token = trig.token
+            if not token and trig.token_node is not None:
+                # A token built from literals in this file is written in the file (flagship slice 2d.2i).
+                token = self.resolve_text(trig.token_node)
+                if token is None:
+                    self.unknown("OBAAF-JEN-015", trig.line,
+                                 f"{trig.name}'s {trig.token_key} is computed; the checker cannot tell whether it is "
+                                 "written in the repository")
+                    continue
+            if not token:
                 continue
             privileged = any(i.ctx.creds or i.publish or i.ai for i in self.infos)
-            hint = trig.token[:3] + "..." if len(trig.token) > 6 else "..."
+            hint = token[:3] + "..." if len(token) > 6 else "..."
             self.add("OBAAF-JEN-015", trig.line,
                      f"{trig.name} at line {trig.line} has its webhook token written in the Jenkinsfile ('{hint}'), "
                      "so anyone who can read the file can start the job and choose every webhook value it reads. "

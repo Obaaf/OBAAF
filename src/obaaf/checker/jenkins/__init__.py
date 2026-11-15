@@ -27,37 +27,131 @@ from obaaf.checker.workflow import IdleDeclaration, bounded, declared_lane, one_
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "Library", "Intermediate", "Saved",
              "DerivedDataCache", ".godot", "Binaries", "build", "dist", "target", ".gradle", ".idea", "vendor"}
 MAX_DEPTH = 6
-_NAME = re.compile(r"^(jenkinsfile([._-].+)?|.+\.jenkinsfile)$", re.I)
+# `Jenkinsfile`, `Jenkinsfile.<x>`, `Jenkinsfile-<x>`, `Jenkinsfile_<x>`, `Jenkinsfile<x>` (Jenkinsfile2,
+# JenkinsfileRelease), and `<x>.jenkinsfile`, `<x>-jenkinsfile`, `<x>_jenkinsfile`, in any letter case.
+_NAME = re.compile(r"^(jenkinsfile([._-].+|[a-z0-9]+)?|.+[._-]jenkinsfile)$", re.I)
+_REFUSED_SUFFIXES = (".md", ".txt", ".html", ".png", ".svg", ".yml", ".yaml", ".json", ".xml", ".properties",
+                     ".orig", ".bak")
 _AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|cline|\bllm\b|\bai[-_ ]|autofix|auto[- ]fix",
                          re.I)
 
 
 def is_jenkinsfile(path: Path) -> bool:
-    return bool(_NAME.match(path.name)) and path.suffix.lower() not in (
-        ".md", ".txt", ".html", ".png", ".svg", ".yml", ".yaml", ".json", ".xml", ".properties", ".orig", ".bak")
+    return bool(_NAME.match(path.name)) and path.suffix.lower() not in _REFUSED_SUFFIXES
 
 
-def discover(root: Path, globs: list[str] | None = None, exclude: list[str] | None = None) -> list[Path]:
-    """Jenkinsfiles under root: `Jenkinsfile`, `Jenkinsfile.<x>`, `Jenkinsfile-<x>` and `<x>.jenkinsfile`
-    at any depth up to MAX_DEPTH, plus files matching the configured globs (jenkins.files), minus
-    those matching jenkins.exclude (for example test fixtures)."""
+def _glob_match(rel: str, glob: str) -> bool:
+    """fnmatch, where `**/` also matches no folder at all (`ci/**/*.groovy` matches `ci/x.groovy`)."""
+    if fnmatch.fnmatch(rel, glob):
+        return True
+    reduced = glob
+    while "**/" in reduced:
+        reduced = reduced.replace("**/", "", 1)
+        if fnmatch.fnmatch(rel, reduced):
+            return True
+    return False
+
+
+def _shown(names: list[str], limit: int = 5) -> str:
+    out = ", ".join(one_line(n, 120) for n in names[:limit])
+    return out + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def discover(root: Path, globs: list[str] | None = None, exclude: list[str] | None = None,
+             notes: list | None = None, errors: list | None = None) -> list[Path]:
+    """Jenkinsfiles under root, by name (see `_NAME`) or by the configured globs (jenkins.files), minus
+    those matching jenkins.exclude (for example test fixtures).
+
+    In a git work tree every file git lists (tracked, or not committed and not ignored) is looked at, in
+    any folder and at any depth: which file a Jenkins job runs is set on the controller and can be any
+    path (flagship slice 2d.2i; folders such as `build/` and `vendor/` and files below six folders were
+    skipped without a word). Elsewhere the folders are walked as before, skipping SKIP_DIRS and stopping
+    at MAX_DEPTH, and the folders not entered are named in a note. A
+    Jenkinsfile that is a link is read when it leads to a file inside the repository, and is an error
+    otherwise. What is left out (by its suffix, by jenkins.exclude, by the walk, or a glob that matches
+    nothing) is said in `notes`."""
+    from obaaf.checker import repo as repo_mod
     root = root.resolve()
+    notes = notes if notes is not None else []
+    errors = errors if errors is not None else []
     globs = [g for g in (globs or []) if isinstance(g, str) and g.strip()]
     exclude = [g for g in (exclude or []) if isinstance(g, str) and g.strip()]
-    found: set[Path] = set()
+    how: dict = {}
+    tracked = repo_mod._git_tracked(root, how)
+    listed: set[str] = set(tracked or [])
+    if tracked is not None:
+        # Files not committed yet and not ignored count too: a new Jenkinsfile is checked before it is
+        # committed, in whatever folder it is.
+        git = repo_mod.find_git(root)
+        others = repo_mod._run_git(git, root, "ls-files", "-z", "--others", "--exclude-standard") if git else None
+        if others is None:
+            tracked = None
+            how["why"] = "git did not list the files that are not committed"
+        else:
+            listed.update(p.decode("utf-8", "surrogateescape") for p in others.split(b"\0") if p)
+    pruned: set[str] = set()
     base_depth = len(root.parts)
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in ([] if tracked is not None else os.walk(root)):
         here = Path(dirpath)
         depth = len(here.parts) - base_depth
+        for d in dirnames:
+            if d != ".git" and (d in SKIP_DIRS or depth >= MAX_DEPTH):
+                pruned.add((here / d).relative_to(root).as_posix())
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not (depth >= MAX_DEPTH))
         for name in filenames:
-            path = here / name
-            rel = path.relative_to(root).as_posix()
-            if any(fnmatch.fnmatch(rel, g) for g in exclude):
-                continue
-            if is_jenkinsfile(path) or any(fnmatch.fnmatch(rel, g) for g in globs):
-                if path.is_file() and not path.is_symlink():
+            listed.add((here / name).relative_to(root).as_posix())
+    # A configured name with no wildcard is looked at even where the walk does not go.
+    for g in globs:
+        if not any(c in g for c in "*?[") and (root / g).exists():
+            listed.add(Path(g).as_posix())
+    found: set[Path] = set()
+    refused_suffix: list[str] = []
+    excluded: list[str] = []
+    matched_globs: set[str] = set()
+    for rel in sorted(listed):
+        path = root / rel
+        by_glob = [g for g in globs if _glob_match(rel, g)]
+        matched_globs.update(by_glob)
+        named = bool(_NAME.match(path.name))
+        if not by_glob and not named:
+            continue
+        if not by_glob and path.suffix.lower() in _REFUSED_SUFFIXES:
+            refused_suffix.append(rel)
+            continue
+        if any(_glob_match(rel, g) for g in exclude):
+            excluded.append(rel)
+            continue
+        try:
+            if path.is_symlink():
+                target = path.resolve()
+                try:
+                    target.relative_to(root)
+                    inside = True
+                except ValueError:
+                    inside = False
+                if inside and target.is_file():
                     found.add(path)
+                else:
+                    errors.append(f"{one_line(rel, 120)}: not read: it is a link that does not lead to a file "
+                                  "inside the repository, and Jenkins may run it")
+                continue
+            if path.is_file():
+                found.add(path)
+        except OSError as exc:
+            errors.append(f"{one_line(rel, 120)}: cannot be read: {exc}")
+    if refused_suffix:
+        notes.append(f"Not read as Jenkinsfiles because of their suffix: {_shown(refused_suffix)}. If Jenkins "
+                     "runs one of them, add it to jenkins.files.")
+    if excluded:
+        notes.append(f"Left out by jenkins.exclude: {_shown(excluded)}.")
+    for g in globs:
+        if g not in matched_globs:
+            notes.append(f"jenkins.files pattern '{one_line(g, 120)}' matched no file.")
+    if tracked is None and pruned:
+        why = how.get("why", "it is not the top of a git work tree")
+        notes.append(f"Jenkinsfiles were looked for by walking the folders, because git's list of tracked files "
+                     f"was not used ({why}); these folders were not entered: {_shown(sorted(pruned))}. A "
+                     "Jenkinsfile in them was not read.")
     return sorted(found)
 
 
@@ -81,6 +175,9 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
             lane_overrides: dict | None = None) -> FileResult:
     result = FileResult(path=rel, digest="sha256:" + hashlib.sha256(data).hexdigest())
     text = data.decode("utf-8", errors="replace")
+    # Groovy ends a line at CR LF, LF or a lone CR. The lexer reads LF, so a file with lone-CR line ends
+    # was one long line, and a `//` comment on its first line hid the whole pipeline (flagship slice 2d.2i).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     parsed = parser_mod.parse(text)
     if parsed.error:
         result.error = parsed.error
