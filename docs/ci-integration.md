@@ -185,9 +185,9 @@ Set it up once, in a **new** tools directory outside your repository, with Pytho
 (
 set -e
 tool_dir="$HOME/.local/share/obaaf-hook-a620b95"
+python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'
 mkdir -p "$HOME/.local/share"
 mkdir "$tool_dir"
-python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'
 git clone --no-checkout https://github.com/Obaaf/OBAAF.git "$tool_dir/source"
 git -C "$tool_dir/source" checkout --detach a620b95cc18293f57ef385651354a43820dd32e6
 python3 -m venv "$tool_dir/checker"
