@@ -3825,7 +3825,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
         others = [n for n in names if n != rel]
         results = _examine_instruction_file(root, rel, source, binary_name, errors)
         for line, template, kind, values in results or []:
-            if others and "more" in values:
+            if others:
                 shown = ", ".join(one_line(n, 80) for n in others[:3]) + (", ..." if len(others) > 3 else "")
                 values = {**values, "names": Fact(others, ""),
                           "more": Note(f"{values['more']} (an agent also reads the file as {len(others)} other "
@@ -3894,16 +3894,16 @@ def _examine_instruction_file(root: Path, rel: str, source: str, binary_name: bo
                 return []
     if len(data) > INSTRUCTION_LIMIT:
         return [(1, "The file is larger than {limit} bytes, more than the checker scans, so it cannot tell what the "
-                 "file hides.", "too-large", {"limit": Note(f"{INSTRUCTION_LIMIT:,}"),
-                                             "digest": Fact(whole.hexdigest()[:32], "")})]
+                 "file hides{more}.", "too-large", {"limit": Note(f"{INSTRUCTION_LIMIT:,}"), "more": Note(""),
+                                                   "digest": Fact(whole.hexdigest()[:32], "")})]
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         # A file in another encoding (UTF-16, a working-tree-encoding in .gitattributes) is text an
         # agent may still read and a reviewer may see otherwise; the scan cannot see what it hides.
         return [(1, "The file is not UTF-8 text (byte {byte}), so the checker cannot tell what it hides; an agent "
-                 "may still read it.", "not-utf8", {"byte": Note(str(exc.start + 1)),
-                                                    "digest": Fact(hashlib.sha256(data).hexdigest()[:32], "")})]
+                 "may still read it{more}.", "not-utf8", {"byte": Note(str(exc.start + 1)), "more": Note(""),
+                                                          "digest": Fact(hashlib.sha256(data).hexdigest()[:32], "")})]
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     hidden = repo_checks.scan_hidden(text)
     if not hidden:

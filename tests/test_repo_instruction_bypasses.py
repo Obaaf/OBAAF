@@ -997,5 +997,19 @@ class SixthReviewTest(unittest.TestCase):
             self.assertTrue(any("characters in all" in e for e in result.errors), result.errors)
 
 
+    def test_a_new_name_for_an_accepted_file_is_a_new_finding(self):
+        """The last check of the grouping: a file not UTF-8, accepted, then read by one more name."""
+        with TempDir() as tmp:
+            tree(tmp, {".github/instructions/legacy.md": "Use tabs.\n".encode("utf-16"),
+                       ".github/CODEOWNERS": "* @o\n"})
+            first, _ = found(tmp, "OBAAF-INS-001")
+            (tmp / "CLAUDE.md").symlink_to(tmp / ".github" / "instructions" / "legacy.md")
+            second, _ = found(tmp, "OBAAF-INS-001")
+            self.assertEqual([f.kind for f in first], ["not-utf8"])
+            self.assertEqual(second[0].facts.get("names"), ["CLAUDE.md"])
+            self.assertNotEqual(first[0].facts, second[0].facts)
+            self.assertIn("CLAUDE.md", second[0].message)
+
+
 if __name__ == "__main__":
     unittest.main()
