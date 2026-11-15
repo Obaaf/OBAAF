@@ -135,15 +135,14 @@ class SchemaPublishingRefusesTest(unittest.TestCase):
             (tmp / "data" / "schemas").mkdir(parents=True)
             for name, text in files.items():
                 (tmp / "data" / "schemas" / name).write_text(text, encoding="utf-8")
-            real = build.resources.files
-            build.resources.files = lambda package: tmp / "data"
-            try:
+            from types import SimpleNamespace
+            from unittest import mock
+            # Only build.py's own name for importlib.resources is replaced, not the shared module.
+            with mock.patch.object(build, "resources", SimpleNamespace(files=lambda package: tmp / "data")):
                 out = tmp / "site"
                 out.mkdir()
                 names = build.write_schemas(out)
                 return names, sorted(p.relative_to(out).as_posix() for p in out.rglob("*.json"))
-            finally:
-                build.resources.files = real
 
     def test_a_schema_is_published_at_its_id_and_other_files_are_skipped(self):
         names, served = self.publish({"a.json": json.dumps({"$id": predicates.NAMESPACE + "/schemas/a/v1.json"}),
@@ -153,18 +152,18 @@ class SchemaPublishingRefusesTest(unittest.TestCase):
     def test_what_stops_the_build(self):
         ns = predicates.NAMESPACE
         cases = {
-            "dot-dot": {"a.json": json.dumps({"$id": ns + "/schemas/../assessment.json"})},
-            "another host": {"a.json": json.dumps({"$id": "https://example.com/schemas/a/v1.json"})},
-            "not json": {"a.json": "{not json"},
-            "an array": {"a.json": "[1, 2]"},
-            "no id": {"a.json": "{}"},
-            "not a .json file": {"a.json": json.dumps({"$id": ns + "/schemas/a/v1.html"})},
-            "a duplicate": {"a.json": json.dumps({"$id": ns + "/schemas/a/v1.json"}),
-                            "b.json": json.dumps({"$id": ns + "/schemas/a/v1.json"})},
+            "dot-dot": ({"a.json": json.dumps({"$id": ns + "/schemas/../assessment.json"})}, "under schemas/"),
+            "another host": ({"a.json": json.dumps({"$id": "https://example.com/schemas/a/v1.json"})}, "is not under"),
+            "not json": ({"a.json": "{not json"}, "not JSON"),
+            "an array": ({"a.json": "[1, 2]"}, "is not under"),
+            "no id": ({"a.json": "{}"}, "is not under"),
+            "not a .json file": ({"a.json": json.dumps({"$id": ns + "/schemas/a/v1.html"})}, "under schemas/"),
+            "a duplicate": ({"a.json": json.dumps({"$id": ns + "/schemas/a/v1.json"}),
+                             "b.json": json.dumps({"$id": ns + "/schemas/a/v1.json"})}, "is also the \\$id of"),
         }
-        for case, files in cases.items():
+        for case, (files, message) in cases.items():
             with self.subTest(case=case):
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, message):
                     self.publish(files)
 
 
