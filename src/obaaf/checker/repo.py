@@ -508,6 +508,9 @@ class TooManyFiles(OSError):
 # with an error (never with a pass).
 WALK_LIMIT = 2_000_000
 LOOK_LIMIT = 1_000_000           # entries looked at behind links
+# Characters of the names tested behind links, in all: a long name behind many links is tested again
+# for each (the sixth review of slice 2d.2h found 3,000-character names behind 100 links took 31 s).
+READ_LIMIT = 100_000_000
 ALIAS_LIMIT = 200_000
 LINK_DEPTH = 8
 
@@ -705,8 +708,17 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
         errors.append(problem)          # what was found so far is still checked
         return sorted(found.values(), key=lambda f: f.rel)
 
+    read = 0                    # characters of names tested behind links
+
+    def too_long() -> list[InstructionFile]:
+        return stop(f"links lead to names of more than {READ_LIMIT:,} characters in all, more than the checker "
+                    "reads when it looks for agent instruction files")
+
     while queue:
         name, first, depth, key, chain, again = queue.pop()
+        read += len(name)
+        if read > READ_LIMIT:
+            return too_long()
         if key not in resolved:
             try:
                 target = (root / key).resolve(strict=True)
@@ -772,12 +784,19 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             pool = tails.get(real)
             if pool is None:
                 looks += hi - lo
+                read += sum(len(inner) for inner in files[lo:hi])
+                if read > READ_LIMIT:
+                    return too_long()
                 pool = tails[real] = [inner for inner in files[lo:hi] if anywhere_match(inner[len(prefix):])]
             else:
                 looks += len(pool)
         if looks > LOOK_LIMIT:
             return stop(f"links lead to more than {LOOK_LIMIT:,} entries, more than the checker looks "
                         "through for agent instruction files")
+        if signature:
+            read += len(pool) * (len(name) + 1) + sum(len(inner) for inner in pool)
+            if read > READ_LIMIT:
+                return too_long()
         for inner in pool:
             tail = inner[len(prefix):]
             if (inner, first) in seen or (signature and not (anywhere_match(tail)

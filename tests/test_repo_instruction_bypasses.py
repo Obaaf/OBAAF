@@ -954,5 +954,22 @@ class FifthReviewTest(unittest.TestCase):
             self.assertIn("vendor/policy", unowned(outer))
 
 
+
+class SixthReviewTest(unittest.TestCase):
+    """What the slice's sixth review found (docs/bypass-attempts.md, 2d.2h, "Review", sixth pass)."""
+
+    def test_long_names_behind_many_links_end_in_an_error_soon(self):
+        deep = "/".join(["d" * 30] * 100) + "/.cursor/.claude"
+        with TempDir() as tmp:
+            tree(tmp, {f"T/n\nx/f{i}": "" for i in range(10000)})
+            (tmp / deep).mkdir(parents=True)
+            for i in range(100):
+                (tmp / deep / f"l{i}").symlink_to(tmp / "T")
+            start = time.monotonic()
+            _, result = found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+            self.assertTrue(any("characters in all" in e for e in result.errors), result.errors)
+
+
 if __name__ == "__main__":
     unittest.main()
