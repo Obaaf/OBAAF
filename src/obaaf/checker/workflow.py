@@ -1837,12 +1837,17 @@ class Step:
                     # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
                     found.append(variant)
                     break
-        # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in.
+        # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in, read
+        # as commands like an input, so prose in an env value (`--notes "$NOTES"`) is not an agent.
         env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
         if env and own and "$" in own:
             put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
             if put != own:
-                found.append(put)
+                for variant in _readings(put):
+                    if any(rx.match(candidate) for segment in command_segments(variant)
+                           for candidate in _first_word_forms(segment) for rx in commands):
+                        found.append(variant)
+                        break
         text = "\n".join(p for p in [own, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 

@@ -26,6 +26,10 @@ _OWNER_PLACEHOLDER_RE = re.compile(r"obaaf_owner", re.I)
 _SHA_PLACEHOLDER_RE = re.compile(r"@0{40}(?![0-9a-fA-F])")
 
 
+# Where a shell line starts another command (`_fetches_over` reads a fetch and its target in one command).
+_COMMAND_SPLIT_RE = re.compile(r"\$\(|[;&|`\n]")
+
+
 def _placeholders_in(text: str, where: str) -> list[str]:
     """The template placeholders a value holds: `OBAAF_OWNER` in any letter case, and the all-zero SHA
     after `@` (or as the whole ref of a `uses`)."""
@@ -3194,36 +3198,69 @@ class WorkflowRules:
         for line in earlier.scripts().splitlines():
             if top not in line:
                 continue        # cheap test first: the line must name the action's top directory
-            words = [w for w in re.split(r"[\s;&|()`'\"]+", line) if w]
-            fetches = bool(self._FETCH_WORDS & set(words))
-            clone_into = None
-            for n, word in enumerate(words[:-1]):
-                nxt = words[n + 1]
-                if word == "git" and "clone" in words[n + 1:n + 4]:
-                    fetches = True
-                    rest = [w for w in words[words.index("clone", n) + 1:] if not w.startswith("-")]
-                    if len(rest) == 1:      # no folder named: git makes one from the repository's name
-                        clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-                    break
-                if (word == "git" and any(w in ("worktree", "submodule") for w in words[n + 1:n + 4])) \
-                        or (word == "gh" and nxt in ("repo", "release", "run")
-                            and any(w in ("download", "clone") for w in words[n + 1:n + 4])) \
-                        or (word == "tar" and re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*|--extract|--get", nxt)):
-                    fetches = True
-                    break
-            if not fetches:
-                continue
-            if clone_into == top:
-                return True
-            for word in words:
-                # A path in the workspace, written as a word or as an option's value (`--output=x`); not a
-                # URL, an absolute path, a home path or one built from a variable.
-                value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
-                if "://" in value or value.startswith(("/", "~", "$", "-")):
-                    continue
-                path = self._workspace_path(value)
-                if path is not None and (path == top or path.startswith(top + "/")):
+            for command in _COMMAND_SPLIT_RE.split(line):
+                if top in command and self._fetches_into(command, top):
                     return True
+        return False
+
+    # Options of `git clone` that take the next word as their value.
+    _CLONE_VALUE_OPTIONS = frozenset({"--depth", "-b", "--branch", "-o", "--origin", "--reference",
+                                      "--reference-if-able", "-c", "--config", "--filter", "-j", "--jobs",
+                                      "--separate-git-dir", "--template", "-u", "--upload-pack", "--shallow-since",
+                                      "--shallow-exclude", "--server-option", "--bundle-uri", "--revision"})
+
+    def _fetches_into(self, command: str, top: str) -> bool:
+        """Whether one command (no `;`, `&&`, `|` in it) clones or downloads into a workspace path at or
+        under `top`, or clones a repository named `top` with no folder given."""
+        words = [w for w in re.split(r"[\s()`'\"]+", command) if w]
+        fetches = bool(self._FETCH_WORDS & set(words))
+        clone_into = None
+        for n, word in enumerate(words[:-1]):
+            nxt = words[n + 1]
+            if word == "git" and "clone" in words[n + 1:n + 4]:
+                fetches = True
+                rest, k = [], words.index("clone", n) + 1
+                while k < len(words):
+                    if words[k] in self._CLONE_VALUE_OPTIONS:
+                        k += 2
+                    elif words[k].startswith("-"):
+                        k += 1
+                    else:
+                        rest.append(words[k])
+                        k += 1
+                if len(rest) == 1:      # no folder named: git makes one from the repository's name
+                    clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                break
+            if word == "gh" and words[n + 1:n + 3] == ["repo", "clone"]:
+                fetches = True
+                rest = []
+                for w in words[n + 3:]:
+                    if w == "--":
+                        break
+                    if not w.startswith("-"):
+                        rest.append(w)
+                if len(rest) == 1:
+                    clone_into = rest[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                break
+            if (word == "git" and any(w in ("worktree", "submodule") for w in words[n + 1:n + 4])) \
+                    or (word == "gh" and nxt in ("repo", "release", "run")
+                        and any(w in ("download", "clone") for w in words[n + 1:n + 4])) \
+                    or (word == "tar" and re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*|--extract|--get", nxt)):
+                fetches = True
+                break
+        if not fetches:
+            return False
+        if clone_into == top:
+            return True
+        for word in words:
+            # A path in the workspace, written as a word or as an option's value (`--output=x`); not a
+            # URL, an absolute path, a home path or one built from a variable.
+            value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+            if "://" in value or value.startswith(("/", "~", "$", "-")):
+                continue
+            path = self._workspace_path(value)
+            if path is not None and (path == top or path.startswith(top + "/")):
+                return True
         return False
 
     def _covers(self, path, target: str, literal_only: bool = False) -> bool:

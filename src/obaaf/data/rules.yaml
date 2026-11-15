@@ -261,7 +261,8 @@ rules:
       repository, a cache restored at a workspace path that holds it, or a script line that runs `git
       clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`,
       `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names a workspace path at or under
-      the action's top directory (not in a URL), or that clones a repository of that name, is reported as
+      the action's top directory (not in a URL) in the same command, or that clones a repository of that
+      name with no folder given, is reported as
       one the checker cannot place (`local-after-download`). An empty image is no container. Not followed:
       code merged or patched into the workspace (`git fetch` and `git merge`, `git am`, `git apply`), a
       download whose target is on another line or in `working-directory`, downloads before an action at
@@ -613,7 +614,7 @@ rules:
       of an action, a `docker://` step's entrypoint and arguments, the step's `shell`, its `env` values
       and the default shell, whose first word (after assignments, wrappers such as `sudo -u user`, `npx`,
       `nice -n 10` or `timeout 5m`, and a shell's `-c`) is an agent's, the step's env values also put into
-      its run script; free text in an input is not a command, unless a line of it begins with an agent's
+      its run script and read as commands; free text in an input or an env value is not a command, unless a line of it begins with an agent's
       name and the words its pattern needs. Not followed, and so never a reason the finding clears: an agent run by a
       package script (`npm run`), a called workflow or a local composite action; code an earlier action
       runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);

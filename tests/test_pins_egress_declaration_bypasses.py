@@ -177,9 +177,14 @@ class LocalActionTest(unittest.TestCase):
             result = check(tmp, job(f"      - uses: actions/checkout@{SHA}\n"
                                     "      - run: curl -sSfL https://example.com/tool -o /tmp/tool && chmod +x /tmp/tool\n"
                                     "      - uses: ./\n"))
-            cloned = check(tmp, job("      - run: git clone https://github.com/someorg/ext\n      - uses: ./ext/deploy\n"))
+            cloned = [check(tmp, job(f"      - run: {clone}\n      - uses: ./ext/deploy\n"))
+                      for clone in ("git clone https://github.com/someorg/ext", "git clone --depth 1 https://x.org/o/ext",
+                                    "git clone -b main https://github.com/someorg/ext.git", "gh repo clone someorg/ext")]
+            lint = check(tmp, job("      - run: curl -sSfL https://x.org/install.sh | sh -s -- -b /usr/local/bin && "
+                                  "golangci-lint run --config .github/golangci.yml\n      - uses: ./.github/actions/report\n"))
         self.assertEqual(of(result, "OBAAF-GHA-008"), [])
-        self.assertEqual([f.kind for f in of(cloned, "OBAAF-GHA-008")], ["local-after-download"])
+        self.assertEqual([[f.kind for f in of(r, "OBAAF-GHA-008")] for r in cloned], [["local-after-download"]] * 4)
+        self.assertEqual(of(lint, "OBAAF-GHA-008"), [])
 
     def test_a_path_with_dots_in_the_action_is_resolved(self):
         steps = (f"      - uses: actions/checkout@{SHA}\n      - uses: actions/checkout@{SHA}\n"
@@ -375,6 +380,13 @@ class AgentFoundTest(unittest.TestCase):
             with self.subTest(name), TempDir() as tmp:
                 result = check(tmp, job(body))
                 self.assertEqual(len(of(result, "OBAAF-GHA-020")), 1)
+
+    def test_prose_in_an_env_value_is_not_an_agent(self):
+        for body in ('      - run: echo "$MESSAGE"\n        env: {MESSAGE: "Merci de nous aider à tester cette version."}\n',
+                     '      - run: gh release create v1 --notes "$NOTES"\n        env: {NOTES: "Now works with aider and cline."}\n'):
+            with self.subTest(body=body), TempDir() as tmp:
+                result = check(tmp, job(body))
+                self.assertEqual(of(result, "OBAAF-GHA-020"), [])
 
     def test_an_agent_as_the_shell_or_in_an_env_value(self):
         cases = {
