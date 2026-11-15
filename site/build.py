@@ -135,7 +135,8 @@ def write_formats(output):
 def write_schemas(output):
     """Publish every JSON Schema OBAAF ships whose $id is under its namespace at that $id (D-007),
     not only the predicate types' (flagship slice 4.6, issue #176: the settings snapshot's was not
-    published). A schema whose $id is elsewhere, or would land outside the build, stops the build."""
+    published). A schema whose $id is elsewhere, names no .json file under schemas/ once resolved, or is
+    another schema's, stops the build, as does a file that is not a JSON object."""
     written = {}
     folder = (output / "schemas").resolve()
     for entry in sorted(resources.files("obaaf.data").joinpath("schemas").iterdir(), key=lambda e: e.name):

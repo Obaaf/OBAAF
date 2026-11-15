@@ -118,5 +118,55 @@ class PublishedPagesTest(unittest.TestCase):
                 self.assertNotIn("–", text)
 
 
+class SchemaPublishingRefusesTest(unittest.TestCase):
+    """`write_schemas` in site/build.py stops the build on a schema it cannot publish safely (flagship
+    slice 4.6): run against a folder of made-up schemas in place of OBAAF's own."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("obaaf_site_build", ROOT / "site" / "build.py")
+        cls.build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.build)
+
+    def publish(self, files):
+        build = self.build
+        with TempDir() as tmp:
+            (tmp / "data" / "schemas").mkdir(parents=True)
+            for name, text in files.items():
+                (tmp / "data" / "schemas" / name).write_text(text, encoding="utf-8")
+            real = build.resources.files
+            build.resources.files = lambda package: tmp / "data"
+            try:
+                out = tmp / "site"
+                out.mkdir()
+                names = build.write_schemas(out)
+                return names, sorted(p.relative_to(out).as_posix() for p in out.rglob("*.json"))
+            finally:
+                build.resources.files = real
+
+    def test_a_schema_is_published_at_its_id_and_other_files_are_skipped(self):
+        names, served = self.publish({"a.json": json.dumps({"$id": predicates.NAMESPACE + "/schemas/a/v1.json"}),
+                                      "notes.txt": "not a schema"})
+        self.assertEqual((names, served), (["a.json"], ["schemas/a/v1.json"]))
+
+    def test_what_stops_the_build(self):
+        ns = predicates.NAMESPACE
+        cases = {
+            "dot-dot": {"a.json": json.dumps({"$id": ns + "/schemas/../assessment.json"})},
+            "another host": {"a.json": json.dumps({"$id": "https://example.com/schemas/a/v1.json"})},
+            "not json": {"a.json": "{not json"},
+            "an array": {"a.json": "[1, 2]"},
+            "no id": {"a.json": "{}"},
+            "not a .json file": {"a.json": json.dumps({"$id": ns + "/schemas/a/v1.html"})},
+            "a duplicate": {"a.json": json.dumps({"$id": ns + "/schemas/a/v1.json"}),
+                            "b.json": json.dumps({"$id": ns + "/schemas/a/v1.json"})},
+        }
+        for case, files in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaises(ValueError):
+                    self.publish(files)
+
+
 if __name__ == "__main__":
     unittest.main()
