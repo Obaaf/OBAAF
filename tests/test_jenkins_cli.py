@@ -130,10 +130,12 @@ class ConfigurationTest(unittest.TestCase):
         with TempDir() as tmp:
             write(tmp, "Jenkinsfile", RISKY)
             write(tmp, ".github/CODEOWNERS", "/docs/ @docs-team\n")
-            findings = [f for f in checker.check(tmp).findings if f.rule == "OBAAF-REPO-001"]
+            findings = [f for f in checker.check(tmp).findings if f.rule == "OBAAF-REPO-001" and f.kind == "no-owner"]
             self.assertEqual(len(findings), 1)
             self.assertIn("Jenkinsfile", findings[0].message)
-            write(tmp, ".github/CODEOWNERS", "/Jenkinsfile @platform-team\n")
+            # The files that decide what the check accepts need an owner too (slice 2d.2h).
+            write(tmp, ".github/CODEOWNERS", "/Jenkinsfile @platform-team\n/.github/ @platform-team\n"
+                                             "/obaaf.yml @platform-team\n")
             self.assertFalse([f for f in checker.check(tmp).findings if f.rule == "OBAAF-REPO-001"])
 
     def test_ignore_entries_name_a_stage(self):

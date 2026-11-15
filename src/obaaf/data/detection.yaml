@@ -54,15 +54,21 @@ agent_installs:
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.
 instruction_files:
+  # Matched without regard to letter case. Where a tool reads a file or folder in every directory,
+  # the pattern starts with **/ (slice 2d.2h; each name is from the tool's own documentation, listed
+  # in docs/bypass-attempts.md). Files that an instruction file pulls in by reference (`@path`,
+  # Aider's `read:`) are not followed.
   - AGENTS.md
   - "**/AGENTS.md"
+  - "**/AGENTS.override.md"
   - AGENT.md
   - "**/AGENT.md"
+  - REVIEW.md
   - opencode.json
   - opencode.jsonc
   - CLAUDE.md
   - "**/CLAUDE.md"
-  - CLAUDE.local.md
+  - "**/CLAUDE.local.md"
   - GEMINI.md
   - "**/GEMINI.md"
   - .github/copilot-instructions.md
@@ -70,19 +76,29 @@ instruction_files:
   - ".github/prompts/**"
   - ".github/chatmodes/**"
   - ".github/agents/**"
+  - ".github/skills/**"
+  - ".github/hooks/**"
+  - ".agents/**"
   - .cursorrules
-  - ".cursor/rules/**"
+  - "**/.cursor/**"
   - .windsurfrules
-  - ".windsurf/rules/**"
+  - "**/.windsurf/**"
   - .clinerules
   - ".clinerules/**"
-  - ".claude/**"
+  - ".cline/**"
+  - "**/.claude/**"
   - ".gemini/**"
   - ".codex/**"
   - .mcp.json
   - .vscode/mcp.json
   - ".continue/**"
-  - .aider.conf.yml
+  - "**/.aider.conf.yml"
+  - ".junie/**"
+  - ".amazonq/**"
+  - ".kiro/**"
+  - .rules
+  - ".augment/**"
+  - .augment-guidelines
 
 # Steps that upload or publish release artifacts (G7.2, FR6).
 upload_actions:
