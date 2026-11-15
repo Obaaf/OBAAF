@@ -3663,6 +3663,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     findings: list[Finding] = []
     errors = errors if errors is not None else []
     unlisted: list = []
+    how: dict = {}
     try:
         codeowners = repo_checks.load_codeowners(root)
         unread = False
@@ -3671,10 +3672,15 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
         codeowners, unread = repo_checks.Codeowners(exc.rel), True
     try:
         entries = repo_checks.find_instruction_entries(root, catalog.detection.get("instruction_files", []), unlisted,
-                                                       errors)
+                                                       errors, how)
     except repo_checks.TooManyFiles as exc:
         errors.append(str(exc))
         entries = []
+    if notes is not None and how.get("listing") == "walk" and (root / ".git").exists():
+        notes.append(f"The checker looked for agent instruction files in every folder, untracked ones included, "
+                     f"because {how.get('why', 'git did not list the tracked files')}; a file git does not "
+                     "track (an installed node_modules, a local build) may be reported, and a pull request "
+                     "cannot add one.")
     if notes is not None and unlisted:
         shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
         notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
@@ -3690,6 +3696,18 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     instruction_files = sorted({e.rel.rstrip("/") for e in entries} | {e.real for e in entries if e.real}
                                | {e.link for e in entries if e.link})
 
+    # A file inside a submodule changes in a pull request only through the submodule's own entry,
+    # so that entry is what needs an owner (the third review of slice 2d.2h).
+    gitlinks = how.get("gitlinks") or []
+
+    def owned_as(path: str) -> str:
+        for link in gitlinks:
+            if path.startswith(link + "/"):
+                return link
+        return path
+
+    instruction_files = sorted({owned_as(p) for p in instruction_files})
+
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
         message, facts = compose(rule, kind, template, None, None, values)
         findings.append(Finding(rule, catalog.rules[rule]["severity"], path, line, message, kind=kind, facts=facts))
@@ -3702,7 +3720,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     # The CI definitions: workflow files and Jenkinsfiles, the local actions they use, the workflow
     # lockfile, and a workflow file not written yet, so that owning each file by name is not owning
     # the folder a new workflow lands in.
-    ci_files = set(workflow_paths) | set(local_actions or [])
+    ci_files = {owned_as(p) for p in set(workflow_paths) | set(local_actions or [])}
     probes: list[str] = []
     if (root / ".github" / "workflows").is_dir():
         if (root / ".github" / "workflows" / "actions.lock").is_file():
@@ -3782,62 +3800,93 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
         except repo_checks.UnreadableFile as exc:
             errors.append(str(exc))
 
+    # Each file is read and scanned once, however many names an agent finds it by (a link to a folder
+    # gives every file in it another name; the third review of slice 2d.2h found 400 links to one large
+    # file took 66 s when each name was read again). Each name still gets its own finding.
+    examined: dict[tuple, list | None] = {}
     for entry in entries:
         if entry.outside:
             continue
         rel = entry.rel
-        name = Path(rel).name.lower()
-        binary_name = Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or name in repo_checks.BINARY_NAMES
-        try:
-            with open(root / rel, "rb") as handle:
-                data = handle.read(INSTRUCTION_LIMIT + 1)
-                whole = hashlib.sha256(data)
-                if len(data) > INSTRUCTION_LIMIT:
-                    # The whole file is digested, so an acceptance does not cover what is added later.
-                    for chunk in iter(lambda: handle.read(1 << 20), b""):
-                        whole.update(chunk)
-        except OSError as exc:
-            errors.append(str(repo_checks.UnreadableFile(rel, exc)))
-            continue
-        if len(data) > INSTRUCTION_LIMIT:
-            add("OBAAF-INS-001", rel, 1, "The file is larger than {limit} bytes, more than the checker scans, so it "
-                "cannot tell what the file hides.", kind="too-large", limit=Note(f"{INSTRUCTION_LIMIT:,}"),
-                digest=Fact(whole.hexdigest()[:32], ""))
-            continue
-        if binary_name:
-            # A picture, an archive or a compiled file is not scanned, unless its bytes are text an agent
-            # could read: then a name is no reason to skip it.
-            try:
-                if b"\0" in data:
-                    raise UnicodeDecodeError("utf-8", data, 0, 1, "NUL")
-                data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            # A file in another encoding (UTF-16, a working-tree-encoding in .gitattributes) is text an
-            # agent may still read and a reviewer may see otherwise; the scan cannot see what it hides.
-            add("OBAAF-INS-001", rel, 1, "The file is not UTF-8 text (byte {byte}), so the checker cannot tell "
-                "what it hides; an agent may still read it.", kind="not-utf8", byte=Note(str(exc.start + 1)),
-                digest=Fact(hashlib.sha256(data).hexdigest()[:32], ""))
-            continue
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        hidden = repo_checks.scan_hidden(text)
-        if hidden:
-            detail = "; ".join(h.label for h in hidden[:3])
-            more = f" and {len(hidden) - 3} more" if len(hidden) > 3 else ""
-            # The finding is which characters the file hides and the text each acts on (as a digest:
-            # the line may be long, and a baseline is not the place for it). A line that moves up or
-            # down is the same finding; a character on other text is another one, because where a
-            # direction override or an invisible instruction sits is what it does. The message shows
-            # the first three with their line and column, and the count of all of them.
-            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) "
-                           f"{'in a paragraph' if h.kind == 'bidirectional control' else 'on a line'} with sha256 {digest}"
-                           for h, digest in zip(hidden, _line_digests(text, hidden)))
-            add("OBAAF-INS-001", rel, hidden[0].line, "{count} hidden character(s): {characters}{more}.",
-                count=Note(str(len(hidden))), more=Note(more), characters=Fact(marks, detail))
+        source = entry.real or rel
+        binary_name = any(Path(p).suffix.lower() in repo_checks.BINARY_SUFFIXES
+                          or Path(p).name.lower() in repo_checks.BINARY_NAMES for p in (rel, source))
+        if (source, binary_name) not in examined:
+            examined[(source, binary_name)] = _examine_instruction_file(root, rel, source, binary_name, errors)
+        for line, template, kind, values in examined[(source, binary_name)] or []:
+            add("OBAAF-INS-001", rel, line, template, kind=kind, **values)
     return findings
+
+
+_STRAY_CONTROLS = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f]")
+
+
+def _looks_binary(data: bytes) -> bool:
+    """Whether bytes that are not UTF-8 text, or hold a NUL, are a binary file rather than text with a
+    few stray bytes. A stray byte is a NUL, another control character (but tab, line feed, form feed and
+    carriage return) or a byte that is part of no UTF-8 character; in the first 64 KiB, more than one
+    byte in eight is stray, or at least eight and more than one in 64 are. A picture, an archive or a
+    compiled file is far above that; text with a stray byte or two, which hid hidden characters from
+    the scan before the slice's third review, is below."""
+    head = data[:1 << 16]
+    stray = len(_STRAY_CONTROLS.findall(head)) + head.decode("utf-8", "replace").count(chr(0xFFFD))
+    return stray * 8 > len(head) or (stray >= 8 and stray * 64 > len(head))
+
+
+def _examine_instruction_file(root: Path, rel: str, source: str, binary_name: bool, errors: list) -> list | None:
+    """The OBAAF-INS-001 findings for one file, as (line, template, kind, values); None when it could
+    not be read (the error is added to `errors`)."""
+    try:
+        with open(root / source, "rb") as handle:
+            data = handle.read(INSTRUCTION_LIMIT + 1)
+            whole = hashlib.sha256(data)
+            if len(data) > INSTRUCTION_LIMIT:
+                # The whole file is digested, so an acceptance does not cover what is added later.
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    whole.update(chunk)
+    except OSError as exc:
+        errors.append(str(repo_checks.UnreadableFile(rel, exc)))
+        return None
+    if binary_name:
+        # A picture, an archive or a compiled file is not scanned, whatever its size. A file with such a
+        # name whose bytes are text, or text with a few stray bytes, is read like any other: a name is no
+        # reason to skip text an agent could read.
+        head = data[:INSTRUCTION_LIMIT]
+        try:
+            if b"\0" in head:
+                raise UnicodeDecodeError("utf-8", head, 0, 1, "NUL")
+            head.decode("utf-8")
+        except UnicodeDecodeError:
+            if _looks_binary(head):
+                return []
+    if len(data) > INSTRUCTION_LIMIT:
+        return [(1, "The file is larger than {limit} bytes, more than the checker scans, so it cannot tell what the "
+                 "file hides.", "too-large", {"limit": Note(f"{INSTRUCTION_LIMIT:,}"),
+                                             "digest": Fact(whole.hexdigest()[:32], "")})]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A file in another encoding (UTF-16, a working-tree-encoding in .gitattributes) is text an
+        # agent may still read and a reviewer may see otherwise; the scan cannot see what it hides.
+        return [(1, "The file is not UTF-8 text (byte {byte}), so the checker cannot tell what it hides; an agent "
+                 "may still read it.", "not-utf8", {"byte": Note(str(exc.start + 1)),
+                                                    "digest": Fact(hashlib.sha256(data).hexdigest()[:32], "")})]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    hidden = repo_checks.scan_hidden(text)
+    if not hidden:
+        return []
+    detail = "; ".join(h.label for h in hidden[:3])
+    more = f" and {len(hidden) - 3} more" if len(hidden) > 3 else ""
+    # The finding is which characters the file hides and the text each acts on (as a digest: the line
+    # may be long, and a baseline is not the place for it). A line that moves up or down is the same
+    # finding; a character on other text is another one, because where a direction override or an
+    # invisible instruction sits is what it does. The message shows the first three with their line and
+    # column, and the count of all of them.
+    marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) "
+                   f"{'in a paragraph' if h.kind == 'bidirectional control' else 'on a line'} with sha256 {digest}"
+                   for h, digest in zip(hidden, _line_digests(text, hidden)))
+    return [(hidden[0].line, "{count} hidden character(s): {characters}{more}.", "",
+             {"count": Note(str(len(hidden))), "more": Note(more), "characters": Fact(marks, detail)})]
 
 
 # The places `obaaf check` looks for its configuration (checker.CONFIG_LOCATIONS).

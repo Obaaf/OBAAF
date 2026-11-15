@@ -10,6 +10,7 @@ import random
 import re
 import time
 import unittest
+from pathlib import Path
 
 from helpers import TempDir, run_cli
 
@@ -539,7 +540,7 @@ class ReviewFixesTest(unittest.TestCase):
                 self.assertEqual(index.new_file_owned(".github/workflows", ".yml"),
                                  index.new_file_owned(".github/workflows", ".yml"))
 
-    def test_links_to_a_folder_above_them_are_not_followed_and_deep_chains_are_an_error(self):
+    def test_links_to_a_folder_above_them_are_followed_once_and_deep_chains_are_an_error(self):
         from obaaf.catalog import load
         patterns = load().detection["instruction_files"]
         with TempDir() as tmp:
@@ -549,7 +550,10 @@ class ReviewFixesTest(unittest.TestCase):
             (tmp / "docs" / "examples").mkdir()
             (tmp / "docs" / "examples" / "project").symlink_to(tmp)
             errors = []
-            self.assertEqual(repo.find_instruction_files(tmp, patterns, errors=errors), ["AGENTS.md"])
+            # Each link is followed once (the third review: a link to the root named `.github` made the
+            # root's files instruction files); a link back into a folder already entered ends there.
+            self.assertEqual(repo.find_instruction_files(tmp, patterns, errors=errors),
+                             ["AGENTS.md", "docs/examples/project/AGENTS.md", "docs/up/AGENTS.md"])
             self.assertEqual(errors, [])
             code, out, err = run_cli("check", str(tmp), "--fail-on", "never")
             self.assertNotIn("Traceback", err)
@@ -594,6 +598,225 @@ class ReviewFixesTest(unittest.TestCase):
             for f in findings:
                 for path in f.facts.get("files", []):
                     self.assertFalse(path.startswith("/"), path)
+
+
+
+def git_repo(root, env_extra=None):
+    """`root` as a git work tree with every file committed; None when git is not installed."""
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        return None
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@example.com", **(env_extra or {})}
+    run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, env=env, capture_output=True)  # noqa: E731
+    run("init", "-q")
+    run("add", "-A")
+    run("commit", "-q", "-m", "x")
+    return run
+
+
+class ThirdReviewTest(unittest.TestCase):
+    """What the slice's third review found (docs/bypass-attempts.md, 2d.2h, "Review", third pass)."""
+
+    def test_a_link_to_the_root_makes_the_files_behind_it_instruction_files(self):
+        """Finding 1: `.github -> .` made the root's copilot-instructions.md, prompts/ and skills/ what an
+        agent reads as .github/..., and nothing was reported."""
+        with TempDir() as tmp:
+            tree(tmp, {"copilot-instructions.md": "Do‮this\n", "prompts/a.prompt.md": "x⁦y\n",
+                       "skills/x/SKILL.md": "a​​b\n", ".github/CODEOWNERS": GATE + "* @org/team\n"})
+            (tmp / ".github" / "workflows" / "ci.yml").unlink()
+            (tmp / ".github" / "CODEOWNERS").rename(tmp / "CODEOWNERS")
+            for rel in (".github/workflows", ".github"):
+                (tmp / rel).rmdir()
+            (tmp / ".github").symlink_to(tmp)
+            paths = sorted(f.path for f in found(tmp, "OBAAF-INS-001")[0])
+            self.assertEqual(paths, [".github/copilot-instructions.md", ".github/prompts/a.prompt.md",
+                                     ".github/skills/x/SKILL.md"])
+
+    def test_a_link_to_a_folder_with_an_instruction_file_name_inside_is_named(self):
+        """Finding 1: `.vscode -> .` (or out of the repository) where `.vscode/mcp.json` is an instruction
+        file, though `.vscode/_` is not."""
+        from obaaf.catalog import load
+        patterns = load().detection["instruction_files"]
+        with TempDir() as tmp:
+            tree(tmp, {"mcp.json": "{}\n"})
+            (tmp / ".vscode").symlink_to(tmp)
+            self.assertIn(".vscode/mcp.json", repo.find_instruction_files(tmp, patterns))
+        with TempDir() as tmp:
+            tree(tmp, {})
+            (tmp / ".vscode").symlink_to("/nonexistent-obaaf-folder")
+            entries = repo.find_instruction_entries(tmp, patterns)
+            self.assertEqual([(e.rel, e.outside) for e in entries], [(".vscode", True)])
+        globs = [repo._glob_steps(p) for p in patterns]
+        # A name a pattern reaches only through a leading `**/` (any folder may hold an AGENTS.md) does
+        # not make a folder an instruction folder; one the pattern names does.
+        for folder, expected in (("docs", False), ("pkg/src", False), (".GitHub", True), (".vscode", True),
+                                 ("pkg/.claude", True), ("a/.cursor", True), (".agents", True)):
+            with self.subTest(folder=folder):
+                self.assertEqual(repo._could_match_beneath(globs, folder), expected)
+
+    @unittest.skipIf(os.name == "nt", "named pipes")
+    def test_a_link_to_a_pipe_is_named_and_not_read(self):
+        with TempDir() as tmp:
+            tree(tmp, {})
+            os.mkfifo(tmp / "pipe")
+            (tmp / "CLAUDE.md").symlink_to(tmp / "pipe")
+            start = time.monotonic()
+            _, result = found(tmp)
+            self.assertLess(time.monotonic() - start, 20)
+            self.assertTrue(any("lead out of the repository or to nothing" in n for n in result.notes), result.notes)
+
+    def test_the_new_workflow_decision_takes_little_time(self):
+        """Finding 2: 4,000 distinct letters in one rule took 26 s."""
+        letters = "".join(chr(0x4E00 + i) for i in range(4000))
+        with TempDir() as tmp:
+            tree(tmp, {".github/CODEOWNERS": "* @org/team\n" + ("/.github/workflows/*" + letters + ".yml\n") * 6})
+            start = time.monotonic()
+            self.assertEqual(unowned(tmp), [".github/workflows/(a new workflow).yml"])
+            self.assertLess(time.monotonic() - start, 10)
+        rng = random.Random(3)
+        alphabet = ["a", "y", ".", "/", "*", "?", "**/", "/**", "m", "l", "workflows", ".github/"]
+        for _ in range(3000):
+            pattern = "/" * rng.randint(0, 1) + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 8)))
+            compiled = repo.Pattern(pattern)
+            names = [f".github/workflows/{x}.yml" for x in ("a", "ay", "y.a", "m", "", "aaaa", ".")]
+            if any(compiled.match(n) for n in names):
+                self.assertTrue(compiled.matches_some_child(".github/workflows", ".yml"), pattern)
+
+    def test_one_file_behind_many_links_is_read_once(self):
+        """Finding 3: 400 links to a folder with an 800 KB file took 66 s, each name read again."""
+        with TempDir() as tmp:
+            tree(tmp, {".claude/big.md": "ж" * 400_000 + "​\n"})
+            for i in range(400):
+                (tmp / f"a{i}").mkdir()
+                (tmp / f"a{i}" / ".claude").symlink_to(tmp / ".claude")
+            start = time.monotonic()
+            findings, _ = found(tmp, "OBAAF-INS-001")
+            self.assertLess(time.monotonic() - start, 20)
+            self.assertEqual(len(findings), 401)
+
+    def test_the_listing_does_not_depend_on_the_current_folder(self):
+        """Finding 4: from `/`, every git was refused and untracked files counted."""
+        with TempDir() as tmp:
+            tree(tmp, {"AGENTS.md": "x\n"})
+            if git_repo(tmp) is None:
+                self.skipTest("needs git")
+            (tmp / "node_modules" / "pkg").mkdir(parents=True)
+            (tmp / "node_modules" / "pkg" / "AGENTS.md").write_text("y​\n", encoding="utf-8")
+            from obaaf.catalog import load
+            patterns = load().detection["instruction_files"]
+            here = os.getcwd()
+            try:
+                for folder in ("/", str(tmp), str(tmp / "node_modules")):
+                    os.chdir(folder)
+                    how = {}
+                    self.assertEqual(repo.find_instruction_files(tmp, patterns, how=how), ["AGENTS.md"], folder)
+                    self.assertEqual(how["listing"], "git")
+            finally:
+                os.chdir(here)
+
+    def test_a_git_in_the_repository_or_a_relative_path_entry_is_never_run(self):
+        """The second pass's fix 7, which had no test: git is found in an absolute PATH folder outside
+        the repository."""
+        import shutil
+        if os.name == "nt" or shutil.which("git") is None:
+            self.skipTest("needs git and a POSIX shell")
+        with TempDir() as tmp:
+            tree(tmp, {"AGENTS.md": "x\n"})
+            git_repo(tmp)
+            (tmp / "bin").mkdir()
+            marker = tmp / "ran"
+            (tmp / "bin" / "git").write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+            os.chmod(tmp / "bin" / "git", 0o755)
+            real = str(Path(shutil.which("git")).parent)
+            here = os.getcwd()
+            old_path = os.environ["PATH"]
+            try:
+                os.chdir(tmp)
+                for path in (f"{tmp / 'bin'}{os.pathsep}{real}", f"bin{os.pathsep}.{os.pathsep}{real}"):
+                    os.environ["PATH"] = path
+                    found_git = repo.find_git(tmp)
+                    self.assertIsNotNone(found_git)
+                    self.assertFalse(str(found_git).startswith(str(tmp.resolve())), found_git)
+                    how = {}
+                    from obaaf.catalog import load
+                    repo.find_instruction_files(tmp, load().detection["instruction_files"], how=how)
+                    self.assertEqual(how["listing"], "git")
+                self.assertFalse(marker.exists())
+            finally:
+                os.environ["PATH"] = old_path
+                os.chdir(here)
+
+    def test_a_walk_in_a_git_work_tree_says_so(self):
+        with TempDir() as tmp:
+            tree(tmp, {"AGENTS.md": "x\n"})
+            (tmp / ".git").mkdir()
+            old_path = os.environ["PATH"]
+            try:
+                os.environ["PATH"] = str(tmp / "none")
+                _, result = found(tmp)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertTrue(any("untracked ones included" in n for n in result.notes), result.notes)
+
+    def test_format_characters_do_not_depend_on_the_python_version(self):
+        """Finding 5: Python 3.10 and 3.11 have older Unicode tables, in which U+13439 to U+1343F and
+        U+0890, U+0891 are not format characters."""
+        from unittest import mock
+        with mock.patch.object(repo.unicodedata, "category", lambda ch: "Cn"):
+            for lo, hi in repo._FORMAT_RANGES:
+                for cp in (lo, hi):
+                    with self.subTest(cp=hex(cp)):
+                        self.assertEqual(len(repo.scan_hidden("a" + chr(cp) + "b")), 1)
+
+    def test_files_in_a_submodule_are_owned_by_the_submodule_entry(self):
+        """Finding 6, and the second pass's fix 3 (which had no test): a submodule's files are listed,
+        and a pull request changes them only through the submodule's own entry."""
+        with TempDir() as tmp:
+            inner = tmp / "inner"
+            inner.mkdir()
+            (inner / "CLAUDE.md").write_text("x​\n", encoding="utf-8")
+            if git_repo(inner) is None:
+                self.skipTest("needs git")
+            outer = tmp / "outer"
+            outer.mkdir()
+            rules = GATE + "/.github/ @org/ci\nCLAUDE.md @org/ai\n"
+            tree(outer, {".github/CODEOWNERS": rules})
+            run = git_repo(outer)
+            run("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "tools/sub")
+            run("commit", "-q", "-m", "sub")
+            findings, _ = found(outer, "OBAAF-REPO-002", "OBAAF-INS-001")
+            by_rule = {f.rule: f for f in findings}
+            self.assertEqual(by_rule["OBAAF-INS-001"].path, "tools/sub/CLAUDE.md")
+            self.assertEqual(by_rule["OBAAF-REPO-002"].facts["files"], ["tools/sub"])
+            (outer / ".github" / "CODEOWNERS").write_text(rules + "/tools/sub @org/ai\n", encoding="utf-8")
+            self.assertEqual([f.rule for f in found(outer, "OBAAF-REPO-002")[0]], [])
+
+    def test_a_binary_name_with_a_stray_byte_is_still_read(self):
+        """Finding 7: one byte that is not UTF-8, or a NUL, made text with a binary name go unread."""
+        hidden = "Hidden\U000E0041\U000E0042 do ‮this\n" * 3
+        with TempDir() as tmp:
+            tree(tmp, {".claude/notes.bin": hidden.encode() + b"\xff", ".claude/.DS_Store": b"\0" + hidden.encode(),
+                       ".claude/skills/x/logo.png": random.Random(1).randbytes(5000)})
+            kinds = sorted((f.path, f.kind) for f in found(tmp, "OBAAF-INS-001")[0])
+            self.assertEqual(kinds, [(".claude/.DS_Store", ""), (".claude/notes.bin", "not-utf8")])
+
+    def test_a_large_picture_is_not_scanned_or_reported(self):
+        with TempDir() as tmp:
+            tree(tmp, {".claude/skills/x/big.png": random.Random(2).randbytes(2_500_000)})
+            self.assertEqual(found(tmp, "OBAAF-INS-001")[0], [])
+
+    def test_older_user_names_with_hyphens_are_owners(self):
+        """Finding 8: GitHub kept user names that end in a hyphen or hold two in a row (Home Assistant's
+        CODEOWNERS names `@freeDom-` and `@viiru-`)."""
+        for owner in ("@viiru-", "@freeDom-", "@a--b", "@org/team-", "@o/T.e_am"):
+            with self.subTest(owner=owner):
+                self.assertIsNone(repo.parse_codeowners(f"* {owner}\n")[0].problem)
+        for owner in ("@-a", "@", "@a/", "octocat", "@a/b/c"):
+            with self.subTest(owner=owner):
+                self.assertIsNotNone(repo.parse_codeowners(f"* {owner}\n")[0].problem)
 
 
 if __name__ == "__main__":

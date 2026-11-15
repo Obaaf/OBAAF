@@ -76,15 +76,25 @@ class UnreadableFile(OSError):
         self.rel = rel
 
 
+# A user (`@name`) or a team (`@org/team`) as a CODEOWNERS file may name one. GitHub's rules for a new
+# user name refuse a hyphen at the end or two in a row, but older accounts keep such names (Home
+# Assistant's CODEOWNERS names `@freeDom-` and `@viiru-`), so they are read as names here; the form
+# for an acceptance's owner (acceptance._HANDLE) stays as it is (the third review of slice 2d.2h).
+_CODEOWNERS_HANDLE = re.compile(r"@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:_[A-Za-z0-9]{1,39})?"
+                                r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,99})?")
+
+
 def _owner_problem(owner: str) -> str | None:
-    from obaaf.checker.acceptance import owner_problem
+    from obaaf.checker.acceptance import _is_email
 
     odd = next((ch for ch in owner if unicodedata.category(ch)[0] in "ZC"), None)
     if odd is not None:
         return f"its owner {owner[:60]!r} holds U+{ord(odd):04X}, a space or control character"
     if any(owner.lower().startswith(p) for p in PLACEHOLDER_OWNERS):
         return f"its owner {owner[:60]!r} is the placeholder from OBAAF's template"
-    return owner_problem(owner)
+    if _CODEOWNERS_HANDLE.fullmatch(owner) or _is_email(owner):
+        return None
+    return f"its owner {owner[:60]!r} is not a user (@name), a team (@org/team) or an e-mail address"
 
 
 def _comment_start(line: str) -> int:
@@ -273,6 +283,7 @@ class Pattern:
             else:
                 steps.append((kind, arg))
         self.m = len(steps)
+        self.kinds = steps
         self.lit: dict[str, int] = {}
         self.one = self.star = self.any = self.enter = 0
         for i, (kind, arg) in enumerate(steps):
@@ -330,6 +341,34 @@ class Pattern:
         if not hasattr(self, "m"):
             self._build_automaton()
 
+    def _reach_any(self, s: int) -> int:
+        """The states after one or more characters, none of them `/`, from the states `s`: one pass
+        over the steps, which only lead forward or to themselves, so the time is linear in the
+        pattern (the third review of slice 2d.2h found that asking each character in turn took 26 s
+        on a 12 KB rule)."""
+        m = self.m
+        bits = bin(s)[:1:-1]
+        live = [i < len(bits) and bits[i] == "1" for i in range(m + 1)]
+        reach = [False] * (m + 1)
+        kinds = self.kinds
+        for i in range(m + 1):
+            got = False
+            if i < m and live[i] and kinds[i][0] in ("star", "any"):
+                got = True                                   # a wildcard takes the character and stays
+            if i >= 1:
+                kind, arg = kinds[i - 1]
+                if (live[i - 1] or reach[i - 1]) and (kind == "one" or (kind == "lit" and arg != "/")):
+                    got = True                               # a step that takes any character but `/`
+                if reach[i - 1] and kind in ("star", "any", "enter"):
+                    got = True                               # a step that may take nothing
+            if i >= 3 and reach[i - 3] and kinds[i - 3][0] == "enter":
+                got = True                                   # `**/` taking no folder
+            reach[i] = got
+        out = 0
+        for i in range(m, -1, -1):
+            out = (out << 1) | reach[i]
+        return out
+
     def matches_some_child(self, folder: str, suffix: str) -> bool:
         """Whether some name `folder/X<suffix>`, X one or more characters with no `/`, matches."""
         self._automaton()
@@ -339,17 +378,7 @@ class Pattern:
             if ch == "/" and s & done and self.suffix in ("dir", "opt"):
                 return True              # the folder itself, or one above it, matches: so does every name
             s = self._step(s, ch)
-        chars = {c for c in self.lit if c != "/"} | {SENTINEL}
-        reach = 0
-        for c in chars:
-            reach |= self._step(s, c)
-        while True:
-            more = reach
-            for c in chars:
-                more |= self._step(reach, c)
-            if more == reach:
-                break
-            reach = more
+        reach = self._reach_any(s)
         for ch in suffix:
             reach = self._step(reach, ch)
         return bool(reach & done) and self.suffix in ("none", "opt")
@@ -482,44 +511,85 @@ ALIAS_LIMIT = 200_000
 LINK_DEPTH = 8
 
 
-def _git_tracked(root: Path) -> list[str] | None:
-    """The files git tracks under `root`, when `root` is the top of a git work tree and git answers;
-    None otherwise (the caller then walks the folder). Tracked files are what a pull request changes
-    and what a checkout holds, so an installed node_modules or a local build folder is left out; the
-    files of checked-out submodules are included. git is found on the PATH, never inside the repository
-    or the current folder, and run with no hook and no file-system monitor and with GIT_* variables
-    removed, so neither the repository's configuration nor the environment can make it run anything
-    else."""
-    if not (root / ".git").exists():
-        return None
-    import shutil
-    git = shutil.which("git")
-    if git is None:
-        return None
-    git_path = Path(git).resolve()
-    for folder in (root, Path.cwd()):
-        try:
-            git_path.relative_to(folder.resolve())
-            return None          # a git inside the repository, or found in the current folder, is not run
-        except (ValueError, OSError):
-            pass
+def find_git(root: Path) -> Path | None:
+    """The git program to run: the first one in an absolute folder of the PATH that is not inside
+    `root`. A relative or empty PATH entry is skipped, so neither the current folder nor the repository
+    can supply it (Windows looks in the current folder first; the PATH is searched here instead). The
+    answer does not depend on the current folder (the third review of slice 2d.2h found that from `/`
+    every git was refused, so untracked files counted)."""
+    names = ["git"]
+    if os.name == "nt":
+        names = ["git" + ext.lower() for ext in os.environ.get("PATHEXT", ".EXE").split(os.pathsep) if ext]
+    try:
+        real_root = root.resolve()
+    except OSError:
+        real_root = root
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not folder or not os.path.isabs(folder):
+            continue
+        for name in names:
+            candidate = Path(folder) / name
+            try:
+                if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                    continue
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            try:
+                resolved.relative_to(real_root)
+                continue                 # a git inside the repository is never run
+            except ValueError:
+                return resolved
+    return None
+
+
+def _run_git(git: Path, root: Path, *args: str) -> bytes | None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        done = subprocess.run([str(git_path), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                               "-c", "core.hooksPath=/dev/null", "ls-files", "-z", "--cached",
-                               "--recurse-submodules"],
+        done = subprocess.run([str(git), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                               "-c", "core.hooksPath=/dev/null", *args],
                               cwd=str(root), env=env, capture_output=True, timeout=120, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    if done.returncode != 0:
+    return done.stdout if done.returncode == 0 else None
+
+
+def _git_tracked(root: Path, how: dict | None = None) -> list[str] | None:
+    """The files git tracks under `root`, when `root` is the top of a git work tree and git answers;
+    None otherwise (the caller then walks the folder, and `how["why"]` says why). Tracked files are
+    what a pull request changes and what a checkout holds, so an installed node_modules or a local
+    build folder is left out; the files of checked-out submodules are included, and `how["gitlinks"]`
+    lists the submodules, whose files a pull request changes only through the submodule's own entry.
+    git is run with no hook and no file-system monitor and with GIT_* variables removed, so neither the
+    repository's configuration nor the environment can make it run anything else."""
+    how = how if how is not None else {}
+    if not (root / ".git").exists():
         return None
-    return sorted({p.decode("utf-8", "surrogateescape") for p in done.stdout.split(b"\0") if p})
+    git = find_git(root)
+    if git is None:
+        how["why"] = "no git program was found in an absolute folder of the PATH outside the repository"
+        return None
+    listed = _run_git(git, root, "ls-files", "-z", "--cached", "--recurse-submodules")
+    staged = _run_git(git, root, "ls-files", "-z", "--stage") if listed is not None else None
+    if listed is None or staged is None:
+        how["why"] = "git did not list the tracked files"
+        return None
+    gitlinks = []
+    for record in staged.split(b"\0"):
+        meta, _, path = record.partition(b"\t")
+        if meta.startswith(b"160000 ") and path:
+            gitlinks.append(path.decode("utf-8", "surrogateescape"))
+    how["gitlinks"] = sorted(gitlinks)
+    return sorted({p.decode("utf-8", "surrogateescape") for p in listed.split(b"\0") if p})
 
 
-def _scan(root: Path, unlisted: list | None) -> tuple[list[str], list[str]]:
+def _scan(root: Path, unlisted: list | None, how: dict | None = None) -> tuple[list[str], list[str]]:
     """(regular files, links) under `root`, each real folder once, without following links. Uses git's
-    list of tracked files when there is one; otherwise walks every folder but `.git`."""
-    tracked = _git_tracked(root)
+    list of tracked files when there is one; otherwise walks every folder but `.git`. `how["listing"]`
+    says which ("git" or "walk")."""
+    how = how if how is not None else {}
+    tracked = _git_tracked(root, how)
+    how["listing"] = "walk" if tracked is None else "git"
     files: list[str] = []
     links: list[str] = []
     if tracked is not None:
@@ -567,7 +637,7 @@ def _scan(root: Path, unlisted: list | None) -> tuple[list[str], list[str]]:
 
 
 def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | None = None,
-                             errors: list | None = None) -> list[InstructionFile]:
+                             errors: list | None = None, how: dict | None = None) -> list[InstructionFile]:
     """Agent instruction files under `root`, matched without regard to letter case (an agent on a
     file system that ignores case reads `agents.md` as AGENTS.md). Each real file is found once by its
     own path; a link is followed while it stays inside the repository, and every file reached through
@@ -575,49 +645,58 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
     TooManyFiles past WALK_LIMIT entries, and past ALIAS_LIMIT names reached through links unless
     `errors` is given: then the problem is added to it and what was found so far is returned."""
     import bisect as _bisect
+    import stat as _stat
 
-    regexes = [_glob_to_regex(p, ignore_case=True) for p in patterns]
+    combined = re.compile("|".join(f"(?:{_glob_to_regex(p).pattern})" for p in patterns) or r"(?!)", re.IGNORECASE)
+    globs = [_glob_steps(p) for p in patterns]
 
     def wanted(rel: str) -> bool:
-        return any(rx.match(rel) for rx in regexes)
+        return combined.match(rel) is not None
+
+    def beneath(rel: str) -> bool:
+        """Whether some name under the folder `rel` would be an instruction file."""
+        return _could_match_beneath(globs, rel)
 
     try:
         real_root = root.resolve()
     except OSError:
         real_root = root
-    files, links = _scan(root, unlisted)
+    files, links = _scan(root, unlisted, how)
     found: dict[str, InstructionFile] = {rel: InstructionFile(rel) for rel in files if wanted(rel)}
-    # (name an agent uses, the link entry first followed, depth, the link's own path in the repository).
-    # A name reached through a link leads where the link's own path leads, which is resolved once.
+    # (name an agent uses, the link entry first followed, depth, the link's own path in the repository,
+    # the folders already entered on the way). A name reached through a link leads where the link's own
+    # path leads, which is resolved once.
     queue = [(rel, rel, 1, rel, frozenset()) for rel in links]
     resolved: dict[str, tuple | None] = {}
-    made = 0
+    made = looks = 0
+
+    def stop(problem: str) -> list[InstructionFile]:
+        if errors is None:
+            raise TooManyFiles(problem)
+        errors.append(problem)          # what was found so far is still checked
+        return sorted(found.values(), key=lambda f: f.rel)
+
     while queue:
         name, first, depth, key, chain = queue.pop()
         if key not in resolved:
             try:
                 target = (root / key).resolve(strict=True)
-                resolved[key] = (target.relative_to(real_root).as_posix(), target.is_dir())
+                mode = target.stat().st_mode
+                kind = "dir" if _stat.S_ISDIR(mode) else "file" if _stat.S_ISREG(mode) else "other"
+                resolved[key] = (target.relative_to(real_root).as_posix(), kind)
             except (OSError, ValueError, RuntimeError):
                 resolved[key] = None
-        try:
-            if resolved[key] is None:
-                raise ValueError(key)
-            real, is_dir = resolved[key]
-        except (OSError, ValueError, RuntimeError):
-            # Out of the repository or to nothing: named when a file there would match.
-            if wanted(name) or wanted(name + "/_"):
+        entry = resolved[key]
+        if entry is None or entry[1] == "other":
+            # Out of the repository, to nothing, or to something that is neither a file nor a folder (a
+            # pipe would stall the read): named, and not read, when it or a file beneath it would match.
+            if wanted(name) or beneath(name):
                 found.setdefault(name, InstructionFile(name, outside=True, link=first))
             continue
-        if not is_dir:
+        real, kind = entry
+        if kind == "file":
             if wanted(name) or wanted(real):
                 found[name] = InstructionFile(name, real=real, link=first)
-            continue
-        # A link to a folder that holds the link (`.`, `..`, the root) adds no file the walk did not
-        # find by its own path; it is named when a file behind it would match, and not followed.
-        if real == "." or key == real or key.startswith(real + "/"):
-            if wanted(name + "/_"):
-                found.setdefault(name, InstructionFile(name, real=None, link=first))
             continue
         if real in chain:
             continue                     # a loop of links: every name on it has been seen
@@ -629,34 +708,110 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             if problem not in errors:
                 errors.append(problem)
             continue
+        # A link to a folder, a folder that holds the link (`.`, `..`, the root) included, is followed
+        # once: every file behind it is found again by the name an agent uses (`.github -> .` makes the
+        # root's `copilot-instructions.md` an instruction file). The folders entered on the way are not
+        # entered again, so a link back to one of them ends there.
         chain = chain | {real}
-        prefix = real + "/"
+        prefix = "" if real == "." else real + "/"
         for pool, is_link in ((files, False), (links, True)):
             at = _bisect.bisect_left(pool, prefix) if prefix else 0
             while at < len(pool) and pool[at].startswith(prefix):
                 inner = pool[at]
                 at += 1
+                looks += 1
+                if looks > WALK_LIMIT:
+                    return stop(f"links lead to more than {WALK_LIMIT:,} entries, more than the checker looks "
+                                "through for agent instruction files")
                 alias = name + "/" + inner[len(prefix):]
+                if not is_link and not wanted(alias):
+                    continue
                 made += 1
                 if made > ALIAS_LIMIT:
-                    problem = (f"links lead to more than {ALIAS_LIMIT:,} names, more than the checker follows when it "
-                               "looks for agent instruction files")
-                    if errors is None:
-                        raise TooManyFiles(problem)
-                    errors.append(problem)      # what was found so far is still checked
-                    return sorted(found.values(), key=lambda f: f.rel)
+                    return stop(f"links lead to more than {ALIAS_LIMIT:,} names, more than the checker follows "
+                                "when it looks for agent instruction files")
                 if is_link:
                     queue.append((alias, first, depth + 1, inner, chain))
-                elif wanted(alias):
+                else:
                     found.setdefault(alias, InstructionFile(alias, real=inner, link=first))
     return sorted(found.values(), key=lambda f: f.rel)
 
 
+def _glob_steps(glob: str) -> list[tuple[str, str]]:
+    """An instruction-file pattern as steps, read as _glob_to_regex reads it, in lower case."""
+    steps: list[tuple[str, str]] = []
+    i = 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            steps.append(("dirs", ""))
+            i += 3
+        elif glob.startswith("**", i):
+            steps.append(("rest", ""))
+            i += 2
+        elif glob[i] == "*":
+            steps.append(("star", ""))
+            i += 1
+        else:
+            steps.append(("lit", glob[i].lower()))
+            i += 1
+    return steps
+
+
+def _could_match_beneath(globs: list[list[tuple[str, str]]], folder: str) -> bool:
+    """Whether some path `folder/X`, X not empty, matches one of the patterns (without regard to case)
+    by what the pattern says of `folder`: a pattern that reaches it only through a leading `**/` (any
+    folder may hold an AGENTS.md) does not count, or every link out of the repository would. Each
+    pattern is run over `folder/` as a set of positions; one still alive can be completed, since every
+    step can take some text."""
+    text = (folder + "/").lower()
+    for steps in globs:
+        n = len(steps)
+
+        def close(states: set) -> set:
+            out, todo = set(states), list(states)
+            while todo:
+                s = todo.pop()
+                if isinstance(s, int) and s < n and steps[s][0] in ("dirs", "rest", "star") and s + 1 not in out:
+                    out.add(s + 1)
+                    todo.append(s + 1)
+            return out
+
+        states = close({0})
+        for ch in text:
+            nxt: set = set()
+            for s in states:
+                if isinstance(s, tuple):                     # inside the folders of a `**/`
+                    nxt.add(s)
+                    if ch == "/":
+                        nxt.add(s[1] + 1)
+                    continue
+                if s >= n:
+                    continue
+                kind, arg = steps[s]
+                if kind == "lit" and arg == ch:
+                    nxt.add(s + 1)
+                elif kind == "star" and ch != "/":
+                    nxt.add(s)
+                elif kind == "rest":
+                    nxt.add(s)
+                elif kind == "dirs":
+                    nxt.add(("in", s))
+                    if ch == "/":
+                        nxt.add(s + 1)
+            states = close(nxt)
+            if not states:
+                break
+        idle = {("in", 0), 1} if steps and steps[0][0] == "dirs" else set()
+        if any(s not in idle and (isinstance(s, tuple) or s < n) for s in states):
+            return True
+    return False
+
+
 def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None,
-                           errors: list | None = None) -> list[str]:
+                           errors: list | None = None, how: dict | None = None) -> list[str]:
     """The paths of agent instruction files under `root` (see find_instruction_entries)."""
     try:
-        return [f.rel for f in find_instruction_entries(root, patterns, unlisted, errors)]
+        return [f.rel for f in find_instruction_entries(root, patterns, unlisted, errors, how)]
     except TooManyFiles as exc:
         if errors is None:
             raise
@@ -739,6 +894,18 @@ class HiddenChar:
         return f"U+{self.codepoint:04X} {name} ({self.kind}) at line {self.line}, column {self.column}"
 
 
+# Every format character (category Cf) of Unicode 15.1, written out so that an older Python, whose
+# Unicode tables are older (3.10 has Unicode 13, 3.11 has 14), reports the same ones: U+0890, U+0891
+# and U+13439 to U+1343F were assigned later. A newer Python may report format characters added after
+# 15.1 as well (the third review of slice 2d.2h).
+_FORMAT_RANGES = ((0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F),
+                  (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E), (0x200B, 0x200F), (0x202A, 0x202E),
+                  (0x2060, 0x2064), (0x2066, 0x206F), (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD),
+                  (0x110CD, 0x110CD), (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+                  (0xE0001, 0xE0001), (0xE0020, 0xE007F))
+_FORMAT = frozenset(cp for lo, hi in _FORMAT_RANGES for cp in range(lo, hi + 1))
+
+
 def _kind(cp: int, ch: str) -> str | None:
     if cp in _TAGS:
         return "tag character"
@@ -746,7 +913,7 @@ def _kind(cp: int, ch: str) -> str | None:
         return "variation selector"
     if cp in _BIDI:
         return "bidirectional control"
-    if cp in _ZERO_WIDTH or cp in _INVISIBLE:
+    if cp in _ZERO_WIDTH or cp in _INVISIBLE or cp in _FORMAT:
         return "zero-width or invisible"
     category = unicodedata.category(ch)
     if category == "Cf":
