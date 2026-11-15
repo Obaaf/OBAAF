@@ -507,6 +507,7 @@ class TooManyFiles(OSError):
 # Entries looked at, and names reached through links, before the search for instruction files stops
 # with an error (never with a pass).
 WALK_LIMIT = 2_000_000
+LOOK_LIMIT = 500_000             # entries looked at behind links
 ALIAS_LIMIT = 200_000
 LINK_DEPTH = 8
 
@@ -649,13 +650,24 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
 
     combined = re.compile("|".join(f"(?:{_glob_to_regex(p).pattern})" for p in patterns) or r"(?!)", re.IGNORECASE)
     globs = [_glob_steps(p) for p in patterns]
+    # A pattern that starts with `**/` matches `name/X` by what it says of `name` (the signature below)
+    # or by matching X alone; so the name behind a link is tested on its short tail, and the whole name
+    # only against the patterns the link's name brings in (the fourth review of slice 2d.2h found long
+    # names behind many links took minutes).
+    anywhere = re.compile("|".join(f"(?:{_glob_to_regex(p).pattern})" for p in patterns if p.startswith("**/"))
+                          or r"(?!)", re.IGNORECASE)
+    by_signature: dict[frozenset, re.Pattern] = {}
 
     def wanted(rel: str) -> bool:
         return combined.match(rel) is not None
 
-    def beneath(rel: str) -> bool:
-        """Whether some name under the folder `rel` would be an instruction file."""
-        return _could_match_beneath(globs, rel)
+    def matcher(signature: frozenset) -> re.Pattern:
+        rx = by_signature.get(signature)
+        if rx is None:
+            rx = by_signature[signature] = re.compile(
+                "|".join(f"(?:{_glob_to_regex(patterns[i]).pattern})" for i in sorted(signature)) or r"(?!)",
+                re.IGNORECASE)
+        return rx
 
     try:
         real_root = root.resolve()
@@ -664,10 +676,12 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
     files, links = _scan(root, unlisted, how)
     found: dict[str, InstructionFile] = {rel: InstructionFile(rel) for rel in files if wanted(rel)}
     # (name an agent uses, the link entry first followed, depth, the link's own path in the repository,
-    # the folders already entered on the way). A name reached through a link leads where the link's own
-    # path leads, which is resolved once.
-    queue = [(rel, rel, 1, rel, frozenset()) for rel in links]
+    # the folders already entered on the way, whether a folder was entered again on the way). A name
+    # reached through a link leads where the link's own path leads, which is resolved once.
+    queue = [(rel, rel, 1, rel, frozenset(), False) for rel in links]
     resolved: dict[str, tuple | None] = {}
+    reentered: set = set()
+    seen: set = set()
     made = looks = 0
 
     def stop(problem: str) -> list[InstructionFile]:
@@ -677,7 +691,7 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
         return sorted(found.values(), key=lambda f: f.rel)
 
     while queue:
-        name, first, depth, key, chain = queue.pop()
+        name, first, depth, key, chain, again = queue.pop()
         if key not in resolved:
             try:
                 target = (root / key).resolve(strict=True)
@@ -689,8 +703,9 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
         entry = resolved[key]
         if entry is None or entry[1] == "other":
             # Out of the repository, to nothing, or to something that is neither a file nor a folder (a
-            # pipe would stall the read): named, and not read, when it or a file beneath it would match.
-            if wanted(name) or beneath(name):
+            # pipe would stall the read): named, and not read, when it or a name a pattern gives beneath
+            # it (other than through a leading `**/`) would be an instruction file.
+            if wanted(name) or _could_match_beneath(globs, name):
                 found.setdefault(name, InstructionFile(name, outside=True, link=first))
             continue
         real, kind = entry
@@ -698,8 +713,18 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             if wanted(name) or wanted(real):
                 found[name] = InstructionFile(name, real=real, link=first)
             continue
+        signature = _beneath_signature(globs, name)
         if real in chain:
-            continue                     # a loop of links: every name on it has been seen
+            # A link back into a folder entered on the way. Entering it again under the new name can
+            # make files behind it instruction files (`.github -> cfg` with `cfg/instructions -> .`
+            # makes `cfg/x.md` what an agent reads as `.github/instructions/x.md`; the fourth review of
+            # slice 2d.2h). It is entered again at most once on each way through the links, once for
+            # each link and set of patterns that could match beneath the name, and never when none
+            # could: a pattern names at most two folders, so deeper names add no file.
+            if again or not signature or (key, signature) in reentered:
+                continue
+            reentered.add((key, signature))
+            again = True
         if depth > LINK_DEPTH:
             problem = (f"{first}: more than {LINK_DEPTH} links lead one through another, more than the checker "
                        "follows when it looks for agent instruction files")
@@ -708,11 +733,11 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             if problem not in errors:
                 errors.append(problem)
             continue
-        # A link to a folder, a folder that holds the link (`.`, `..`, the root) included, is followed
-        # once: every file behind it is found again by the name an agent uses (`.github -> .` makes the
-        # root's `copilot-instructions.md` an instruction file). The folders entered on the way are not
-        # entered again, so a link back to one of them ends there.
+        # A link to a folder, a folder that holds the link (`.`, `..`, the root) included, is followed:
+        # every file behind it is found again by the name an agent uses (`.github -> .` makes the root's
+        # `copilot-instructions.md` an instruction file).
         chain = chain | {real}
+        brought = matcher(signature)
         prefix = "" if real == "." else real + "/"
         for pool, is_link in ((files, False), (links, True)):
             at = _bisect.bisect_left(pool, prefix) if prefix else 0
@@ -720,18 +745,24 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
                 inner = pool[at]
                 at += 1
                 looks += 1
-                if looks > WALK_LIMIT:
-                    return stop(f"links lead to more than {WALK_LIMIT:,} entries, more than the checker looks "
+                if looks > LOOK_LIMIT:
+                    return stop(f"links lead to more than {LOOK_LIMIT:,} entries, more than the checker looks "
                                 "through for agent instruction files")
-                alias = name + "/" + inner[len(prefix):]
-                if not is_link and not wanted(alias):
-                    continue
+                tail = inner[len(prefix):]
+                if not is_link:
+                    if (inner, first) in seen or not (anywhere.match(tail)
+                                                      or (signature and brought.match(name + "/" + tail))):
+                        continue
+                    # One name for each file and link that leads to it is enough: a further name adds
+                    # neither a file to scan nor a link to own.
+                    seen.add((inner, first))
                 made += 1
                 if made > ALIAS_LIMIT:
                     return stop(f"links lead to more than {ALIAS_LIMIT:,} names, more than the checker follows "
                                 "when it looks for agent instruction files")
+                alias = name + "/" + tail
                 if is_link:
-                    queue.append((alias, first, depth + 1, inner, chain))
+                    queue.append((alias, first, depth + 1, inner, chain, again))
                 else:
                     found.setdefault(alias, InstructionFile(alias, real=inner, link=first))
     return sorted(found.values(), key=lambda f: f.rel)
@@ -757,54 +788,92 @@ def _glob_steps(glob: str) -> list[tuple[str, str]]:
     return steps
 
 
-def _could_match_beneath(globs: list[list[tuple[str, str]]], folder: str) -> bool:
-    """Whether some path `folder/X`, X not empty, matches one of the patterns (without regard to case)
-    by what the pattern says of `folder`: a pattern that reaches it only through a leading `**/` (any
-    folder may hold an AGENTS.md) does not count, or every link out of the repository would. Each
-    pattern is run over `folder/` as a set of positions; one still alive can be completed, since every
-    step can take some text."""
+def _beneath_signature(globs: list[list[tuple[str, str]]], folder: str) -> frozenset:
+    """The patterns (by position) by which some path `folder/X`, X not empty, could match, judged by
+    what each says of `folder` (without regard to case). A pattern that reaches `folder` only through a
+    leading `**/` (any folder may hold an AGENTS.md) does not count, or every link out of the repository
+    would: such a pattern counts only from a folder boundary at which its own text starts to match.
+    Each pattern runs over the text as a set of positions, stopping as soon as it dies or reaches a
+    `**` that takes everything after (the fourth review of slice 2d.2h found 1,000 links with long
+    paths took 27 s when every pattern ran over every path to the end)."""
     text = (folder + "/").lower()
-    for steps in globs:
-        n = len(steps)
+    starts = None
+    out = []
+    for index, steps in enumerate(globs):
+        if steps and steps[0][0] == "dirs":
+            if starts is None:
+                starts = [0] + [k + 1 for k, ch in enumerate(text) if ch == "/" and k + 1 < len(text)]
+                boundary = set(starts)
+            rest = steps[1:]
+            lead = ""
+            for kind, arg in rest:
+                if kind != "lit":
+                    break
+                lead += arg
+            # Where the pattern's own text could start: a folder boundary at which the text holds the
+            # pattern's leading plain characters, or the rest of the text is the start of them.
+            if lead:
+                candidates = []
+                at = text.find(lead)
+                while at != -1:
+                    if at in boundary:
+                        candidates.append(at)
+                    at = text.find(lead, at + 1)
+                for k in reversed(starts):
+                    if len(text) - k >= len(lead):
+                        break
+                    if lead.startswith(text[k:]):
+                        candidates.append(k)
+            else:
+                candidates = starts
+            if any(_alive(rest, text[k:]) for k in candidates):
+                out.append(index)
+        elif _alive(steps, text):
+            out.append(index)
+    return frozenset(out)
 
-        def close(states: set) -> set:
-            out, todo = set(states), list(states)
-            while todo:
-                s = todo.pop()
-                if isinstance(s, int) and s < n and steps[s][0] in ("dirs", "rest", "star") and s + 1 not in out:
-                    out.add(s + 1)
-                    todo.append(s + 1)
-            return out
 
-        states = close({0})
-        for ch in text:
-            nxt: set = set()
-            for s in states:
-                if isinstance(s, tuple):                     # inside the folders of a `**/`
-                    nxt.add(s)
-                    if ch == "/":
-                        nxt.add(s[1] + 1)
-                    continue
-                if s >= n:
-                    continue
-                kind, arg = steps[s]
-                if kind == "lit" and arg == ch:
+def _could_match_beneath(globs: list[list[tuple[str, str]]], folder: str) -> bool:
+    return bool(_beneath_signature(globs, folder))
+
+
+def _alive(steps: list[tuple[str, str]], text: str) -> bool:
+    """Whether the pattern `steps`, run from its start over all of `text`, can still match something
+    longer (every step can take some text, so any live position can be completed)."""
+    n = len(steps)
+
+    def close(states: set) -> set:
+        out, todo = set(states), list(states)
+        while todo:
+            s = todo.pop()
+            if isinstance(s, int) and s < n and steps[s][0] in ("dirs", "rest", "star") and s + 1 not in out:
+                out.add(s + 1)
+                todo.append(s + 1)
+        return out
+
+    states = close({0})
+    for ch in text:
+        nxt: set = set()
+        for s in states:
+            if isinstance(s, tuple):                         # inside the folders of a `**/`: takes anything
+                return True
+            if s >= n:
+                continue
+            kind, arg = steps[s]
+            if kind == "rest":
+                return True                                  # a trailing `**` takes everything after
+            if kind == "lit" and arg == ch:
+                nxt.add(s + 1)
+            elif kind == "star" and ch != "/":
+                nxt.add(s)
+            elif kind == "dirs":
+                nxt.add(("in", s))
+                if ch == "/":
                     nxt.add(s + 1)
-                elif kind == "star" and ch != "/":
-                    nxt.add(s)
-                elif kind == "rest":
-                    nxt.add(s)
-                elif kind == "dirs":
-                    nxt.add(("in", s))
-                    if ch == "/":
-                        nxt.add(s + 1)
-            states = close(nxt)
-            if not states:
-                break
-        idle = {("in", 0), 1} if steps and steps[0][0] == "dirs" else set()
-        if any(s not in idle and (isinstance(s, tuple) or s < n) for s in states):
-            return True
-    return False
+        states = close(nxt)
+        if not states:
+            return False
+    return any(isinstance(s, tuple) or s < n for s in states)
 
 
 def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None,

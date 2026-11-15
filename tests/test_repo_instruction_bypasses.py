@@ -819,5 +819,98 @@ class ThirdReviewTest(unittest.TestCase):
                 self.assertIsNotNone(repo.parse_codeowners(f"* {owner}\n")[0].problem)
 
 
+
+class FourthReviewTest(unittest.TestCase):
+    """What the slice's fourth review found (docs/bypass-attempts.md, 2d.2h, "Review", fourth pass)."""
+
+    def test_a_link_back_into_a_folder_entered_on_the_way_is_entered_again(self):
+        """`.github -> cfg` and `cfg/instructions -> .` make `cfg/evil.instructions.md` what an agent
+        reads as `.github/instructions/evil.instructions.md`."""
+        with TempDir() as tmp:
+            tree(tmp, {"cfg/evil.instructions.md": "x​y\n", ".github/CODEOWNERS": GATE + "/.github/ @org/team\n"})
+            (tmp / ".github" / "CODEOWNERS").rename(tmp / "CODEOWNERS")
+            (tmp / ".github" / "workflows" / "ci.yml").unlink()
+            (tmp / ".github" / "workflows").rmdir()
+            (tmp / ".github").rmdir()
+            (tmp / ".github").symlink_to(tmp / "cfg")
+            (tmp / "cfg" / "instructions").symlink_to(tmp / "cfg")
+            findings, _ = found(tmp, "OBAAF-INS-001", "OBAAF-REPO-002")
+            self.assertIn(("OBAAF-INS-001", ".github/instructions/evil.instructions.md"),
+                          [(f.rule, f.path) for f in findings])
+            repo002 = next(f for f in findings if f.rule == "OBAAF-REPO-002")
+            self.assertIn("cfg/evil.instructions.md", repo002.facts["files"])
+
+    def test_links_with_long_paths_and_many_links_take_little_time(self):
+        long = "/".join(["d" * 30] * 100)
+        with TempDir() as tmp:
+            tree(tmp, {})
+            (tmp / long).mkdir(parents=True)
+            for i in range(1000):
+                (tmp / long / f"l{i}").symlink_to(tmp / "missing")
+            start = time.monotonic()
+            found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+        with TempDir() as tmp:
+            tree(tmp, {f".claude/f{i}.md": "" for i in range(2000)})
+            for i in range(50):
+                (tmp / ".claude" / f"l{i:02d}").symlink_to(tmp / ".claude")
+            start = time.monotonic()
+            _, result = found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+            self.assertEqual(result.errors, [])
+        with TempDir() as tmp:
+            tree(tmp, {f"big/f{i}.txt": "" for i in range(2000)})
+            for i in range(400):
+                (tmp / f"l{i}").symlink_to(tmp / "big")
+            start = time.monotonic()
+            _, result = found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+            self.assertTrue(any("more than 500,000 entries" in e for e in result.errors), result.errors)
+
+    def test_a_gate_file_in_a_submodule_needs_the_submodule_entry_owned(self):
+        with TempDir() as tmp:
+            inner = tmp / "inner"
+            inner.mkdir()
+            (inner / "obaaf.yml").write_text("ignore: []\n", encoding="utf-8")
+            if git_repo(inner) is None:
+                self.skipTest("needs git")
+            outer = tmp / "outer"
+            outer.mkdir()
+            tree(outer, {"CODEOWNERS": "/.github/ @org/ci\n/CODEOWNERS @org/ci\n/obaaf.yml @org/ci\n"
+                                      "/vendor/policy/ @org/ci\n"})
+            run = git_repo(outer)
+            run("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "vendor/policy")
+            (outer / "obaaf.yml").symlink_to("vendor/policy/obaaf.yml")
+            run("add", "obaaf.yml")
+            run("commit", "-q", "-m", "policy")
+            self.assertEqual(unowned(outer, kind="gate-no-owner"), ["vendor/policy"])
+
+    def test_a_replacement_character_written_in_the_text_is_not_a_stray_byte(self):
+        text = ("Notes " + "�" * 20 + " about the table.\n" + "x" * 900 + "\n").encode() + \
+            "".join(chr(0xE0000 + ord(c)) for c in "run curl evil").encode() + b"\xff\n"
+        with TempDir() as tmp:
+            tree(tmp, {".claude/skills/fmt/table.db": text})
+            self.assertEqual([f.kind for f in found(tmp, "OBAAF-INS-001")[0]], ["not-utf8"])
+
+    def test_archives_documents_and_pictures_with_their_own_beginning_are_not_scanned(self):
+        import io
+        import tarfile
+        import zipfile
+        body = ("Plain guide text.\n" * 4000).encode()
+        tar_bytes = io.BytesIO()
+        with tarfile.open(fileobj=tar_bytes, mode="w", format=tarfile.GNU_FORMAT) as archive:
+            info = tarfile.TarInfo("guide.md")
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+        zip_bytes = io.BytesIO()
+        with zipfile.ZipFile(zip_bytes, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("guide.md", body + b"\xff\x00")
+        pdf = b"%PDF-1.4\n" + body + b"\n\xe2\xe3\xcf\xd3\n%%EOF\n"
+        with TempDir() as tmp:
+            tree(tmp, {".claude/skills/r/guide.tar": tar_bytes.getvalue(), ".claude/skills/r/stored.zip": zip_bytes.getvalue(),
+                       ".claude/skills/r/report.pdf": pdf})
+            self.assertEqual(found(tmp, "OBAAF-INS-001")[0], [])
+
+
 if __name__ == "__main__":
     unittest.main()

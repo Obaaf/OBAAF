@@ -3698,12 +3698,15 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
 
     # A file inside a submodule changes in a pull request only through the submodule's own entry,
     # so that entry is what needs an owner (the third review of slice 2d.2h).
-    gitlinks = how.get("gitlinks") or []
+    gitlinks = set(how.get("gitlinks") or [])
 
     def owned_as(path: str) -> str:
-        for link in gitlinks:
-            if path.startswith(link + "/"):
-                return link
+        if gitlinks:
+            at = path.find("/")
+            while at != -1:
+                if path[:at] in gitlinks:
+                    return path[:at]
+                at = path.find("/", at + 1)
         return path
 
     instruction_files = sorted({owned_as(p) for p in instruction_files})
@@ -3737,6 +3740,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     if codeowners.path:
         places = repo_checks.CODEOWNERS_LOCATIONS
         gate.update(places[:places.index(codeowners.path) + 1] if codeowners.path in places else [codeowners.path])
+    gate = {owned_as(p) for p in gate}
 
     if unread:
         pass        # the error stands for both rules: who owns what cannot be read
@@ -3818,18 +3822,32 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     return findings
 
 
-_STRAY_CONTROLS = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f]")
+_STRAY_CONTROLS = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f\x7f]")
+_STRAY_BYTES = re.compile("[\udc80-\udcff]")
+# How pictures, archives, documents, fonts and compiled files begin. A file with such a name that
+# begins so is not scanned: its bytes are not what an agent reads as text, and GitHub shows no diff of
+# it (the fourth review of slice 2d.2h found a tar of a text file, a stored zip and a PDF reported).
+_BINARY_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-", b"PK\x03\x04", b"PK\x05\x06",
+                 b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"RIFF", b"OggS", b"ID3", b"wOFF", b"wOF2",
+                 b"OTTO", b"\x00\x01\x00\x00", b"\x7fELF", b"MZ", b"\x00asm", b"SQLite format 3\x00",
+                 b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"8BPS", b"II*\x00",
+                 b"MM\x00*", b"\x00\x00\x01\x00", b"\x93NUMPY", b"PAR1", b"\x80\x04\x95", b"\x80\x05\x95",
+                 b"Bud1", b"\x00\x00\x00\x01Bud1")
+
+
+def _begins_binary(data: bytes) -> bool:
+    return data.startswith(_BINARY_MAGIC) or data[257:262] == b"ustar" or data[4:8] == b"ftyp"
 
 
 def _looks_binary(data: bytes) -> bool:
     """Whether bytes that are not UTF-8 text, or hold a NUL, are a binary file rather than text with a
     few stray bytes. A stray byte is a NUL, another control character (but tab, line feed, form feed and
-    carriage return) or a byte that is part of no UTF-8 character; in the first 64 KiB, more than one
-    byte in eight is stray, or at least eight and more than one in 64 are. A picture, an archive or a
-    compiled file is far above that; text with a stray byte or two, which hid hidden characters from
-    the scan before the slice's third review, is below."""
+    carriage return) or a byte that is part of no UTF-8 character (a U+FFFD written in the text is not
+    one); in the first 64 KiB, more than one byte in eight is stray, or at least eight and more than one
+    in 64 are. A compressed picture or archive is far above that; text with a stray byte or two, which
+    hid hidden characters from the scan before the slice's third review, is below."""
     head = data[:1 << 16]
-    stray = len(_STRAY_CONTROLS.findall(head)) + head.decode("utf-8", "replace").count(chr(0xFFFD))
+    stray = len(_STRAY_CONTROLS.findall(head)) + len(_STRAY_BYTES.findall(head.decode("utf-8", "surrogateescape")))
     return stray * 8 > len(head) or (stray >= 8 and stray * 64 > len(head))
 
 
@@ -3848,10 +3866,13 @@ def _examine_instruction_file(root: Path, rel: str, source: str, binary_name: bo
         errors.append(str(repo_checks.UnreadableFile(rel, exc)))
         return None
     if binary_name:
-        # A picture, an archive or a compiled file is not scanned, whatever its size. A file with such a
-        # name whose bytes are text, or text with a few stray bytes, is read like any other: a name is no
-        # reason to skip text an agent could read.
+        # A picture, an archive or a compiled file is not scanned, whatever its size: one that begins
+        # as such a file begins, or whose bytes look binary. A file with such a name whose bytes are
+        # text, or text with a few stray bytes, is read like any other: a name is no reason to skip text
+        # an agent could read.
         head = data[:INSTRUCTION_LIMIT]
+        if _begins_binary(head):
+            return []
         try:
             if b"\0" in head:
                 raise UnicodeDecodeError("utf-8", head, 0, 1, "NUL")
