@@ -72,8 +72,9 @@ RULES: tuple[Rule, ...] = (
          "who can push a branch can add a job that names the environment and reads its secrets. With required "
          "reviewers the only gate left is one person's approval; without them there is none. An environment a "
          "job names that the settings do not have gets no protection from them. Not followed: who may bypass the "
-         "rules of a branch the environment is limited to (OBAAF-SET-004), which branches GitHub counts as "
-         "protected, what a pattern matches, and what trusts an environment that holds no secret.",
+         "rules of a branch the environment is limited to (OBAAF-SET-004), approvals a new push does not dismiss "
+         "and approvals a workflow can give (OBAAF-SET-013), which branches GitHub counts as protected, what a "
+         "pattern matches, and what trusts an environment that holds no secret.",
          "In the environment's settings, limit deployment to selected branches and name the default branch. "
          "Add required reviewers where a person should decide; a wildcard or a tag pattern is reported until "
          "there are reviewers."),
@@ -264,6 +265,7 @@ class _Run:
         self.results: list[dict] = []
         self.compared = ""       # what was compared, when something was
         self.idle = ""           # why there was nothing to compare
+        self.assumed = ""        # what an answer took for granted, shown whatever the rule's status
         self.failed = False
 
     # -- results
@@ -827,30 +829,41 @@ def _stops(run: _Run):
     settings this depends on that were not read in full, as clauses. A check reported only by a job GitHub
     does not run never reports."""
     stopped: dict = {}
+    maybe: dict = {}            # files GitHub may not run, with why: never counted as reporting
     blocked: dict = {}
     unread: list = []
     value, whole = run.got("actions_permissions")
     if value is None or not whole:
         unread.append(run.why("actions_permissions"))
     if value is not None:
-        if value.get("enabled") is False:
-            for file in run.files():
-                stopped[file["path"]] = "GitHub Actions is turned off for the repository"
-        elif value.get("sha_pinning_required") is True and not run.usage.get("actions_lock"):
-            for file in run.files():
-                loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
-                if loose and file["path"] not in stopped:
-                    stopped[file["path"]] = (f"the repository requires actions pinned to a full commit and it uses "
-                                             f"{_names([_q(a, 100) for a in loose], 2)}, so GitHub refuses it")
+        for file in run.files():
+            path = file["path"]
+            loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
+            remote = any(job["actions"] for job in file["jobs"])
+            if value.get("enabled") is False:
+                stopped[path] = "GitHub Actions is turned off for the repository"
+            elif value.get("allowed_actions") == "local_only" and remote:
+                stopped[path] = ("the repository allows only its own actions and it uses one from another "
+                                 "repository, so GitHub refuses it")
+            elif value.get("sha_pinning_required") is True and loose:
+                why = (f"the repository requires actions pinned to a full commit and it uses "
+                       f"{_names([_q(a, 100) for a in loose], 2)}")
+                if run.usage.get("actions_lock"):
+                    maybe[path] = why + "; .github/workflows/actions.lock may pin them, and it is not read"
+                else:
+                    stopped[path] = why + ", so GitHub refuses it"
     policies, whole = run.got("actions_policies")
     if policies is None or not whole:
         unread.append(run.why("actions_policies"))
     for file in run.files():
-        applying, _ = _policy_verdicts(file, policies or [])
+        applying, unclear = _policy_verdicts(file, policies or [])
         for policy, allowed in applying:
             if policy["enforcement"] == "active":
                 blocked.setdefault(file["path"], set()).update(e for e in file["triggers"] if e not in allowed)
-    return stopped, blocked, unread
+        if unclear and file["path"] not in stopped:
+            maybe.setdefault(file["path"], f"the Actions policy {_q(unclear[0]['name'])}, which this audit does not "
+                                           "understand, may block its events")
+    return stopped, maybe, blocked, unread
 
 
 def _api_reporters(run: _Run) -> str:
@@ -1013,7 +1026,14 @@ def _push_gate(run: _Run, branch: str) -> tuple[str, str]:
     if need["approvals"]:
         return "closed", f"it requires {_n(need['approvals'], 'approval')}"
     if need["merge_unread"]:
-        return "closed", need["merge_unread"][0]
+        # Who may push is then who may bypass that rule, or who the restrictions name, which is not compared
+        # with who can push (the review of slice 2d.2g).
+        return "unknown", need["merge_unread"][0]
+    deployments = [g for g in need["gates"] if g[0] == "required_deployments"]
+    if deployments:
+        # A deployment that must succeed first may itself wait for a reviewer; that is not weighed here.
+        return "unknown", (f"a required_deployments rule (ruleset {plain(deployments[0][1], 20)}), whose deployments "
+                           "may wait for a reviewer, which is not weighed")
     if not need["approvals_whole"]:
         clauses = need["approvals_unread"] + [run.why(k) for k in sorted(set(need["gaps"]))
                                                if run.settings[k]["status"] in ("unread", "partial")]
@@ -1158,7 +1178,9 @@ def rule_003(run: _Run) -> None:
             # A copy in another environment that any branch may use and that asks nobody is a copy every job
             # can reach: it only has to name that environment (slice 2d.2g).
             open_envs = {e["name"].lower(): e["name"] for e in environments
-                         if e["deployment_branches"] == "any" and not e["reviewers"] and e["name"].lower() != env.lower()}
+                         if not e["reviewers"] and e["name"].lower() != env.lower() and (
+                             e["deployment_branches"] == "any" or any(
+                                 p["type"] != "tag" and _open_pattern(p) for p in e.get("branch_policies") or []))}
             for name in sorted(n for n in in_env if fnmatch.fnmatchcase(n, pattern) and n not in reported):
                 copies = sorted(open_envs[e.lower()] for e in in_env[name] if e.lower() in open_envs)
                 if copies:
@@ -1539,7 +1561,13 @@ def rule_005(run: _Run) -> None:
 def _check_rules(run: _Run, kind: str) -> None:
     """OBAAF-SET-006, 007 and 008 share their reading of the required checks."""
     branches = _branches(run)
-    stopped, blocked, runs_unread = _stops(run)
+    stopped, maybe, blocked, runs_unread = _stops(run)
+
+    def reports(file: dict, job: dict, context: str):
+        """_reports, and never True for a job in a file GitHub may not run (slice 2d.2g)."""
+        verdict = _reports(job, context)
+        return None if verdict is True and file["path"] in maybe else verdict
+
     reporting = [(f, j) for f, j in run.jobs() if _stands_alone(f) and f["path"] not in stopped]
     idle_files = [(f, j) for f, j in run.jobs() if _stands_alone(f) and f["path"] in stopped]
     broken = run.broken()
@@ -1585,11 +1613,13 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           f"{plain(app, 20)}, which is not GitHub Actions. What that app reports "
                                           "is not something the audit reads.")
                     continue
-                verdicts = [_reports(job, context) for _, job in reporting]
+                verdicts = [reports(file, job, context) for file, job in reporting]
                 if any(v is True for v in verdicts):
                     continue
                 idle = [(f, j) for f, j in idle_files if _reports(j, context) is not False]
-                if idle and app == ACTIONS_APP and not broken and not any(v is None for v in verdicts):
+                off = any(why == "GitHub Actions is turned off for the repository" for why in stopped.values())
+                if idle and app == ACTIONS_APP and not broken and not any(v is None for v in verdicts) and (
+                        off or _api_reporters(run) == "no"):
                     file, job = idle[0]
                     run.finding(item, "medium",
                                 f"{_q(branch)} requires the check {_q(context)} from GitHub Actions. The only job "
@@ -1601,14 +1631,16 @@ def _check_rules(run: _Run, kind: str) -> None:
                     file, job = idle[0]
                     run.cannot_tell(item, f"The only job known to report {_q(context)}, {_job_label(file, job)}, is "
                                           f"in a workflow GitHub does not run ({stopped[file['path']]}), and something "
-                                          "else may report it, so whether anything does is not known.")
+                                          "else may report it (another file that could not be read or whose names "
+                                          "could not be written out, or a step whose token may write checks), so "
+                                          "whether anything does is not known.")
                     continue
                 unsure = sum(1 for v in verdicts if v is None)
                 if broken or unsure:
                     why = ([f"{_n(len(broken), 'workflow file')} could not be read"] if broken else []) + (
                         [f"{_do(unsure, 'job', 'reports', 'report')} under names that could not be written "
                          "out (a computed name, a matrix or a called workflow that was not read), or in a file "
-                         "GitHub may read otherwise than the audit does"] if unsure else [])
+                         "GitHub may read otherwise than the audit does or may not run"] if unsure else [])
                     run.cannot_tell(item, f"No job is known to report {_q(context)}, and {' and '.join(why)}, so "
                                           "whether anything reports it is not known.")
                     continue
@@ -1632,14 +1664,18 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
-                matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
+                matches = [(f, j) for f, j in reporting if reports(f, j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
                 if not _held_by_actions(need["apps"][context]):
                     foreign_only += 1
                     continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 compared += 1
-                runs = sorted(((_report_run(f, j, branch, skipped=True, blocked=blocked.get(f["path"], ())), f, j)
+                # Only a plain job that is skipped reports its check as passed: `if:` is decided before a matrix
+                # expands and before a called workflow runs, so a skipped matrix job or caller reports its bare
+                # name, not the required one (the review of slice 2d.2g).
+                runs = sorted(((_report_run(f, j, branch, skipped=j["check"]["kind"] == "static",
+                                            blocked=blocked.get(f["path"], ())), f, j)
                                for f, j in matches), key=lambda item: ORDER.index(item[0]))
                 how, file, job = runs[0]
                 item = f"{subject}: required check {_q(context)}"
@@ -1701,8 +1737,12 @@ def _check_rules(run: _Run, kind: str) -> None:
                 if job["advisory"]:
                     continue
                 how = hows[(file["path"], job["id"])]
-                if how == "target" or (job.get("doubt") and how == "always"):
-                    targets.append((file, job, how))
+                if how == "target":
+                    # Whether its check counts on the pull request is OBAAF-SET-007's question; a check nobody
+                    # requires fails without blocking a merge either way (the review of slice 2d.2g).
+                    how = "always"
+                if how == "always" and (job.get("doubt") or file["path"] in maybe):
+                    targets.append((file, job, maybe.get(file["path"], "")))
                     continue
                 if how == "maybe":
                     # A branch pattern decides whether it runs for pull requests into this branch.
@@ -1715,7 +1755,7 @@ def _check_rules(run: _Run, kind: str) -> None:
                     # A job of a called workflow with `continue-on-error: true` reports as passed (slice 2d.2g).
                     advisory = set(job["check"].get("advisory_names") or [])
                     names = [name for name in names if name not in advisory]
-                    twice = [name for name in names if reported_by.get(name, 0) > 1]
+                    twice = [name for name in names if reported_by.get(name, 0) > 1 and name in need["apps"]]
                     if twice:
                         shared.append((file, job, twice))
                         continue
@@ -1732,7 +1772,7 @@ def _check_rules(run: _Run, kind: str) -> None:
                         # holds the merge up is not established.
                         foreign.append((file, job, [n for n in names if not _held_by_actions(need["apps"][n])]))
                     continue
-                verdicts = [_reports(job, context) for context in need["apps"]]
+                verdicts = [reports(file, job, context) for context in need["apps"]]
                 if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
                     compared += 1
                     unrequired.append((file, job, None, None))
@@ -1762,11 +1802,9 @@ def _check_rules(run: _Run, kind: str) -> None:
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
                             f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
                             f"request can merge while the job is failing.{source}{waiting}")
-            for file, job, how in targets:
-                why = ("it reaches pull requests only through pull_request_target, which runs on the latest commit "
-                       "of the default branch (GitHub's changelog of 2025-11-07), so whether its check counts for "
-                       "the pull request at all is not established" if how == "target" else
-                       f"GitHub may read its file otherwise than the audit does ({_names(file['doubt'], 2)})")
+            for file, job, stop in targets:
+                why = (f"GitHub may not run its file ({stop})" if stop else
+                       f"GitHub may read it otherwise than the audit does ({_names(job['doubt'], 2)})")
                 run.cannot_tell(f"{subject}: job {_job_label(file, job)}",
                                 f"{_job_label(file, job)} may run on pull requests into {_q(branch)}, and {why}, so "
                                 "whether it can fail without blocking a merge was not compared.")
@@ -1792,16 +1830,17 @@ def _check_rules(run: _Run, kind: str) -> None:
                                 "pattern in the triggers decides whether it runs there (patterns are not "
                                 f"evaluated), so whether {'it' if unsure == 1 else 'each'} can fail without "
                                 "blocking a merge was not compared.")
+    if runs_unread and (compared or run.results):
+        # Not a "cannot tell": these settings need an administrator's token, and without one every check rule
+        # would answer nothing. The rule's line says what its answers took for granted, whatever they are
+        # (slice 2d.2g).
+        run.assumed = ("every workflow file was taken as running, because whether GitHub Actions is on, requires "
+                       "pinning, or has a policy that blocks an event was not read (" + "; ".join(runs_unread) + ")")
     if compared:
         run.compared = {"missing": f"{_n(compared, 'required check')} and the names the jobs report",
                         "filtered": f"{_n(compared, 'required check')} that a job reports, and its triggers",
                         }.get(kind, f"{_n(compared, 'job')} running on every pull request, and the required checks")
-        if runs_unread:
-            # Not a "cannot tell": these settings need an administrator's token, and without one every check
-            # rule would answer nothing. The note says what the answer took for granted (slice 2d.2g).
-            run.compared += ("; taken as running every workflow file, because whether GitHub Actions is on, "
-                             "requires pinning, or has a policy that blocks an event was not read ("
-                             + "; ".join(runs_unread) + ")")
+
     elif not run.results:
         run.idle = {"missing": "no audited branch requires a check",
                     "filtered": ("the required checks a workflow job reports are required from another app, which "
@@ -2229,7 +2268,7 @@ def evaluate(snapshot: dict, usage: dict) -> dict:
         rules.append({"id": rule.id, "title": rule.title, "status": status, "findings": len(findings),
                       "cannot_tell": len(unknown),
                       "note": note or ("" if findings or unknown else "nothing to compare"),
-                      "failed": run.failed})
+                      "assumed": run.assumed, "failed": run.failed})
         results += run.results
     results.sort(key=_order)
     findings = [r for r in results if r["state"] == "finding"]

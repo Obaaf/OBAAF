@@ -313,6 +313,9 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
             parts.append(f"cannot tell ({entry['cannot_tell']})")
         if not parts:
             parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], NOTE_LIMIT)}")
+        if entry.get("assumed"):
+            # What the rule's answers took for granted is said whatever they are (slice 2d.2g).
+            parts.append(f"assumed: {plain(entry['assumed'], NOTE_LIMIT)}")
         lines.append(f"  {entry['id']}  {'; '.join(parts)}")
     return lines
 

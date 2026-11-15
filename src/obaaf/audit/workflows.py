@@ -69,8 +69,18 @@ def _node(node, key):
 
 
 def _job_node(job: wf_mod.Job):
-    """The job's composed mapping, or None when it cannot be found (a merge key, a key not written as text)."""
-    return _node(_node(job.workflow.composed(), "jobs"), job.id)
+    """The job's composed mapping, or None when it cannot be found (a merge key, a key not written as text).
+    The jobs' nodes are listed once per workflow, so asking for every job costs one walk of the file."""
+    nodes = job.workflow.__dict__.get("_audit_job_nodes")
+    if nodes is None:
+        jobs = _node(job.workflow.composed(), "jobs")
+        nodes = {}
+        if isinstance(jobs, yamlutil.yaml.MappingNode):
+            for k, v in jobs.value:
+                if isinstance(k, yamlutil.yaml.ScalarNode):
+                    nodes.setdefault(k.value, v)
+        job.workflow.__dict__["_audit_job_nodes"] = nodes
+    return nodes.get(job.id)
 
 
 def _same_in_both(value, node) -> bool:
@@ -215,7 +225,7 @@ def _job(job: wf_mod.Job) -> dict:
         "advisory": job.raw.get("continue-on-error") is True,
         # Whether GitHub may read the job's file otherwise than this module does (set in read()): its
         # checks are then never counted as reported (flagship slice 2d.2g).
-        "doubt": False,
+        "doubt": [],
         # github-hosted, self-hosted, or unknown (a label of the repository's own, an expression, a runner
         # group alone: a group can hold larger GitHub-hosted runners).
         "runner": None if job.reusable else _runner(job),
@@ -239,10 +249,15 @@ def _file(path: str, text: str) -> dict:
     problems = [wf_mod.one_line(p, 200) for p in workflow.problems]
     if workflow.has_merge_key and not any("merge key" in p for p in problems):
         problems.append("uses a YAML merge key (<<), which this reader merges and a YAML 1.2 reader does not")
-    return {"path": path, "error": None, "problems": problems, "doubt": list(problems),
+    # Only the problems that can change which jobs there are, what they are called or what starts them make
+    # the file one GitHub may read otherwise (a step's problem changes none of those).
+    doubt = [p for p in problems if any(word in p for word in DOUBT_WORDS)]
+    return {"path": path, "error": None, "problems": problems, "doubt": doubt,
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
 
+# Words in the checker's problems with a file that can change its jobs, their names or its triggers.
+DOUBT_WORDS = ("merge key", "job id", "two jobs", "trigger under 'on'")
 # Filters that GitHub's workflow syntax says cannot be used together on one event.
 EXCLUSIVE_FILTERS = (("branches", "branches-ignore"), ("tags", "tags-ignore"), ("paths", "paths-ignore"))
 
@@ -285,7 +300,7 @@ def _resolve_calls(files: list[dict]) -> None:
         return [[job["called_from"] for job in file["jobs"]] for file in by_path.values()]
 
     def names():
-        return [[job["check"]["names"] for job in file["jobs"]] for file in by_path.values()]
+        return [[(job["check"]["names"], job["doubt"]) for job in file["jobs"]] for file in by_path.values()]
 
     passes = 0
     while True:
@@ -313,6 +328,11 @@ def _resolve_once(by_path: dict) -> None:
             if called is None:
                 continue
             reach = sorted((set(job["triggers"]) | set(job["called_from"])) - {"workflow_call"})
+            # A caller reports the names of the workflow it calls, so a doubt about that file is its doubt too.
+            if called.get("doubt") or any(inner.get("doubt") for inner in called["jobs"]):
+                note = f"it calls {called['path']}, which GitHub may read otherwise than the audit does"
+                if note not in job["doubt"]:
+                    job["doubt"] = job["doubt"] + [note]
             names: list[str] | None = []
             for inner in called["jobs"]:
                 inner["called_from"] = sorted(set(inner["called_from"]) | set(reach))
@@ -374,10 +394,10 @@ def read(root: str | Path) -> dict:
         if not (path.name.endswith((".yml", ".yaml")) and path.name not in (".yml", ".yaml")):
             doubt.append("its name is not NAME.yml or NAME.yaml in lower case, and whether GitHub runs such a file "
                          "is not established")
-        if path.is_symlink():
-            doubt.append("it is a symbolic link, and whether GitHub follows one is not established")
+        if any(p.is_symlink() for p in (root / ".github", root / ".github" / "workflows", path)):
+            doubt.append("it is, or is in, a symbolic link, and whether GitHub follows one is not established")
         for job in files[-1]["jobs"]:
-            job["doubt"] = bool(doubt)
+            job["doubt"] = list(doubt)
     _resolve_calls(files)
     usage = {"format": FORMAT, "read": True, "reason": "", "root": str(root), "files": files, "config": None,
              "config_error": "",

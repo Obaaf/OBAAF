@@ -247,6 +247,12 @@ class AuditedBranchTest(unittest.TestCase):
         found = assess(entries, self.FILES, branches=("release",))
         self.assertEqual(answered(found, "OBAAF-SET-001"), "cannot-tell")
 
+    def test_a_limit_on_who_may_push_or_a_required_deployment_is_cannot_tell(self):
+        for found_rule in (rule("update", {"update_allows_fetch_and_merge": False}, ruleset=77),
+                           rule("required_deployments", {"required_deployment_environments": ["prod"]}, ruleset=77)):
+            found = assess(extra_branch(self.ENTRIES, "release", [found_rule]), self.FILES, branches=("release",))
+            self.assertEqual(answered(found, "OBAAF-SET-001"), "cannot-tell", found_rule["type"])
+
     def test_reviewers_still_gate_it(self):
         entries = with_environments(ADMIN, [environment("production", "custom", reviewers=True)],
                                     policies={"production": [("release", "branch")]},
@@ -283,6 +289,16 @@ class OpenCopyOfAProtectedSecretTest(unittest.TestCase):
         finding, = of(found, "OBAAF-SET-003", "finding", 'secret "DEPLOY_KEY"')
         self.assertEqual(finding["severity"], "high")
         self.assertIn('also stored in the environment "staging"', finding["message"])
+
+    def test_a_copy_behind_an_all_star_pattern_is_open_too(self):
+        entries = with_environments(ADMIN, [environment("production", "custom"), environment("staging", "custom")],
+                                    policies={"production": [("main", "branch")], "staging": [("**", "branch")]},
+                                    secrets={"production": ["DEPLOY_KEY"], "staging": ["DEPLOY_KEY"]})
+        entries = changed(entries, f"{R}/actions/secrets?per_page=100",
+                          lambda body: body.update(total_count=0, secrets=[]))
+        found = assess(entries, {"d.yml": wf("  push:\n", job("deploy", "    environment: production\n"))},
+                       config="protected_secrets:\n  DEPLOY_KEY: production\n")
+        self.assertEqual(answered(found, "OBAAF-SET-003", 'secret "DEPLOY_KEY"'), "finding high")
 
 
 class PolicyRepositoryConditionsTest(unittest.TestCase):
@@ -434,9 +450,28 @@ class FilesGitHubMayReadOtherwiseTest(unittest.TestCase):
         merged = ("name: W\non:\n  pull_request:\npermissions:\n  contents: read\n"
                   "x-base: &base\n  name: build\n  runs-on: ubuntu-latest\n"
                   "jobs:\n  b:\n    <<: *base\n    steps:\n      - run: echo hi\n")
-        for files in ({"ci.YML": text}, {".yml": text}, {"ci.yml": ("symlink", text)}, {"ci.yml": merged}):
+        merged_id = ("name: W\non:\n  pull_request:\npermissions:\n  contents: read\n"
+                     "x-base: &base\n  runs-on: ubuntu-latest\n"
+                     "jobs:\n  build:\n    <<: *base\n    steps:\n      - run: echo hi\n")
+        for files in ({"ci.YML": text}, {".yml": text}, {"ci.yml": ("symlink", text)}, {"ci.yml": merged},
+                      {"ci.yml": merged_id}):
             found = assess(requiring("build"), files)
             self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell", list(files))
+
+    def test_a_caller_of_such_a_file_and_a_linked_directory(self):
+        caller = wf(PR, "  ci:\n    uses: ./.github/workflows/r.yml\n")
+        callee = wf("  workflow_call:\n", job("build"))
+        found = assess(requiring("ci / build"), {"ci.yml": caller, "r.yml": ("symlink", callee)})
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+        snap, _ = take(requiring("build"), token=TOKEN, repository=REPO)
+        with TempDir() as tmp:
+            real = tmp / "real"
+            real.mkdir()
+            (real / "ci.yml").write_text(wf(PR, job("build")), encoding="utf-8")
+            (tmp / "repo" / ".github").mkdir(parents=True)
+            (tmp / "repo" / ".github" / "workflows").symlink_to(real)
+            found = rules.evaluate(snap, workflows.read(tmp / "repo"))
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
 
     def test_an_ordinary_file_still_reports(self):
         self.assertEqual(answered(assess(requiring("build"), {"ci.yml": wf(PR, job("build"))}), "OBAAF-SET-006"),
@@ -462,16 +497,30 @@ class WhenACheckReportsTest(unittest.TestCase):
     """B103, B104, B106: a job its `if:` skips still reports (as passed); pull_request_target runs on the
     default branch's latest commit."""
 
-    def test_a_job_skipped_on_pull_requests_still_reports(self):
-        on = "  push:\n    branches: [main]\n  pull_request:\n"
-        for jobs in (job("test", MATRIX_313 + "    if: github.event_name == 'push'\n"),
-                     job("gate", "    if: github.event_name == 'push'\n") + job("test", MATRIX_313 + "    needs: gate\n")):
-            self.assertEqual(answered(assess(ADMIN, {"ci.yml": wf(on, jobs)}), "OBAAF-SET-007"), "no-finding")
+    ON = "  push:\n    branches: [main]\n  pull_request:\n"
+
+    def test_a_plain_job_skipped_on_pull_requests_still_reports(self):
+        for jobs in (job("test", "    if: github.event_name == 'push'\n"),
+                     job("gate", "    if: github.event_name == 'push'\n") + job("test", "    needs: gate\n")):
+            found = assess(requiring("test"), {"ci.yml": wf(self.ON, jobs)})
+            self.assertEqual(answered(found, "OBAAF-SET-007"), "no-finding")
+
+    def test_a_skipped_matrix_job_or_caller_reports_its_bare_name(self):
+        # `if:` is decided before the matrix expands or the called workflow runs (the review of slice 2d.2g).
+        found = assess(ADMIN, {"ci.yml": wf(self.ON, job("test", MATRIX_313 + "    if: github.event_name == 'push'\n"))})
+        self.assertEqual(answered(found, "OBAAF-SET-007"), "finding medium")
+        files = {"ci.yml": wf(self.ON, "  ci:\n    if: github.event_name == 'push'\n    uses: ./.github/workflows/r.yml\n"),
+                 "r.yml": wf("  workflow_call:\n", job("test"))}
+        self.assertEqual(answered(assess(requiring("ci / test"), files), "OBAAF-SET-007"), "finding medium")
 
     def test_pull_request_target_is_cannot_tell(self):
         found = assess(ADMIN, {"ci.yml": wf("  pull_request_target:\n", job("test", MATRIX_313))})
         self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
         self.assertIn("pull_request_target", of(found, "OBAAF-SET-007", "cannot-tell")[0]["message"])
+
+    def test_an_unrequired_pull_request_target_check_is_still_a_finding(self):
+        files = {"ci.yml": wf(PR, job("test", MATRIX_313)), "scan.yml": wf("  pull_request_target:\n", job("scan"))}
+        self.assertEqual(answered(assess(ADMIN, files), "OBAAF-SET-008", "scan.yml#scan"), "finding medium")
 
 
 class SettingsThatStopEveryRunTest(unittest.TestCase):
@@ -498,11 +547,39 @@ class SettingsThatStopEveryRunTest(unittest.TestCase):
         files = {"ci.yml": wf("  pull_request:\n  push:\n    branches: [main]\n", job("test", MATRIX_313))}
         self.assertEqual(answered(assess(changed(ADMIN, POLICY_7, change), files), "OBAAF-SET-007"), "finding medium")
 
-    def test_unread_settings_are_named_in_the_note(self):
+    def test_a_refused_workflow_beside_a_token_that_may_write_checks_is_cannot_tell(self):
+        steps = "      - uses: actions/checkout@v4\n      - run: echo\n"
+        files = {"ci.yml": wf(PR, job("test", MATRIX_313, steps=steps)),
+                 "other.yml": wf("  push:\n", job("o"), permissions="permissions:\n  checks: write\n")}
+        self.assertEqual(answered(assess(ADMIN, files), "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_workflow_github_may_refuse_is_never_counted_as_reporting(self):
+        steps = "      - uses: actions/checkout@v4\n      - run: echo\n"
+        found = assess(ADMIN, {"ci.yml": wf(PR, job("test", MATRIX_313, steps=steps))},
+                       extra={".github/workflows/actions.lock": "version: 1\n"})
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_policy_the_audit_does_not_understand_leaves_the_checks_cannot_tell(self):
+        def change(body):
+            body["conditions"] = {"workflow_path": {"include": ["~ALL"], "exclude": []},
+                                  "repository_name": {"include": ["game"], "exclude": []}}
+            body["rules"] = [{"type": "restrict_action_events", "parameters": {"allowed_events": ["push"]}}]
+        found = assess(changed(ADMIN, POLICY_7, change), self.CI)
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+        self.assertEqual(status(found, "OBAAF-SET-007"), "not-applicable")
+
+    def test_only_its_own_actions_allowed(self):
+        entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        found = assess(entries, {"ci.yml": wf(PR, job("test", MATRIX_313, steps=f"      - uses: {PIN}\n"))})
+        self.assertIn("allows only its own actions", of(found, "OBAAF-SET-006", "finding")[0]["message"])
+
+    def test_unread_settings_are_named_on_the_rules_line_whatever_its_answers(self):
         entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"message": "Must have admin rights"}, status=403)
-        found = assess(entries, self.CI)
-        note = next(r["note"] for r in found["rules"] if r["id"] == "OBAAF-SET-006")
-        self.assertIn("taken as running every workflow file", note)
+        for found, wanted in ((assess(entries, self.CI), "no-finding"),
+                              (assess(requiring("ghost", "test (3.13)", entries=entries), self.CI), "findings")):
+            entry = next(r for r in found["rules"] if r["id"] == "OBAAF-SET-006")
+            self.assertEqual(entry["status"], wanted)
+            self.assertIn("every workflow file was taken as running", entry["assumed"])
 
 
 class SharedCheckNamesTest(unittest.TestCase):
@@ -512,6 +589,12 @@ class SharedCheckNamesTest(unittest.TestCase):
         for files in ({"a.yml": wf(PR, job("test", MATRIX_313)), "b.yml": wf(PR, job("slow", "    name: test\n" + MATRIX_313))},
                       {"ci.yml": wf(PR, job("test", MATRIX_313) + job("t2", "    name: test\n" + MATRIX_313))}):
             self.assertEqual(answered(assess(ADMIN, files), "OBAAF-SET-008"), "cannot-tell", list(files))
+
+    def test_two_jobs_with_one_name_nobody_requires_are_still_findings(self):
+        files = {"ci.yml": wf(PR, job("test", MATRIX_313)),
+                 "a.yml": wf(PR, job("lint")), "b.yml": wf(PR, job("l2", "    name: lint\n"))}
+        found = assess(ADMIN, files)
+        self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 2)
 
     def test_a_job_with_the_same_name_that_never_runs_on_pull_requests_does_not_count(self):
         files = {"a.yml": wf(PR, job("test", MATRIX_313)),
