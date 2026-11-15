@@ -244,8 +244,23 @@ rules:
       A third-party action, reusable workflow or container image is referenced by a tag or branch,
       which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs
       are reported at high severity. Ordinary jobs with explicitly limited token permissions,
-      no secrets and no privileged outside trigger are reported at low severity. Other jobs
-      remain medium: missing token permissions must not silently downgrade a privileged job.
+      no secrets and no privileged outside trigger are reported at low severity; a job in a workflow other
+      workflows can call (`workflow_call`) is never low, because its callers' triggers are not in the file.
+      Other jobs remain medium: missing token permissions must not silently downgrade a privileged job.
+      An action or reusable workflow is pinned only by a full commit SHA as github.com writes one, 40
+      hexadecimal digits in lower case (a 64-digit ref can only be a tag or a branch there), and an image
+      only by `@sha256:` and 64 hexadecimal digits at its end. Every image is read: the container's and
+      each service's, also written as text; one computed when the job runs is reported as such (kind
+      `image-expression`) unless it is exactly `${{ matrix.x }}` with the values written out in the file,
+      which are read one by one, and one written in a form the checker does not read (not text, a key in
+      another letter case, services not written as a mapping) is reported too (`image-unreadable`). An
+      action in the repository itself (`./path`, `$/path`) has nothing to pin, except that a `./` action
+      after a step that checks out another repository at that path is that repository at the ref it was
+      checked out at (`local-from-checkout`), and one after a step that clones, downloads or unpacks code
+      into the workspace is reported as one the checker cannot place (`local-after-download`). Not
+      followed: the actions a local composite action or a called workflow uses (they are checked where
+      their own files are), whether a pinned commit is on the repository's own branches or only in a fork
+      of it, and what a pinned action fetches or runs when it runs.
     fix: >-
       Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep
       the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot
@@ -259,7 +274,12 @@ rules:
     supports: [FR3, FR8]
     description: >-
       Neither the workflow nor the job declares `permissions`, so the job token gets the repository or
-      organization default, which may include write access.
+      organization default, which may include write access. The finding is the job's: which events can
+      start the job is not part of it (other rules report what a trigger adds), so an acceptance keeps
+      covering the job when its triggers change. A `permissions` value the checker cannot read, and a file
+      it reads in a way GitHub may not (a YAML merge key, a job id this reader takes for a value other
+      than text), are errors of the file, which fail the check. Not followed: the repository's or
+      organization's default itself, which `obaaf audit` reads.
     fix: >-
       Declare `permissions: {}` or `permissions: {contents: read}` at the top of the workflow and grant
       each job only what it needs.
@@ -571,6 +591,21 @@ rules:
       A policy declared in `OBAAF_EGRESS`, or a control behind a condition, is reported too, so it is
       not mistaken for enforcement. A baseline entry that accepts "cannot tell" is for the workflow
       file as it stood, byte for byte. A cleared finding still says what the control does not stop.
+      The firewall's policy file is read with the three keys its README describes (`mode`, `allow`,
+      `no-default-urls`); any other key, or one of them in another letter case, is "cannot tell". Under
+      OBAAF's action, a step that may follow it is taken for `actions/upload-artifact` only when its path
+      is exactly that, with no `.`, `..` or empty part; a cache or an earlier step that may name the
+      scratch directory (also by a pattern such as `/t[m]p`, or through `mktemp`), and an earlier step
+      that may leave a process running (`&`, `nohup`, a container engine, a service or process manager,
+      `ssh -f`, `sudo -b`, a script language's fork or spawn), are "cannot tell" or "not met"; a value
+      given outside the confined command whose name says it may be a credential (`vars.*_KEY`, a job's
+      or step's output named like a token, an `env` name of a model key) is "cannot tell". The agent is
+      looked for in every script a step runs and every input it gives an action, with quotes and
+      backslashes taken out. Not followed, and so never a reason the finding clears: an agent run by a
+      package script (`npm run`), a called workflow or a local composite action; code an earlier action
+      runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);
+      whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
+      runner with the firewall's label has the firewall, which the label is taken to mean.
     fix: >-
       Run the agent job on GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with a
       `.github/egress-firewall.yaml` in `enforce` mode) where the repository can use it, or wrap the
@@ -633,7 +668,11 @@ rules:
     supports: [FR12]
     description: >-
       The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all-zero commit
-      SHA), so it will not run as intended.
+      SHA), so it will not run as intended. Each placeholder in a value GitHub reads is one finding, named
+      by where it is (the job, the step and the key): values are read as YAML gives them, so an escape or a
+      line joined inside double quotes is the placeholder it spells, and a comment is not read.
+      `OBAAF_OWNER` is found in any letter case, and the all-zero SHA as exactly 40 zeros after `@` or as
+      the ref of a `uses`.
     fix: >-
       Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or
       replace the placeholders by hand.
@@ -697,7 +736,17 @@ rules:
       stage. An entry for a file outside the run (another file when one file is checked, a
       Jenkinsfile when only workflows are checked) is not looked at. An ignore entry cannot accept
       this finding, because it would accept every such declaration in the file it names; a baseline
-      entry, which names the one declaration and its value, can.
+      entry, which names the one declaration and its value, can. Another spelling is any name that
+      looks like OBAAF_LANE, or is one letter from it, once case, separators, invisible characters and
+      look-alike letters from other scripts are set aside (`OBAAF.LANE`, `OBAAF_LANES`, a Cyrillic `О`);
+      it is reported in any env, in a Jenkinsfile's environment block or withEnv too. The variable in
+      any spelling is also reported where nothing reads it as a declaration (kind `elsewhere`): a key of
+      a step's `with`, of the matrix or of a called workflow's `with`, an `env` written as one expression
+      that names it, a script that writes it to `GITHUB_ENV`, and in a Jenkinsfile an assignment to
+      `env.OBAAF_LANE` in a script (`jenkins-scripted`). A name that only holds it (`MY_OBAAF_LANE`), and
+      a definition under the name (an input of `workflow_call`, written as a mapping), are not
+      declarations. Not followed: a lane variable set by a command the checker does not read as
+      writing `GITHUB_ENV`, or written in a file a step sources.
     fix: >-
       Correct the declaration or delete it. The value is one of untrusted, agent, effect, release or
       trusted, and the variable is spelled OBAAF_LANE. In a workflow it belongs in the job's env or
