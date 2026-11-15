@@ -96,7 +96,7 @@ class ThePageTest(unittest.TestCase):
         # The pre-commit hook's checker is installed from the same commit, in a
         # tools directory named after it.
         self.assertIn(f"checkout --detach {pin}", text)
-        short = re.findall(r"obaaf-hook-([0-9a-f]+)", text)
+        short = re.findall(r"obaaf-hook-([^/\"\s`]+)", text)
         self.assertTrue(short)
         for prefix in short:
             self.assertTrue(len(prefix) >= 7 and pin.startswith(prefix), prefix)
