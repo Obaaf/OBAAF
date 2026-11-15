@@ -98,6 +98,10 @@ class FirewallRunnerLabelTest(unittest.TestCase):
                 found = findings(f"{{group: {group}, labels: [ubuntu-24.04-firewall]}}")
                 self.assertEqual(found["OBAAF-GHA-013"].severity, "high")
                 self.assertNotEqual(found["OBAAF-GHA-020"].state, "fixed")
+        for group, shown in (("~", "group:null"), ("false", "group:false"), ("''", "group:''"), ("0", "group:0")):
+            with self.subTest(group=group, shown=shown):
+                self.assertIn(f"({shown}, ubuntu-24.04-firewall)",
+                              findings(f"{{group: {group}, labels: [ubuntu-24.04-firewall]}}")["OBAAF-GHA-013"].message)
         for group in ("0", "false"):
             with self.subTest(group=group, label="ubuntu-latest"):
                 self.assertEqual(findings(f"{{group: {group}, labels: [ubuntu-latest]}}")["OBAAF-GHA-013"].severity,

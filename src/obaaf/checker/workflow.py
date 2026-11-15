@@ -92,6 +92,20 @@ def is_self_hosted_label(label) -> bool:
 
 def is_hosted_label(label) -> bool:
     return str(label).lower() in HOSTED_LABELS
+
+
+def _group_text(value) -> str:
+    """A `runs-on` group's name as the file spells it, not as Python prints the value: `null`, `false`,
+    `''` (flagship slice 2d.9). The text is in findings and their facts, which acceptances match."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value if value else "''"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value, sort_keys=True, default=str)
 # A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
 # reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
 _YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
@@ -1953,7 +1967,7 @@ class Job:
             labels = value.get("labels")
             # The key counts whatever its value: `group: 0` or `group: false` is a group GitHub may name
             # "0" or "false", not the absence of one (found by the review of flagship slice 2d.9).
-            out = ["group:" + str(value.get("group"))] if "group" in value else []
+            out = ["group:" + _group_text(value.get("group"))] if "group" in value else []
             if isinstance(labels, str):
                 out.append(labels)
             elif isinstance(labels, list):
