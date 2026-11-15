@@ -123,7 +123,13 @@ TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
 
 # Names in an interpolated expression, outside quoted text, that are not called (`f(`, `tool "x"`).
 _QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
-_NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+[\"'\w$])")
+_NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+(?!(?:as|in|instanceof)\b)[\"'\w$])")
+
+
+def _unquoted(expr: str) -> str:
+    """The expression with quoted text that interpolates nothing replaced by a placeholder; text that does
+    interpolate is kept, without its quotes, so the names it reads are read (the third review of 2d.2i)."""
+    return _QUOTED.sub(lambda m: f" {m.group(0)[1:-1]} " if "$" in m.group(0) else " _q_ ", expr)
 # Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
 _JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
                     "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace",
@@ -1051,7 +1057,7 @@ class JenkinsRules:
             # names are environment variables), is not one of Jenkins's globals, and the file never gave it a
             # value the checker saw; and any name whose value reads an environment variable by a computed name.
             computed = self.secret_names({COMPUTED_ENV}) - {COMPUTED_ENV}
-            unaccounted = sorted({w for e in exprs for w in _NAME_IN_EXPR.findall(_QUOTED.sub(" _q_ ", e))
+            unaccounted = sorted({w for e in exprs for w in _NAME_IN_EXPR.findall(_unquoted(e))
                                   if (w in computed) or (w[:1].islower() and w not in _JENKINS_GLOBALS
                                                          and w not in self.p.refs and w not in self.p.literals
                                                          and w not in self.p.lists)})

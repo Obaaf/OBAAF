@@ -258,7 +258,7 @@ signing_secret_patterns:
   # (SENTRY_UPLOAD_KEY): the review of slice 2d.2i found them on ordinary workflows.
   - '(^|_)(GPG|PGP)$'
   - '(^|_)(JKS|SECRING)($|_)'
-  - '(SIGN(ING)?|PRIVATE|SECRET|KEY)_?ASC($|_)'
+  - '(^|_)(SIGN(ING)?|PRIVATE|SECRET|KEY)_?ASC($|_)'
   - 'SIGNING_?IN_?MEMORY'
   - 'DIST(RIBUTION)?_?CERT'
   - 'SIGNER_?KEY'
