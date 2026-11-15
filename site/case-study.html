@@ -34,9 +34,9 @@
 <li>Nothing OBAAF ran restricted a job at run time. It reported.</li>
 </ul>
 <h2>What is newer than that page</h2>
-<p>The case study says an egress control exists and the checker does not credit it yet. That sentence is the page as written on 2026-11-13. The development checker is written to clear <code>OBAAF-GHA-020</code> for GitHub's native egress firewall in enforce mode. OBAAF's own action stays "cannot tell" until a released commit is listed, and none is listed. <code>OBAAF-GHA-005</code> still cannot be cleared. The firewall clearing is not in release 0.3.0. Release 0.3.0 does drop OBAAF-GHA-020 for an unconditional Harden-Runner step with <code>egress-policy: block</code>, which is a different, narrower test. The <a href="rules.html">rules</a> page records the 2026-11-14 runs.</p>
+<p>The case study says an egress control exists and the checker does not credit it yet. That sentence is the page as written on 2026-11-13. The development checker, which is not in a release, clears <code>OBAAF-GHA-020</code> for GitHub's native egress firewall in enforce mode, under conditions the <a href="rules.html">rules</a> page lists. OBAAF's own action stays "cannot tell" until a released commit is listed, and none is listed. <code>OBAAF-GHA-005</code> still cannot be cleared. Release 0.3.0, like the pin, drops OBAAF-GHA-020 for a Harden-Runner step with <code>egress-policy: block</code> and no <code>if</code>, without looking at its version, its position or its sudo setting. The development checker asks for more, and answers "cannot tell" at best for Harden-Runner. The <a href="rules.html">rules</a> page records the 2026-11-14 runs.</p>
 <p>Expectrail, as the case study records it, still runs the OBAAF of 2026-11-10, commit <code>d014b63</code>. The later work does not apply to it until that pin moves.</p>
-<p class="caption">Phase A is dated 2026-10-30 in that document. The gate command it quotes is in the block below.</p>
+<p class="caption">Expectrail first ran the checker, in reporting mode, on 2026-10-30. The gate command the document quotes is in the block below.</p>
 <pre><code>obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes</code></pre>
 
 </main>
