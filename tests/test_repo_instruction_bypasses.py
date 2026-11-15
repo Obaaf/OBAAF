@@ -970,6 +970,29 @@ class SixthReviewTest(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 15)
             self.assertTrue(any("characters in all" in e for e in result.errors), result.errors)
 
+    def test_a_long_target_and_long_built_names_are_counted(self):
+        deep = "/".join(["d" * 30] * 100)
+        with TempDir() as tmp:
+            tree(tmp, {deep + "/target.md": "x\n"})
+            (tmp / "F").mkdir()
+            (tmp / "S").symlink_to(tmp / deep / "target.md")
+            for i in range(1990):
+                (tmp / "F" / f"z{i}").symlink_to(tmp / "S")
+            for i in range(100):
+                (tmp / f"L{i}").symlink_to(tmp / "F")
+            start = time.monotonic()
+            found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+        with TempDir() as tmp:
+            tree(tmp, {f"R/a{i}/AGENTS.md": "" for i in range(2000)})
+            (tmp / deep).mkdir(parents=True)
+            for i in range(99):
+                (tmp / deep / f"l{i}").symlink_to(tmp / "R")
+            start = time.monotonic()
+            _, result = found(tmp)
+            self.assertLess(time.monotonic() - start, 15)
+            self.assertTrue(any("characters in all" in e for e in result.errors), result.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -708,7 +708,8 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
         errors.append(problem)          # what was found so far is still checked
         return sorted(found.values(), key=lambda f: f.rel)
 
-    read = 0                    # characters of names tested behind links
+    read = 0                    # characters of names tested or built behind links
+    wanted_target: dict[str, bool] = {}
 
     def too_long() -> list[InstructionFile]:
         return stop(f"links lead to names of more than {READ_LIMIT:,} characters in all, more than the checker "
@@ -737,7 +738,11 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             continue
         real, kind = entry
         if kind == "file":
-            if wanted(name) or wanted(real):
+            target_wanted = wanted_target.get(key)
+            if target_wanted is None:
+                read += len(real)
+                target_wanted = wanted_target[key] = wanted(real)
+            if target_wanted or wanted(name):
                 found[name] = InstructionFile(name, real=real, link=first)
             continue
         signature = None
@@ -805,6 +810,9 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             # One name for each file and link that leads to it is enough: a further name adds neither
             # a file to scan nor a link to own.
             seen.add((inner, first))
+            read += len(name) + 1 + len(tail)
+            if read > READ_LIMIT:
+                return too_long()
             made += 1
             if made > ALIAS_LIMIT:
                 return stop(f"links lead to more than {ALIAS_LIMIT:,} names, more than the checker follows "
