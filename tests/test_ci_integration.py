@@ -89,9 +89,17 @@ class ThePageTest(unittest.TestCase):
 
     def test_the_pin_is_the_same_everywhere_on_the_page(self):
         text = PAGE.read_text(encoding="utf-8")
-        shas = set(re.findall(r"(?:setup-obaaf@|OBAAF\.git@)([0-9a-f]{40})", text))
+        shas = set(re.findall(r"(?:setup-obaaf@|OBAAF\.git@|checkout --detach )([0-9a-f]{40})", text))
         self.assertEqual(len(shas), 1, shas)
-        self.assertIn(f"`{shas.pop()}`", text)
+        pin = shas.pop()
+        self.assertIn(f"`{pin}`", text)
+        # The pre-commit hook's checker is installed from the same commit, in a
+        # tools directory named after it.
+        self.assertIn(f"checkout --detach {pin}", text)
+        short = re.findall(r"obaaf-hook-([^/\"\s`]+)", text)
+        self.assertTrue(short)
+        for prefix in short:
+            self.assertTrue(len(prefix) >= 7 and pin.startswith(prefix), prefix)
 
     def test_the_workflow_on_the_page_has_no_findings(self):
         workflow = next(b for b in blocks("yaml") if "jobs:" in b)
