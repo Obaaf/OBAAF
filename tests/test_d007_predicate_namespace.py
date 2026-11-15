@@ -87,6 +87,29 @@ class PublishedPagesTest(unittest.TestCase):
                 self.assertTrue(served.is_file(), served)
                 self.assertEqual(json.loads(served.read_text(encoding="utf-8")), json.loads(data_text(rel)))
 
+    def test_every_shipped_schema_with_an_id_here_is_served_at_it(self):
+        """Not only the predicate types' schemas: the settings snapshot's too (flagship slice 4.6, #176)."""
+        from importlib import resources
+        names = []
+        for entry in resources.files("obaaf.data").joinpath("schemas").iterdir():
+            if not entry.name.endswith(".json"):
+                continue
+            schema = json.loads(entry.read_text(encoding="utf-8"))
+            names.append(entry.name)
+            with self.subTest(schema=entry.name):
+                self.assertTrue(schema["$id"].startswith(predicates.NAMESPACE + "/schemas/"))
+                served = self._local(schema["$id"])
+                self.assertTrue(served.is_file(), served)
+                self.assertEqual(json.loads(served.read_text(encoding="utf-8")), schema)
+        self.assertIn("settings-snapshot.schema.json", names)
+
+    def test_the_questionnaire_names_its_canonical_address_and_says_it_needs_javascript(self):
+        text = (self.out / "assessment.html").read_text(encoding="utf-8")
+        self.assertEqual(text.count('<link rel="canonical" href="https://www.obaaf.com/assessment.html">'), 1)
+        self.assertIn('<div id="tiers"><noscript>', text)
+        self.assertIn("obaaf assess init", text)
+        self.assertIn("Back to the OBAAF field guide", text)
+
     def test_format_pages_use_no_dashes(self):
         for uri in [*predicates.OBAAF_TYPES.values(), predicates.GENERIC_BUILD_TYPE]:
             with self.subTest(uri=uri):
