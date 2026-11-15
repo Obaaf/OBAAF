@@ -70,6 +70,12 @@ HOSTED_LABELS = frozenset({
     "macos-latest", "macos-26", "macos-15", "macos-14", "macos-15-intel",
     "macos-latest-large", "macos-15-large", "macos-14-large",
     "macos-latest-xlarge", "macos-26-xlarge", "macos-15-xlarge", "macos-14-xlarge",
+    # GitHub's native egress firewall runner (a technical preview), the label the firewall's README
+    # names and `egress.FIREWALL_LABEL`. OBAAF-GHA-020 already reads it as GitHub's own runner, so
+    # OBAAF-GHA-013 does too (flagship slice 2d.9, issue #172; before, a job that cleared
+    # OBAAF-GHA-020 here still got a medium OBAAF-GHA-013 for an unknown label). A test keeps the two
+    # names the same.
+    "ubuntu-24.04-firewall",
 })
 # Events whose payload has `pull_request.head.repo`, which a fork-safe runner selector tests.
 PULL_REQUEST_PAYLOAD_EVENTS = frozenset({"pull_request", "pull_request_target", "pull_request_review",
