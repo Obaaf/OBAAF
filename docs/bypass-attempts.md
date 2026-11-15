@@ -1225,11 +1225,12 @@ One Opus 5.5 sub-agent that wrote none of it reviewed the slice. It checked the 
 
   Of 3 non-blocking findings, two were fixed: an evaluate-mode policy, or one whose events cover the file, no longer makes the file doubtful; a code owner's review makes a branch "cannot tell" for `OBAAF-SET-001`. One is left: `OBAAF-SET-007` leaves out a paths-filtered reporter in a file GitHub may not run, so that finding moves to `OBAAF-SET-006`'s "cannot tell".
 - **Third pass** (a fresh Opus 5.5 sub-agent, on the second pass's fixes only): all four held for the cases named. It found 3 more blocking defects, all fixed and tested:
-  1. The exemption for problems about a step's input names matched a phrase, which a workflow can quote in a trigger or a permission. It now matches the problem's whole shape.
+  1. The exemption for problems about a step's input names matched a phrase, which a workflow can quote in a trigger or a permission. It now matches the start of the problem as the checker writes it (the job id, the step number, then the phrase). Only a job id that GitHub refuses could still forge a match, and the audit does not check job ids (issue #182).
   2. Under `local_only`, a reusable workflow from another repository was not counted as remote.
   3. A caller of a workflow file that is missing, or was not read, still counted as reporting.
 
-  Two non-blocking findings were also fixed. The pinning requirement is now weighed before `local_only`, so a refused file is refused. A policy readable only as a list of actors no longer counts as covering every event.
+  Two non-blocking findings were also fixed. The pinning requirement is now weighed before `local_only`, so a refused file is refused. A policy whose enforcement value is not understood, and whose rules are only about actors, no longer counts as covering every event; an enforced policy of actors only is still not compared, as before.
+- **Fourth pass** (a fresh Opus 5.5 sub-agent, on the third pass's fixes only): no blocking defect; every change moves an answer towards "cannot tell" or a finding, and ordinary cases read as before. Its non-blocking findings are in issue #182: `uses: ./` alone and `$/` calls are not compared, job ids are not checked against GitHub's form, an empty list of selected actions is not read as blocking, and the caller loop is quadratic in the length of a chain of calls (1.2 s for 1,500). Wording it found too strong was corrected; the last commit after it changes only wording.
 
 #### Every attempt of reviewer A, before and after the fixes
 
