@@ -70,6 +70,12 @@ HOSTED_LABELS = frozenset({
     "macos-latest", "macos-26", "macos-15", "macos-14", "macos-15-intel",
     "macos-latest-large", "macos-15-large", "macos-14-large",
     "macos-latest-xlarge", "macos-26-xlarge", "macos-15-xlarge", "macos-14-xlarge",
+    # GitHub's native egress firewall runner (a technical preview), the label the firewall's README
+    # names and `egress.FIREWALL_LABEL`. OBAAF-GHA-020 already reads it as GitHub's own runner, so
+    # OBAAF-GHA-013 does too (flagship slice 2d.9, issue #172; before, a job that cleared
+    # OBAAF-GHA-020 here still got a medium OBAAF-GHA-013 for an unknown label). A test keeps the two
+    # names the same.
+    "ubuntu-24.04-firewall",
 })
 # Events whose payload has `pull_request.head.repo`, which a fork-safe runner selector tests.
 PULL_REQUEST_PAYLOAD_EVENTS = frozenset({"pull_request", "pull_request_target", "pull_request_review",
@@ -86,6 +92,23 @@ def is_self_hosted_label(label) -> bool:
 
 def is_hosted_label(label) -> bool:
     return str(label).lower() in HOSTED_LABELS
+
+
+def _group_text(value) -> str:
+    """A `runs-on` group's name as a YAML value (`null`, `false`, `''`), not as Python prints it
+    (flagship slice 2d.9). The text is in findings and their facts, which acceptances match."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value if value else "''"
+    if isinstance(value, (int, float)):
+        return str(value)
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):     # keys of mixed types, a circular alias
+        return str(value)
 # A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
 # reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
 _YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
@@ -1945,7 +1968,9 @@ class Job:
             return [str(v) for v in value]
         if isinstance(value, dict):
             labels = value.get("labels")
-            out = ["group:" + str(value.get("group"))] if value.get("group") else []
+            # The key counts whatever its value: `group: 0` or `group: false` is a group GitHub may name
+            # "0" or "false", not the absence of one (found by the review of flagship slice 2d.9).
+            out = ["group:" + _group_text(value.get("group"))] if "group" in value else []
             if isinstance(labels, str):
                 out.append(labels)
             elif isinstance(labels, list):

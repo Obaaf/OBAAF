@@ -1189,7 +1189,9 @@ class WorkflowRules:
             return None
         sets = job.runner_label_sets()
         firewall = egress_mod.FIREWALL_LABEL
-        on = [s for s in (sets or []) if len(s) == 1 and s[0].strip().lower() == firewall]
+        # Read as OBAAF-GHA-013's hosted list reads it (`is_hosted_label`: any letter case, no space
+        # trimmed), so the two rules agree on what runs the job (flagship slice 2d.9, issue #172).
+        on = [s for s in (sets or []) if len(s) == 1 and is_hosted_label(s[0]) and s[0].lower() == firewall]
         policy = self.firewall
         if not on:
             # A larger runner can be in a runner group (`group:`), which the checker otherwise counts as
