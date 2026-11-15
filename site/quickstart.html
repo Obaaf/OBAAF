@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install obaaf 0.3.0 and check one workflow file. A recorded low finding, then a pin, with exits 1 and 0. A local exit does not set a merge gate.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Try OBAAF 0.3.0</title>
+  <link rel="canonical" href="https://www.obaaf.com/quickstart.html">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="header wrap">
+  <a class="brand" href="index.html">OBAAF</a>
+  <nav aria-label="Pages"><a href="index.html">Home</a> <a href="quickstart.html" aria-current="page">Quickstart</a> <a href="rules.html">Rules</a> <a href="comparison.html">Comparison</a> <a href="case-study.html">Case study</a> <a href="papers.html">Papers</a></nav>
+</header>
+<main id="main" class="section wrap">
+
+<p class="section-label">Try release 0.3.0</p>
+<h1>Install it, then check one file.</h1>
+<p class="large">Python 3.10 or later. Installation downloads packages. The check reads a file on the machine and does not edit it. No action is run.</p>
+<pre><code>python -m pip install obaaf==0.3.0
+obaaf --version
+obaaf check unpinned.yml --fail-on low
+obaaf check pinned.yml --fail-on low</code></pre>
+<p>Checked on 2026-11-14 at 04:24 UTC with obaaf 0.3.0 from PyPI. <code>obaaf --version</code> printed <code>obaaf 0.3.0</code>. The first command exited 1. The second exited 0. The finding is low. A medium threshold would not fail it. The same two files, checked again the same day with obaaf 0.3.0 and with the development version, exited 1 and then 0.</p>
+<h2>The finding</h2>
+<pre><code>unpinned.yml
+     9  LOW    OBAAF-GHA-008  Action or container not pinned to a full digest  [job build]
+        Action 'actions/checkout@v6.0.0' is pinned to 'v6.0.0', not a full commit SHA.
+        Requirement: G2.1, R6
+        Fix: Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep the version in a comment (for example `uses: actions/checkout@&lt;sha&gt; # v7.0.1`). Let Dependabot propose updates to the pin.
+
+1 workflow file(s) checked.
+Authority findings: 0 high, 0 medium, 0 low.
+Hygiene findings: 0 high, 0 medium, 1 low.</code></pre>
+<p>The pinned file printed no findings. Pinning selects a revision. It does not prove that revision is safe. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. The commit in the pinned file is the one the <code>actions/checkout</code> repository tags <code>v6.0.0</code>.</p>
+<h2>The two files</h2>
+<div class="section-grid">
+<pre><code>name: pin
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.0
+        with:
+          persist-credentials: false</code></pre>
+<pre><code>name: pin
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          persist-credentials: false</code></pre>
+</div>
+<p class="caption">Each file is one job: <code>on: push</code>, top-level <code>contents: read</code>, <code>persist-credentials: false</code>, and one action. The finding was on line 9.</p>
+<h2>A gate is a repository setting</h2>
+<p>The exit status does not configure a merge gate. Checking a file on your machine runs no workflow and blocks no merge. To make a failing check stop a merge, run the check in a workflow and require that status check in the repository's branch rules; that is a setting, not something OBAAF changes.</p>
+<p>There is no <code>obaaf init</code> in release 0.3.0. Companion scanners are named on the <a href="comparison.html">comparison</a> page. Setting them up is separate work.</p>
+<p>The development version's report of the same two files adds lines release 0.3.0 does not print, including "Accepted risk: none" and a count of other findings. Those lines are not part of release 0.3.0. Release 0.3.0 already ignores a finding when an ignore entry has a rule, a path, a reason, and an <code>until</code> date that has not passed. Requiring an owner, refusing a reason the checker judges too short, and refusing an <code>until</code> date more than 366 days ahead are not in that release.</p>
+<p>An older hosted demonstration, using OBAAF 0.1, rated an unpinned action medium. From 0.2 its severity depends on the job. It is low, as here, when the job declares its permissions with no write scope, has no <code>id-token</code> permission, no secrets and no privileged trigger such as <code>pull_request_target</code>. It is medium on a job without those limits, including one with no <code>permissions:</code> block, and high on a job the checker puts in its agent, release or effect lane, such as a job that runs an AI agent. <code>obaaf check . --lanes</code> shows each job's lane and why. <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/docs/checker-demonstration.md">The demonstration record</a>.</p>
+
+</main>
+<footer class="wrap">
+  <div><strong>OBAAF</strong><p>Osita Sean Keluo-Udeke led the research. Ofonna Nweze handled implementation, testing, and GitHub integration, with Osita Sean Keluo-Udeke contributing across the project.</p></div>
+  <div><p>Code is Apache-2.0. Documentation is CC BY 4.0. The development package also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/LICENSING.md">Licensing</a>.</p></div>
+</footer>
+</body>
+</html>
