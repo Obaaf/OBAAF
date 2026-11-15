@@ -21,13 +21,32 @@ class OwnerRule:
     line: int
 
 
+class UnreadableFile(OSError):
+    """A file the checks need that exists and could not be read. It is an error for that file, so
+    the check fails, rather than a file taken for missing or empty."""
+
+    def __init__(self, rel: str, exc: OSError) -> None:
+        super().__init__(f"{rel}: cannot be read: {exc.strerror or exc}")
+        self.rel = rel
+
+
 def read_codeowners(root: Path) -> tuple[str | None, list[OwnerRule]]:
-    """The CODEOWNERS file GitHub would use (first found of .github/, root, docs/) and its rules."""
+    """The CODEOWNERS file GitHub would use (first found of .github/, root, docs/) and its rules.
+    Raises UnreadableFile for one that is there and cannot be read."""
     for rel in CODEOWNERS_LOCATIONS:
         path = root / rel
-        if path.is_file():
+        try:
+            # A folder that cannot be entered hides whether the file is there at all.
+            present = path.is_file()
+        except OSError as exc:
+            raise UnreadableFile(rel, exc) from exc
+        if present:
             rules = []
-            for number, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise UnreadableFile(rel, exc) from exc
+            for number, raw in enumerate(text.splitlines(), start=1):
                 line = raw.split("#", 1)[0].strip() if not raw.lstrip().startswith("\\#") else raw.strip()
                 if not line:
                     continue
@@ -107,31 +126,43 @@ def _glob_to_regex(glob: str) -> re.Pattern:
     return re.compile(f"^{out}$")
 
 
-def find_instruction_files(root: Path, patterns: list[str]) -> list[str]:
+def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None) -> list[str]:
+    """Agent instruction files under `root`. A directory that cannot be listed is added to
+    `unlisted` (its path relative to `root`), so the caller can say it was not looked in."""
     regexes = [_glob_to_regex(p) for p in patterns]
     found = []
-    for path in _walk(root):
+    for path in _walk(root, unlisted, root):
         rel = path.relative_to(root).as_posix()
         if any(rx.match(rel) for rx in regexes):
             found.append(rel)
     return sorted(found)
 
 
-def _walk(root: Path):
+def _walk(root: Path, unlisted: list | None = None, base: Path | None = None):
     stack = [root]
     while stack:
         current = stack.pop()
         try:
             entries = sorted(current.iterdir())
         except OSError:
+            if unlisted is not None:
+                unlisted.append(current.relative_to(base or root).as_posix())
             continue
         for entry in entries:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                if entry.name not in SKIP_DIRS:
-                    stack.append(entry)
-            elif entry.is_file():
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    if entry.name not in SKIP_DIRS:
+                        stack.append(entry)
+                    continue
+                regular = entry.is_file()
+            except OSError:
+                # A folder that can be listed and not entered: its entries cannot be looked at.
+                if unlisted is not None:
+                    unlisted.append(current.relative_to(base or root).as_posix())
+                break
+            if regular:
                 yield entry
 
 

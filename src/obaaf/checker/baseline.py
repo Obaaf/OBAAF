@@ -102,7 +102,9 @@ def dumps(data) -> str:
 
 # ------------------------------------------------------------------ the old format
 def _identity_v1(f) -> list:
-    return [f.rule, f.severity, f.path, f.job or "", f.step or "", f.scope or "", _EXPIRED.sub("", f.message)]
+    # A finding a later version words differently carries the message 0.3.0 wrote for it (`legacy`).
+    message = getattr(f, "legacy", "") or f.message
+    return [f.rule, f.severity, f.path, f.job or "", f.step or "", f.scope or "", _EXPIRED.sub("", message)]
 
 
 def _digest(ident: list) -> str:
