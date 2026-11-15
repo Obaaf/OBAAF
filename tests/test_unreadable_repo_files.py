@@ -30,18 +30,29 @@ class UnreadableCodeownersTest(unittest.TestCase):
             code, out, err = run_cli("check", str(root), "--fail-on", "never")
             self.assertEqual(code, 1, err)
             self.assertNotIn("Traceback", err)
-            self.assertIn(".github/CODEOWNERS: cannot be read", out + err)
+            # Since slice 2d.2h a link at a CODEOWNERS place is an error before anything is read from it.
+            self.assertIn(".github/CODEOWNERS: is a symbolic link", out + err)
             result = checker.check(root)
             self.assertFalse([f for f in result.findings if f.rule in ("OBAAF-REPO-001", "OBAAF-REPO-002")])
             code, out, err = run_cli("check", str(root), "--lanes")
             self.assertEqual(code, 1, err)
-            self.assertIn(".github/CODEOWNERS: cannot be read", err)
+            self.assertIn(".github/CODEOWNERS: is a symbolic link", err)
+
+    def test_an_input_output_error_is_an_error_not_a_traceback(self):
+        with TempDir() as tmp:
+            root = repository(tmp)
+            (root / ".github" / "CODEOWNERS").write_text("* @owner\n", encoding="utf-8")
+            with mock.patch("obaaf.checker.repo.open", side_effect=OSError(5, "Input/output error"), create=True):
+                result = checker.check(root)
+            self.assertIn(".github/CODEOWNERS: cannot be read: Input/output error", result.errors)
+            self.assertFalse([f for f in result.findings if f.rule in ("OBAAF-REPO-001", "OBAAF-REPO-002")])
 
     def test_the_reader_raises_for_a_file_it_cannot_read(self):
         with TempDir() as tmp:
             root = repository(tmp)
             (root / ".github" / "CODEOWNERS").write_text("* @owner\n", encoding="utf-8")
-            with mock.patch.object(Path, "read_text", side_effect=PermissionError(13, "Permission denied")):
+            with mock.patch("obaaf.checker.repo.open", side_effect=PermissionError(13, "Permission denied"),
+                            create=True):
                 with self.assertRaises(repo_checks.UnreadableFile) as caught:
                     repo_checks.read_codeowners(root)
             self.assertEqual(caught.exception.rel, ".github/CODEOWNERS")
@@ -53,14 +64,14 @@ class UnreadableInstructionFileTest(unittest.TestCase):
             root = repository(tmp)
             (root / ".github" / "CODEOWNERS").write_text("* @owner\n", encoding="utf-8")
             (root / "AGENTS.md").write_text("Be careful.\n", encoding="utf-8")
-            real = Path.read_text
+            real = open
 
-            def read_text(self, *args, **kwargs):
-                if self.name == "AGENTS.md":
+            def guarded(path, *args, **kwargs):
+                if Path(path).name == "AGENTS.md":
                     raise PermissionError(13, "Permission denied")
-                return real(self, *args, **kwargs)
+                return real(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "read_text", read_text):
+            with mock.patch("obaaf.checker.rules.open", guarded, create=True):
                 result = checker.check(root)
             self.assertIn("AGENTS.md: cannot be read: Permission denied", result.errors)
 
@@ -68,14 +79,14 @@ class UnreadableInstructionFileTest(unittest.TestCase):
         with TempDir() as tmp:
             root = repository(tmp)
             (root / "locked").mkdir()
-            real = Path.iterdir
+            real = os.scandir
 
-            def iterdir(self):
-                if self.name == "locked":
+            def scandir(path="."):
+                if Path(path).name == "locked":
                     raise PermissionError(13, "Permission denied")
-                return real(self)
+                return real(path)
 
-            with mock.patch.object(Path, "iterdir", iterdir):
+            with mock.patch.object(os, "scandir", scandir):
                 result = checker.check(root)
             self.assertEqual(result.errors, [])
             self.assertTrue(any("locked/" in note and "could not be listed" in note for note in result.notes),
@@ -89,14 +100,15 @@ class FoldersThatCannotBeEnteredTest(unittest.TestCase):
     def test_a_codeowners_place_that_cannot_be_looked_in_is_an_error(self):
         with TempDir() as tmp:
             root = repository(tmp)
-            real = Path.is_file
+            (root / "docs").mkdir()
+            real = os.listdir
 
-            def is_file(self):
-                if self.parent.name == "docs":
+            def listdir(path="."):
+                if Path(path).name == "docs":
                     raise PermissionError(13, "Permission denied")
-                return real(self)
+                return real(path)
 
-            with mock.patch.object(Path, "is_file", is_file):
+            with mock.patch.object(os, "listdir", listdir):
                 result = checker.check(root)
             self.assertIn("docs/CODEOWNERS: cannot be read: Permission denied", result.errors)
 

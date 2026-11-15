@@ -149,3 +149,22 @@ def make(source: str, owner, reason, expires, today: date) -> Acceptance:
     shown = day.isoformat() if day else (str(expires) if expires not in (None, "") else None)
     return Acceptance(source=source, owner=_text(owner) or None, reason=_text(reason) or None, expires=shown,
                       problems=problems(owner, reason, expires, today))
+
+
+# Findings no acceptance can clear (slice 2d.2h): OBAAF-REPO-001 for the files that decide what the
+# check accepts (CODEOWNERS, the configuration, a baseline, the firewall policy). Acceptances are kept
+# in those files, so an acceptance of it would be the unowned file vouching for itself; the fix, a
+# CODEOWNERS line, is always open to the team.
+# The same holds when the repository has no CODEOWNERS file, or one GitHub does not load: then no file
+# has an owner, the configuration and the baseline included.
+UNACCEPTABLE = {("OBAAF-REPO-001", "gate-no-owner"), ("OBAAF-REPO-001", "no-codeowners"),
+                ("OBAAF-REPO-002", "no-codeowners"), ("OBAAF-REPO-001", "not-loaded"), ("OBAAF-REPO-002", "not-loaded")}
+UNACCEPTABLE_PROBLEM = ("no entry can accept this finding: acceptances are kept in files that have no code owner "
+                        "here, so an acceptance would be an unowned file vouching for itself")
+
+
+def acceptable(finding) -> bool:
+    """Whether an ignore or baseline entry may accept this finding. One that may not is still matched
+    by the entries that name it, which carry UNACCEPTABLE_PROBLEM, so the report says why."""
+    return (getattr(finding, "rule", None), getattr(finding, "kind", None)) not in UNACCEPTABLE
+

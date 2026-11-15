@@ -175,7 +175,10 @@ def cmd_check(args) -> int:
               "--expires YYYY-MM-DD (it carries over the findings the file covers and accepts nothing new), or "
               "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
-    result = checker.check(target, config=config, platform=args.platform)
+    # A baseline or configuration given by path decides what the check accepts, so it needs an owner
+    # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h).
+    gate_files = [Path(p) for p in (args.baseline, args.config) if p]
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     # What a command the report suggests has to repeat to check the same thing.
     # One word each, so a value that begins with a hyphen is still read as a value.
