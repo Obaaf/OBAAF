@@ -23,7 +23,15 @@
 <p class="banner">Release 0.3.0 is on PyPI. This page describes that release, except where a sentence says development only. Development only, and the development version, mean code in the repository, numbered 0.4.0.dev0, that is not in a release.</p>
 <header class="header wrap">
   <a class="brand" href="#main">OBAAF <span>0.3.0</span></a>
-  <nav aria-label="On this page">
+  <nav aria-label="Pages">
+    <a href="index.html" aria-current="page">Home</a>
+    <a href="quickstart.html">Quickstart</a>
+    <a href="rules.html">Rules</a>
+    <a href="comparison.html">Comparison</a>
+    <a href="case-study.html">Case study</a>
+    <a href="papers.html">Papers</a>
+  </nav>
+  <nav class="subnav" aria-label="On this page">
     <a href="#try">Try it</a>
     <a href="#ideas">Three ideas</a>
     <a href="#relationship">Check, audit, enforcement</a>
@@ -224,7 +232,7 @@ jobs:
       </article>
       <article class="cmd">
         <h3><code>obaaf audit</code></h3>
-        <p>Development only, not in release 0.3.0. It reads repository settings it can see and compares them with the workflows. What it cannot read is "cannot tell", and cannot tell is not a pass.</p>
+        <p>Development only, not in release 0.3.0. It reads repository settings it can see and compares them with the workflows. A rule that cannot see what it needs answers "cannot tell", and the report never counts that as a pass. By default it does not change the exit status; with <code>--fail-on-cannot-tell</code> the command exits 1.</p>
       </article>
     </div>
     <h2 id="records-title" class="records-title">Records, and a caller's exit, are not enforcement.</h2>
