@@ -1049,27 +1049,31 @@ rules:
     supports: [FR9]
     description: >-
       No CODEOWNERS rule gives an owner to the workflow files or Jenkinsfiles, the local actions the
-      workflows use (`uses: ./path`), the workflow lockfile, or a workflow file not written yet, so a
-      change to how the project builds, releases or runs agents does not need an owner's review. A
-      second finding names the files that decide what the checks accept: the CODEOWNERS file itself,
-      the checker's configuration (each place it is looked for while there is none), a baseline or
-      configuration given by path, and the egress firewall policy. No ignore or baseline entry can
-      accept that second finding, because acceptances are kept in those files. CODEOWNERS is read as
-      GitHub documents it (a line ends at a line feed; a pattern and its owners are separated by spaces
-      or tabs; a comment begins at a `#` at the start of the line or after a space or tab; the last
-      matching rule wins; `**` crosses folders only in `**/`, `/**/` and a trailing `/**`; a file of
-      3 MB or more is not loaded). A rule whose owners are not all in the form `@user`, `@org/team` or
-      an e-mail address, or that names OBAAF's template placeholder, gives no owner. A CODEOWNERS file
-      that is a link, is not UTF-8, or needs more than two million comparisons is an error. Limits:
-      whether an owner exists and has write access, and whether code-owner review is required, are
-      not checked (`obaaf audit` reads review requirements); the check reads the working tree, so on a
-      pull request it reads that pull request's CODEOWNERS, while GitHub uses the base branch's;
-      scripts a workflow runs, actions a composite action uses, Jenkinsfiles in folders Jenkins
-      discovery skips, and a Jenkinsfile that is a link are not counted.
+      workflows use (`uses: ./path`), the workflow lockfile, or a workflow file not written yet (tried
+      under random names), so a change to how the project builds, releases or runs agents does not
+      need an owner's review. A link is checked by its own path and by the file it leads to. A second
+      finding names the files that decide what the checks accept: the CODEOWNERS file in use and each
+      place GitHub looks in before it, the checker's configuration (each place it is looked for while
+      there is none), a baseline or configuration given by path, and the egress firewall policy's
+      place. No ignore or baseline entry can accept that second finding, nor "no CODEOWNERS file" or
+      a CODEOWNERS file GitHub does not load, because the acceptance would be kept in a file with no
+      owner. CODEOWNERS is read as GitHub documents it (a line ends at a line feed; a pattern and its
+      owners are separated by spaces or tabs; a comment begins at a `#` at the start of the line or
+      after a space or tab; the last matching rule wins; `**` crosses folders only in `**/`, `/**/` and
+      a trailing `/**`; a file of 3 MB or more is not loaded). A rule whose owners are not all in the
+      form `@user`, `@org/team` or an e-mail address (with no space or control character), or that
+      names OBAAF's template placeholder, gives no owner. A CODEOWNERS file that is a link, is not
+      UTF-8, or needs more comparisons than the checker makes is an error. Limits: whether an owner
+      exists and has write access, and whether code-owner review is required, are not checked (`obaaf
+      audit` reads review requirements); the check reads the working tree, so on a pull request it
+      reads that pull request's CODEOWNERS, while GitHub uses the base branch's; a line indented with
+      spaces is read as a rule; scripts a workflow runs, actions a composite or JavaScript action uses,
+      Jenkinsfiles in folders Jenkins discovery skips, and a Jenkinsfile that is a link are not counted.
     fix: >-
-      Add CODEOWNERS rules for `/.github/` (workflows, local actions, the checker configuration and
-      this file), every Jenkinsfile, a root `obaaf.yml` and any baseline kept elsewhere, and require
-      code-owner review on protected branches (see templates/github-actions/CODEOWNERS.example).
+      Add CODEOWNERS rules for `/.github/` (workflows, local actions, the checker configuration, the
+      firewall policy and this file), every Jenkinsfile, a root `obaaf.yml` and `CODEOWNERS`, and any
+      baseline kept elsewhere, and require code-owner review on protected branches (see
+      templates/github-actions/CODEOWNERS.example).
 
   - id: OBAAF-REPO-002
     title: Agent instruction files have no code owner
@@ -1081,12 +1085,14 @@ rules:
     description: >-
       The repository contains files that steer AI agents (for example AGENTS.md, CLAUDE.md, REVIEW.md,
       skills, rules files or MCP configuration) that no CODEOWNERS rule gives an owner. Files are found
-      by the names the agents' own documentation gives, in every folder but `.git`, without regard to
-      letter case; a link is followed while it stays inside the repository, and then the file it leads
-      to needs an owner too. A link out of the repository is named in a note and not read. CODEOWNERS
-      is read as for OBAAF-REPO-001. Limits: files an instruction file pulls in by reference (`@path`
-      imports, Aider's `read:`, a context file name set in a tool's settings) are not followed, and a
-      tool whose file names are not in the list is not seen.
+      by the names the agents' own documentation gives, without regard to letter case: among the files
+      git tracks when the folder is a git work tree, otherwise in every folder but `.git`. A link is
+      followed while it stays inside the repository; then the link and the file it leads to need an
+      owner too. A link out of the repository is named in a note and not read. More entries, or more
+      names reached through links, than the checker looks through is an error. CODEOWNERS is read as
+      for OBAAF-REPO-001. Limits: files an instruction file pulls in by reference (`@path` imports,
+      Aider's `read:`, a context file name set in a tool's settings) are not followed, a tool whose file
+      names are not in the list is not seen, and files in a git submodule are not looked at.
     fix: >-
       Add CODEOWNERS rules for every agent instruction file and require code-owner review on protected
       branches.
@@ -1105,13 +1111,15 @@ rules:
       carriage return, the line and paragraph separators, variation selectors, tag characters and the
       invisible letters (Hangul fillers, the braille blank, Khmer inherent vowels) are reported; an
       emoji sequence, a keycap, the three recommended subdivision flags, one presentation selector
-      after a symbol, and a joiner between letters of a script that uses joiners are not. A file that
-      is not UTF-8 text, or is larger than two million bytes, is reported because the scan cannot see
-      what it hides. The finding is each character with a digest of its line; for a direction control,
-      of its paragraph. Limits: soft hyphens, right-to-left marks, ideographic variation selectors and
+      after a base of Unicode's emoji variation sequences, and a joiner between letters of a script
+      that joins (Arabic, Syriac, Thaana, the Indic scripts, Tibetan, Myanmar, Khmer, Mongolian) are
+      not. A file that is not UTF-8 text, or is larger than two million bytes, is reported because the
+      scan cannot see what it hides (pictures, archives, office and compiled files are not scanned).
+      The finding is each character with a digest of its line; for a direction control, of its
+      paragraph. Limits: soft hyphens, right-to-left marks, ideographic variation selectors and
       Mongolian selectors in ordinary text are reported too; text hidden by Markdown (HTML comments,
-      collapsed sections) and space characters are not; a few bits can still be carried by joiners
-      between emoji or between letters.
+      collapsed sections) and space characters are not; one bit per pair can still be carried by
+      joiners between emoji or between letters of a script that joins.
     fix: >-
       Remove the characters, review the file's history to find how they arrived, and keep the scan in
       CI with `obaaf check`.

@@ -424,7 +424,7 @@ class IgnoreEntryTest(unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertIn("1 finding(s) whose ignore entry has expired or does not count were not written", err)
             written = json.loads(out.read_text())["findings"]
-            self.assertEqual(len(written), 15)
+            self.assertEqual(len(written), 14)      # nor is "no CODEOWNERS file", which no entry accepts (2d.2h)
             self.assertFalse([e for e in written if e["path"].endswith("ci.yml")])
 
 
@@ -521,9 +521,11 @@ class MigrateTest(unittest.TestCase):
                 self.assertNotIn("fingerprint", item)
                 self.assertNotIn("message", item)
             code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low", "--no-fixes")
-            self.assertEqual(code, 0, out)
-            self.assertIn("Baseline: 16 finding(s) accepted by the baseline, 0 new.", out)
-            self.assertNotIn("Not accepted", out)
+            # Since slice 2d.2h the fixture's "no CODEOWNERS file" cannot be accepted (no file has an owner,
+            # the baseline included); the other 15 pass as before.
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+            self.assertIn("vouching for itself", out)
 
     def test_it_needs_an_owner_a_reason_and_a_date_that_count(self):
         with TempDir() as tmp:
@@ -553,7 +555,7 @@ class MigrateTest(unittest.TestCase):
             self.assertEqual(json.loads(old.read_text())["format"], baseline.FORMAT_V1)     # --output leaves it
             code, out, _ = run_cli("check", repo, "--baseline", new, "--fail-on", "low", "--no-fixes")
             self.assertEqual(code, 1)
-            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+            self.assertIn("Baseline: 14 finding(s) accepted by the baseline, 2 new.", out)
 
     def test_it_writes_nothing_when_no_entry_matches(self):
         with TempDir() as tmp:
@@ -611,7 +613,7 @@ class WriteBaselineTest(unittest.TestCase):
                          ("--owner", "nobody", "--reason", REASON, "--expires", SOON)):
                 code, _, err = run_cli("check", repo, "--write-baseline", out, *args)
                 self.assertEqual(code, 2, args)
-                self.assertIn("would accept 16 finding(s)", err)
+                self.assertIn("would accept 15 finding(s)", err)
                 self.assertIn("Nothing was written.", err)
                 self.assertFalse(out.exists())
 
@@ -633,9 +635,9 @@ class WriteBaselineTest(unittest.TestCase):
             code, _, err = run_cli("check", repo, "--write-baseline", out, "--owner", "@octocat", "--reason",
                                    "The new token is read-only", "--expires", later)
             self.assertEqual(code, 0, err)
-            self.assertIn(f"1 finding(s) newly accepted by @octocat until {later}, 15 kept", err)
+            self.assertIn(f"1 finding(s) newly accepted by @octocat until {later}, 14 kept", err)
             entries = json.loads(out.read_text())["findings"]
-            self.assertEqual(len(entries), 16)
+            self.assertEqual(len(entries), 15)      # "no CODEOWNERS file" is never written (slice 2d.2h)
             new = [e for e in entries if e["owner"] == "@octocat"]
             self.assertEqual([(e["rule"], e["facts"], e["expires"]) for e in new],
                              [("OBAAF-GHA-001", {"secrets": ["OTHER_TOKEN"]}, later)])
@@ -672,9 +674,12 @@ class WriteBaselineTest(unittest.TestCase):
             before = json.loads(out.read_text())
             code, _, err = run_cli("check", repo, "--write-baseline", out)
             self.assertEqual(code, 0, err)
-            self.assertIn("0 finding(s) newly accepted, 16 kept", err)
+            self.assertIn("0 finding(s) newly accepted, 15 kept", err)
             self.assertEqual(json.loads(out.read_text())["findings"], before["findings"])
-            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "low")[0], 0)
+            # Everything is accepted but the fixture's "no CODEOWNERS file" (medium), which no entry can
+            # accept since slice 2d.2h.
+            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "high")[0], 0)
+            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "medium")[0], 1)
 
     def test_it_writes_only_where_a_baseline_can_go(self):
         with TempDir() as tmp:
@@ -697,7 +702,7 @@ class WriteBaselineTest(unittest.TestCase):
             repo, _ = fixture_repo(tmp)
             code, _, err = run_cli("check", repo, "--write-baseline", "/dev/null", *ACCEPT)
             self.assertEqual(code, 0, err)
-            self.assertIn("16 finding(s) newly accepted", err)
+            self.assertIn("15 finding(s) newly accepted", err)
 
     def test_a_report_that_cannot_be_written_is_an_error(self):
         with TempDir() as tmp:

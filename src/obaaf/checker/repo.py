@@ -13,6 +13,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import subprocess
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,8 +22,10 @@ CODEOWNERS_LOCATIONS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 # GitHub: "CODEOWNERS files must be under 3 MB in size. A CODEOWNERS file over this limit will not be
 # loaded". The lower reading of 3 MB is taken, so a file GitHub may not load is never read as loaded.
 CODEOWNERS_LIMIT = 3_000_000
-# At most this many comparisons of a pattern with a path; past it the file is an error, never a pass.
+# At most this many comparisons of a pattern with a path, and this many looks at a rule (most end at
+# a check that the path holds the pattern's plain text); past either the file is an error, never a pass.
 MATCH_BUDGET = 2_000_000
+STEP_BUDGET = 30_000_000
 # OBAAF's own template ships this owner as a placeholder (templates/github-actions/CODEOWNERS.example).
 PLACEHOLDER_OWNERS = ("@your-org/",)
 # Only the repository's own history is left out of the walk. Folders that are usually build output or
@@ -32,8 +35,11 @@ SKIP_DIRS = {".git"}
 # An instruction folder may hold pictures and archives an agent does not read as text; these are
 # owned like any other file and not scanned for hidden characters.
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tif", ".tiff", ".pdf", ".zip",
-                   ".gz", ".tgz", ".bz2", ".xz", ".7z", ".tar", ".woff", ".woff2", ".ttf", ".otf", ".mp3", ".mp4",
-                   ".wav", ".ogg", ".webm", ".mov", ".avif", ".heic"}
+                   ".gz", ".tgz", ".bz2", ".xz", ".7z", ".tar", ".woff", ".woff2", ".ttf", ".otf", ".ttc", ".eot",
+                   ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".mov", ".avif", ".heic", ".psd", ".docx", ".xlsx",
+                   ".pptx", ".odt", ".ods", ".odp", ".wasm", ".pyc", ".class", ".jar", ".so", ".dylib", ".dll",
+                   ".exe", ".bin", ".sqlite", ".db", ".npy", ".pkl", ".parquet"}
+BINARY_NAMES = {".ds_store", "thumbs.db"}
 
 
 # ------------------------------------------------------------------ CODEOWNERS
@@ -73,6 +79,9 @@ class UnreadableFile(OSError):
 def _owner_problem(owner: str) -> str | None:
     from obaaf.checker.acceptance import owner_problem
 
+    odd = next((ch for ch in owner if unicodedata.category(ch)[0] in "ZC"), None)
+    if odd is not None:
+        return f"its owner {owner[:60]!r} holds U+{ord(odd):04X}, a space or control character"
     if any(owner.lower().startswith(p) for p in PLACEHOLDER_OWNERS):
         return f"its owner {owner[:60]!r} is the placeholder from OBAAF's template"
     return owner_problem(owner)
@@ -117,6 +126,13 @@ def _entry(root: Path, rel: str) -> str | None:
     an entry has not been established, and it is never a reason to read a file elsewhere."""
     folder, _, name = rel.rpartition("/")
     directory = root / folder if folder else root
+    if folder:
+        # The folder's own name is compared exactly too (`.GitHub` is not `.github`).
+        try:
+            if folder not in os.listdir(root):
+                return None
+        except OSError as exc:
+            raise UnreadableFile(rel, exc) from exc
     try:
         names = os.listdir(directory)
     except FileNotFoundError:
@@ -222,7 +238,7 @@ class Pattern:
             self.suffix = "dir"
         elif self.tokens and self.tokens[-1][0] == "rest":
             self.suffix = "none"
-        elif "*" in last and last != "**":
+        elif ("*" in last and last != "**") or "?" in last:
             self.suffix = "none"
         else:
             self.suffix = "opt"
@@ -301,24 +317,13 @@ class Pattern:
         return bool(s & done) and self.suffix in ("none", "opt")
 
 
-def _pattern_to_regex(pattern: str) -> re.Pattern:
-    """A regular expression for a CODEOWNERS pattern (kept for callers that want one; matching uses
-    `Pattern`, which does not backtrack)."""
-    compiled = Pattern(pattern)
-    if compiled.regex is not None:
-        return compiled.regex
-    class _Adapter:                                    # noqa: N801 - an object with .match like a regex
-        def match(self, path):
-            return compiled.match(path) or None
-    return _Adapter()                                  # type: ignore[return-value]
-
-
 _WILDCARDS = re.compile(r"\*+/?|\?")
 
 
 class OwnerIndex:
     """The rules of a CODEOWNERS file, each pattern compiled once, asked from the last rule up so that
-    the first match is the one that wins. More comparisons than MATCH_BUDGET raise UnreadableFile."""
+    the first match is the one that wins. More comparisons than MATCH_BUDGET, or looks at a rule than
+    STEP_BUDGET, raise UnreadableFile."""
 
     def __init__(self, rules: list[OwnerRule], rel: str = "CODEOWNERS") -> None:
         self.rules = rules
@@ -326,13 +331,14 @@ class OwnerIndex:
         self._compiled: dict[str, Pattern] = {}
         self._required: dict[str, str] = {}
         self.spent = 0
+        self.steps = 0
 
     def rule_for(self, path: str) -> OwnerRule | None:
         for rule in reversed(self.rules):
-            self.spent += 1
-            if self.spent > MATCH_BUDGET:
-                raise UnreadableFile(self.rel, detail=f"needs more than {MATCH_BUDGET:,} comparisons of a pattern "
-                                                      "with a path, more than the checker makes")
+            self.steps += 1
+            if self.steps > STEP_BUDGET:
+                raise UnreadableFile(self.rel, detail=f"needs more than {STEP_BUDGET:,} looks at a rule, more than the "
+                                                      "checker makes")
             required = self._required.get(rule.pattern)
             if required is None:
                 # A run of plain characters any matching path contains (each piece between wildcards
@@ -341,6 +347,10 @@ class OwnerIndex:
                 required = self._required[rule.pattern] = max(pieces, key=len)
             if required not in path:
                 continue
+            self.spent += 1
+            if self.spent > MATCH_BUDGET:
+                raise UnreadableFile(self.rel, detail=f"needs more than {MATCH_BUDGET:,} comparisons of a pattern "
+                                                      "with a path, more than the checker makes")
             compiled = self._compiled.get(rule.pattern)
             if compiled is None:
                 compiled = self._compiled[rule.pattern] = Pattern(rule.pattern)
@@ -382,63 +392,68 @@ def _glob_to_regex(glob: str, ignore_case: bool = False) -> re.Pattern:
 @dataclass
 class InstructionFile:
     """An agent instruction file as found: `rel` is where an agent finds it; `real` is the file in the
-    repository it reads when `rel` is or passes through a link (None when it is not a link), and
-    `outside` says the link leads out of the repository or to nothing."""
+    repository it reads when `rel` is or passes through a link (None when no link is on the way);
+    `link` is the link entry that was followed (the link a pull request would change); `outside` says
+    the link leads out of the repository or to nothing."""
     rel: str
     real: str | None = None
     outside: bool = False
+    link: str | None = None
 
 
-def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | None = None) -> list[InstructionFile]:
-    """Agent instruction files under `root`, matched without regard to letter case (an agent on a
-    file system that ignores case reads `agents.md` as AGENTS.md). Links are followed while they stay
-    inside the repository; a directory that cannot be listed is added to `unlisted`."""
-    regexes = [_glob_to_regex(p, ignore_case=True) for p in patterns]
-    found = []
+class TooManyFiles(OSError):
+    """More entries than the checker looks through: the instruction files cannot all be found."""
+
+
+# Entries looked at, and names reached through links, before the search for instruction files stops
+# with an error (never with a pass).
+WALK_LIMIT = 2_000_000
+ALIAS_LIMIT = 200_000
+LINK_DEPTH = 8
+
+
+def _git_tracked(root: Path) -> list[str] | None:
+    """The files git tracks under `root`, when `root` is the top of a git work tree and git answers;
+    None otherwise (the caller then walks the folder). Tracked files are what a pull request changes
+    and what a checkout holds, so an installed node_modules or a local build folder is left out. git
+    is run with no hook and no file-system monitor, and with GIT_* variables removed, so neither the
+    repository's configuration nor the environment can make it run anything else."""
+    if not (root / ".git").exists():
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        real_root = root.resolve()
-    except OSError:
-        real_root = root
-    for rel, path, linked in _walk(root, unlisted, real_root):
-        # A link to a folder outside the repository is named when a file inside it would match.
-        probe = rel + "_" if rel.endswith("/") else rel
-        if not any(rx.match(probe) for rx in regexes):
-            continue
-        if not linked:
-            found.append(InstructionFile(rel))
-            continue
-        try:
-            target = path.resolve(strict=True)
-            real = target.relative_to(real_root).as_posix()
-            outside = not target.is_file()
-        except (OSError, ValueError, RuntimeError):
-            real, outside = None, True
-        found.append(InstructionFile(rel, real=real, outside=outside))
-    return sorted(found, key=lambda f: f.rel)
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                               "-c", "core.hooksPath=/dev/null", "ls-files", "-z", "--cached"],
+                              cwd=str(root), env=env, capture_output=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return sorted({p.decode("utf-8", "surrogateescape") for p in done.stdout.split(b"\0") if p})
 
 
-def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None) -> list[str]:
-    """The paths of agent instruction files under `root` (see find_instruction_entries)."""
-    return [f.rel for f in find_instruction_entries(root, patterns, unlisted)]
-
-
-WALK_LIMIT = 500_000      # entries looked at before the walk stops and says so
-
-
-def _walk(root: Path, unlisted: list | None = None, real_root: Path | None = None):
-    """(path relative to root, path, whether a link is on the way) for every file. A link to a folder
-    is followed when it leads inside the repository and is not one of the folders it is already in; a
-    link to a folder outside is yielded once as `rel/`, and a link to a file as found. A walk that
-    meets more than WALK_LIMIT entries stops and adds the folder it was in to `unlisted`."""
-    real_root = real_root or root
-    try:
-        top = root.resolve()
-    except OSError:
-        top = root
-    stack = [(root, "", False, frozenset({top}))]
+def _scan(root: Path, unlisted: list | None) -> tuple[list[str], list[str]]:
+    """(regular files, links) under `root`, each real folder once, without following links. Uses git's
+    list of tracked files when there is one; otherwise walks every folder but `.git`."""
+    tracked = _git_tracked(root)
+    files: list[str] = []
+    links: list[str] = []
+    if tracked is not None:
+        for rel in tracked:
+            path = root / rel
+            try:
+                if path.is_symlink():
+                    links.append(rel)
+                elif path.is_file():
+                    files.append(rel)
+            except OSError:
+                if unlisted is not None:
+                    unlisted.append(rel)
+        return files, links
+    stack = [(root, "")]
     count = 0
     while stack:
-        current, prefix, linked, ancestors = stack.pop()
+        current, prefix = stack.pop()
         try:
             entries = sorted(os.scandir(current), key=lambda e: e.name)
         except OSError:
@@ -448,42 +463,99 @@ def _walk(root: Path, unlisted: list | None = None, real_root: Path | None = Non
         for entry in entries:
             count += 1
             if count > WALK_LIMIT:
-                if unlisted is not None:
-                    unlisted.append((prefix.rstrip("/") or ".") + f" (and the rest: more than {WALK_LIMIT:,} entries)")
-                return
+                raise TooManyFiles(f"the repository has more than {WALK_LIMIT:,} entries, more than the checker "
+                                   "looks through for agent instruction files")
             rel = prefix + entry.name
             try:
-                is_link = entry.is_symlink()
-                if entry.is_dir(follow_symlinks=False):
+                if entry.is_symlink():
+                    links.append(rel)
+                elif entry.is_dir(follow_symlinks=False):
                     if entry.name not in SKIP_DIRS:
-                        try:
-                            key = Path(entry.path).resolve()
-                        except OSError:
-                            key = Path(entry.path)
-                        stack.append((Path(entry.path), rel + "/", linked, ancestors | {key}))
-                    continue
-                if is_link:
-                    target = Path(entry.path)
-                    if target.is_dir():
-                        try:
-                            key = target.resolve(strict=True)
-                            key.relative_to(real_root)
-                        except (OSError, ValueError, RuntimeError):
-                            yield rel + "/", target, True      # a folder outside: named, not walked
-                            continue
-                        if entry.name not in SKIP_DIRS and key not in ancestors:
-                            stack.append((target, rel + "/", True, ancestors | {key}))
-                        continue
-                    yield rel, target, True
-                    continue
-                regular = entry.is_file(follow_symlinks=False)
+                        stack.append((Path(entry.path), rel + "/"))
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(rel)
             except OSError:
                 # A folder that can be listed and not entered: its entries cannot be looked at.
                 if unlisted is not None:
                     unlisted.append(prefix.rstrip("/") or ".")
                 break
-            if regular:
-                yield rel, Path(entry.path), linked
+    return sorted(files), sorted(links)
+
+
+def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | None = None,
+                             errors: list | None = None) -> list[InstructionFile]:
+    """Agent instruction files under `root`, matched without regard to letter case (an agent on a
+    file system that ignores case reads `agents.md` as AGENTS.md). Each real file is found once by its
+    own path; a link is followed while it stays inside the repository, and every file reached through
+    it is found again by the name an agent uses (through at most LINK_DEPTH links). Raises
+    TooManyFiles past WALK_LIMIT entries, and past ALIAS_LIMIT names reached through links unless
+    `errors` is given: then the problem is added to it and what was found so far is returned."""
+    import bisect as _bisect
+
+    regexes = [_glob_to_regex(p, ignore_case=True) for p in patterns]
+
+    def wanted(rel: str) -> bool:
+        return any(rx.match(rel) for rx in regexes)
+
+    try:
+        real_root = root.resolve()
+    except OSError:
+        real_root = root
+    files, links = _scan(root, unlisted)
+    found: dict[str, InstructionFile] = {rel: InstructionFile(rel) for rel in files if wanted(rel)}
+    # (name an agent uses, the link entry first followed, depth, the link's own path in the repository).
+    # A name reached through a link leads where the link's own path leads, which is resolved once.
+    queue = [(rel, rel, 1, rel) for rel in links]
+    resolved: dict[str, tuple | None] = {}
+    made = 0
+    while queue:
+        name, first, depth, key = queue.pop()
+        if key not in resolved:
+            try:
+                target = (root / key).resolve(strict=True)
+                resolved[key] = (target.relative_to(real_root).as_posix(), target.is_dir())
+            except (OSError, ValueError, RuntimeError):
+                resolved[key] = None
+        try:
+            if resolved[key] is None:
+                raise ValueError(key)
+            real, is_dir = resolved[key]
+        except (OSError, ValueError, RuntimeError):
+            # Out of the repository or to nothing: named when a file there would match.
+            if wanted(name) or wanted(name + "/_"):
+                found.setdefault(name, InstructionFile(name, outside=True, link=first))
+            continue
+        if not is_dir:
+            if wanted(name) or wanted(real):
+                found[name] = InstructionFile(name, real=real, link=first)
+            continue
+        if depth > LINK_DEPTH:
+            continue
+        prefix = real + "/" if real != "." else ""
+        for pool, is_link in ((files, False), (links, True)):
+            at = _bisect.bisect_left(pool, prefix) if prefix else 0
+            while at < len(pool) and pool[at].startswith(prefix):
+                inner = pool[at]
+                at += 1
+                alias = name + "/" + inner[len(prefix):]
+                made += 1
+                if made > ALIAS_LIMIT:
+                    problem = (f"links lead to more than {ALIAS_LIMIT:,} names, more than the checker follows when it "
+                               "looks for agent instruction files")
+                    if errors is None:
+                        raise TooManyFiles(problem)
+                    errors.append(problem)      # what was found so far is still checked
+                    return sorted(found.values(), key=lambda f: f.rel)
+                if is_link:
+                    queue.append((alias, first, depth + 1, inner))
+                elif wanted(alias):
+                    found.setdefault(alias, InstructionFile(alias, real=inner, link=first))
+    return sorted(found.values(), key=lambda f: f.rel)
+
+
+def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None) -> list[str]:
+    """The paths of agent instruction files under `root` (see find_instruction_entries)."""
+    return [f.rel for f in find_instruction_entries(root, patterns, unlisted)]
 
 
 # ------------------------------------------------------------ hidden characters
@@ -513,17 +585,33 @@ def _is_pictographic(ch: str) -> bool:
         (0x2190 <= cp <= 0x21FF) or (0x2300 <= cp <= 0x23FF) or cp in (0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139)
 
 
+# Bases of Unicode's emoji variation sequences outside the pictograph ranges above.
+_EMOJI_BASES = {0x24C2, 0x25AA, 0x25AB, 0x25B6, 0x25C0, 0x25FB, 0x25FC, 0x25FD, 0x25FE, 0x2934, 0x2935, 0x3030,
+                0x303D, 0x3297, 0x3299}
+
+
 def _is_symbol(ch: str) -> bool:
-    """A character that may take an emoji or text presentation selector: a pictograph, any symbol,
-    or one of the two punctuation marks with an emoji form (U+3030 wavy dash, U+303D part alternation)."""
-    return _is_pictographic(ch) or unicodedata.category(ch) in ("So", "Sm") or ord(ch) in (0x3030, 0x303D)
+    """A character that may take an emoji or text presentation selector: a pictograph, or another base
+    of Unicode's emoji variation sequences. Not every symbol: a selector after `|` or `=` carries a bit."""
+    return _is_pictographic(ch) or ord(ch) in _EMOJI_BASES
+
+
+# Scripts in which a zero-width joiner or non-joiner changes how letters join: Arabic (with its
+# supplements and presentation forms), Syriac, Thaana, the Indic scripts from Devanagari to Sinhala,
+# Tibetan, Myanmar, Khmer and Mongolian.
+_JOINING_SCRIPTS = ((0x0600, 0x06FF), (0x0700, 0x074F), (0x0750, 0x077F), (0x0780, 0x07BF), (0x08A0, 0x08FF),
+                    (0x0900, 0x0DFF), (0x0F00, 0x0FFF), (0x1000, 0x109F), (0x1780, 0x17FF), (0x1800, 0x18AF),
+                    (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))
+
+
+def _in_joining_script(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _JOINING_SCRIPTS) and unicodedata.category(ch)[0] in "LM"
 
 
 def _joins_letters(prev: str, nxt: str) -> bool:
-    """A zero-width joiner or non-joiner between two letters or marks of a script that uses them
-    (Arabic, Persian, Hebrew, the Indic scripts and later blocks), where it changes how letters join."""
-    return bool(prev and nxt) and ord(prev) >= 0x0590 and ord(nxt) >= 0x0590 and \
-        unicodedata.category(prev)[0] in "LM" and unicodedata.category(nxt)[0] in "LM"
+    """A zero-width joiner or non-joiner between two letters or marks of a script that uses them."""
+    return bool(prev and nxt) and _in_joining_script(prev) and _in_joining_script(nxt)
 
 
 @dataclass

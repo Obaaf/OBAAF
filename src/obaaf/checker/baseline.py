@@ -237,11 +237,6 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
     for f in sorted(findings, key=lambda f: not f.suppressed):
         if f.state == FIXED:
             continue
-        if not acceptance_mod.acceptable(f):
-            # Its entry is left over (stale), and the finding says why nothing accepts it.
-            if by_key.get(finding_key(f)) and acceptance_mod.UNACCEPTABLE_NOTE not in f.message:
-                f.message += acceptance_mod.UNACCEPTABLE_NOTE
-            continue
         groups = by_key.get(finding_key(f))
         if not groups:
             continue
@@ -261,6 +256,9 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
                 made.source, made.owner, made.reason, made.expires,
                 made.problems + [f"it accepts the finding at {entry['severity']} severity and the finding is "
                                  f"now {f.severity}"])
+        if not acceptance_mod.acceptable(f):
+            made = acceptance_mod.Acceptance(made.source, made.owner, made.reason, made.expires,
+                                             made.problems + [acceptance_mod.UNACCEPTABLE_PROBLEM])
         f.acceptance = made
         f.baselined = made.valid
     return [entry for entry in entries if id(entry) not in used]

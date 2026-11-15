@@ -3606,32 +3606,40 @@ def _line_digests(text: str, hidden: list) -> list[str]:
     into a line feed (if one reaches this function before a line feed it is left out of the digest).
     A form feed, a vertical tab, U+0085 or U+2028 does not end a line: text after one is still beside
     the character for a reader and for a direction override. A direction control (U+202A to U+202E,
-    U+2066 to U+2069, the marks) is digested with the rest of its paragraph, up to the next blank
-    line, because rendered Markdown joins those lines and the control reorders them all (slice 2d.2h).
-    Each line start is found once, so the cost is linear in the text."""
+    U+2066 to U+2069, the marks) is digested with its whole paragraph, from the blank line before it
+    to the blank line after it, because rendered Markdown joins those lines and the control reorders
+    them (slice 2d.2h). Line and paragraph bounds are found once and each is hashed once, so the cost
+    is linear in the text."""
+    def digest(piece: str) -> str:
+        if piece.endswith("\r"):
+            piece = piece[:-1]
+        return hashlib.sha256(piece.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
     starts = [0]
     at = text.find("\n")
     while at != -1:
         starts.append(at + 1)
         at = text.find("\n", at + 1)
-    cache: dict[tuple[int, bool], str] = {}
+    # Paragraphs: the text between blank lines (a blank line holds only spaces and tabs).
+    breaks = [0]
+    for m in re.finditer(r"\n[ \t]*(?=\n)", text):
+        breaks.append(m.start() + 1)
+    cache: dict[tuple[str, int], str] = {}
     digests = []
     for h in hidden:
         offset = h.offset if h.offset >= 0 else starts[h.line - 1] + h.column - 1
-        index = bisect.bisect_right(starts, offset) - 1
-        paragraph = h.kind == "bidirectional control"
-        key = (index, paragraph)
-        if key not in cache:
-            begin = starts[index]
-            end = text.find("\n", begin)
-            if paragraph:
-                blank = re.compile(r"\n[ \t]*(?:\n|\Z)")
-                found = blank.search(text, begin)
-                end = found.start() if found else -1
-            line = text[begin: len(text) if end == -1 else end]
-            if line.endswith("\r"):
-                line = line[:-1]
-            cache[key] = hashlib.sha256(line.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+        if h.kind == "bidirectional control":
+            index = bisect.bisect_right(breaks, offset) - 1
+            key = ("p", index)
+            if key not in cache:
+                end = breaks[index + 1] if index + 1 < len(breaks) else len(text)
+                cache[key] = digest(text[breaks[index]:end].strip("\n"))
+        else:
+            index = bisect.bisect_right(starts, offset) - 1
+            key = ("l", index)
+            if key not in cache:
+                end = text.find("\n", starts[index])
+                cache[key] = digest(text[starts[index]: len(text) if end == -1 else end])
         digests.append(cache[key])
     return digests
 
@@ -3661,7 +3669,12 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     except repo_checks.UnreadableFile as exc:
         errors.append(str(exc))
         codeowners, unread = repo_checks.Codeowners(exc.rel), True
-    entries = repo_checks.find_instruction_entries(root, catalog.detection.get("instruction_files", []), unlisted)
+    try:
+        entries = repo_checks.find_instruction_entries(root, catalog.detection.get("instruction_files", []), unlisted,
+                                                       errors)
+    except repo_checks.TooManyFiles as exc:
+        errors.append(str(exc))
+        entries = []
     if notes is not None and unlisted:
         shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
         notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
@@ -3674,7 +3687,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
                      "target exists would.")
     # Who must own what: each instruction file where an agent finds it, and the file in the repository
     # it reads when that is a link.
-    instruction_files = sorted({e.rel.rstrip("/") for e in entries} | {e.real for e in entries if e.real})
+    instruction_files = sorted({e.rel.rstrip("/") for e in entries} | {e.real for e in entries if e.real}
+                               | {e.link for e in entries if e.link})
 
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
         message, facts = compose(rule, kind, template, None, None, values)
@@ -3689,17 +3703,22 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     # lockfile, and a workflow file not written yet, so that owning each file by name is not owning
     # the folder a new workflow lands in.
     ci_files = set(workflow_paths) | set(local_actions or [])
+    probes: dict[str, str] = {}
     if (root / ".github" / "workflows").is_dir():
         if (root / ".github" / "workflows" / "actions.lock").is_file():
-            ci_files.add(".github/workflows/actions.lock")
-        ci_files.update(NEW_WORKFLOW_PROBES)
+            ci_files.update(_with_target(root, ".github/workflows/actions.lock"))
+        probes = _new_workflow_probes()
     # The files that decide what the check accepts. A configuration file that is not there yet can be
-    # added by any change, so while there is none, each place the checker looks for one counts.
+    # added by any change, so while there is none, each place the checker looks for one counts; so do
+    # the firewall policy's place, and each CODEOWNERS place GitHub looks in before the one in use.
     gate = set(gate_files or [])
-    present = [loc for loc in CONFIG_FILES if (root / loc).is_file()]
-    gate.update(present or CONFIG_FILES)
-    if (root / egress_mod.FIREWALL_POLICY).is_file():
-        gate.add(egress_mod.FIREWALL_POLICY)
+    present = [loc for loc in CONFIG_FILES if (root / loc).is_file() or (root / loc).is_symlink()]
+    for loc in present or CONFIG_FILES:
+        gate.update(_with_target(root, loc))
+    gate.update(_with_target(root, egress_mod.FIREWALL_POLICY))
+    if codeowners.path:
+        places = repo_checks.CODEOWNERS_LOCATIONS
+        gate.update(places[:places.index(codeowners.path) + 1] if codeowners.path in places else [codeowners.path])
 
     if unread:
         pass        # the error stands for both rules: who owns what cannot be read
@@ -3737,10 +3756,17 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
                             + ", so GitHub assigns no owner)")
 
             missing, problems = uncovered(sorted(ci_files))
+            # A new workflow file: owned only when every one of several names nobody can predict is.
+            for label, names in sorted(probes.items()):
+                lacking, why_not = uncovered(names)
+                if lacking:
+                    missing.append(label)
+                    problems.extend(why_not)
+            missing = sorted(missing)
             if missing:
                 add("OBAAF-REPO-001", codeowners.path, 1, "No code owner for {count} CI definition file(s): {files}{why}.",
                     kind="no-owner", why=why(problems), **files(missing))
-            missing, problems = uncovered(sorted(gate | {codeowners.path}))
+            missing, problems = uncovered(sorted(gate))
             if missing:
                 add("OBAAF-REPO-001", codeowners.path, 1,
                     "No code owner for {count} file(s) that decide what the checks accept: {files}{why}. Without "
@@ -3758,18 +3784,24 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
         if entry.outside:
             continue
         rel = entry.rel
-        if Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES:
+        name = Path(rel).name.lower()
+        if Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or name in repo_checks.BINARY_NAMES:
             continue
         try:
             with open(root / rel, "rb") as handle:
                 data = handle.read(INSTRUCTION_LIMIT + 1)
+                whole = hashlib.sha256(data)
+                if len(data) > INSTRUCTION_LIMIT:
+                    # The whole file is digested, so an acceptance does not cover what is added later.
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        whole.update(chunk)
         except OSError as exc:
             errors.append(str(repo_checks.UnreadableFile(rel, exc)))
             continue
         if len(data) > INSTRUCTION_LIMIT:
             add("OBAAF-INS-001", rel, 1, "The file is larger than {limit} bytes, more than the checker scans, so it "
                 "cannot tell what the file hides.", kind="too-large", limit=Note(f"{INSTRUCTION_LIMIT:,}"),
-                digest=Fact(hashlib.sha256(data).hexdigest()[:32], ""))
+                digest=Fact(whole.hexdigest()[:32], ""))
             continue
         try:
             text = data.decode("utf-8")
@@ -3790,7 +3822,8 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
             # down is the same finding; a character on other text is another one, because where a
             # direction override or an invisible instruction sits is what it does. The message shows
             # the first three with their line and column, and the count of all of them.
-            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) on a line with sha256 {digest}"
+            marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) "
+                           f"{'in a paragraph' if h.kind == 'bidirectional control' else 'on a line'} with sha256 {digest}"
                            for h, digest in zip(hidden, _line_digests(text, hidden)))
             add("OBAAF-INS-001", rel, hidden[0].line, "{count} hidden character(s): {characters}{more}.",
                 count=Note(str(len(hidden))), more=Note(more), characters=Fact(marks, detail))
@@ -3801,3 +3834,33 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
 CONFIG_FILES = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
 # Names standing for a workflow file nobody has written yet: whoever may add one changes what runs.
 NEW_WORKFLOW_PROBES = (".github/workflows/(a new workflow).yml", ".github/workflows/(a new workflow).yaml")
+
+
+def _new_workflow_probes() -> dict[str, list[str]]:
+    """For each extension, the label the finding shows and names to try: the label itself and five
+    random names of random length, so a CODEOWNERS file cannot be written to own exactly the names
+    the checker tries (slice 2d.2h's review)."""
+    import secrets
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    out = {}
+    for label in NEW_WORKFLOW_PROBES:
+        ext = label.rsplit(".", 1)[1]
+        names = [label] + [".github/workflows/" + "".join(secrets.choice(alphabet) for _ in range(1 + secrets.randbelow(24)))
+                           + "." + ext for _ in range(5)]
+        out[label] = names
+    return out
+
+
+def _with_target(root: Path, rel: str) -> list[str]:
+    """`rel`, and when it is a link, the file it leads to: its path in the repository, or a label that
+    says it leads out (which no CODEOWNERS rule can own)."""
+    out = [rel]
+    path = root / rel
+    try:
+        if not path.is_symlink():
+            return out
+        target = path.resolve(strict=False)
+        out.append(target.relative_to(root.resolve()).as_posix())
+    except (OSError, ValueError, RuntimeError):
+        out.append(f"{rel} (a link out of the repository)")
+    return out

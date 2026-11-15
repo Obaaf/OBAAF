@@ -11,6 +11,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field, replace
@@ -421,11 +422,6 @@ def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None
     for finding in findings:
         if finding.rule == IDLE_DECLARATION:
             continue    # accepted by a baseline entry only, which names the one declaration (see Config.from_data)
-        if not acceptance_mod.acceptable(finding):
-            if any(entry["rule"] == finding.rule and fnmatch.fnmatch(finding.path, str(entry["path"]))
-                   for entry in config.ignore):
-                finding.message += acceptance_mod.UNACCEPTABLE_NOTE
-            continue
         for entry in config.ignore:
             if entry["rule"] != finding.rule or not fnmatch.fnmatch(finding.path, str(entry["path"])):
                 continue
@@ -433,6 +429,8 @@ def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None
                 continue
             until = acceptance_mod.parse_date(entry["until"])
             made = acceptance_mod.make(acceptance_mod.IGNORE, entry.get("owner"), entry["reason"], until, today)
+            if not acceptance_mod.acceptable(finding):
+                made.problems.append(acceptance_mod.UNACCEPTABLE_PROBLEM)
             if made.valid:
                 finding.suppressed = f"{entry['reason']} (until {until.isoformat()})"
                 finding.acceptance = made
@@ -607,9 +605,14 @@ def _as_found(path: Path, root: Path, strict: bool = False) -> list[str]:
         absolute = Path(os.path.abspath(path))
         out.append(absolute.relative_to(root).as_posix())
     except ValueError:
-        if strict:
-            return []
-        out.append(path.as_posix())
+        # The path may reach the repository through a link (macOS's /tmp is /private/tmp): its folder,
+        # with links resolved, is tried before it counts as outside.
+        try:
+            out.append((absolute.parent.resolve() / absolute.name).relative_to(root).as_posix())
+        except (ValueError, OSError, RuntimeError):
+            if strict:
+                return []
+            out.append(path.as_posix())
     try:
         real = path.resolve().relative_to(root).as_posix()
         if real not in out:
@@ -628,13 +631,14 @@ def _local_action_files(root: Path, workflow) -> set[str]:
             uses = step.uses
             if not wf_mod.is_local_reference(uses):
                 continue
-            folder = uses[2:].split("@", 1)[0].strip("/")
-            if ".." in folder.split("/"):
-                continue
-            prefix = f"{folder}/" if folder else ""
+            folder = posixpath.normpath(uses[2:].split("@", 1)[0].strip("/") or ".")
+            if folder == ".." or folder.startswith("../"):
+                continue        # outside the repository: nothing here to own
+            prefix = "" if folder == "." else f"{folder}/"
             names = [f"{prefix}action.yml", f"{prefix}action.yaml"]
-            present = [n for n in names if (root / n).is_file()]
-            out.update(present or names[:1])
+            present = [n for n in names if (root / n).is_file() or (root / n).is_symlink()]
+            for name in present or names[:1]:
+                out.update(_as_found(root / name, root))
     return out
 
 
