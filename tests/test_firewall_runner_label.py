@@ -65,9 +65,10 @@ class FirewallRunnerLabelTest(unittest.TestCase):
         self.assertNotIn("OBAAF-GHA-013", found)
 
     def test_a_label_with_spaces_round_it_is_one_neither_rule_names(self):
-        """GitHub's handling of a label written with spaces round it was not read. OBAAF-GHA-013 has
-        never trimmed a label; OBAAF-GHA-020 used to, and so cleared on a label OBAAF-GHA-013 reported.
-        Now both fail closed: a medium OBAAF-GHA-013, and OBAAF-GHA-020 "cannot tell"."""
+        """GitHub's handling of a label written with spaces round it was not read. OBAAF-GHA-013's
+        hosted list has never trimmed a label; OBAAF-GHA-020 used to, and so cleared on a label
+        OBAAF-GHA-013 reported. Now both fail closed: a medium OBAAF-GHA-013, and, where the policy
+        enforces, OBAAF-GHA-020 "cannot tell"."""
         found = findings('" ubuntu-24.04-firewall "')
         self.assertEqual(found["OBAAF-GHA-013"].severity, "medium")
         self.assertNotEqual(found["OBAAF-GHA-020"].state, "fixed")
@@ -87,6 +88,20 @@ class FirewallRunnerLabelTest(unittest.TestCase):
         found = findings("{group: agents, labels: [ubuntu-24.04-firewall]}")
         self.assertEqual(found["OBAAF-GHA-013"].severity, "high")
         self.assertNotEqual(found["OBAAF-GHA-020"].state, "fixed")
+
+    def test_a_runner_group_with_a_value_that_looks_false_is_still_a_group(self):
+        """`group: 0`, `false`, `''` or null: the key names a runner group whatever its value. Before,
+        a value that Python reads as false was dropped, and the job was taken for GitHub-hosted (or,
+        before this slice, for an unknown label at medium) while OBAAF-GHA-020 cleared."""
+        for group in ("0", "false", "''", "~", "0.0"):
+            with self.subTest(group=group):
+                found = findings(f"{{group: {group}, labels: [ubuntu-24.04-firewall]}}")
+                self.assertEqual(found["OBAAF-GHA-013"].severity, "high")
+                self.assertNotEqual(found["OBAAF-GHA-020"].state, "fixed")
+        for group in ("0", "false"):
+            with self.subTest(group=group, label="ubuntu-latest"):
+                self.assertEqual(findings(f"{{group: {group}, labels: [ubuntu-latest]}}")["OBAAF-GHA-013"].severity,
+                                 "high")
 
     def test_a_matrix_of_the_firewall_and_a_hosted_label_names_no_unknown_runner(self):
         found = findings("${{ matrix.os }}\n    strategy:\n      matrix:\n"

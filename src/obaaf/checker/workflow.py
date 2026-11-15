@@ -1951,7 +1951,9 @@ class Job:
             return [str(v) for v in value]
         if isinstance(value, dict):
             labels = value.get("labels")
-            out = ["group:" + str(value.get("group"))] if value.get("group") else []
+            # The key counts whatever its value: `group: 0` or `group: false` is a group GitHub may name
+            # "0" or "false", not the absence of one (found by the review of flagship slice 2d.9).
+            out = ["group:" + str(value.get("group"))] if "group" in value else []
             if isinstance(labels, str):
                 out.append(labels)
             elif isinstance(labels, list):
