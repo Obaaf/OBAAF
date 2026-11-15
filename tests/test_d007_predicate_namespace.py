@@ -106,7 +106,7 @@ class PublishedPagesTest(unittest.TestCase):
     def test_the_questionnaire_names_its_canonical_address_and_says_it_needs_javascript(self):
         text = (self.out / "assessment.html").read_text(encoding="utf-8")
         self.assertEqual(text.count('<link rel="canonical" href="https://www.obaaf.com/assessment.html">'), 1)
-        self.assertIn('<div id="tiers"><noscript>', text)
+        self.assertIn('</noscript><div id="tiers"></div>', text)
         self.assertIn("obaaf assess init", text)
         self.assertIn("Back to the OBAAF field guide", text)
 

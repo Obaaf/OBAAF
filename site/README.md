@@ -10,8 +10,8 @@ It uses no external fonts, analytics, or client-side package dependencies. The h
 five pages and the format pages read without JavaScript; the self-assessment needs it, because
 its questions are written into the page by a script, and without it the page says so and points
 to the questions in `spec/self-assessment.md` and to `obaaf assess`.
-Public draft publication was authorized by the maintainer on October 10, 2026.
-The repository remains a draft; see [LICENSING.md](../LICENSING.md) for reuse terms.
+Publication of the site, then as a public draft, was authorized by the maintainer on October 10,
+2026; see [LICENSING.md](../LICENSING.md) for reuse terms.
 
 ## Build and preview
 
@@ -30,8 +30,9 @@ first, so delete it before a build if earlier files should not be there. It copi
 `styles.css` and `main.js`; writes `.nojekyll`; writes the questionnaire, `assessment.html`; and
 writes a page for each of OBAAF's predicate types and its generic build type, under
 `attestation/` and `buildtypes/`, and every JSON Schema OBAAF ships (the predicate types' and the
-settings snapshot's) at its `$id`, under `schemas/` (decision D-007). A schema whose `$id` is not
-under `https://www.obaaf.com/schemas/` stops the build.
+settings snapshot's) at its `$id`, under `schemas/` (decision D-007). A schema whose `$id` does
+not name a `.json` file under `https://www.obaaf.com/schemas/`, or is another schema's, stops the
+build.
 The questionnaire uses `obaaf.render.form_html`, preserving the package's questions
 and scoring rules. Answers stay in the browser and are not uploaded to a server. The builder uses
 whichever `obaaf` is installed, so with `pip install obaaf` (the latest release) the questionnaire

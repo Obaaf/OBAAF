@@ -136,21 +136,29 @@ def write_schemas(output):
     """Publish every JSON Schema OBAAF ships whose $id is under its namespace at that $id (D-007),
     not only the predicate types' (flagship slice 4.6, issue #176: the settings snapshot's was not
     published). A schema whose $id is elsewhere, or would land outside the build, stops the build."""
-    written = []
+    written = {}
+    folder = (output / "schemas").resolve()
     for entry in sorted(resources.files("obaaf.data").joinpath("schemas").iterdir(), key=lambda e: e.name):
         if not entry.name.endswith(".json"):
             continue
         text = entry.read_text(encoding="utf-8")
-        schema_id = json.loads(text).get("$id")
+        try:
+            schema = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(f"schemas/{entry.name}: not JSON ({exc})") from None
+        schema_id = schema.get("$id") if isinstance(schema, dict) else None
         if not isinstance(schema_id, str) or not schema_id.startswith(predicates.NAMESPACE + "/schemas/"):
             raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} is not under {predicates.NAMESPACE}/schemas/")
         path = (output / schema_id.removeprefix(predicates.NAMESPACE + "/")).resolve()
-        if not path.is_relative_to(output.resolve()) or path.suffix != ".json":
-            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} does not name a .json file in the site")
+        # Resolved, so `schemas/../x.json` is caught too (found by the review of slice 4.6).
+        if not path.is_relative_to(folder) or path.suffix != ".json":
+            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} does not name a .json file under schemas/")
+        if path in written:
+            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} is also the $id of schemas/{written[path]}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-        written.append(schema_id)
-    return written
+        written[path] = entry.name
+    return sorted(written.values())
 
 
 ASSESSMENT_CANONICAL = predicates.NAMESPACE + "/assessment.html"
@@ -169,7 +177,9 @@ def assessment_page():
     for old, new in (
             ('<header>', '<header>\n<nav aria-label="Resource site"><a href="index.html">Back to the OBAAF field guide</a></nav>'),
             ('</head>', f'<link rel="canonical" href="{ASSESSMENT_CANONICAL}">\n</head>'),
-            ('<div id="tiers"></div>', f'<div id="tiers">{ASSESSMENT_NOSCRIPT}</div>')):
+            # Before the element, not in it: the form's CSS styles the first tier as `:first-child`
+            # (found by the review of slice 4.6).
+            ('<div id="tiers"></div>', f'{ASSESSMENT_NOSCRIPT}<div id="tiers"></div>')):
         if page.count(old) != 1:
             raise ValueError(f"assessment.html: expected one {old!r} in the form, found {page.count(old)}")
         page = page.replace(old, new, 1)
