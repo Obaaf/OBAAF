@@ -102,6 +102,10 @@ class FirewallRunnerLabelTest(unittest.TestCase):
             with self.subTest(group=group, shown=shown):
                 self.assertIn(f"({shown}, ubuntu-24.04-firewall)",
                               findings(f"{{group: {group}, labels: [ubuntu-24.04-firewall]}}")["OBAAF-GHA-013"].message)
+        for group in ("{1: a, b: c}", "[{1: a, b: c}]", "[pool]"):     # no traceback on keys of mixed types
+            with self.subTest(group=group):
+                self.assertEqual(findings(f"{{group: {group}, labels: [ubuntu-24.04-firewall]}}")["OBAAF-GHA-013"].severity,
+                                 "high")
         for group in ("0", "false"):
             with self.subTest(group=group, label="ubuntu-latest"):
                 self.assertEqual(findings(f"{{group: {group}, labels: [ubuntu-latest]}}")["OBAAF-GHA-013"].severity,

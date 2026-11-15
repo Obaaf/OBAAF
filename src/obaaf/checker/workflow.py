@@ -95,8 +95,8 @@ def is_hosted_label(label) -> bool:
 
 
 def _group_text(value) -> str:
-    """A `runs-on` group's name as the file spells it, not as Python prints the value: `null`, `false`,
-    `''` (flagship slice 2d.9). The text is in findings and their facts, which acceptances match."""
+    """A `runs-on` group's name as a YAML value (`null`, `false`, `''`), not as Python prints it
+    (flagship slice 2d.9). The text is in findings and their facts, which acceptances match."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -105,7 +105,10 @@ def _group_text(value) -> str:
         return value if value else "''"
     if isinstance(value, (int, float)):
         return str(value)
-    return json.dumps(value, sort_keys=True, default=str)
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):     # keys of mixed types, a circular alias
+        return str(value)
 # A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
 # reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
 _YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
