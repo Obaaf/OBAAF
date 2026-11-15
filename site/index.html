@@ -165,7 +165,7 @@ jobs:
         <p>Release 0.3.0 is the check. Audit, and the one control that enforces a limit on a command, are development only.</p>
         <figure class="rel-figure">
           <svg viewBox="0 0 368 312" role="img" aria-label="How the check, the audit and the egress action fit together" aria-describedby="rel-fig-desc">
-            <desc id="rel-fig-desc">Three rows. Check, in release 0.3.0: obaaf check reads workflow files and reports findings. Audit, development only: obaaf audit reads repository settings and the workflow files, and reports findings, or cannot tell where it could not read a setting. Enforcement, development only: the egress action runs the agent's command inside a boundary; a request to a listed host goes through, and a request to a host not on the list is refused at the boundary.</desc>
+            <desc id="rel-fig-desc">Three rows. Check, in release 0.3.0: obaaf check reads workflow files and reports findings. Audit, development only: obaaf audit reads repository settings and the workflow files, and reports findings, or cannot tell where it could not read a setting or a workflow file. Enforcement, development only: the egress action runs the agent's command inside a boundary; a request to a listed host goes through, and a request to a host not on the list is refused at the boundary.</desc>
             <text class="fig-row" x="4" y="16">CHECK · RELEASE 0.3.0</text>
             <rect class="fig-box" x="4" y="28" width="120" height="40"/>
             <text x="64" y="53" text-anchor="middle">workflow files</text>
