@@ -55,6 +55,7 @@ button, a { touch-action: manipulation; }
 .skip:focus { top: 12px; }
 .wrap { max-width: 1120px; margin: auto; padding-left: 32px; padding-right: 32px; }
 .banner {
+  margin: 0;
   background: var(--ink);
   color: var(--paper);
   padding: 10px 32px;
@@ -90,6 +91,8 @@ button, a { touch-action: manipulation; }
 .header nav { display: flex; flex-wrap: wrap; gap: 18px 22px; font-size: 14px; }
 .header nav a { text-decoration: none; }
 .header nav a:hover { text-decoration: underline; }
+.header { flex-wrap: wrap; }
+.header .subnav { flex-basis: 100%; gap: 8px 20px; font-size: 13px; color: var(--muted); }
 .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; padding-top: 64px; padding-bottom: 36px; align-items: start; }
 .eyebrow, .section-label {
   font: 12px/1.5 var(--mono);
@@ -228,5 +231,6 @@ footer p, footer a { font-size: 14px; color: var(--muted); }
   .header { flex-direction: column; align-items: flex-start; }
   .cards, .cmds, .rel { grid-template-columns: 1fr; }
   .brand span { display: none; }
+  .header .subnav { flex-basis: auto; }
   footer { flex-direction: column; }
 }
