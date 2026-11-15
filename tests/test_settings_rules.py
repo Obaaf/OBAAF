@@ -151,8 +151,12 @@ class TheSixIncidentsTest(unittest.TestCase):
 
     def test_4_a_required_checks_list_that_names_one_job_of_those_that_run(self):
         subjects = sorted(r["subject"] for r in of(self.found, "OBAAF-SET-008", "finding"))
-        self.assertEqual(subjects, ['branch "main": job .github/workflows/ci.yml#lint',
-                                    'branch "main": job .github/workflows/scan.yml#scan'])
+        self.assertEqual(subjects, ['branch "main": job .github/workflows/ci.yml#lint'])
+        # scan.yml reaches pull requests only through pull_request_target, which runs on the default branch's
+        # latest commit, so whether its check counts for the pull request is not established (slice 2d.2g).
+        scan, = of(self.found, "OBAAF-SET-008", "cannot-tell")
+        self.assertEqual(scan["subject"], 'branch "main": job .github/workflows/scan.yml#scan')
+        self.assertIn("only through pull_request_target", scan["message"])
         self.assertEqual(status(self.found, "OBAAF-SET-006"), "no-finding")  # "test (3.13)" is the matrix job's
 
     def test_5_an_actions_policy_that_blocks_a_trigger_the_workflow_uses(self):
@@ -168,10 +172,11 @@ class TheSixIncidentsTest(unittest.TestCase):
         self.assertIn('stored only in the environment "release"', finding["message"])
 
     def test_the_summary_counts_them_and_nothing_failed(self):
-        # The one "cannot tell": whether this public repository has self-hosted runners, which a fork's pull
-        # request could name in its own copy of a workflow (OBAAF-SET-014).
-        self.assertEqual(self.found["summary"], {"findings": 8, "high": 3, "medium": 5, "low": 0, "cannot_tell": 1,
-                                                 "rules_cannot_tell": 1, "rules_failed": 0})
+        # The two "cannot tell": whether this public repository has self-hosted runners, which a fork's pull
+        # request could name in its own copy of a workflow (OBAAF-SET-014), and whether scan.yml's
+        # pull_request_target check counts for a pull request (OBAAF-SET-008, slice 2d.2g).
+        self.assertEqual(self.found["summary"], {"findings": 7, "high": 3, "medium": 4, "low": 0, "cannot_tell": 2,
+                                                 "rules_cannot_tell": 2, "rules_failed": 0})
         self.assertTrue(rules.fails(self.found, "high"))
 
     def test_with_no_token_the_rules_that_need_more_say_cannot_tell(self):
@@ -182,7 +187,7 @@ class TheSixIncidentsTest(unittest.TestCase):
             self.assertFalse(of(found, rule, "finding"), rule)
         # What anyone may read still gives its findings: the open environment and the checks.
         self.assertEqual(of(found, "OBAAF-SET-001", "finding")[0]["severity"], "high")
-        self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 2)
+        self.assertEqual(len(of(found, "OBAAF-SET-008", "finding")), 1)
         target = of(found, "OBAAF-SET-010")[0]
         self.assertIn("2026-12-02", target["message"])
         self.assertEqual(target["unread"], ["actions_policies"])
@@ -1247,9 +1252,9 @@ class CommandTest(unittest.TestCase):
     def test_findings_decide_the_exit_code_at_the_severity_asked_for(self):
         code, out, err = audit_command(ADMIN, INCIDENT_REPO, token=True)
         self.assertEqual(code, 1)
-        self.assertIn("8 finding(s): 3 high, 5 medium, 0 low (--fail-on medium)", err)
-        self.assertIn("FINDINGS: 8 (3 high, 5 medium, 0 low). CANNOT TELL: 1, from 1 of 15 rules.", out)
-        self.assertLess(out.index("FINDINGS: 8"), out.index("WHAT WAS READ"))
+        self.assertIn("7 finding(s): 3 high, 4 medium, 0 low (--fail-on medium)", err)
+        self.assertIn("FINDINGS: 7 (3 high, 4 medium, 0 low). CANNOT TELL: 2, from 2 of 15 rules.", out)
+        self.assertLess(out.index("FINDINGS: 7"), out.index("WHAT WAS READ"))
         self.assertEqual(audit_command(ADMIN, INCIDENT_REPO, "--fail-on", "never", token=True)[0], 0)
         self.assertEqual(audit_command(ADMIN, INCIDENT_REPO, "--fail-on", "high", token=True)[0], 1)
         # GitHub's own answers for the first adopter, and one job that is not among its required checks.
@@ -1274,18 +1279,20 @@ class CommandTest(unittest.TestCase):
         code, out, err = audit_command(recording("public-no-token"), INCIDENT_REPO, "--fail-on", "never")
         self.assertEqual(code, 0)
         self.assertIn('"Cannot tell" is never a pass', out)
-        self.assertIn("CANNOT TELL: 10, from 9 of 15 rules.", out)
-        self.assertIn("CANNOT TELL: 10. A setting or a file the rule needs was not read", out)
+        self.assertIn("CANNOT TELL: 11, from 10 of 15 rules.", out)
+        self.assertIn("CANNOT TELL: 11. A setting or a file the rule needs was not read", out)
         code, _, err = audit_command(recording("public-no-token"), INCIDENT_REPO, "--fail-on", "never",
                                      "--fail-on-cannot-tell")
         self.assertEqual(code, 1)
-        self.assertIn("could not tell in 10 case(s)", err)
+        self.assertIn("could not tell in 11 case(s)", err)
 
     def test_every_rule_has_a_line_and_fixes_can_be_left_out(self):
         _, out, _ = audit_command(ADMIN, INCIDENT_REPO, token=True)
         for rule in rules.RULES:
+            found = assess(ADMIN)
+            # One line under RULES, and one under each of FINDINGS and CANNOT TELL that has a result of it.
             self.assertEqual(sum(1 for line in out.splitlines() if line.startswith(f"  {rule.id}  ")),
-                             2 if of(assess(ADMIN), rule.id) else 1, rule.id)
+                             1 + bool(of(found, rule.id, "finding")) + bool(of(found, rule.id, "cannot-tell")), rule.id)
         self.assertIn("    Fix: ", out)
         self.assertNotIn("    Fix: ", audit_command(ADMIN, INCIDENT_REPO, "--no-fixes", token=True)[1])
 
@@ -1294,7 +1301,7 @@ class CommandTest(unittest.TestCase):
         document = json.loads(out)
         self.assertEqual(code, 1)
         self.assertEqual(document["format"], "obaaf-settings-audit/v0.1")
-        self.assertEqual(document["summary"]["findings"], 8)
+        self.assertEqual(document["summary"]["findings"], 7)
         self.assertEqual(len(document["rules"]), len(rules.RULES))
         self.assertEqual({r["state"] for r in document["results"]}, {"finding", "cannot-tell"})
         self.assertEqual(snapshot_mod.problems(document["snapshot"]), [])
@@ -1335,7 +1342,7 @@ class CommandTest(unittest.TestCase):
             with clean_env():
                 code, out, _ = run_cli("audit", INCIDENT_REPO, "--from-snapshot", tmp / "s.json", "--fail-on", "high")
         self.assertEqual(code, 1)
-        self.assertIn("FINDINGS: 8", out)
+        self.assertIn("FINDINGS: 7", out)
         self.assertIn("Nothing was asked of GitHub now.", out)
 
     def test_a_directory_with_no_workflows_says_so(self):

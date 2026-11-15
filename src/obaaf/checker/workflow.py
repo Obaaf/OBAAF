@@ -2224,18 +2224,52 @@ class Job:
 
     def triggers(self, _seen: frozenset = frozenset()) -> set[str]:
         """Workflow triggers that can reach this job, narrowed by simple `if:` tests on the event, and
-        by the jobs it needs (a job runs only if they ran, unless its `if:` overrides that)."""
+        by the jobs it needs (a job runs only if they ran, unless its `if:` overrides that).
+
+        Each job's answer is worked out once per workflow and kept (flagship slice 2d.2g): following
+        `needs` afresh for every path took time that doubled with each job, so a 3 KB file of 25 jobs
+        that each need every earlier one held up `obaaf check` and `obaaf audit` for minutes. In a file
+        whose `needs` form a cycle, which GitHub refuses, no job is narrowed by the jobs it needs: the
+        wider answer, so a finding is never lost to the order in which the cycle was walked."""
+        memo = self.workflow.__dict__.get("_job_triggers")
+        if memo is None or memo[0] != len(self.workflow.jobs):
+            memo = (len(self.workflow.jobs), {})
+            self.workflow.__dict__["_job_triggers"] = memo
+        known = memo[1]
+        if self.id not in known:
+            # The jobs it needs are worked out first, deepest first, so a long chain does not recurse.
+            order: list[Job] = []
+            stack = [(self, iter(self.needs))]
+            visiting = {self.id}
+            while stack:
+                job, deps = stack[-1]
+                name = next(deps, None)
+                if name is None:
+                    stack.pop()
+                    order.append(job)
+                    continue
+                dep = self.workflow.jobs.get(name)
+                if dep is None or dep.id in known or dep.id in visiting:
+                    continue
+                visiting.add(dep.id)
+                stack.append((dep, iter(dep.needs)))
+            for job in order:
+                if job.id not in known:
+                    known[job.id] = frozenset(job._triggers())
+        return set(known[self.id])
+
+    def _triggers(self) -> set[str]:
         events = set(self.workflow.triggers)
         cond = self.raw.get("if")
         if isinstance(cond, str):
             events = _narrow(events, cond)
-        if self.id in _seen or runs_after_failure(cond):
+        if runs_after_failure(cond) or self.workflow.needs_cycle():
             return events
         for name in self.needs:
             dep = self.workflow.jobs.get(name)
             if dep is None:
                 continue
-            allowed = dep.triggers(_seen | {self.id})
+            allowed = dep.triggers()
             narrowed = set()
             for event in events:
                 if event in allowed:
@@ -2432,6 +2466,37 @@ class Workflow:
                 cached = True
             self.__dict__["_has_merge_key"] = cached
         return cached
+
+    def needs_cycle(self) -> bool:
+        """Whether the jobs' `needs` form a cycle (GitHub refuses such a file). Worked out once, without
+        recursion, so a long chain of jobs cannot exhaust Python's stack."""
+        cached = self.__dict__.get("_needs_cycle")
+        if cached is not None and cached[0] == len(self.jobs):
+            return cached[1]
+        state: dict[str, int] = {}      # 1: on the current path, 2: done
+        found = False
+        for start in self.jobs:
+            if start in state:
+                continue
+            stack = [(start, iter(self.jobs[start].needs))]
+            state[start] = 1
+            while stack and not found:
+                node, deps = stack[-1]
+                dep = next(deps, None)
+                if dep is None:
+                    state[node] = 2
+                    stack.pop()
+                elif dep not in self.jobs:
+                    continue
+                elif state.get(dep) == 1:
+                    found = True
+                elif dep not in state:
+                    state[dep] = 1
+                    stack.append((dep, iter(self.jobs[dep].needs)))
+            if found:
+                break
+        self.__dict__["_needs_cycle"] = (len(self.jobs), found)
+        return found
 
     @property
     def triggers(self) -> dict[str, Any]:
