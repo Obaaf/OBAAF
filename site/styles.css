@@ -133,7 +133,7 @@ h3 { font-size: 20px; line-height: 1.35; margin: 0 0 8px; }
   padding: 2px 0 2px 16px;
   margin-top: 18px;
 }
-.boundary p { color: var(--muted); font-size: 15px; }
+.boundary p { color: var(--muted); font-size: 15px; overflow-wrap: anywhere; }
 .ideas { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
 .idea {
   background: var(--light);
@@ -176,8 +176,16 @@ pre {
 details { border-top: 1px solid var(--line); padding: 12px 0; }
 .term details { border-top-color: #2c4a46; }
 summary { cursor: pointer; font-weight: 650; }
-.rel-figure { margin: 8px 0 0; }
+.rel-figure { margin: 24px 0 0; max-width: 440px; }
 .rel-figure svg { width: 100%; height: auto; display: block; color: var(--ink); }
+.rel-figure text { font: 15px "Segoe UI", Tahoma, sans-serif; fill: currentColor; }
+.rel-figure .fig-row { font: 700 13px var(--mono); letter-spacing: 0.04em; fill: var(--accent); }
+.rel-figure .fig-cmd { font-family: var(--mono); font-size: 14px; }
+.rel-figure .fig-small { font-size: 13px; fill: var(--accent); }
+.rel-figure .fig-box, .rel-figure .fig-edge { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.rel-figure .fig-boundary { fill: none; stroke: var(--accent); stroke-width: 2.5; }
+.rel-figure .fig-blocked { stroke: var(--accent); stroke-dasharray: 5 4; }
+.rel-figure .fig-stop { fill: none; stroke: var(--accent); stroke-width: 3; }
 .rel {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -187,6 +195,7 @@ summary { cursor: pointer; font-weight: 650; }
 .rel h3 { font: normal 22px/1.3 var(--serif); margin: 0 0 8px; }
 .rel p { margin: 0; color: var(--muted); font-size: 15px; }
 .records-title { margin-top: 36px; }
+.section-grid + .cmds { margin-top: 40px; }
 .cmds { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
 .cmd { border-left: 3px solid var(--accent); padding: 0 0 0 14px; }
 .cmd code { font-weight: 700; }

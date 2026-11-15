@@ -20,7 +20,7 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<p class="banner">Release 0.3.0 is on PyPI. This page describes that release, except where a sentence says development only. The checkout that builds this site is 0.4.0.dev0, which is not a release.</p>
+<p class="banner">Release 0.3.0 is on PyPI. This page describes that release, except where a sentence says development only. Development only means code in the repository, numbered 0.4.0.dev0, that is not in a release.</p>
 <header class="header wrap">
   <a class="brand" href="#main">OBAAF <span>0.3.0</span></a>
   <nav aria-label="On this page">
@@ -37,7 +37,7 @@
       <p class="eyebrow">Open Build and Agent Assurance Framework</p>
       <h1 id="hero-title">What an agent job can reach.</h1>
       <p class="lede">OBAAF is an open framework and command-line toolchain. For a job that runs an AI agent or publishes a release, release 0.3.0 reads the workflow file and reports what that job can reach, with the evidence in the finding.</p>
-      <p>It is not the only tool that asks this. In the measured comparison of 2026-11-13, the OBAAF run was 0.4.0.dev0 at commit c04d811. ci-agent-audit and that run both reported token-permission and egress findings on two agent fixtures, and ci-agent-audit reported a prompt input that run did not. The same two fixture files, checked with obaaf 0.3.0, each report OBAAF-GHA-003 and OBAAF-GHA-020. For other mistakes in workflow files, the project's position is zizmor first, CodeQL where code scanning is on, actionlint for plain mistakes, and poutine for scripts piped into a shell. OBAAF does not replace them. The record is in the <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md">landscape</a>.</p>
+      <p>It is not the only tool that asks this. In the measured comparison of 2026-11-13, the OBAAF run was 0.4.0.dev0 at commit c04d811. ci-agent-audit and that run both reported token-permission and egress findings on two agent fixtures (<code>clinejection-triage</code> and <code>promptpwnd-issue-agent</code>), and ci-agent-audit reported a prompt input that run did not. The same two fixture files, checked with obaaf 0.3.0, each report OBAAF-GHA-003 and OBAAF-GHA-020. For other mistakes in workflow files, the comparison's positioning section recommends zizmor first, CodeQL where code scanning is on, actionlint for plain mistakes, and poutine for scripts piped into a shell. OBAAF does not replace them. The record is in the <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md">landscape</a>.</p>
       <div class="actions">
         <a class="button" href="#try">See a real check</a>
         <a href="https://github.com/Obaaf/OBAAF">View on GitHub</a>
@@ -45,12 +45,12 @@
     </div>
     <div class="term" id="try">
       <p class="eyebrow">Try the released package</p>
-      <p>Python 3.10 or later. Installation downloads packages. The check reads a file on the machine and does not edit it. No action was run.</p>
+      <p>Python 3.10 or later. Installation downloads packages. The check reads a file on the machine and does not edit it. No GitHub Actions workflow is run.</p>
       <pre><code>python -m pip install obaaf==0.3.0
 obaaf --version
 obaaf check unpinned.yml --fail-on low
 obaaf check pinned.yml --fail-on low</code></pre>
-      <p class="caption">Run on 2026-11-14 at 03:44 UTC, in a clean environment, with the package from PyPI. <code>obaaf --version</code> printed <code>obaaf 0.3.0</code>. The first check exited 1. The second exited 0.</p>
+      <p class="caption"><code>obaaf --version</code> prints <code>obaaf 0.3.0</code>. The first check exits 1. The second exits 0.</p>
     </div>
   </section>
 
@@ -75,7 +75,7 @@ Hygiene findings: 0 high, 0 medium, 1 low.</code></pre>
         <pre><code>1 workflow file(s) checked.
 Authority findings: 0 high, 0 medium, 0 low.
 Hygiene findings: 0 high, 0 medium, 0 low.</code></pre>
-        <p class="caption">This is the whole of what obaaf 0.3.0 printed for the pinned file. A medium threshold would not have failed the low finding. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. The SHA is the one the website truth table records for the v6.0.0 pin. The tag was not resolved again for this page.</p>
+        <p class="caption">This is the whole of what obaaf 0.3.0 printed for the pinned file. A medium threshold would not have failed the low finding. The checker's example comment says <code>v7.0.1</code>. That is its example, not this file's version. On 2026-11-15 the tag v6.0.0 of actions/checkout named the commit in the pinned file.</p>
       </div>
     </div>
     <details>
@@ -127,7 +127,7 @@ jobs:
           <text x="216" y="77" text-anchor="middle" fill="currentColor" font-family="Georgia, serif" font-size="16">Cache</text>
         </svg>
         <h3 id="idea-isolate-h">Isolate the build</h3>
-        <p>The source tree of release 0.3.0 has the release-lane workflow templates. obaaf templates install copies them when it is run from a clone of that release. The wheel does not carry those files. It reports a release job that an untrusted trigger can start (OBAAF-GHA-015) and a release job that can read a shared cache (OBAAF-GHA-006). The check reads the workflow file. It does not run the build, and it does not place the job on its own machine.</p>
+        <p>The source tree of release 0.3.0 has the release-lane workflow templates; the wheel does not. With the package from PyPI, <code>obaaf templates install --source &lt;clone&gt;/templates/github-actions</code> copies them from a clone of that release. The check reports a release job that an untrusted trigger can start (OBAAF-GHA-015) and a release job that can read a shared cache (OBAAF-GHA-006). The check reads the workflow file. It does not run the build, and it does not place the job on its own machine.</p>
       </article>
       <article class="idea">
         <svg viewBox="0 0 280 150" role="img" aria-labelledby="idea-record-h" aria-describedby="idea-record-desc">
@@ -163,6 +163,43 @@ jobs:
         <p class="section-label">How the three fit</p>
         <h2 id="rel-title">Check, audit, and enforcement are not the same thing.</h2>
         <p>Release 0.3.0 is the check. Audit, and the one control that enforces a limit on a command, are development only.</p>
+        <figure class="rel-figure">
+          <svg viewBox="0 0 360 312" role="img" aria-labelledby="rel-title" aria-describedby="rel-fig-desc">
+            <desc id="rel-fig-desc">Three rows. Check, in release 0.3.0: obaaf check reads workflow files and reports findings. Audit, development only: obaaf audit reads repository settings and reports findings, or cannot tell where it could not read a setting. Enforcement, development only: the egress action runs the agent's command inside a boundary; a request to a listed host goes through, and a request to any other host is blocked at the boundary.</desc>
+            <text class="fig-row" x="4" y="16">CHECK · RELEASE 0.3.0</text>
+            <rect class="fig-box" x="4" y="28" width="120" height="40"/>
+            <text x="64" y="53" text-anchor="middle">workflow files</text>
+            <path class="fig-edge" d="M124 48 H146 M139 42 L146 48 L139 54"/>
+            <rect class="fig-box" x="148" y="28" width="104" height="40"/>
+            <text class="fig-cmd" x="200" y="53" text-anchor="middle">obaaf check</text>
+            <path class="fig-edge" d="M252 48 H268 M261 42 L268 48 L261 54"/>
+            <text x="274" y="53">findings</text>
+
+            <text class="fig-row" x="4" y="104">AUDIT · DEVELOPMENT ONLY</text>
+            <rect class="fig-box" x="4" y="116" width="120" height="44"/>
+            <text x="64" y="134" text-anchor="middle">repository</text>
+            <text x="64" y="152" text-anchor="middle">settings</text>
+            <path class="fig-edge" d="M124 138 H146 M139 132 L146 138 L139 144"/>
+            <rect class="fig-box" x="148" y="118" width="104" height="40"/>
+            <text class="fig-cmd" x="200" y="143" text-anchor="middle">obaaf audit</text>
+            <path class="fig-edge" d="M252 138 H268 M261 132 L268 138 L261 144"/>
+            <text x="274" y="134">findings, or</text>
+            <text x="274" y="152">cannot tell</text>
+
+            <text class="fig-row" x="4" y="196">ENFORCEMENT · DEVELOPMENT ONLY</text>
+            <rect class="fig-boundary" x="4" y="208" width="236" height="100"/>
+            <text class="fig-cmd fig-small" x="14" y="226">egress action</text>
+            <rect class="fig-box" x="18" y="238" width="132" height="56"/>
+            <text x="84" y="262" text-anchor="middle">agent's</text>
+            <text x="84" y="281" text-anchor="middle">command</text>
+            <path class="fig-edge" d="M150 252 H268 M261 246 L268 252 L261 258"/>
+            <text x="274" y="257">listed host</text>
+            <path class="fig-edge fig-blocked" d="M150 282 H236"/>
+            <path class="fig-stop" d="M232 274 L248 290 M248 274 L232 290"/>
+            <text x="274" y="280">other host:</text>
+            <text x="274" y="298">blocked</text>
+          </svg>
+        </figure>
       </div>
       <div class="rel" role="group" aria-label="Check, audit, and enforcement">
         <article>
@@ -206,9 +243,9 @@ jobs:
   <section class="section wrap" id="scope" aria-labelledby="scope-title">
     <h2 id="scope-title">What this release does not do.</h2>
     <div class="boundary">
-      <p>OBAAF ships no inference proxy. With a real model key, the provider can still be asked to fetch a URL or reach a remote server. An optional egress action in this checkout can restrict the command it wraps, where someone configures it. A name under an allowed name can still be queried. That action is not in release 0.3.0, and no released commit of it is listed.</p>
-      <p>Release 0.3.0 does not report OBAAF-GHA-020 for an agent job that has a <code>step-security/harden-runner</code> step with <code>egress-policy: block</code> and no <code>if</code>. On 2026-11-14, obaaf 0.3.0 checked a job whose first step was <code>step-security/harden-runner@v2.12.0</code> with that setting: the report had no OBAAF-GHA-020. Two OBAAF-GHA-008 findings remained, because the actions were not pinned to a commit. The same step behind <code>if: github.ref == 'refs/heads/main'</code> still produced OBAAF-GHA-020. That release does not look at the action's version, at <code>disable-sudo-and-containers</code>, or at whether the step is first. The checker in this checkout still reports OBAAF-GHA-020 on that same v2.12.0 file. The control is not met, because sudo and containers are kept. A further file, whose first step was step-security/harden-runner pinned to fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 (the commit this checkout lists as v2.16.0), with egress-policy: block and disable-sudo-and-containers: true, and whose agent action was also pinned, made obaaf 0.3.0 print no findings and exit 0. This checkout still reports OBAAF-GHA-020 on that file. It says it cannot tell, because whether the repository is covered by a Harden-Runner tier is not in the workflow. Cannot tell is not a pass. A step of that name is not, in this checkout, enough to drop the finding.</p>
-      <p>On this checkout, OBAAF-GHA-020 can be cleared when the job runs on <code>ubuntu-24.04-firewall</code> and <code>.github/egress-firewall.yaml</code> sets <code>mode: enforce</code>, with a token that can read the file. That clearing is not in release 0.3.0. A model key placed behind AWF's API proxy does not clear OBAAF-GHA-005. That proxy is not an inference proxy shipped by OBAAF. OBAAF-GHA-005 still cannot be cleared.</p>
+      <p>OBAAF ships no inference proxy. With a real model key, the provider can still be asked to fetch a URL or reach a remote server. An egress action, development only, can restrict the network of the command it wraps, where someone configures it. A DNS query for a name under an allowed name still leaves the runner, so data can be sent in it. That action is not in release 0.3.0, and no released commit of it is listed.</p>
+      <p>Release 0.3.0 does not report OBAAF-GHA-020 for an agent job that has a <code>step-security/harden-runner</code> step with <code>egress-policy: block</code> and no <code>if</code>. On 2026-11-14, obaaf 0.3.0 checked a job whose first step was <code>step-security/harden-runner@v2.12.0</code> with that setting: the report had no OBAAF-GHA-020. Two OBAAF-GHA-008 findings remained, because the actions were not pinned to a commit. The same step behind <code>if: github.ref == 'refs/heads/main'</code> still produced OBAAF-GHA-020. That release does not look at the action's version, at <code>disable-sudo-and-containers</code>, or at whether the step is first. The development checker still reports OBAAF-GHA-020 on that same v2.12.0 file. The control is not met, because sudo and containers are kept. A further file, whose first step was step-security/harden-runner pinned to <code>fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594</code> (the commit of its v2.16.0), with <code>egress-policy: block</code> and <code>disable-sudo-and-containers: true</code>, and whose agent action was also pinned, made obaaf 0.3.0 print no findings and exit 0. The development checker still reports OBAAF-GHA-020 on that file. It says it cannot tell, because whether the repository is covered by a Harden-Runner tier is not in the workflow. Cannot tell is not a pass. In the development version, a step of that name is not enough to drop the finding.</p>
+      <p>In the development version, OBAAF-GHA-020 can be cleared by GitHub's native egress firewall: when <code>obaaf check</code> is run on the repository, not on a single file; every run of the job is on <code>ubuntu-24.04-firewall</code>; <code>.github/egress-firewall.yaml</code> sets <code>mode: enforce</code> and allows only plain host names that are not public suffixes; the job's token has <code>contents</code> permission; and no other workflow can call this one. That clearing is not in release 0.3.0. In the development version, a model key given to AWF's API proxy through the egress action's <code>model-keys</code> input can satisfy one of OBAAF-GHA-005's five controls, but only at a released commit of the action, and none is listed. OBAAF-GHA-005 still cannot be cleared by <code>obaaf check</code>, because whether a secret is stored only in a protected environment is a repository setting it does not read.</p>
       <p>Release 0.3.0 already ignores a finding when an ignore entry has a reason and an <code>until</code> date that has not passed. Requiring an owner, and refusing a reason the checker judges too short, are not in that release. An acceptance is a recorded decision, not proof that a risk was removed.</p>
       <p>There is one documented adopter, and it is a project of one of the authors. This page does not say that several teams are using it, and it does not say how long a person takes to read a result.</p>
     </div>
@@ -222,7 +259,7 @@ jobs:
         <p><a class="button" href="assessment.html">Open the questionnaire</a></p>
       </div>
       <div>
-        <p>Thirty-four questions, answered yes, no, unknown, or, where the item allows it, not applicable. The tier names are Accounted, Controlled, Verified, and Assured. They describe the rubric and the supplied answers, not controls OBAAF has verified. Game studios are the worked example.</p>
+        <p>Thirty-four questions, answered yes, no, not sure (counted as no) or, where the item allows it, N/A. The tier names are Accounted, Controlled, Verified, and Assured. They describe the rubric and the supplied answers, not controls OBAAF has verified. Game studios are the worked example.</p>
         <p class="caption">The questionnaire linked here still says "Thirty-four yes-or-no questions", says a tier describes controls in place, and can say "Would have prevented". Those are not claims the evidence supports. <a href="https://github.com/Obaaf/OBAAF/issues/152">Issue 152</a> tracks the form. Reassessing after 90 days is a suggestion in the adoption guide, not a result the tool measured.</p>
       </div>
     </div>
@@ -234,7 +271,7 @@ jobs:
       <a class="paper" href="https://doi.org/10.5281/zenodo.23622566"><span class="kicker">Paper 1</span><strong>Untrusted Text, Trusted Tokens</strong><p class="caption">The manuscript that states R1 to R8. Not presented here as peer-reviewed or as an adopted standard.</p></a>
       <a class="paper" href="https://doi.org/10.5281/zenodo.23622802"><span class="kicker">Paper 2</span><strong>Securing the Game Build</strong><p class="caption">A profile mapping SSDF and SLSA onto game-studio builds. A crosswalk is not a certification.</p></a>
       <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/landscape.md"><span class="kicker">Comparison</span><h3>Where OBAAF stands</h3><p class="caption">The landscape, including the measured runs dated 2026-11-13. The OBAAF run in that comparison was 0.4.0.dev0 at c04d811.</p></a>
-      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/site-truth-table.md"><span class="kicker">Evidence</span><h3>Claims and their sources</h3><p class="caption">The table this page was written against.</p></a>
+      <a href="https://github.com/Obaaf/OBAAF/blob/dbef2b7c6d3fdb8c00168c860741b93f3725db80/docs/site-truth-table.md"><span class="kicker">Evidence</span><h3>Claims and their sources</h3><p class="caption">Website claims the project audited, each with its source and verdict.</p></a>
     </div>
     <p class="caption">The catalogue maps documented cases to controls that might matter. A mapping is not a test that a control would have prevented the case.</p>
   </section>
