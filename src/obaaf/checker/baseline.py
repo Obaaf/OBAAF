@@ -237,6 +237,11 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
     for f in sorted(findings, key=lambda f: not f.suppressed):
         if f.state == FIXED:
             continue
+        if not acceptance_mod.acceptable(f):
+            # Its entry is left over (stale), and the finding says why nothing accepts it.
+            if by_key.get(finding_key(f)) and acceptance_mod.UNACCEPTABLE_NOTE not in f.message:
+                f.message += acceptance_mod.UNACCEPTABLE_NOTE
+            continue
         groups = by_key.get(finding_key(f))
         if not groups:
             continue
@@ -322,7 +327,8 @@ def plan(result, previous: Baseline | None, today: date | None = None) -> tuple[
     current format, or None): (the findings to write, those that keep a valid entry of the old file,
     as finding id -> its owner, reason and expiry date, and those that would be newly accepted)."""
     today = today or date.today()
-    candidates = [f for f in result.findings if not f.suppressed and f.state != FIXED]
+    candidates = [f for f in result.findings if not f.suppressed and f.state != FIXED
+                  and acceptance_mod.acceptable(f)]
     kept: dict = {}
     if previous is not None and not previous.legacy:
         before = [(f.acceptance, f.baselined) for f in candidates]

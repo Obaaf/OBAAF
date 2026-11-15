@@ -149,3 +149,18 @@ def make(source: str, owner, reason, expires, today: date) -> Acceptance:
     shown = day.isoformat() if day else (str(expires) if expires not in (None, "") else None)
     return Acceptance(source=source, owner=_text(owner) or None, reason=_text(reason) or None, expires=shown,
                       problems=problems(owner, reason, expires, today))
+
+
+# Findings no acceptance can clear (slice 2d.2h): OBAAF-REPO-001 for the files that decide what the
+# check accepts (CODEOWNERS, the configuration, a baseline, the firewall policy). Acceptances are kept
+# in those files, so an acceptance of it would be the unowned file vouching for itself; the fix, a
+# CODEOWNERS line, is always open to the team.
+UNACCEPTABLE = {("OBAAF-REPO-001", "gate-no-owner")}
+UNACCEPTABLE_NOTE = (" No ignore or baseline entry accepts this finding: acceptances are kept in these files, so "
+                     "an acceptance would be an unowned file vouching for itself.")
+
+
+def acceptable(finding) -> bool:
+    """Whether an ignore or baseline entry may accept this finding."""
+    return (getattr(finding, "rule", None), getattr(finding, "kind", None)) not in UNACCEPTABLE
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import hashlib
 import json
@@ -3600,51 +3601,80 @@ class WorkflowRules:
 
 
 def _line_digests(text: str, hidden: list) -> list[str]:
-    """For each hidden character, a digest of the line it is on. A line here ends only at a line
-    feed. The line numbers the scanner reports come from `str.splitlines`, which also ends a line at
-    a form feed, a vertical tab, U+0085, U+2028 and several more; text after one of those is still
-    beside the character for a reader and for a direction override, so it is part of what is
-    digested. An instruction file is read with every carriage return, alone or before a line feed,
-    already turned into a line feed, so in a file each of those ends a line as well. If a carriage
-    return does reach this function before a line feed, it is left out of the digest."""
-    starts, at = [], 0
-    for line in text.splitlines(keepends=True):
-        starts.append(at)
-        at += len(line)
+    """For each hidden character, a digest of the text it acts on. A line here ends only at a line
+    feed; the text is expected with every carriage return, alone or before a line feed, already turned
+    into a line feed (if one reaches this function before a line feed it is left out of the digest).
+    A form feed, a vertical tab, U+0085 or U+2028 does not end a line: text after one is still beside
+    the character for a reader and for a direction override. A direction control (U+202A to U+202E,
+    U+2066 to U+2069, the marks) is digested with the rest of its paragraph, up to the next blank
+    line, because rendered Markdown joins those lines and the control reorders them all (slice 2d.2h).
+    Each line start is found once, so the cost is linear in the text."""
+    starts = [0]
+    at = text.find("\n")
+    while at != -1:
+        starts.append(at + 1)
+        at = text.find("\n", at + 1)
+    cache: dict[tuple[int, bool], str] = {}
     digests = []
     for h in hidden:
-        offset = starts[h.line - 1] + h.column - 1
-        begin = text.rfind("\n", 0, offset) + 1
-        end = text.find("\n", offset)
-        line = text[begin: len(text) if end == -1 else end]
-        if line.endswith("\r"):
-            line = line[:-1]
-        digests.append(hashlib.sha256(line.encode("utf-8", "surrogatepass")).hexdigest()[:32])
+        offset = h.offset if h.offset >= 0 else starts[h.line - 1] + h.column - 1
+        index = bisect.bisect_right(starts, offset) - 1
+        paragraph = h.kind == "bidirectional control"
+        key = (index, paragraph)
+        if key not in cache:
+            begin = starts[index]
+            end = text.find("\n", begin)
+            if paragraph:
+                blank = re.compile(r"\n[ \t]*(?:\n|\Z)")
+                found = blank.search(text, begin)
+                end = found.start() if found else -1
+            line = text[begin: len(text) if end == -1 else end]
+            if line.endswith("\r"):
+                line = line[:-1]
+            cache[key] = hashlib.sha256(line.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+        digests.append(cache[key])
     return digests
+
+
+# The largest instruction file the checker scans for hidden characters; a larger one is a finding.
+INSTRUCTION_LIMIT = 2_000_000
 
 
 # ------------------------------------------------------------------- repository
 def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, errors: list | None = None,
-                  notes: list | None = None) -> list[Finding]:
+                  notes: list | None = None, local_actions: list[str] | None = None,
+                  gate_files: list[str] | None = None) -> list[Finding]:
     """The repository rules. A CODEOWNERS or instruction file that is there and cannot be read is
     an error in `errors` (the check fails), never taken for missing or clean; a directory that
     cannot be listed is a note in `notes`, because git cannot make a checked-out directory
-    unreadable, so only a local run meets one."""
+    unreadable, so only a local run meets one.
+
+    `workflow_paths` are the CI definition files as found (a link by its own path); `local_actions`
+    the action files workflows use from this repository; `gate_files` other files that decide what
+    the check accepts, such as a baseline given on the command line (slice 2d.2h)."""
     findings: list[Finding] = []
     errors = errors if errors is not None else []
     unlisted: list = []
     try:
-        codeowners_path, rules = repo_checks.read_codeowners(root)
+        codeowners = repo_checks.load_codeowners(root)
         unread = False
     except repo_checks.UnreadableFile as exc:
         errors.append(str(exc))
-        codeowners_path, rules, unread = exc.rel, [], True
-    instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []),
-                                                           unlisted)
+        codeowners, unread = repo_checks.Codeowners(exc.rel), True
+    entries = repo_checks.find_instruction_entries(root, catalog.detection.get("instruction_files", []), unlisted)
     if notes is not None and unlisted:
         shown = ", ".join(f"{one_line(d, 60)}/" for d in unlisted[:3]) + (", ..." if len(unlisted) > 3 else "")
         notes.append(f"{len(unlisted)} director(ies) could not be listed or entered ({shown}), so agent instruction files in "
                      "them were not looked for.")
+    outside = [e.rel for e in entries if e.outside]
+    if notes is not None and outside:
+        shown = ", ".join(one_line(p, 60) for p in outside[:3]) + (", ..." if len(outside) > 3 else "")
+        notes.append(f"{len(outside)} agent instruction file(s) or folder(s) are links that lead out of the repository or "
+                     f"to nothing ({shown}); the checker did not read them, and an agent on a machine where the "
+                     "target exists would.")
+    # Who must own what: each instruction file where an agent finds it, and the file in the repository
+    # it reads when that is a link.
+    instruction_files = sorted({e.rel.rstrip("/") for e in entries} | {e.real for e in entries if e.real})
 
     def add(rule: str, path: str, line: int, template: str, kind: str = "", **values) -> None:
         message, facts = compose(rule, kind, template, None, None, values)
@@ -3652,43 +3682,122 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
 
     def files(paths: list[str]) -> dict:
         """The message names the first five files and counts them all; every one is part of the finding."""
-        return {"count": Note(str(len(paths))), "files": Fact(sorted(paths), ", ".join(paths[:5]))}
+        paths = sorted(paths)
+        return {"count": Note(str(len(paths))), "files": Fact(paths, ", ".join(paths[:5]))}
+
+    # The CI definitions: workflow files and Jenkinsfiles, the local actions they use, the workflow
+    # lockfile, and a workflow file not written yet, so that owning each file by name is not owning
+    # the folder a new workflow lands in.
+    ci_files = set(workflow_paths) | set(local_actions or [])
+    if (root / ".github" / "workflows").is_dir():
+        if (root / ".github" / "workflows" / "actions.lock").is_file():
+            ci_files.add(".github/workflows/actions.lock")
+        ci_files.update(NEW_WORKFLOW_PROBES)
+    # The files that decide what the check accepts. A configuration file that is not there yet can be
+    # added by any change, so while there is none, each place the checker looks for one counts.
+    gate = set(gate_files or [])
+    present = [loc for loc in CONFIG_FILES if (root / loc).is_file()]
+    gate.update(present or CONFIG_FILES)
+    if (root / egress_mod.FIREWALL_POLICY).is_file():
+        gate.add(egress_mod.FIREWALL_POLICY)
 
     if unread:
         pass        # the error stands for both rules: who owns what cannot be read
-    elif codeowners_path is None:
+    elif codeowners.path is None:
         add("OBAAF-REPO-001", ".github/CODEOWNERS", 1, "The repository has no CODEOWNERS file.", kind="no-codeowners")
         if instruction_files:
             add("OBAAF-REPO-002", instruction_files[0], 1,
                 "No CODEOWNERS file covers the {count} agent instruction file(s): {files}.", kind="no-codeowners",
                 **files(instruction_files))
+    elif codeowners.not_loaded:
+        add("OBAAF-REPO-001", codeowners.path, 1, "GitHub does not load {codeowners}: {why}.", kind="not-loaded",
+            codeowners=codeowners.path, why=Note(codeowners.not_loaded))
+        if instruction_files:
+            add("OBAAF-REPO-002", codeowners.path, 1,
+                "GitHub does not load {codeowners}, so it covers none of the {count} agent instruction file(s): "
+                "{files}.", kind="not-loaded", codeowners=codeowners.path, **files(instruction_files))
     else:
-        uncovered = [p for p in workflow_paths if not repo_checks.owners_for(rules, p)]
-        if uncovered:
-            add("OBAAF-REPO-001", codeowners_path, 1, "No code owner for {count} CI definition file(s): {files}.",
-                kind="no-owner", **files(uncovered))
-        uncovered = [p for p in instruction_files if not repo_checks.owners_for(rules, p)]
-        if uncovered:
-            add("OBAAF-REPO-002", codeowners_path, 1, "No code owner for {count} agent instruction file(s): {files}.",
-                kind="no-owner", **files(uncovered))
-
-    for rel in instruction_files:
+        index = repo_checks.OwnerIndex(codeowners.rules, codeowners.path)
         try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            def uncovered(paths):
+                out, problems = [], []
+                for path in paths:
+                    rule = index.rule_for(path)
+                    if rule is None or not rule.valid_owners:
+                        out.append(path)
+                        if rule is not None and rule.problem:
+                            problems.append(rule.problem)
+                return out, problems
+
+            def why(problems):
+                if not problems:
+                    return Note("")
+                first = sorted(set(problems))
+                return Note(" (" + "; ".join(first[:2]) + (", and more" if len(first) > 2 else "")
+                            + ", so GitHub assigns no owner)")
+
+            missing, problems = uncovered(sorted(ci_files))
+            if missing:
+                add("OBAAF-REPO-001", codeowners.path, 1, "No code owner for {count} CI definition file(s): {files}{why}.",
+                    kind="no-owner", why=why(problems), **files(missing))
+            missing, problems = uncovered(sorted(gate | {codeowners.path}))
+            if missing:
+                add("OBAAF-REPO-001", codeowners.path, 1,
+                    "No code owner for {count} file(s) that decide what the checks accept: {files}{why}. Without "
+                    "one, a change to them needs no owner's review, and it can take ownership away or accept a "
+                    "finding.", kind="gate-no-owner", why=why(problems), **files(missing))
+            missing, problems = uncovered(instruction_files)
+            if missing:
+                add("OBAAF-REPO-002", codeowners.path, 1,
+                    "No code owner for {count} agent instruction file(s): {files}{why}.", kind="no-owner",
+                    why=why(problems), **files(missing))
+        except repo_checks.UnreadableFile as exc:
+            errors.append(str(exc))
+
+    for entry in entries:
+        if entry.outside:
+            continue
+        rel = entry.rel
+        if Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES:
+            continue
+        try:
+            with open(root / rel, "rb") as handle:
+                data = handle.read(INSTRUCTION_LIMIT + 1)
         except OSError as exc:
             errors.append(str(repo_checks.UnreadableFile(rel, exc)))
             continue
+        if len(data) > INSTRUCTION_LIMIT:
+            add("OBAAF-INS-001", rel, 1, "The file is larger than {limit} bytes, more than the checker scans, so it "
+                "cannot tell what the file hides.", kind="too-large", limit=Note(f"{INSTRUCTION_LIMIT:,}"),
+                digest=Fact(hashlib.sha256(data).hexdigest()[:32], ""))
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # A file in another encoding (UTF-16, a working-tree-encoding in .gitattributes) is text an
+            # agent may still read and a reviewer may see otherwise; the scan cannot see what it hides.
+            add("OBAAF-INS-001", rel, 1, "The file is not UTF-8 text (byte {byte}), so the checker cannot tell "
+                "what it hides; an agent may still read it.", kind="not-utf8", byte=Note(str(exc.start + 1)),
+                digest=Fact(hashlib.sha256(data).hexdigest()[:32], ""))
+            continue
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         hidden = repo_checks.scan_hidden(text)
         if hidden:
             detail = "; ".join(h.label for h in hidden[:3])
             more = f" and {len(hidden) - 3} more" if len(hidden) > 3 else ""
-            # The finding is which characters the file hides and the text of the line each is on (as a
-            # digest: the line may be long, and a baseline is not the place for it). A line that moves
-            # up or down is the same finding; a character on other text is another one, because where
-            # a direction override or an invisible instruction sits is what it does. The message
-            # shows the first three with their line and column, and the count of all of them.
+            # The finding is which characters the file hides and the text each acts on (as a digest:
+            # the line may be long, and a baseline is not the place for it). A line that moves up or
+            # down is the same finding; a character on other text is another one, because where a
+            # direction override or an invisible instruction sits is what it does. The message shows
+            # the first three with their line and column, and the count of all of them.
             marks = sorted(f"U+{h.codepoint:04X} ({h.kind}) on a line with sha256 {digest}"
                            for h, digest in zip(hidden, _line_digests(text, hidden)))
             add("OBAAF-INS-001", rel, hidden[0].line, "{count} hidden character(s): {characters}{more}.",
                 count=Note(str(len(hidden))), more=Note(more), characters=Fact(marks, detail))
     return findings
+
+
+# The places `obaaf check` looks for its configuration (checker.CONFIG_LOCATIONS).
+CONFIG_FILES = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
+# Names standing for a workflow file nobody has written yet: whoever may add one changes what runs.
+NEW_WORKFLOW_PROBES = (".github/workflows/(a new workflow).yml", ".github/workflows/(a new workflow).yaml")

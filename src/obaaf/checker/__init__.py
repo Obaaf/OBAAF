@@ -421,6 +421,11 @@ def _apply_ignores(findings: list[Finding], config: Config, today: date) -> None
     for finding in findings:
         if finding.rule == IDLE_DECLARATION:
             continue    # accepted by a baseline entry only, which names the one declaration (see Config.from_data)
+        if not acceptance_mod.acceptable(finding):
+            if any(entry["rule"] == finding.rule and fnmatch.fnmatch(finding.path, str(entry["path"]))
+                   for entry in config.ignore):
+                finding.message += acceptance_mod.UNACCEPTABLE_NOTE
+            continue
         for entry in config.ignore:
             if entry["rule"] != finding.rule or not fnmatch.fnmatch(finding.path, str(entry["path"])):
                 continue
@@ -456,10 +461,13 @@ def _resolve(target: Path, platform: str) -> tuple[Path, list[Path], list[Path],
 
 
 def check(target: Path, files: list[Path] | None = None, config: Config | None = None,
-          catalog: Catalog | None = None, today: date | None = None, platform: str = "auto") -> CheckResult:
+          catalog: Catalog | None = None, today: date | None = None, platform: str = "auto",
+          gate_files: list[Path] | None = None) -> CheckResult:
     """Check a repository root (workflows, Jenkinsfiles and repository files) or specific files.
 
     platform: auto (both kinds of CI definition), github (workflows only) or jenkins (Jenkinsfiles only).
+    gate_files: other files that decide what the check accepts (a baseline, a configuration given by
+    path), which OBAAF-REPO-001 then requires an owner for when they are in the repository.
     """
     if platform not in PLATFORMS:
         raise ValueError(f"platform must be one of {', '.join(PLATFORMS)}, not {platform!r}")
@@ -485,6 +493,10 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     findings: list[Finding] = []
     errors: list[str] = []
     rels: list[str] = []
+    # The CI definitions as a pull request changes them: a workflow that is a link by its own path,
+    # and the target too when it is in the repository (slice 2d.2h).
+    owned_paths: list[str] = []
+    local_actions: set[str] = set()
     agent_lane_present = False
     suspect_jobs: list[tuple[str, str]] = []
     declared = _LaneDeclarations(config, root, is_repo, on_its_own, workflows_sought=platform != "jenkins",
@@ -498,6 +510,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         except ValueError:
             rel = path.as_posix()
         rels.append(rel)
+        owned_paths.extend(_as_found(path, root))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -536,6 +549,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             continue
         findings.extend(found)
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
+        local_actions.update(_local_action_files(root, workflow))
     jenkins_results = []
     jenkins_rels: list[str] = []
     for path in jenkins_paths:
@@ -545,6 +559,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             rel = path.name
         rels.append(rel)
         jenkins_rels.append(rel)
+        owned_paths.extend(_as_found(path, root))
         try:
             data = path.read_bytes()
         except OSError as exc:
@@ -563,7 +578,10 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         suspect_jobs.extend((rel, f"stage {s}") for s in result.suspect_stages)
     repo_notes: list[str] = []
     if is_repo:
-        findings.extend(rules_mod.repo_findings(root, rels, catalog, errors, repo_notes))
+        gates = [p for p in (_as_found(Path(g), root, strict=True) for g in (gate_files or [])) if p]
+        findings.extend(rules_mod.repo_findings(root, sorted(set(owned_paths)), catalog, errors, repo_notes,
+                                                local_actions=sorted(local_actions),
+                                                gate_files=sorted({x for p in gates for x in p})))
     # A lane declaration that does nothing is a finding like any other: it can fail the check, be
     # fixed by correcting it, or be accepted by an ignore or baseline entry.
     findings.extend(declared.findings(catalog))
@@ -578,6 +596,46 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
                        jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
+
+
+def _as_found(path: Path, root: Path, strict: bool = False) -> list[str]:
+    """A file's path relative to the repository as found, without following links, and, when it is
+    a link, the path of the file it leads to if that is in the repository. With `strict`, a file
+    outside the repository gives nothing (a baseline kept elsewhere is not the repository's to own)."""
+    out = []
+    try:
+        absolute = Path(os.path.abspath(path))
+        out.append(absolute.relative_to(root).as_posix())
+    except ValueError:
+        if strict:
+            return []
+        out.append(path.as_posix())
+    try:
+        real = path.resolve().relative_to(root).as_posix()
+        if real not in out:
+            out.append(real)
+    except (ValueError, OSError, RuntimeError):
+        pass
+    return out
+
+
+def _local_action_files(root: Path, workflow) -> set[str]:
+    """The action files a workflow's steps use from this repository (`uses: ./path` or `$/path`): the
+    path's action.yml, or action.yaml, or where action.yml would be when there is neither."""
+    out: set[str] = set()
+    for job in workflow.jobs.values():
+        for step in job.steps:
+            uses = step.uses
+            if not wf_mod.is_local_reference(uses):
+                continue
+            folder = uses[2:].split("@", 1)[0].strip("/")
+            if ".." in folder.split("/"):
+                continue
+            prefix = f"{folder}/" if folder else ""
+            names = [f"{prefix}action.yml", f"{prefix}action.yaml"]
+            present = [n for n in names if (root / n).is_file()]
+            out.update(present or names[:1])
+    return out
 
 
 def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present: bool,
