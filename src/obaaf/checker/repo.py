@@ -316,6 +316,55 @@ class Pattern:
                 return False
         return bool(s & done) and self.suffix in ("none", "opt")
 
+    # ---- questions about every name in a folder (a workflow file nobody has written yet)
+    def _step(self, s: int, ch: str) -> int:
+        slash = ch == "/"
+        advance = s & (self.lit.get(ch, 0) | (0 if slash else self.one))
+        stay = s & (self.any | (0 if slash else self.star))
+        s = self._closure((advance << 1) | stay)
+        if slash and not self.anchored:
+            s |= self.start
+        return s
+
+    def _automaton(self) -> None:
+        if not hasattr(self, "m"):
+            self._build_automaton()
+
+    def matches_some_child(self, folder: str, suffix: str) -> bool:
+        """Whether some name `folder/X<suffix>`, X one or more characters with no `/`, matches."""
+        self._automaton()
+        done = 1 << self.m
+        s = self.start
+        for ch in folder + "/":
+            if ch == "/" and s & done and self.suffix in ("dir", "opt"):
+                return True              # the folder itself, or one above it, matches: so does every name
+            s = self._step(s, ch)
+        chars = {c for c in self.lit if c != "/"} | {SENTINEL}
+        reach = 0
+        for c in chars:
+            reach |= self._step(s, c)
+        while True:
+            more = reach
+            for c in chars:
+                more |= self._step(reach, c)
+            if more == reach:
+                break
+            reach = more
+        for ch in suffix:
+            reach = self._step(reach, ch)
+        return bool(reach & done) and self.suffix in ("none", "opt")
+
+    def matches_every_child(self, folder: str, suffix: str) -> bool:
+        """Whether every name `folder/X<suffix>` matches. X is replaced by a character no pattern holds
+        (a pattern that holds it never counts), in three lengths: a run of wildcards that takes all
+        three takes every length from one up, and any characters, since a wildcard takes any but `/`."""
+        if SENTINEL in "".join(arg for _kind, arg in self.tokens):
+            return False
+        return all(self.match(f"{folder}/{SENTINEL * n}{suffix}") for n in (1, 2, 31))
+
+
+# A private-use character standing for "any name" in the questions above.
+SENTINEL = "\ue000"
 
 _WILDCARDS = re.compile(r"\*+/?|\?")
 
@@ -361,6 +410,27 @@ class OwnerIndex:
     def owners(self, path: str) -> list[str] | None:
         rule = self.rule_for(path)
         return None if rule is None else rule.valid_owners
+
+    def new_file_owned(self, folder: str, suffix: str) -> tuple[bool, str | None]:
+        """Whether every file not written yet, `folder/X<suffix>`, gets an owner: the last rule that
+        matches every such name must give one, and no rule after it that can match some such name may
+        give none. (owned, the problem of the rule that leaves one unowned, if it says one)."""
+        for index in range(len(self.rules) - 1, -1, -1):
+            rule = self.rules[index]
+            compiled = self._compiled.get(rule.pattern) or Pattern(rule.pattern)
+            self._compiled[rule.pattern] = compiled
+            if compiled.matches_every_child(folder, suffix):
+                if not rule.valid_owners:
+                    return False, rule.problem
+                for later in self.rules[index + 1:]:
+                    if later.valid_owners:
+                        continue
+                    pattern = self._compiled.get(later.pattern) or Pattern(later.pattern)
+                    self._compiled[later.pattern] = pattern
+                    if pattern.matches_some_child(folder, suffix):
+                        return False, later.problem
+                return True, None
+        return False, None
 
 
 def owners_for(rules: list[OwnerRule], path: str) -> list[str] | None:
@@ -415,15 +485,29 @@ LINK_DEPTH = 8
 def _git_tracked(root: Path) -> list[str] | None:
     """The files git tracks under `root`, when `root` is the top of a git work tree and git answers;
     None otherwise (the caller then walks the folder). Tracked files are what a pull request changes
-    and what a checkout holds, so an installed node_modules or a local build folder is left out. git
-    is run with no hook and no file-system monitor, and with GIT_* variables removed, so neither the
-    repository's configuration nor the environment can make it run anything else."""
+    and what a checkout holds, so an installed node_modules or a local build folder is left out; the
+    files of checked-out submodules are included. git is found on the PATH, never inside the repository
+    or the current folder, and run with no hook and no file-system monitor and with GIT_* variables
+    removed, so neither the repository's configuration nor the environment can make it run anything
+    else."""
     if not (root / ".git").exists():
         return None
+    import shutil
+    git = shutil.which("git")
+    if git is None:
+        return None
+    git_path = Path(git).resolve()
+    for folder in (root, Path.cwd()):
+        try:
+            git_path.relative_to(folder.resolve())
+            return None          # a git inside the repository, or found in the current folder, is not run
+        except (ValueError, OSError):
+            pass
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                               "-c", "core.hooksPath=/dev/null", "ls-files", "-z", "--cached"],
+        done = subprocess.run([str(git_path), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                               "-c", "core.hooksPath=/dev/null", "ls-files", "-z", "--cached",
+                               "--recurse-submodules"],
                               cwd=str(root), env=env, capture_output=True, timeout=120, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -505,11 +589,11 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
     found: dict[str, InstructionFile] = {rel: InstructionFile(rel) for rel in files if wanted(rel)}
     # (name an agent uses, the link entry first followed, depth, the link's own path in the repository).
     # A name reached through a link leads where the link's own path leads, which is resolved once.
-    queue = [(rel, rel, 1, rel) for rel in links]
+    queue = [(rel, rel, 1, rel, frozenset()) for rel in links]
     resolved: dict[str, tuple | None] = {}
     made = 0
     while queue:
-        name, first, depth, key = queue.pop()
+        name, first, depth, key, chain = queue.pop()
         if key not in resolved:
             try:
                 target = (root / key).resolve(strict=True)
@@ -529,9 +613,24 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
             if wanted(name) or wanted(real):
                 found[name] = InstructionFile(name, real=real, link=first)
             continue
-        if depth > LINK_DEPTH:
+        # A link to a folder that holds the link (`.`, `..`, the root) adds no file the walk did not
+        # find by its own path; it is named when a file behind it would match, and not followed.
+        if real == "." or key == real or key.startswith(real + "/"):
+            if wanted(name + "/_"):
+                found.setdefault(name, InstructionFile(name, real=None, link=first))
             continue
-        prefix = real + "/" if real != "." else ""
+        if real in chain:
+            continue                     # a loop of links: every name on it has been seen
+        if depth > LINK_DEPTH:
+            problem = (f"{first}: more than {LINK_DEPTH} links lead one through another, more than the checker "
+                       "follows when it looks for agent instruction files")
+            if errors is None:
+                raise TooManyFiles(problem)
+            if problem not in errors:
+                errors.append(problem)
+            continue
+        chain = chain | {real}
+        prefix = real + "/"
         for pool, is_link in ((files, False), (links, True)):
             at = _bisect.bisect_left(pool, prefix) if prefix else 0
             while at < len(pool) and pool[at].startswith(prefix):
@@ -547,15 +646,22 @@ def find_instruction_entries(root: Path, patterns: list[str], unlisted: list | N
                     errors.append(problem)      # what was found so far is still checked
                     return sorted(found.values(), key=lambda f: f.rel)
                 if is_link:
-                    queue.append((alias, first, depth + 1, inner))
+                    queue.append((alias, first, depth + 1, inner, chain))
                 elif wanted(alias):
                     found.setdefault(alias, InstructionFile(alias, real=inner, link=first))
     return sorted(found.values(), key=lambda f: f.rel)
 
 
-def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None) -> list[str]:
+def find_instruction_files(root: Path, patterns: list[str], unlisted: list | None = None,
+                           errors: list | None = None) -> list[str]:
     """The paths of agent instruction files under `root` (see find_instruction_entries)."""
-    return [f.rel for f in find_instruction_entries(root, patterns, unlisted)]
+    try:
+        return [f.rel for f in find_instruction_entries(root, patterns, unlisted, errors)]
+    except TooManyFiles as exc:
+        if errors is None:
+            raise
+        errors.append(str(exc))
+        return []
 
 
 # ------------------------------------------------------------ hidden characters
@@ -606,12 +712,17 @@ _JOINING_SCRIPTS = ((0x0600, 0x06FF), (0x0700, 0x074F), (0x0750, 0x077F), (0x078
 
 def _in_joining_script(ch: str) -> bool:
     cp = ord(ch)
-    return any(lo <= cp <= hi for lo, hi in _JOINING_SCRIPTS) and unicodedata.category(ch)[0] in "LM"
+    return any(lo <= cp <= hi for lo, hi in _JOINING_SCRIPTS)
 
 
 def _joins_letters(prev: str, nxt: str) -> bool:
-    """A zero-width joiner or non-joiner between two letters or marks of a script that uses them."""
-    return bool(prev and nxt) and _in_joining_script(prev) and _in_joining_script(nxt)
+    """A zero-width joiner or non-joiner between two letters of a script that joins, or after a virama
+    and before a letter of that script (Indic conjuncts and half forms); never between two marks."""
+    if not (prev and nxt) or not (_in_joining_script(prev) and _in_joining_script(nxt)):
+        return False
+    if unicodedata.category(nxt)[0] != "L":
+        return False
+    return unicodedata.category(prev)[0] == "L" or unicodedata.combining(prev) == 9
 
 
 @dataclass
@@ -679,8 +790,6 @@ def scan_hidden(text: str) -> list[HiddenChar]:
             continue  # zero-width joiner inside an emoji sequence
         if cp in (0x200C, 0x200D) and _joins_letters(prev, nxt):
             continue
-        if cp == 0x200D and prev and 0x0900 <= ord(prev) <= 0x0DFF and unicodedata.category(prev) == "Mn":
-            continue  # a joiner after an Indic virama at the end of a word (Malayalam chillu forms)
         if cp in (0xFE0E, 0xFE0F) and prev:
             if _is_symbol(prev):
                 continue  # text or emoji presentation selector after a symbol

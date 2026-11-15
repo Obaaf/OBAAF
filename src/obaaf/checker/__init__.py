@@ -636,7 +636,10 @@ def _local_action_files(root: Path, workflow) -> set[str]:
                 continue        # outside the repository: nothing here to own
             prefix = "" if folder == "." else f"{folder}/"
             names = [f"{prefix}action.yml", f"{prefix}action.yaml"]
-            present = [n for n in names if (root / n).is_file() or (root / n).is_symlink()]
+            try:
+                present = [n for n in names if (root / n).is_file() or (root / n).is_symlink()]
+            except OSError:
+                present = []         # a path the file system refuses (too long): taken as absent
             for name in present or names[:1]:
                 out.update(_as_found(root / name, root))
     return out
@@ -650,7 +653,8 @@ def _lane_notes(root: Path, catalog: Catalog, is_repo: bool, agent_lane_present:
     if agent_lane_present:
         return notes
     if is_repo:
-        instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []))
+        instruction_files = repo_checks.find_instruction_files(root, catalog.detection.get("instruction_files", []),
+                                                               errors=[])
         if instruction_files:
             shown = ", ".join(instruction_files[:3]) + (", ..." if len(instruction_files) > 3 else "")
             notes.append(

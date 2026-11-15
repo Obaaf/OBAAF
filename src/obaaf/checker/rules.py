@@ -3703,11 +3703,11 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     # lockfile, and a workflow file not written yet, so that owning each file by name is not owning
     # the folder a new workflow lands in.
     ci_files = set(workflow_paths) | set(local_actions or [])
-    probes: dict[str, str] = {}
+    probes: list[str] = []
     if (root / ".github" / "workflows").is_dir():
         if (root / ".github" / "workflows" / "actions.lock").is_file():
             ci_files.update(_with_target(root, ".github/workflows/actions.lock"))
-        probes = _new_workflow_probes()
+        probes = list(NEW_WORKFLOW_PROBES)
     # The files that decide what the check accepts. A configuration file that is not there yet can be
     # added by any change, so while there is none, each place the checker looks for one counts; so do
     # the firewall policy's place, and each CODEOWNERS place GitHub looks in before the one in use.
@@ -3756,12 +3756,14 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
                             + ", so GitHub assigns no owner)")
 
             missing, problems = uncovered(sorted(ci_files))
-            # A new workflow file: owned only when every one of several names nobody can predict is.
-            for label, names in sorted(probes.items()):
-                lacking, why_not = uncovered(names)
-                if lacking:
+            # A new workflow file: owned only when every name it could have gets an owner, decided from
+            # the rules themselves (slice 2d.2h's second review), not from names the checker tries.
+            for label in probes:
+                owned, why_not = index.new_file_owned(".github/workflows", "." + label.rsplit(".", 1)[1])
+                if not owned:
                     missing.append(label)
-                    problems.extend(why_not)
+                    if why_not:
+                        problems.append(why_not)
             missing = sorted(missing)
             if missing:
                 add("OBAAF-REPO-001", codeowners.path, 1, "No code owner for {count} CI definition file(s): {files}{why}.",
@@ -3785,8 +3787,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
             continue
         rel = entry.rel
         name = Path(rel).name.lower()
-        if Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or name in repo_checks.BINARY_NAMES:
-            continue
+        binary_name = Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or name in repo_checks.BINARY_NAMES
         try:
             with open(root / rel, "rb") as handle:
                 data = handle.read(INSTRUCTION_LIMIT + 1)
@@ -3803,6 +3804,15 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
                 "cannot tell what the file hides.", kind="too-large", limit=Note(f"{INSTRUCTION_LIMIT:,}"),
                 digest=Fact(whole.hexdigest()[:32], ""))
             continue
+        if binary_name:
+            # A picture, an archive or a compiled file is not scanned, unless its bytes are text an agent
+            # could read: then a name is no reason to skip it.
+            try:
+                if b"\0" in data:
+                    raise UnicodeDecodeError("utf-8", data, 0, 1, "NUL")
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -3834,21 +3844,6 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
 CONFIG_FILES = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
 # Names standing for a workflow file nobody has written yet: whoever may add one changes what runs.
 NEW_WORKFLOW_PROBES = (".github/workflows/(a new workflow).yml", ".github/workflows/(a new workflow).yaml")
-
-
-def _new_workflow_probes() -> dict[str, list[str]]:
-    """For each extension, the label the finding shows and names to try: the label itself and five
-    random names of random length, so a CODEOWNERS file cannot be written to own exactly the names
-    the checker tries (slice 2d.2h's review)."""
-    import secrets
-    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
-    out = {}
-    for label in NEW_WORKFLOW_PROBES:
-        ext = label.rsplit(".", 1)[1]
-        names = [label] + [".github/workflows/" + "".join(secrets.choice(alphabet) for _ in range(1 + secrets.randbelow(24)))
-                           + "." + ext for _ in range(5)]
-        out[label] = names
-    return out
 
 
 def _with_target(root: Path, rel: str) -> list[str]:

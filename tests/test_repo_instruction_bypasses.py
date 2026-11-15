@@ -276,7 +276,8 @@ class CiDefinitionTest(unittest.TestCase):
                                                     "/.github/workflows/ci.yml\n", "ci/real.yml": WORKFLOW})
             (tmp / ".github" / "workflows" / "ci.yml").unlink()
             (tmp / ".github" / "workflows" / "ci.yml").symlink_to(tmp / "ci" / "real.yml")
-            self.assertEqual(unowned(tmp), [".github/workflows/ci.yml"])
+            # A rule with no owner that can match a name in the folder leaves a new workflow unowned too.
+            self.assertEqual(unowned(tmp), [".github/workflows/(a new workflow).yml", ".github/workflows/ci.yml"])
             # The file it leads to needs an owner too.
             (tmp / ".github" / "CODEOWNERS").write_text(GATE + "/.github/workflows/ @octocat\n", encoding="utf-8")
             self.assertEqual(unowned(tmp), ["ci/real.yml"])
@@ -361,11 +362,19 @@ class HiddenCharacterTest(unittest.TestCase):
 
     def test_ordinary_text_in_other_scripts_and_emoji_passes(self):
         for text in ("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0d36\u0d4d\u200d\u0d30",
-                     "\u0915\u094d\u200d\u0937", "\u0d28\u0d4d\u200d ", "\U0001F3F4\U000E0067\U000E0062\U000E0065"
+                     "\u0915\u094d\u200d\u0937", "\U0001F3F4\U000E0067\U000E0062\U000E0065"
                      "\U000E006E\U000E0067\U000E007F", "\u25b6\ufe0f \u3030\ufe0f \u303d\ufe0f \u24c2\ufe0f",
                      "Release notes \U0001F3AE \U0001F469\u200d\U0001F4BB \u2764\ufe0f #\ufe0f\u20e3"):
             with self.subTest(text=text):
                 self.assertEqual(repo.scan_hidden(text), [])
+
+    def test_joiners_between_marks_or_before_a_space_count(self):
+        # The second review: 60 marks with a joiner, a non-joiner or nothing between them carry 1.58 bits
+        # each; a joiner after a virama counts unless a letter follows (Malayalam's old chillu spelling
+        # is reported: Unicode 5.1 has the chillu letters).
+        self.assertEqual(len(repo.scan_hidden("\u0915" + "\u0902\u200d\u0902\u200c" * 10)), 20)
+        self.assertEqual(len(repo.scan_hidden("\u0628\u064e\u200d\u064e")), 1)
+        self.assertEqual(len(repo.scan_hidden("\u0d28\u0d4d\u200d ")), 1)
 
     def test_tags_outside_the_three_flags_still_count(self):
         self.assertEqual(len(repo.scan_hidden("\U0001F3F4\U000E0061\U000E0062\U000E007F")), 3)
@@ -516,6 +525,57 @@ class ReviewFixesTest(unittest.TestCase):
         index = repo.OwnerIndex(rules)
         for i in range(700):
             self.assertEqual(index.owners(f".claude/skills/s/f{i}.md"), ["@o"])
+
+    def test_a_new_workflow_is_decided_from_the_rules(self):
+        cases = [("/.github/workflows/ @a\n", True), ("/.github/ @a\n", True), ("*.yml @a\n*.yaml @a\n", True),
+                 ("/.github/workflows/?* @a\n", True), ("/.github/workflows/ci.yml @a\n", False),
+                 ("/.github/workflows/*.yml @o\n/.github/workflows/*.*.yml\n/.github/workflows/R*\n", False),
+                 ("/.github/workflows/ @a\n/.github/workflows/d* octocat\n", False),
+                 ("/.github/ @a\n/apps/github\n", True), ("/.github/workflows/\ue000* @a\n", False)]
+        for text, owned in cases:
+            with self.subTest(text=text):
+                index = repo.OwnerIndex(repo.parse_codeowners(text))
+                self.assertEqual(index.new_file_owned(".github/workflows", ".yml")[0], owned)
+                self.assertEqual(index.new_file_owned(".github/workflows", ".yml"),
+                                 index.new_file_owned(".github/workflows", ".yml"))
+
+    def test_links_to_a_folder_above_them_are_not_followed_and_deep_chains_are_an_error(self):
+        from obaaf.catalog import load
+        patterns = load().detection["instruction_files"]
+        with TempDir() as tmp:
+            tree(tmp, {f"f{i}.txt": "x\n" for i in range(300)} | {"AGENTS.md": "x\n"})
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "up").symlink_to(tmp)
+            (tmp / "docs" / "examples").mkdir()
+            (tmp / "docs" / "examples" / "project").symlink_to(tmp)
+            errors = []
+            self.assertEqual(repo.find_instruction_files(tmp, patterns, errors=errors), ["AGENTS.md"])
+            self.assertEqual(errors, [])
+            code, out, err = run_cli("check", str(tmp), "--fail-on", "never")
+            self.assertNotIn("Traceback", err)
+        with TempDir() as tmp:
+            tree(tmp, {"d9/evil.instructions.md": "x\U000E0041\n"})
+            (tmp / ".github" / "instructions").mkdir(parents=True)
+            (tmp / ".github" / "instructions" / "a").symlink_to(tmp / "d1")
+            for level in range(1, 9):
+                (tmp / f"d{level}").mkdir()
+                (tmp / f"d{level}" / "a").symlink_to(tmp / f"d{level + 1}")
+            errors = []
+            repo.find_instruction_entries(tmp, patterns, errors=errors)
+            self.assertTrue(any("links lead one through another" in e for e in errors), errors)
+
+    def test_a_text_file_with_a_binary_name_is_scanned(self):
+        with TempDir() as tmp:
+            tree(tmp, {".claude/skills/x/reference.bin": "Hidden\U000E0041\n", ".claude/.DS_Store": "x\u202ey\n"})
+            self.assertEqual(sorted(f.path for f in found(tmp, "OBAAF-INS-001")[0]),
+                             [".claude/.DS_Store", ".claude/skills/x/reference.bin"])
+
+    def test_a_local_action_path_too_long_for_the_file_system_is_no_traceback(self):
+        wf = WORKFLOW.replace("- run: true", "- uses: ./" + "a" * 300)
+        with TempDir() as tmp:
+            tree(tmp, {".github/CODEOWNERS": GATE + "/.github/ @octocat\n"})
+            (tmp / ".github" / "workflows" / "ci.yml").write_text(wf, encoding="utf-8")
+            found(tmp)
 
     def test_probes_cannot_be_owned_by_a_pattern_for_their_label(self):
         with TempDir() as tmp:
