@@ -17,7 +17,8 @@ from pathlib import Path
 from obaaf.catalog import Catalog
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
-    CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline, StepUse,
+    COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline,
+    StepUse,
     chain_name, first_arg, literal, named_arg, shell_script, source_texts, untrusted_source,
 )
 from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Prop, Str, path_of
@@ -120,6 +121,11 @@ class Info:
 TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
 
 
+# Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
+_JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
+                    "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace"}
+
+
 def stage_label(stage: tuple) -> str:
     return " > ".join(stage) if stage else "pipeline"
 
@@ -195,6 +201,7 @@ class JenkinsRules:
         self.path = path
         self.p = pipeline
         self.catalog = catalog
+        self._script_texts: dict[int, tuple] = {}     # id(call) -> (call, the script as the shell reads it)
         self.detection = catalog.detection
         self.root = root
         extra_agents = extra_agents or {}
@@ -1022,12 +1029,31 @@ class JenkinsRules:
             variables = {v for b in info.ctx.creds for v in b.variables if v not in b.paths and v != "?"}
             secrets = self.secret_names(variables)
             used = sorted({w for e in exprs for w in re.findall(r"[A-Za-z_]\w*", e) if w in secrets})
-            if not used and any(re.search(r"\benv\s*(\[\s*[^'\"\s\]]|\.getProperty\s*\(\s*[^'\"\s)])", e)
-                                for e in exprs):
+            envs = {"env"} | {n for n, refs in self.p.refs.items() if refs == {"env"}}
+            computed_env = re.compile(
+                r"\b(" + "|".join(sorted(map(re.escape, envs))) + r")\s*(\[\s*[^'\"\s\]]|\.\s*[\"']|"
+                r"\.\s*(getProperty|getAt|get)\s*\(\s*[^'\"\s)])|\bSystem\s*\.\s*getenv\s*\(\s*[^'\"\s)]|"
+                r"(^|[^.\w])getProperty\s*\(\s*[^'\"\s)]")
+            if not used and any(computed_env.search(e) for e in exprs):
                 self.unknown("OBAAF-JEN-013", info.line,
                              f"the {info.use.name} step at line {info.line} interpolates an environment variable whose "
                              "name is computed, inside a credential binding; the checker cannot tell whether it is the "
                              "secret")
+                continue
+            # A name of this file whose value the checker never saw (a closure's parameter, `it`, a name a
+            # destructuring assignment sets) may be the secret (the review of slice 2d.2i).
+            # The first name of each path a step interpolates, when it starts with a lower-case letter (upper-case
+            # names are environment variables), is not one of Jenkins's globals, and the file never gave it a
+            # value the checker saw; and any name whose value reads an environment variable by a computed name.
+            computed = self.secret_names({COMPUTED_ENV}) - {COMPUTED_ENV}
+            unaccounted = sorted({w for e in exprs for w in re.findall(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\()", e)
+                                  if (w in computed) or (w[:1].islower() and w not in _JENKINS_GLOBALS
+                                                         and w not in self.p.refs and w not in self.p.literals
+                                                         and w not in self.p.lists)})
+            if not used and unaccounted:
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates {', '.join(unaccounted[:3])} "
+                             "inside a credential binding, and the checker cannot tell what it holds")
                 continue
             if not used and any(b.variables == () or "?" in b.variables for b in info.ctx.creds) and exprs:
                 self.unknown("OBAAF-JEN-013", info.line,
@@ -1055,15 +1081,20 @@ class JenkinsRules:
     def script_text(self, info: Info) -> str:
         """The script as the shell reads it: backslash-continued lines joined, and `${name}` placeholders
         for variables of this file that hold a literal replaced by it (flagship slice 2d.2i)."""
+        cached = self._script_texts.get(id(info.use.call))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
         text = info.script
         for _ in range(3):
             changed = re.sub(r"\$\{([A-Za-z_]\w*)\}", lambda m: (
-                self.p.literals[m.group(1)].text() if m.group(1) in self.p.literals and
-                not self.p.literals[m.group(1)].interpolated else m.group(0)), text)
+                self.p.literals[m.group(1)].text() if m.group(1) in self.p.literals else m.group(0)), text)
             if changed == text:
                 break
             text = changed
-        return re.sub(r"\\\r?\n[ \t]*", " ", text)
+        # A line continued with `\` (shell), `^` (cmd) or a backtick (PowerShell) is one line.
+        text = re.sub(r"[\\^`]\r?\n[ \t]*", " ", text)
+        self._script_texts[id(info.use.call)] = (info.use.call, text)
+        return text
 
     def signing_keys(self) -> None:
         patterns = [re.compile(x, re.I) for x in self.detection.get("signing_secret_patterns", [])]
@@ -1075,7 +1106,7 @@ class JenkinsRules:
             names = [n for n in list(b.ids) + list(b.variables) if n != "?"]
             hits = [n for n in names if any(p.search(re.sub(r"[-.]", "_", n)) for p in patterns)]
             # A certificate binding is a PKCS#12 keystore: signing material whatever it is called.
-            if b.how.endswith(":certificate") or "CertificateMultiBinding" in b.how:
+            if b.how.endswith((":certificate", ":CertificateMultiBinding")):
                 hits.append(f"certificate binding {self.ids(b)}")
             if hits:
                 stage = infos[0].ctx.stage if infos else ()
@@ -1084,8 +1115,16 @@ class JenkinsRules:
                          f"Signing material ({', '.join(sorted(set(hits)))}) is bound by {b.how} for the steps of "
                          f"stage '{stage_label(stage)}', so any build step there can read the key.", stage,
                          severity=severity)
+        loads: dict[int, tuple] = {}
         for info in self.infos:
-            if info.shell and any(rx.search(self.script_text(info)) for rx in commands):
+            if not info.shell:
+                continue
+            hit = loads.get(id(info.use.call))
+            if hit is None or hit[0] is not info.use.call:
+                # Once per call, however many times the method holding it is expanded.
+                hit = (info.use.call, any(rx.search(self.script_text(info)) for rx in commands))
+                loads[id(info.use.call)] = hit
+            if hit[1]:
                 severity = "high" if self.publishes_near(info.ctx.stage) else "medium"
                 self.add("OBAAF-JEN-014", info.line,
                          f"The step at line {info.line} loads a signing key into the build environment.",

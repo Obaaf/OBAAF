@@ -655,6 +655,24 @@ _PATH_KINDS = {"file", "zip", "FileBinding", "ZipFileBinding"}
 _PATH_KEYS = {"keyFileVariable", "keystoreVariable"}
 
 
+COMPUTED_ENV = "<computed env>"
+
+
+def _computed_env(node) -> bool:
+    """The expression reads an environment variable whose name is computed: env[n], env."${n}",
+    env.getProperty(n), env.getAt(n), System.getenv(n) (flagship slice 2d.2i)."""
+    for n in find_nodes(node, lambda n: isinstance(n, (Index, Prop, Call)), limit=400):
+        if isinstance(n, Index) and path_of(n.target) == "env" and literal(n.index) is None:
+            return True
+        if isinstance(n, Prop) and path_of(n.target) == "env" and "${" in n.name:
+            return True
+        if isinstance(n, Call) and (chain_name(n.callee) or "") in (
+                "System.getenv", "env.getProperty", "env.getAt", "env.get", "getProperty") and \
+                n.args and literal(n.args[0]) is None:
+            return True
+    return False
+
+
 def named_entries(call: Call) -> list:
     """A call's named arguments, and the entries of a map given as an argument: Groovy passes
     `string(credentialsId: 'x')` and `string([credentialsId: 'x'])` the same map (flagship slice 2d.2i)."""
@@ -700,7 +718,7 @@ def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
         if isinstance(b, MapLit):
             entries = [(k, v) for k, v in b.entries if isinstance(k, str)]
             kind = (next((literal(v) for k, v in entries if k == "$class"), "") or "").rsplit(".", 1)[-1]
-            return make(entries, kind, b.line, how)
+            return make(entries, kind, b.line, f"{how}:{kind}" if kind else how)
         return None
 
     if name == "withCredentials":
@@ -714,9 +732,9 @@ def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
             b = from_binding_call(item)
             if b:
                 out.append(b)
-            elif not isinstance(item, (Call, MapLit)):
-                # A binding the checker cannot read (a variable it could not follow, a computed list):
-                # unknown credentials in unknown variables (flagship slice 2d.2i).
+            else:
+                # A binding the checker cannot read (a variable it could not follow, a computed list, a
+                # method that returns one): unknown credentials in unknown variables (flagship slice 2d.2i).
                 out.append(Binding(("?",), ("?",), how, call.line, ctx_origin))
         if not out and items:
             out.append(Binding(("?",), (), how, call.line, ctx_origin))
@@ -1030,6 +1048,9 @@ class Builder:
         self.closure_vars: dict[str, Block] = {}
         self.method_refs: dict[str, str] = {}
         self.closure_maps: dict[str, dict] = {}
+        # Variables the file changes other than by assigning them (`b << x`, `b.add(x)`, `b += x`): a list
+        # held in one is not taken for the list first assigned (the review of slice 2d.2i).
+        self.changed_lists: set[str] = set()
 
     def build(self, tree: Block) -> Pipeline:
         # Methods may be defined below their first use; collect the top-level ones first. A method the
@@ -1042,6 +1063,17 @@ class Builder:
                     self.methods[target.name] = target.body
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
+        for n in find_nodes(tree, lambda n: isinstance(n, (Binary, Call, Assign))):
+            if isinstance(n, Binary) and n.op == "<<" and path_of(n.left):
+                self.changed_lists.add(path_of(n.left))
+            elif isinstance(n, Call) and isinstance(n.callee, Prop) and path_of(n.callee.target) and \
+                    n.callee.name in ("add", "addAll", "push", "leftShift", "plus", "putAt", "set", "remove", "clear",
+                                      "removeAll", "retainAll", "putAll", "put"):
+                self.changed_lists.add(path_of(n.callee.target))
+            elif isinstance(n, Assign) and n.op != "=" and path_of(n.target):
+                self.changed_lists.add(path_of(n.target))
+            elif isinstance(n, Assign) and path_of(n.target) is None and path_of(getattr(n.target, "target", None)):
+                self.changed_lists.add(path_of(n.target.target))
         declarative = any(isinstance(s, ExprStmt) and isinstance(s.expr, Call) and callee_name(s.expr) == "pipeline"
                           for s in tree.stmts)
         self.p.kind = "declarative" if declarative else "scripted"
@@ -1125,6 +1157,11 @@ class Builder:
                                             " > ".join(ctx.stage)))
             if target:
                 self.p.local_names.add(target.split(".")[0])
+                if path_of(stmt.target) and "." in target and not target.startswith("env.") and \
+                        isinstance(stmt.value, Closure):
+                    base, _, attr = target.partition(".")
+                    if "." not in attr:
+                        self.closure_maps.setdefault(base, {})[attr] = stmt.value.body
                 if path_of(stmt.target):
                     self.track_value(target.removeprefix("env."), stmt.value)
                 else:
@@ -1228,6 +1265,16 @@ class Builder:
                 self.closure_maps[name] = {str(k): v.body for k, v in value.entries if isinstance(v, Closure)}
         self.p.refs.setdefault(name, set()).update(
             w for t in source_texts(value) for w in re.findall(r"[A-Za-z_]\w*", t or ""))
+        if _computed_env(value):
+            # def v = env."${n}": the value of an environment variable whose name is computed.
+            self.p.refs[name].add(COMPUTED_ENV)
+        if isinstance(value, Closure):
+            # def get = { TOKEN }: what the closure returns can be what it reads (the review of slice 2d.2i).
+            for n in find_nodes(value.body, lambda n: isinstance(n, (Name, Str)), limit=2000):
+                if isinstance(n, Name):
+                    self.p.refs[name].add(n.name)
+                else:
+                    self.p.refs[name].update(w for e in n.exprs for w in re.findall(r"[A-Za-z_]\w*", e))
         cname = chain_name(value) if isinstance(value, Call) else None
         if cname and (cname.startswith("docker.build") or cname.startswith("docker.image")):
             self.p.docker_vars.add(name)
@@ -1283,9 +1330,23 @@ class Builder:
                 break
         if name.startswith("this.") and name.endswith(".call") and name[5:-5] in self.defs:
             name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
-        # A closure held in a variable, given as the last argument, is the step's body like a literal one.
-        if call.closure is None and call.args and name != "parallel" and path_of(call.args[-1]) in self.closure_vars:
-            call = replace(call, args=call.args[:-1], closure=self.closure_vars[path_of(call.args[-1])])
+        # A closure held in a variable, given as the last argument, is the step's body like a literal one;
+        # so is a method pointer (this.&build, or a variable holding one), as a call of the method.
+        if call.closure is None and call.args and name != "parallel":
+            last = call.args[-1]
+            lp = path_of(last)
+            pointer = None
+            if lp in self.closure_vars:
+                call = replace(call, args=call.args[:-1], closure=self.closure_vars[lp])
+            elif lp in self.method_refs:
+                pointer = self.method_refs[lp]
+            elif isinstance(last, Prop) and isinstance(last.target, Name) and last.target.name == "this" and \
+                    last.name in self.defs:
+                pointer = last.name
+            if pointer is not None:
+                body = Block([ExprStmt(Call(Name(pointer, line=call.line), line=call.line), line=call.line)],
+                             line=call.line)
+                call = replace(call, args=call.args[:-1], closure=body)
         # `f(a, { ... })` is `f(a) { ... }` in Groovy: the closure is the step's body, and the bindings of
         # withCredentials([...], { ... }) reach it (flagship slice 2d.2i). Not for parallel, whose closure
         # arguments are branches.
@@ -1295,11 +1356,24 @@ class Builder:
         # A closure passed to a method of this file runs where the method calls it: `body()` inside
         # withCredentials in the method gets the method's bindings (flagship slice 2d.2i).
         target = name[:-len(".call")] if name.endswith(".call") else name
-        for frame in reversed(self.closure_args):
+        for idx in range(len(self.closure_args) - 1, -1, -1):
+            frame = self.closure_args[idx]
             if target in frame and "." not in target:
-                body, walked = frame[target]
-                frame[target] = (body, True)
-                self.block(body, ctx)
+                body, walked, depth = frame[target]
+                frame[target] = (body, True, depth)
+                if self.budget <= 0:
+                    self.p.opaque.append((call.line, f"call to {target}() not expanded (too many calls)"))
+                    return
+                self.budget -= 1
+                # The closure runs with the frames and methods of the place it was written: a `body()`
+                # inside it is the caller's, not this method's (the review of slice 2d.2i found two helpers
+                # that both name their closure `body` recursing without end).
+                saved_frames, saved_stack = self.closure_args, self.stack
+                self.closure_args, self.stack = saved_frames[:idx], saved_stack[:depth]
+                try:
+                    self.block(body, ctx)
+                finally:
+                    self.closure_args, self.stack = saved_frames, saved_stack
                 return
         # A closure, a method pointer or a map of closures assigned in this file, called here: walked here,
         # with the bindings and conditions of this place (flagship slice 2d.2i). The closure was also walked
@@ -1317,6 +1391,25 @@ class Builder:
             return
         if "." not in target and target in self.method_refs:
             self.inline(self.method_refs[target], call, ctx)
+            return
+        if name.endswith(".put") and "." not in name[:-4] and call.args and literal(call.args[0]) is not None:
+            # tasks.put('a', { ... }), whose closure the line above may have made the call's body.
+            body = call.closure if len(call.args) == 1 and call.closure is not None else (
+                call.args[1].body if len(call.args) == 2 and isinstance(call.args[1], Closure) else None)
+            if body is not None:
+                self.closure_maps.setdefault(name[:-4], {})[literal(call.args[0])] = body
+        if isinstance(call.callee, Index) and path_of(call.callee.target) in self.closure_maps:
+            key = literal(call.callee.index)
+            bodies = self.closure_maps[path_of(call.callee.target)]
+            chosen = [bodies[key]] if key in bodies else list(bodies.values())
+            if self.budget > 0 and target not in self.stack:
+                self.budget -= 1
+                self.stack.append(target or "index call")
+                try:
+                    for body in chosen:
+                        self.block(body, ctx)
+                finally:
+                    self.stack.pop()
             return
         head, _, key = target.partition(".")
         if key and "." not in key and head in self.closure_maps and key in self.closure_maps[head]:
@@ -1385,9 +1478,22 @@ class Builder:
                     continue
                 p = path_of(arg)
                 if p and p in self.closure_maps:
-                    # A map of closures assigned in this file: each branch runs here (flagship slice 2d.2i).
-                    for key, body in self.closure_maps[p].items():
-                        self.block(body, branch(key))
+                    # A map of closures assigned in this file: each branch runs here (flagship slice 2d.2i),
+                    # once per walk, under the budget, and not inside itself.
+                    marker = f"parallel {p}"
+                    if marker in self.stack or self.budget <= 0:
+                        self.p.opaque.append((call.line, f"parallel {p} not expanded (recursion or too many calls)"))
+                        continue
+                    self.stack.append(marker)
+                    try:
+                        for key, body in self.closure_maps[p].items():
+                            self.budget -= 1
+                            if self.budget <= 0:
+                                self.p.opaque.append((call.line, f"parallel {p} not expanded (too many calls)"))
+                                break
+                            self.block(body, branch(key))
+                    finally:
+                        self.stack.pop()
                     continue
                 if p:
                     # Branches assigned in this file (branches[name] = { ... }) were walked where they were
@@ -1461,7 +1567,7 @@ class Builder:
         if depth > 50:
             return node
         p = path_of(node)
-        if p and p in self.p.lists:
+        if p and p in self.p.lists and p not in self.changed_lists:
             return self.p.lists[p]
         if isinstance(node, Binary) and node.op == "+":
             return replace(node, left=self._lists_in(node.left, depth + 1), right=self._lists_in(node.right, depth + 1))
@@ -1487,12 +1593,13 @@ class Builder:
         for param, value in zip(mdef.params, values):
             self.track_value(param, value)
         frame: dict = {}
+        depth = len(self.stack)
         for param, value in zip(mdef.params, values):
             # Each closure given to the method, in any position, runs where the method calls it.
             if isinstance(param, str) and isinstance(value, Closure):
-                frame[param] = (value.body, False)
+                frame[param] = (value.body, False, depth)
             elif isinstance(param, str) and path_of(value) in self.closure_vars:
-                frame[param] = (self.closure_vars[path_of(value)], False)
+                frame[param] = (self.closure_vars[path_of(value)], False, depth)
         self.stack.append(name)
         self.closure_args.append(frame)
         try:
@@ -1503,7 +1610,7 @@ class Builder:
         # A trailing closure passed to the method runs inside it (withRetry { ... }); where the method
         # calls it by its parameter, it was walked there, with the method's bindings and conditions.
         # (A closure given as another argument was walked at the call, before the method, by `expr`.)
-        if call.closure is not None and not any(walked for body, walked in frame.values() if body is call.closure):
+        if call.closure is not None and not any(walked for body, walked, _ in frame.values() if body is call.closure):
             self.block(call.closure, ctx)
 
     def record_step(self, name: str, call: Call, ctx: Ctx) -> None:

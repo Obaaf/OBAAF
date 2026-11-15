@@ -252,13 +252,16 @@ signing_secret_patterns:
   - '(^|_)(MACOS|APPLE|WINDOWS|WIN|MAC)_?(CODESIGN_?)?CERT(IFICATE)?($|_)'
   # Flagship slice 2d.2i (names a Jenkins attack got past; `-` and `.` are read as `_` in Jenkins):
   # release.jks, secring.gpg, signing.asc, a credential named GPG, signingInMemoryKey (Gradle),
-  # ios-dist-cert, artifact-signer-key, an Android upload key. Not `signer` alone: OBAAF's own Jenkins
+  # ios-dist-cert, artifact-signer-key. Not `signer` alone: OBAAF's own Jenkins
   # template names `obaaf-release-signer` a credential that can only ask a KMS to sign.
-  - '(^|_)(GPG|PGP|JKS|SECRING|ASC)($|_)'
+  # Not `ASC` alone (App Store Connect's ASC_KEY_ID), a `GPG_` prefix (GPG_FINGERPRINT) or an upload key
+  # (SENTRY_UPLOAD_KEY): the review of slice 2d.2i found them on ordinary workflows.
+  - '(^|_)(GPG|PGP)$'
+  - '(^|_)(JKS|SECRING)($|_)'
+  - 'SIGN(ING)?_?ASC($|_)'
   - 'SIGNING_?IN_?MEMORY'
   - 'DIST(RIBUTION)?_?CERT'
   - 'SIGNER_?KEY'
-  - '(^|_)UPLOAD_?KEY(STORE)?($|_)'
 # Commands that load a key file into the build environment. A command continued on the next line
 # with a backslash is joined before these are matched.
 signing_commands:
@@ -266,8 +269,9 @@ signing_commands:
   - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key(\s+|=)(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
   - '(?i)signtool(\.exe)?\s+sign\b.*\s/f\s'
   - '(^|[\s;&|(/`])gpg2?(\.exe)?([ \t]+--?\w[\w-]*(=\S+|[ \t]+("[^"\n]*"|''[^''\n]*''|(?!["''-])[^\s;&|]+))?)*[ \t]+--import(?![\w-])'
-  # Any `security import` but of a public certificate file (flagship slice 2d.2i: `security import "$P12"`).
-  - '(^|[\s;&|(])security\s+import\s+(?!\S+\.(?i:cer|crt|der)\b)'
+  # Any `security import` but of a public certificate or a provisioning profile (flagship slice 2d.2i:
+  # `security import "$P12"`).
+  - '(^|[\s;&|(])security\s+import\s+(?!\S*\.(?i:cer|crt|der|mobileprovision|provisionprofile)["'']?(\s|$))'
   - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
   - '(^|[\s;&|(])apksigner\s+sign\b.*--(ks|key)\b'
   - '(?i:\bImport-PfxCertificate\b)'

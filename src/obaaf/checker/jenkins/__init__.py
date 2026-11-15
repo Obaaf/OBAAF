@@ -44,10 +44,14 @@ def _glob_match(rel: str, glob: str) -> bool:
     """fnmatch, where `**/` also matches no folder at all (`ci/**/*.groovy` matches `ci/x.groovy`)."""
     if fnmatch.fnmatch(rel, glob):
         return True
-    reduced = glob
-    while "**/" in reduced:
-        reduced = reduced.replace("**/", "", 1)
-        if fnmatch.fnmatch(rel, reduced):
+    parts = glob.split("**/")
+    if len(parts) == 1 or len(parts) > 8:
+        return False
+    for mask in range(1, 2 ** (len(parts) - 1)):
+        candidate = parts[0]
+        for i, part in enumerate(parts[1:]):
+            candidate += ("" if mask >> i & 1 else "**/") + part
+        if fnmatch.fnmatch(rel, candidate):
             return True
     return False
 
@@ -100,10 +104,18 @@ def discover(root: Path, globs: list[str] | None = None, exclude: list[str] | No
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not (depth >= MAX_DEPTH))
         for name in filenames:
             listed.add((here / name).relative_to(root).as_posix())
-    # A configured name with no wildcard is looked at even where the walk does not go.
+    # A configured name with no wildcard is looked at even where the walk does not go, if it is a path inside
+    # the repository (the review of slice 2d.2i: `../x` and `/etc/passwd` were read).
     for g in globs:
-        if not any(c in g for c in "*?[") and (root / g).exists():
-            listed.add(Path(g).as_posix())
+        if any(c in g for c in "*?["):
+            continue
+        rel_g = Path(g)
+        if rel_g.is_absolute() or ".." in rel_g.parts:
+            errors.append(f"jenkins.files names '{one_line(g, 120)}', which is not a path inside the repository; "
+                          "it was not read")
+            continue
+        if (root / rel_g).exists() or (root / rel_g).is_symlink():
+            listed.add(rel_g.as_posix())
     found: set[Path] = set()
     refused_suffix: list[str] = []
     excluded: list[str] = []
@@ -122,18 +134,16 @@ def discover(root: Path, globs: list[str] | None = None, exclude: list[str] | No
             excluded.append(rel)
             continue
         try:
-            if path.is_symlink():
-                target = path.resolve()
-                try:
-                    target.relative_to(root)
-                    inside = True
-                except ValueError:
-                    inside = False
-                if inside and target.is_file():
-                    found.add(path)
-                else:
-                    errors.append(f"{one_line(rel, 120)}: not read: it is a link that does not lead to a file "
-                                  "inside the repository, and Jenkins may run it")
+            # The file itself, or a folder on its way, may be a link: what is read must be a file in the repository.
+            target = path.resolve()
+            try:
+                target.relative_to(root)
+                inside = True
+            except ValueError:
+                inside = False
+            if not inside or (path.is_symlink() and not target.is_file()):
+                errors.append(f"{one_line(rel, 120)}: not read: it is a link, or under one, that does not lead to a "
+                              "file inside the repository, and Jenkins may run it")
                 continue
             if path.is_file():
                 found.add(path)
