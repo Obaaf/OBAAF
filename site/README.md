@@ -22,9 +22,6 @@ python site/build.py
 python -m http.server 8080 --directory site/_site
 ```
 
-The builder uses whichever `obaaf` is installed, so with `pip install obaaf` (release 0.3.0) the
-questionnaire you preview is the release's, not the one that would deploy.
-
 Open `http://localhost:8080`. The builder writes only into `site/_site` (or the directory given
 with `--output`), and validates local references and anchors. It does not empty that directory
 first, so delete it before a build if earlier files should not be there. It copies `index.html`,
@@ -35,7 +32,9 @@ writes a page for each of OBAAF's predicate types and its generic build type, un
 `schemas/` (decision D-007). The settings snapshot's schema, which also has an `$id` under
 `https://www.obaaf.com/`, is not published.
 The questionnaire uses `obaaf.render.form_html`, preserving the package's questions
-and scoring rules. Answers stay in the browser and are not uploaded to a server.
+and scoring rules. Answers stay in the browser and are not uploaded to a server. The builder uses
+whichever `obaaf` is installed, so with `pip install obaaf` (the latest release) the questionnaire
+you preview is the release's, not the one that would deploy.
 
 ## Hosting
 
@@ -47,7 +46,7 @@ directory, and deploys through the `github-pages` environment, which is meant to
 main (a repository setting, not in the workflow, and not checked when this was written).
 The build has read-only repository access; only deployment receives Pages write
 and OIDC permissions. Pull-request CI builds the site without publishing it.
-So the site shows `main` as of its last successful CI run or dispatch: a change merged into
+So the site shows `main` as of its last successful deployment: a change merged into
 another branch is not published until that branch reaches `main`.
 
 The home page, the five pages and the format pages name `https://www.obaaf.com/` as their
