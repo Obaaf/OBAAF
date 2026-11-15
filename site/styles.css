@@ -178,6 +178,7 @@ details { border-top: 1px solid var(--line); padding: 12px 0; }
 summary { cursor: pointer; font-weight: 650; }
 .rel-figure { margin: 24px 0 0; max-width: 440px; }
 .rel-figure svg { width: 100%; height: auto; display: block; color: var(--ink); }
+.rel-figure figcaption { margin-top: 12px; }
 .rel-figure text { font: 15px "Segoe UI", Tahoma, sans-serif; fill: currentColor; }
 .rel-figure .fig-row { font: 700 13px var(--mono); letter-spacing: 0.04em; fill: var(--accent); }
 .rel-figure .fig-cmd { font-family: var(--mono); font-size: 14px; }
