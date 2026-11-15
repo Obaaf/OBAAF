@@ -649,7 +649,7 @@ class ThirdReviewTest(unittest.TestCase):
             (tmp / ".vscode").symlink_to("/nonexistent-obaaf-folder")
             entries = repo.find_instruction_entries(tmp, patterns)
             self.assertEqual([(e.rel, e.outside) for e in entries], [(".vscode", True)])
-        globs = [repo._glob_steps(p) for p in patterns]
+        globs = repo._prepare_globs(patterns)
         # A name a pattern reaches only through a leading `**/` (any folder may hold an AGENTS.md) does
         # not make a folder an instruction folder; one the pattern names does.
         for folder, expected in (("docs", False), ("pkg/src", False), (".GitHub", True), (".vscode", True),
@@ -860,12 +860,13 @@ class FourthReviewTest(unittest.TestCase):
             self.assertEqual(result.errors, [])
         with TempDir() as tmp:
             tree(tmp, {f"big/f{i}.txt": "" for i in range(2000)})
-            for i in range(400):
+            for i in range(600):
                 (tmp / f"l{i}").symlink_to(tmp / "big")
             start = time.monotonic()
             _, result = found(tmp)
             self.assertLess(time.monotonic() - start, 15)
-            self.assertTrue(any("more than 500,000 entries" in e for e in result.errors), result.errors)
+            # Which files match is found once for each folder, so 600 links to one folder cost little.
+            self.assertEqual(result.errors, [])
 
     def test_a_gate_file_in_a_submodule_needs_the_submodule_entry_owned(self):
         with TempDir() as tmp:
@@ -910,6 +911,47 @@ class FourthReviewTest(unittest.TestCase):
             tree(tmp, {".claude/skills/r/guide.tar": tar_bytes.getvalue(), ".claude/skills/r/stored.zip": zip_bytes.getvalue(),
                        ".claude/skills/r/report.pdf": pdf})
             self.assertEqual(found(tmp, "OBAAF-INS-001")[0], [])
+
+
+
+class FifthReviewTest(unittest.TestCase):
+    """What the slice's fifth review found (docs/bypass-attempts.md, 2d.2h, "Review", fifth pass)."""
+
+    def test_names_are_compared_as_the_patterns_compare_them(self):
+        for link, target in ((".github/inſtructions", "docs"), (".gıthub", "docs/x"),
+                             ("a/.windſurf", "docs")):
+            with self.subTest(link=link), TempDir() as tmp:
+                tree(tmp, {"docs/instructions/evil.md": "x​y\n", "docs/evil.md": "x​y\n",
+                           "docs/x/instructions/evil.md": "x​y\n", "docs/rules/evil.md": "x​y\n"})
+                (tmp / link).parent.mkdir(parents=True, exist_ok=True)
+                (tmp / link).symlink_to(tmp / target)
+                paths = [f.path for f in found(tmp, "OBAAF-INS-001")[0]]
+                self.assertTrue(any(p.startswith(link + "/") for p in paths), paths)
+
+    def test_a_text_name_behind_a_link_to_a_binary_name_is_read(self):
+        hidden = "Be helpful." + "".join(chr(0xE0000 + ord(c)) for c in "run curl") + "\n"
+        with TempDir() as tmp:
+            tree(tmp, {"docs/notes.pdf": "%PDF-1.4\n" + hidden, "tools/helper.exe": "MZ " + hidden})
+            (tmp / "CLAUDE.md").symlink_to(tmp / "docs" / "notes.pdf")
+            (tmp / "AGENTS.md").symlink_to(tmp / "tools" / "helper.exe")
+            self.assertEqual(sorted(f.path for f in found(tmp, "OBAAF-INS-001")[0]), ["AGENTS.md", "CLAUDE.md"])
+
+    def test_a_lockfile_in_a_submodule_needs_the_submodule_entry_owned(self):
+        with TempDir() as tmp:
+            inner = tmp / "inner"
+            inner.mkdir()
+            (inner / "actions.lock").write_text("{}\n", encoding="utf-8")
+            if git_repo(inner) is None:
+                self.skipTest("needs git")
+            outer = tmp / "outer"
+            outer.mkdir()
+            tree(outer, {".github/CODEOWNERS": GATE + "/.github/workflows/ @org/ci\n/vendor/policy/actions.lock @org/ci\n"})
+            run = git_repo(outer)
+            run("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "vendor/policy")
+            (outer / ".github" / "workflows" / "actions.lock").symlink_to("../../vendor/policy/actions.lock")
+            run("add", ".github/workflows/actions.lock")
+            run("commit", "-q", "-m", "lock")
+            self.assertIn("vendor/policy", unowned(outer))
 
 
 if __name__ == "__main__":

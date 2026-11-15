@@ -3727,7 +3727,7 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
     probes: list[str] = []
     if (root / ".github" / "workflows").is_dir():
         if (root / ".github" / "workflows" / "actions.lock").is_file():
-            ci_files.update(_with_target(root, ".github/workflows/actions.lock"))
+            ci_files.update(owned_as(p) for p in _with_target(root, ".github/workflows/actions.lock"))
         probes = list(NEW_WORKFLOW_PROBES)
     # The files that decide what the check accepts. A configuration file that is not there yet can be
     # added by any change, so while there is none, each place the checker looks for one counts; so do
@@ -3806,15 +3806,18 @@ def repo_findings(root: Path, workflow_paths: list[str], catalog: Catalog, error
 
     # Each file is read and scanned once, however many names an agent finds it by (a link to a folder
     # gives every file in it another name; the third review of slice 2d.2h found 400 links to one large
-    # file took 66 s when each name was read again). Each name still gets its own finding.
+    # file took 66 s when each name was read again). Each name kept (one for each file and link that
+    # leads to it) gets its own finding.
     examined: dict[tuple, list | None] = {}
     for entry in entries:
         if entry.outside:
             continue
         rel = entry.rel
         source = entry.real or rel
-        binary_name = any(Path(p).suffix.lower() in repo_checks.BINARY_SUFFIXES
-                          or Path(p).name.lower() in repo_checks.BINARY_NAMES for p in (rel, source))
+        # By the name the agent reads: `CLAUDE.md -> notes.pdf` is read as text whatever it begins
+        # with (the fifth review of slice 2d.2h).
+        binary_name = Path(rel).suffix.lower() in repo_checks.BINARY_SUFFIXES or \
+            Path(rel).name.lower() in repo_checks.BINARY_NAMES
         if (source, binary_name) not in examined:
             examined[(source, binary_name)] = _examine_instruction_file(root, rel, source, binary_name, errors)
         for line, template, kind, values in examined[(source, binary_name)] or []:
