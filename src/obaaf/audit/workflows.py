@@ -249,15 +249,17 @@ def _file(path: str, text: str) -> dict:
     problems = [wf_mod.one_line(p, 200) for p in workflow.problems]
     if workflow.has_merge_key and not any("merge key" in p for p in problems):
         problems.append("uses a YAML merge key (<<), which this reader merges and a YAML 1.2 reader does not")
-    # Only the problems that can change which jobs there are, what they are called or what starts them make
-    # the file one GitHub may read otherwise (a step's problem changes none of those).
-    doubt = [p for p in problems if any(word in p for word in DOUBT_WORDS)]
+    # Every problem but those about the names of a step's inputs makes the file one GitHub may read otherwise or
+    # refuse (the second review of slice 2d.2g: a step that is text, or has neither run nor uses, a job whose
+    # uses is not text, are refused by GitHub, and a list of words to include missed them).
+    doubt = [p for p in problems if not any(word in p for word in HARMLESS_PROBLEMS)]
     return {"path": path, "error": None, "problems": problems, "doubt": doubt,
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
 
-# Words in the checker's problems with a file that can change its jobs, their names or its triggers.
-DOUBT_WORDS = ("merge key", "job id", "two jobs", "trigger under 'on'")
+# The checker's problems with a file that are about which input an action gets, not about whether GitHub runs
+# the file or which jobs and names it has. Every other problem makes the file doubtful.
+HARMLESS_PROBLEMS = ("has an input name with a letter outside ASCII", "gives the same input twice")
 # Filters that GitHub's workflow syntax says cannot be used together on one event.
 EXCLUSIVE_FILTERS = (("branches", "branches-ignore"), ("tags", "tags-ignore"), ("paths", "paths-ignore"))
 

@@ -247,6 +247,13 @@ class AuditedBranchTest(unittest.TestCase):
         found = assess(entries, self.FILES, branches=("release",))
         self.assertEqual(answered(found, "OBAAF-SET-001"), "cannot-tell")
 
+    def test_a_code_owner_review_is_cannot_tell(self):
+        found_rule = rule("pull_request", {"required_approving_review_count": 0, "require_code_owner_review": True,
+                                           "dismiss_stale_reviews_on_push": False, "require_last_push_approval": False,
+                                           "required_review_thread_resolution": False}, ruleset=77)
+        found = assess(extra_branch(self.ENTRIES, "release", [found_rule]), self.FILES, branches=("release",))
+        self.assertEqual(answered(found, "OBAAF-SET-001"), "cannot-tell")
+
     def test_a_limit_on_who_may_push_or_a_required_deployment_is_cannot_tell(self):
         for found_rule in (rule("update", {"update_allows_fetch_and_merge": False}, ruleset=77),
                            rule("required_deployments", {"required_deployment_environments": ["prod"]}, ruleset=77)):
@@ -458,6 +465,14 @@ class FilesGitHubMayReadOtherwiseTest(unittest.TestCase):
             found = assess(requiring("build"), files)
             self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell", list(files))
 
+    def test_files_github_refuses_for_a_step_or_a_job(self):
+        for extra in ("      - echo hi\n", "      - name: nothing\n", "      - parallel: 5\n"):
+            body = job("build", steps="      - run: echo\n" + extra)
+            found = assess(requiring("build"), {"ci.yml": wf(PR, body)})
+            self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell", extra)
+        found = assess(requiring("build"), {"ci.yml": wf(PR, job("build") + "  other:\n    uses: 5\n")})
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+
     def test_a_caller_of_such_a_file_and_a_linked_directory(self):
         caller = wf(PR, "  ci:\n    uses: ./.github/workflows/r.yml\n")
         callee = wf("  workflow_call:\n", job("build"))
@@ -518,6 +533,11 @@ class WhenACheckReportsTest(unittest.TestCase):
         self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
         self.assertIn("pull_request_target", of(found, "OBAAF-SET-007", "cannot-tell")[0]["message"])
 
+    def test_a_pull_request_target_filtered_by_a_pattern_is_cannot_tell(self):
+        files = {"ci.yml": wf(PR, job("test", MATRIX_313)),
+                 "sec.yml": wf("  pull_request_target:\n    branches: ['release/**']\n", job("sec"))}
+        self.assertEqual(answered(assess(ADMIN, files), "OBAAF-SET-008", "sec.yml#sec"), "cannot-tell")
+
     def test_an_unrequired_pull_request_target_check_is_still_a_finding(self):
         files = {"ci.yml": wf(PR, job("test", MATRIX_313)), "scan.yml": wf("  pull_request_target:\n", job("scan"))}
         self.assertEqual(answered(assess(ADMIN, files), "OBAAF-SET-008", "scan.yml#scan"), "finding medium")
@@ -568,10 +588,27 @@ class SettingsThatStopEveryRunTest(unittest.TestCase):
         self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
         self.assertEqual(status(found, "OBAAF-SET-007"), "not-applicable")
 
-    def test_only_its_own_actions_allowed(self):
+    def test_only_some_owners_actions_allowed(self):
+        # GitHub calls the value "Allow OWNER actions and reusable workflows"; which owners is not matched.
         entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
         found = assess(entries, {"ci.yml": wf(PR, job("test", MATRIX_313, steps=f"      - uses: {PIN}\n"))})
-        self.assertIn("allows only its own actions", of(found, "OBAAF-SET-006", "finding")[0]["message"])
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_caller_of_a_refused_workflow(self):
+        files = {"ci.yml": wf(PR, "  ci:\n    uses: ./.github/workflows/r.yml\n"),
+                 "r.yml": wf("  workflow_call:\n", job("test", steps="      - uses: actions/checkout@v4\n"))}
+        found = assess(requiring("ci / test"), files)
+        self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_policy_that_allows_every_event_the_file_uses_or_only_evaluates(self):
+        for enforcement, events in (("active", ["pull_request", "push"]), ("evaluate", ["push"])):
+            def change(body, enforcement=enforcement, events=events):
+                body["enforcement"] = enforcement
+                body["conditions"] = {"workflow_path": {"include": ["~ALL"], "exclude": []},
+                                      "repository_name": {"include": ["~ALL"], "exclude": ["legacy"]}}
+                body["rules"] = [{"type": "restrict_action_events", "parameters": {"allowed_events": events}}]
+            found = assess(changed(ADMIN, POLICY_7, change), self.CI)
+            self.assertEqual(answered(found, "OBAAF-SET-006"), "no-finding", enforcement)
 
     def test_unread_settings_are_named_on_the_rules_line_whatever_its_answers(self):
         entries = answer(ADMIN, ACTIONS_PERMISSIONS, {"message": "Must have admin rights"}, status=403)

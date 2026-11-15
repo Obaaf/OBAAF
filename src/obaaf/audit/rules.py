@@ -809,7 +809,7 @@ def _report_run(file: dict, job: dict, branch: str, pushes: bool = True, skipped
             continue
         kind = ("maybe" if admitted is None else "paths" if filters["paths"]
                 else "always" if _every_update(filters["types"]) else "types")
-        found = better("target" if event not in HEAD_COMMIT_EVENTS and kind in ("always", "maybe") else kind)
+        found = better("target" if event not in HEAD_COMMIT_EVENTS and kind == "always" else kind)
     push = file["triggers"].get("push")
     if pushes and push is not None and "push" in events:
         if push["branches"] is None and push["branches_ignore"] is None:
@@ -843,8 +843,10 @@ def _stops(run: _Run):
             if value.get("enabled") is False:
                 stopped[path] = "GitHub Actions is turned off for the repository"
             elif value.get("allowed_actions") == "local_only" and remote:
-                stopped[path] = ("the repository allows only its own actions and it uses one from another "
-                                 "repository, so GitHub refuses it")
+                # GitHub's own words for this value, by the second review of slice 2d.2g, are "Allow OWNER actions
+                # and reusable workflows": which owner's actions that lets through is not matched here.
+                maybe[path] = ("the repository allows only some owners' actions (allowed_actions: local_only), "
+                               "which is not matched against the actions it uses")
             elif value.get("sha_pinning_required") is True and loose:
                 why = (f"the repository requires actions pinned to a full commit and it uses "
                        f"{_names([_q(a, 100) for a in loose], 2)}")
@@ -860,9 +862,30 @@ def _stops(run: _Run):
         for policy, allowed in applying:
             if policy["enforcement"] == "active":
                 blocked.setdefault(file["path"], set()).update(e for e in file["triggers"] if e not in allowed)
-        if unclear and file["path"] not in stopped:
-            maybe.setdefault(file["path"], f"the Actions policy {_q(unclear[0]['name'])}, which this audit does not "
+        events = set(file["triggers"]) - {"workflow_call"}
+        for policy in unclear:
+            if policy["enforcement"] == "evaluate" or file["path"] in stopped:
+                continue            # evaluate mode blocks nothing
+            lists = _event_rules(policy)
+            if lists is not None and all(events <= set(allowed) for allowed in lists):
+                continue            # whatever it applies to, it allows every event the file uses
+            maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
                                            "understand, may block its events")
+    # A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
+    # slice 2d.2g): the whole calling file is taken as one GitHub may not run, until nothing changes.
+    changed = True
+    while changed:
+        changed = False
+        for file in run.files():
+            if file["path"] in stopped or file["path"] in maybe:
+                continue
+            for job in file["jobs"]:
+                target = called_path(job)
+                if target and (target in stopped or target in maybe):
+                    maybe[file["path"]] = (f"it calls {plain(target, 120)}, which GitHub "
+                                           f"{'does not run' if target in stopped else 'may not run'}")
+                    changed = True
+                    break
     return stopped, maybe, blocked, unread
 
 
@@ -1025,6 +1048,8 @@ def _push_gate(run: _Run, branch: str) -> tuple[str, str]:
     need = _branch_requirements(run, branch)
     if need["approvals"]:
         return "closed", f"it requires {_n(need['approvals'], 'approval')}"
+    if need["code_owner"]:
+        return "unknown", "it requires a code owner's review, and who the code owners are (CODEOWNERS) is not read"
     if need["merge_unread"]:
         # Who may push is then who may bypass that rule, or who the restrictions name, which is not compared
         # with who can push (the review of slice 2d.2g).
