@@ -125,7 +125,13 @@ CASES = {
  "k01_bat_caret": "pipeline {\n  agent any\n  stages {\n    stage('Release') {\n      when { branch 'main' }\n      steps {\n        bat '''signtool sign /fd SHA256 ^\n  /f cert.pfx /p %P% app.exe'''\n        powershell '''certutil -user -p $env:P `\n  -importPFX cert.pfx'''\n      }\n    }\n  }\n}\n",
  "c10_interp_cmd_var": "pipeline {\n  agent any\n  stages {\n    stage('Release') {\n      when { branch 'main' }\n      steps {\n        script {\n          def imp = \"gpg --batch --import ${env.WORKSPACE}/key.asc\"\n          sh imp\n        }\n      }\n    }\n  }\n}\n",
  "c10b_agent_interp_var": "pipeline {\n  agent any\n  stages {\n    stage('Review') {\n      steps {\n        withCredentials([string(credentialsId: 'gh-token', variable: 'GH_TOKEN')]) {\n          script {\n            def cmd = \"claude -p 'review ${env.BUILD_TAG}'\"\n            sh cmd\n          }\n        }\n      }\n    }\n  }\n}\n",
- "c06_certmulti_map": "pipeline {\n  agent any\n  stages {\n    stage('Release') {\n      when { branch 'main' }\n      steps {\n        withCredentials([[$class: 'CertificateMultiBinding', credentialsId: 'release', keystoreVariable: 'STORE', passwordVariable: 'PW']]) {\n          sh './gradlew assembleRelease'\n        }\n      }\n    }\n  }\n}\n"
+ "c06_certmulti_map": "pipeline {\n  agent any\n  stages {\n    stage('Release') {\n      when { branch 'main' }\n      steps {\n        withCredentials([[$class: 'CertificateMultiBinding', credentialsId: 'release', keystoreVariable: 'STORE', passwordVariable: 'PW']]) {\n          sh './gradlew assembleRelease'\n        }\n      }\n    }\n  }\n}\n",
+ "u01_list_mutated_in_method": "def addGh(list) { list << string(credentialsId: 'gh', variable: 'GH_TOKEN') }\npipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        script {\n          def b = [string(credentialsId: 'a', variable: 'A')]\n          addGh(b)\n          withCredentials(b) {\n            sh \"curl -H Authorization:${GH_TOKEN} https://example.com\"\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "u02_list_alias": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        script {\n          def b = [string(credentialsId: 'a', variable: 'A')]\n          def c = b\n          c << string(credentialsId: 'gh', variable: 'GH_TOKEN')\n          withCredentials(b) {\n            sh \"curl -H Authorization:${GH_TOKEN} https://example.com\"\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "e08_bindvar": "pipeline {\n  agent any\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'api-token', variable: 'TOKEN')]) {\n          script {\n            def tok = binding.getVariable(\"TOK\" + \"EN\")\n            sh \"curl -H Authorization:${tok} https://example.com\"\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "n05_ternary": "pipeline {\n  agent any\n  parameters { string(name: 'TARGET', defaultValue: 'staging') }\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([usernamePassword(credentialsId: 'registry', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {\n          script {\n            sh \"helm upgrade app ./chart -f values-${params.TARGET == \"prod\" ? \"prod\" : \"staging\"}.yaml\"\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "n06_tool": "pipeline {\n  agent any\n  parameters { string(name: 'TARGET', defaultValue: 'staging') }\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([usernamePassword(credentialsId: 'registry', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {\n          script {\n            sh \"${tool \"maven-3\"}/bin/mvn -B deploy\"\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "n07_newdate": "pipeline {\n  agent any\n  parameters { string(name: 'TARGET', defaultValue: 'staging') }\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([usernamePassword(credentialsId: 'registry', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {\n          script {\n            sh \"echo deployed at ${new Date().format(\"yyyyMMdd\")}\"\n          }\n        }\n      }\n    }\n  }\n}\n"
 }
 
 # (case, rule, what the adapter must say: a finding, "unknown" (never a pass) or nothing, severity)
@@ -237,6 +243,12 @@ EXPECT = [
     ('c10_interp_cmd_var', 'OBAAF-JEN-014', 'finding', 'medium'),
     ('c10b_agent_interp_var', 'OBAAF-JEN-001', 'finding', 'high'),
     ('c06_certmulti_map', 'OBAAF-JEN-014', 'finding', 'medium'),
+    ('u01_list_mutated_in_method', 'OBAAF-JEN-013', 'unknown', None),
+    ('u02_list_alias', 'OBAAF-JEN-013', 'unknown', None),
+    ('e08_bindvar', 'OBAAF-JEN-013', 'unknown', None),
+    ('n05_ternary', 'OBAAF-JEN-013', 'none', None),
+    ('n06_tool', 'OBAAF-JEN-013', 'none', None),
+    ('n07_newdate', 'OBAAF-JEN-013', 'none', None),
 ]
 
 A018 = b'// Review pipeline\rpipeline {\r  agent any\r  stages {\r    stage(\'Review\') {\r      steps {\r        withCredentials([string(credentialsId: \'gh-token\', variable: \'GH_TOKEN\')]) {\r          sh \'claude -p "review this change"\'\r        }\r      }\r    }\r  }\r}\r'

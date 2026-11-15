@@ -667,7 +667,8 @@ def _computed_env(node) -> bool:
         if isinstance(n, Prop) and path_of(n.target) == "env" and "${" in n.name:
             return True
         if isinstance(n, Call) and (chain_name(n.callee) or "") in (
-                "System.getenv", "env.getProperty", "env.getAt", "env.get", "getProperty") and \
+                "System.getenv", "env.getProperty", "env.getAt", "env.get", "getProperty", "binding.getVariable",
+                "getVariable", "binding.getProperty") and \
                 n.args and literal(n.args[0]) is None:
             return True
     return False
@@ -1063,6 +1064,19 @@ class Builder:
                     self.methods[target.name] = target.body
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
+        # A list is followed into withCredentials only when its name is used nowhere else: passed to a method or
+        # copied to another name, it can be changed there (the second review of slice 2d.2i).
+        uses: dict[str, int] = {}
+        for n in find_nodes(tree, lambda n: isinstance(n, Name)):
+            uses[n.name] = uses.get(n.name, 0) + 1
+        in_bindings: dict[str, int] = {}
+        for c in find_nodes(tree, lambda n: isinstance(n, Call) and (chain_name(n.callee) or "").removeprefix(
+                "steps.") == "withCredentials"):
+            for a in list(c.args) + [v for k, v in c.named if k == "bindings"]:
+                for part in _list_parts(a):
+                    if isinstance(part, Name):
+                        in_bindings[part.name] = in_bindings.get(part.name, 0) + 1
+        self.changed_lists.update(name for name, count in uses.items() if count > in_bindings.get(name, 0))
         for n in find_nodes(tree, lambda n: isinstance(n, (Binary, Call, Assign))):
             if isinstance(n, Binary) and n.op == "<<" and path_of(n.left):
                 self.changed_lists.add(path_of(n.left))

@@ -121,9 +121,13 @@ class Info:
 TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
 
 
+# Names in an interpolated expression, outside quoted text, that are not called (`f(`, `tool "x"`).
+_QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
+_NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+[\"'\w$])")
 # Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
 _JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
-                    "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace"}
+                    "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace",
+                    "new", "in", "as", "instanceof", "def", "return"}
 
 
 def stage_label(stage: tuple) -> str:
@@ -1033,7 +1037,8 @@ class JenkinsRules:
             computed_env = re.compile(
                 r"\b(" + "|".join(sorted(map(re.escape, envs))) + r")\s*(\[\s*[^'\"\s\]]|\.\s*[\"']|"
                 r"\.\s*(getProperty|getAt|get)\s*\(\s*[^'\"\s)])|\bSystem\s*\.\s*getenv\s*\(\s*[^'\"\s)]|"
-                r"(^|[^.\w])getProperty\s*\(\s*[^'\"\s)]")
+                r"(^|[^.\w])(getProperty|getVariable)\s*\(\s*[^'\"\s)]|\bbinding\s*\.\s*(getVariable|getProperty)\s*\("
+                r"\s*[^'\"\s)]")
             if not used and any(computed_env.search(e) for e in exprs):
                 self.unknown("OBAAF-JEN-013", info.line,
                              f"the {info.use.name} step at line {info.line} interpolates an environment variable whose "
@@ -1046,7 +1051,7 @@ class JenkinsRules:
             # names are environment variables), is not one of Jenkins's globals, and the file never gave it a
             # value the checker saw; and any name whose value reads an environment variable by a computed name.
             computed = self.secret_names({COMPUTED_ENV}) - {COMPUTED_ENV}
-            unaccounted = sorted({w for e in exprs for w in re.findall(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\()", e)
+            unaccounted = sorted({w for e in exprs for w in _NAME_IN_EXPR.findall(_QUOTED.sub(" _q_ ", e))
                                   if (w in computed) or (w[:1].islower() and w not in _JENKINS_GLOBALS
                                                          and w not in self.p.refs and w not in self.p.literals
                                                          and w not in self.p.lists)})
