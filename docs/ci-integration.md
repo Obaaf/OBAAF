@@ -177,9 +177,9 @@ jobs:
 
 ## A hook before each commit
 
-Use a local system hook with a dedicated checker environment. Its OBAAF source comes from the same full Git commit as the CI example. Its build backend and dependencies come from that commit's wheel lock, including the optional signing packages in the CI install. The hook then uses the checker on the committer's PATH.
+This uses a local hook in [pre-commit](https://pre-commit.com/) that runs the `obaaf` first on your `PATH`. Install that checker the way the CI example's action installs it: OBAAF's source from the same full Git commit, and its build backend and dependencies from that commit's hash-checked lock, `actions/setup-obaaf/requirements.txt`.
 
-Set up the two environments once in a **new** tools directory outside the consuming repository. These shell commands are for Linux, the platform tested. Save the tools directory for later shells.
+Set it up once, in a **new** tools directory outside your repository, with Python 3.10 or later. The commands are for a POSIX shell; they were tried only on Linux with Python 3.12, by the session that wrote this section (see [what was run](#what-was-run-and-what-was-not)). On Debian and Ubuntu, `python3 -m venv` needs the `python3-venv` package. If a command fails, the block stops; delete the tools directory before you run it again.
 
 ```bash
 (
@@ -195,19 +195,26 @@ python3 -m venv "$tool_dir/checker"
 "$tool_dir/checker/bin/python" -m pip check
 python3 -m venv "$tool_dir/runner"
 "$tool_dir/runner/bin/python" -m pip install pre-commit==4.7.0
+mkdir "$tool_dir/bin"
+ln -s "$tool_dir/checker/bin/obaaf" "$tool_dir/runner/bin/pre-commit" "$tool_dir/bin/"
 )
 ```
 
-Run the setup commands in order and stop if a command fails. Use a fresh checker environment and a clean source checkout for each pin update. Keep the checker and runner directories on PATH in each shell or Git client that commits:
+The last two lines put links to `obaaf` and `pre-commit`, and nothing else, in one `bin` directory, so that putting it on your `PATH` does not also put the checker environment's `python` and `pip` first (a later `pip install` in that shell would then go into the hash-checked environment). Put this line in the startup file of every shell you commit from, and check that the hook's checker comes first:
 
 ```bash
-tool_dir="$HOME/.local/share/obaaf-hook-a620b95"
-export PATH="$tool_dir/checker/bin:$tool_dir/runner/bin:$PATH"
-command -v obaaf
-obaaf --version
+export PATH="$HOME/.local/share/obaaf-hook-a620b95/bin:$PATH"
+test "$(command -v obaaf)" = "$HOME/.local/share/obaaf-hook-a620b95/bin/obaaf" && echo "the hook's checker comes first"
 ```
 
-The dependency install checks SHA-256 digests against the reviewed lock. Building OBAAF locally uses its pinned source and the installed build backend. There is no separately hashed OBAAF wheel. The interpreter, bootstrap pip and pre-commit runner sit outside this lock. The runner command fixes the pre-commit version and resolves its own dependencies separately. A local hook has no remote hook `rev`; review the config in the consuming repository and update the checker explicitly. A different PATH can select another executable.
+Only `obaaf` has to be on the `PATH` when you commit: pre-commit's hook script runs the Python that installed it. A Git client started from the desktop may not read your shell's startup file, so check which `obaaf` it finds (from its own terminal, if it has one) or commit from a shell: with no `obaaf` on its `PATH` the hook fails and the commit is blocked, and with another `obaaf` first the hook runs that one. `obaaf --version` prints `0.4.0.dev0` for every development build, so it does not tell you which commit you have; the tools directory's name and its `source` checkout do. To move to a new commit, set up a new tools directory and change the `PATH` line.
+
+**What this pins, and what it does not.**
+
+- **Pinned to a commit:** OBAAF's source, checked out detached at `a620b95cc18293f57ef385651354a43820dd32e6`.
+- **Pinned by version and SHA-256:** the 11 packages in that commit's lock: setuptools (the build backend) and 10 dependencies, including cryptography (for the `keys` extra) and the cffi and pycparser it needs. pip refuses any file whose digest differs. These are the lock and the three install commands that `actions/setup-obaaf` runs in CI.
+- **Not hashed:** OBAAF itself, which is built on your machine from that source (there is no OBAAF wheel with a published digest); Python and the pip each new environment starts with; and pre-commit, whose version is fixed but whose own dependencies are resolved when it is installed, unpinned and unhashed, and run at every commit.
+- **Not pinned by the hook:** a local hook has no `rev`. The configuration below runs whatever `obaaf` is first on the `PATH`.
 
 `.pre-commit-config.yaml`:
 
@@ -231,17 +238,17 @@ Then run `pre-commit validate-config .pre-commit-config.yaml`, `pre-commit insta
 
 ### Why this hook uses a separate checker environment
 
-On Linux with Python 3.12 and pre-commit 4.7.0, each option passed the clean workflow and failed the same risky workflow at the medium threshold. The difference was how the checker reached the committer's machine.
+OBAAF ships no hook definition (`.pre-commit-hooks.yaml`), by choice (decision D-063). Five ways of installing the hook were tried by the ChatGPT session that wrote this section (2026-11-14, Linux, Python 3.12, pre-commit 4.7.0), each in local test clones with its own new repository, pre-commit cache and checker environment. Its logs are not in this repository, and no review re-ran them. Each way passed a clean workflow and failed a risky one at `--fail-on medium`. The rows with a remote Python hook ran OBAAF at `d3e7c1b` (with a trial hook definition added, never published), and the system-hook rows at `a620b95`, whose checker code differs; the table compares how each installs, not what the checker found.
 
-| Installation tested | What the pin covers | What the install showed |
+| Installation tried | What the pin covers | What the install showed |
 | --- | --- | --- |
-| Remote Python hook pinned by full Git SHA | Hook and OBAAF source | The hook environment resolved `rpds-py==2026.9.1`; the reviewed lock listed `0.30.0`. |
-| Remote Python hook with exact additional dependencies | Same Git pin plus package versions | All 11 constrained versions matched, including `cffi==2.1.1`. The installer received no project wheel hashes. A pin on setuptools in the hook environment also does not constrain pip's isolated build environment. |
-| Local system hook with ordinary pip install from Git | Full SHA for OBAAF source | This also resolved `rpds-py==2026.9.1`. The checker ran from PATH. |
-| Local system hook with the wheel lock (example above) | Full SHA for source; versions and SHA-256 for the 11 locked dependencies | All versions matched. A separate download with an intentionally incorrect hash was rejected. |
-| Remote system hook with a separately locked checker | Remote full SHA for the hook definition; separate source pin and lock for the executable | The hook still needed the separately installed checker on PATH. |
+| Remote Python hook pinned by full Git SHA | The hook and OBAAF's source | pip resolved the dependencies itself: `rpds-py==2026.9.1`, where the lock at that commit lists `0.30.0`. No hash from OBAAF's lock was checked. |
+| Remote Python hook with exact `additional_dependencies` | The same, plus each package's version | All 11 versions matched the lock, including `cffi==2.1.1`, but no hash from OBAAF's lock was checked, and pip's isolated build environment takes its own setuptools whatever the hook pins. |
+| Local system hook, OBAAF installed with an ordinary `pip install` from Git | OBAAF's source | As in the first row, `rpds-py==2026.9.1`, and no hash checked. |
+| Local system hook, OBAAF installed from the lock (the setup above, before the review added the `bin` directory) | OBAAF's source; the version and SHA-256 of the 11 packages in the lock | All versions matched the lock. A commit with the hook went through on the clean workflow and was blocked on the risky one. |
+| Remote system hook with the checker installed from the lock | The hook definition by one SHA; OBAAF's source by another | The same install as the row above, with a second pin to keep in step: the hook definition does not install the checker. |
 
-The remote manifests existed only in local test clones based on `d3e7c1b5eb7c6e25ceac0d5015a5c0c1fe357633`. Their Python hooks installed that source plus the trial manifest. All system hooks ran the checker at the CI example pin (`a620b95`). On the local hash-checked path, a Git commit succeeded on clean input and was blocked on risky input. For those trials, `pre-commit autoupdate --freeze` converted a local tag into a full SHA in the consuming config. That command updates the hook repository pin; it supplies no PyPI wheel hashes. The local example avoids maintaining both a remote manifest pin and an independent checker installation.
+A remote hook's `rev` (which `pre-commit autoupdate --freeze` writes as a full SHA) holds the hook's own code to a commit, never the wheels its environment installs. Only the last two rows meet the rule `actions/setup-obaaf` follows in CI, every dependency by exact version and SHA-256, and of those the local hook needs one pin, not two.
 
 ## What was run, and what was not
 
@@ -251,8 +258,10 @@ Run by the review (run `stint`, 2026-11-14, Python 3.13): every exit status and 
 
 Not run: this workflow on a GitHub runner (including the review's change to the template: the configuration read under all three names, and a pull request's own `.obaaf-base` removed; git's handling of the three patterns was checked locally), an upload to code scanning, a required check in a ruleset, actionlint on the workflow above (it could not be installed in the review's session), and pre-commit in the review's session (no access to PyPI).
 
+**The pre-commit setup** (H3). Run by the ChatGPT session that wrote it (2026-11-14, Linux, Python 3.12.14, pre-commit 4.7.0): the five installations in the table above, and the setup block as it first wrote it, with the tools directory moved (it installed; run again, it stopped at `mkdir`). Its logs are not in this repository. Run by the review (run `garganey`, 2026-11-15, Python 3.13, no access to PyPI): the 11 packages counted in the lock at `a620b95`, and the block's install commands compared with `actions/setup-obaaf/action.yml` at that commit (the same, apart from the action's `--quiet` and `--disable-pip-version-check` and its check that Python is 3.10 or later); the clone and detached checkout; a build of OBAAF with `--no-deps --no-build-isolation` in a new environment that took its packages from the machine instead of the lock; the `bin` directory of links, with `obaaf` run through its link on its own environment's Python and found first on the `PATH`. Not run by anyone: the setup block as it now stands from start to end, the hash-checked install in the review's session, pre-commit in the review's session, macOS, and Python 3.10, 3.11 and 3.13 with pre-commit. That pre-commit's hook script runs the Python that installed it is read from pre-commit's hook template, not run.
+
 ## What is still missing
 
-- **OBAAF has no hook definition of its own** (`.pre-commit-hooks.yaml`), and no test runs pre-commit; the tests read the hook's configuration only.
+- **No test runs pre-commit or the setup commands for the hook**; the tests read the hook's configuration and check that its pin is the CI example's. OBAAF ships no `.pre-commit-hooks.yaml` by choice ([why](#why-this-hook-uses-a-separate-checker-environment)); that is to be looked at again if a hook definition can check the lock's hashes with less setup.
 - **No promise about the JSON and SARIF formats.** OBAAF is 0.x, and the format name `obaaf-check/v0.1` did not change when the entries under `baseline.stale` did.
 - **The template is the only workflow tested**: its check step is run with bash and a stand-in for `obaaf`, and nothing has run the workflow on GitHub with a pull request.
