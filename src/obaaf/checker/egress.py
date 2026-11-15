@@ -190,6 +190,16 @@ def read_firewall_policy(root) -> FirewallPolicy:
                                      "take for a key of that name")
     if not isinstance(raw, dict):
         return FirewallPolicy("unreadable", digest=digest, detail="its top level is not a mapping")
+    # The README describes three keys, and says the format may change. Another key, or one of the three in
+    # another letter case beside it (`MODE: log`), may widen what the firewall allows or change its mode,
+    # so the file is not read one way (flagship slice 2d.2f; before, other keys were left out unread).
+    unknown = [key for key in raw if key not in POLICY_KEYS]
+    if unknown:
+        return FirewallPolicy("unreadable", mode=raw.get("mode") if isinstance(raw.get("mode"), str) else None,
+                              digest=digest,
+                              detail=f"it has {shown_keys(unknown)}, which the firewall's README does not describe "
+                                     f"(it names {', '.join(POLICY_KEYS)}), so the checker cannot tell what the "
+                                     "firewall makes of it")
     mode = raw.get("mode")
     allow = raw.get("allow")
     entries: list = []
@@ -201,6 +211,18 @@ def read_firewall_policy(root) -> FirewallPolicy:
     return FirewallPolicy("read", mode=mode if isinstance(mode, str) else None, allow=entries,
                           no_defaults=raw.get("no-default-urls") is True, digest=digest,
                           detail="" if isinstance(mode, str) else "its mode is not written as text")
+
+
+# The keys of the firewall's policy file its README describes (read on 2026-11-15).
+POLICY_KEYS = ("mode", "allow", "no-default-urls")
+# The endpoints the firewall allows unless `no-default-urls: true`, as its README lists them on 2026-11-15:
+# the two wildcard ones are GitHub-managed and expand to URLs from GitHub's /meta endpoint.
+DEFAULT_ENDPOINTS = "github.com, codeload.github.com, and GitHub's own blob storage and Actions endpoints"
+
+
+def shown_keys(keys: list) -> str:
+    shown = ", ".join(f"'{str(key)[:40]}'" for key in keys[:3])
+    return ("the key " if len(keys) == 1 else "the keys ") + shown + (" and more" if len(keys) > 3 else "")
 
 
 def _has_merge_key(text: str) -> bool:
@@ -325,6 +347,27 @@ def uncommented(script: str) -> str:
     return "".join(out)
 
 
+# How a step can name the scratch directory (/tmp/obaaf-egress.<random>) or /tmp, read the widest way
+# (flagship slice 2d.2f): `/tmp` or `obaaf-egress` once quotes and backslashes are taken out and slashes
+# and `.` parts collapsed; a top-level path whose first part is a pattern or built from an expansion
+# (`/t[m]p`, `/t?p`, `/*/obaaf*`, `/{tmp,x}`, `/$D`, `/t$(echo m)p`); and a temporary directory asked
+# for by name. Still a pattern search: a path assembled in a way none of these sees is not found.
+_TOP_PATTERN_RE = re.compile(r"(?:^|[^\w.~$}-])/[^\s/'\"]*[*?\[{$`]")
+_TEMP_NAME_RE = re.compile(r"mktemp|tmpdir|gettempdir|tempfile|mkdtemp|tmp_dir|os\.tmpdir|temp_dir",
+                           re.I)
+
+
+def names_temporary(text: str) -> bool:
+    """Whether a value may name /tmp or the scratch directory under it (see `_TOP_PATTERN_RE`)."""
+    raw = text or ""
+    plain = re.sub(r"[\"'\\]", "", raw)
+    plain = re.sub(r"/(?:\.?/)+", "/", plain)
+    lowered = plain.lower()
+    if "/tmp" in lowered or "obaaf-egress" in lowered or "obaaf-egress" in raw.lower():
+        return True
+    return bool(_TOP_PATTERN_RE.search(raw) or _TOP_PATTERN_RE.search(plain) or _TEMP_NAME_RE.search(raw))
+
+
 # A process a step may leave running after it ends. Shell can start one in endless spellings (line
 # continuations, full paths, `--detach=true`, backticks, `sudo at`), so the checker does not try to
 # tell a detached container from one that ends with its step: any mention of a container engine, a
@@ -333,9 +376,13 @@ def uncommented(script: str) -> str:
 # "cannot tell" and never hides one. Both patterns are linear in the length of the script.
 _AMPERSAND_RE = re.compile(r"(?<![&|>])&(?![&>])")
 _DETACHING_RE = re.compile(
-    r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|coproc|docker|docker-compose|podman"
-    r"|podman-compose|nerdctl|screen|tmux|batch)\b"
-    r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])")
+    r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|systemctl|initctl|coproc"
+    r"|docker|dockerd|docker-compose|containerd|podman|podman-compose|nerdctl|screen|tmux|batch|pm2|forever"
+    r"|supervisord|supervisorctl|ssh-agent|autossh|sshd|socat|fork|spawn|popen|subprocess|child_process|detached"
+    r"|crontab|atd)\b"
+    r"|(?<!no-)\bdaemon\b|\bservice[ \t]+\S+[ \t]+(?:start|restart)\b|\bssh\b[^\n]*[ \t]-[A-Za-z]*[fN]"
+    r"|\bsudo\b[^\n]*[ \t](?:-[A-Za-z]*b|--background)\b"
+    r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])", re.I)
 
 
 def leaves_process(script: str) -> str | None:
@@ -343,7 +390,11 @@ def leaves_process(script: str) -> str | None:
     (not `&&`, `2>&1`, `&>` or `|&`), or a mention anywhere of `nohup`, `setsid`, `disown`,
     `daemonize`, `start-stop-daemon`, `systemd-run`, `coproc`, `batch`, `at` followed by a time word,
     a digit or an option, a container engine (`docker`, `docker-compose`, `podman`, `podman-compose`, `nerdctl`)
-    or a terminal multiplexer (`screen`, `tmux`)."""
+    or a terminal multiplexer (`screen`, `tmux`). From flagship slice 2d.2f, in any letter case, also a
+    service manager or process manager (`systemctl`, `service ... start`, `pm2`, `forever`, `supervisord`),
+    `ssh -f`, `ssh -N`, `ssh-agent` and `socat`, `sudo -b`, the container daemons, `crontab`, and the words a script language forks or spawns
+    with (`fork`, `spawn`, `popen`, `subprocess`, `child_process`, `detached`). Still a list: a process
+    started in a way it does not name is not found."""
     text = script or ""
     if _AMPERSAND_RE.search(text):
         return "&"

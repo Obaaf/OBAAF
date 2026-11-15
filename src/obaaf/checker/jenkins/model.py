@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
+from obaaf.checker.workflow import is_lane_variable_spelling
 from obaaf.checker.jenkins.parser import (
     Annotated, Assign, Binary, Block, Call, Closure, Decl, ExprStmt, If, Index, ListLit, Loop, MapLit,
     MethodDef, ClassDef, Name, Opaque, Prop, Return, Str, Switch, Ternary, Try, Unary, callee_name, path_of,
@@ -127,6 +128,10 @@ class Pipeline:
     triggers: list = field(default_factory=list)        # Trigger: SCM and webhook triggers named in the file
     literals: dict = field(default_factory=dict)        # variable -> Str assigned to it (last assignment)
     stages: list = field(default_factory=list)          # every stage with a block, as a tuple of names, steps or not
+    # Lane declarations the checker does not read (flagship slice 2d.2f): (kind, name, value text or
+    # None, line, stage). `jenkins-misnamed` is the variable under another spelling in an environment
+    # block or a withEnv; `jenkins-scripted` is any spelling assigned to `env.` in a script.
+    unread_lanes: list = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------- helpers
@@ -1001,6 +1006,12 @@ class Builder:
                 self.expr(stmt.value, ctx)
         elif isinstance(stmt, Assign):
             target = path_of(stmt.target) or path_of(getattr(stmt.target, "target", None))
+            if target and target.startswith("env.") and (target[4:] == "OBAAF_LANE"
+                                                          or is_lane_variable_spelling(target[4:])):
+                # `env.OBAAF_LANE = 'agent'` in a script sets the variable for later steps when the build
+                # runs; the checker reads lanes from environment blocks and withEnv only (2d.2a left this).
+                self.p.unread_lanes.append(("jenkins-scripted", target[4:], literal(stmt.value), stmt.line,
+                                            " > ".join(ctx.stage)))
             if target:
                 self.p.local_names.add(target.split(".")[0])
                 if path_of(stmt.target):
@@ -1240,6 +1251,9 @@ class Builder:
                         if var.strip() == "OBAAF_LANE" and sep:
                             inner = replace(inner, lane=val.strip().lower() or inner.lane, lane_line=s.line,
                                             lanes=inner.lanes + ((val.strip(), s.line),))
+                        elif sep and is_lane_variable_spelling(var.strip()):
+                            self.p.unread_lanes.append(("jenkins-misnamed", var.strip(), val.strip(), s.line,
+                                                        " > ".join(ctx.stage)))
             self.block(call.closure, inner)
 
     def inline(self, name: str, call: Call, ctx: Ctx) -> None:
@@ -1384,6 +1398,8 @@ class Builder:
                 new.append(Binding((cid,), (var, f"{var}_USR", f"{var}_PSW"), "environment credentials()",
                                    stmt.line, origin))
                 continue
+            if var != "OBAAF_LANE" and is_lane_variable_spelling(var):
+                self.p.unread_lanes.append(("jenkins-misnamed", var, literal(value), stmt.line, " > ".join(ctx.stage)))
             if var == "OBAAF_LANE":
                 text = literal(value)
                 lane = (text or "").strip().lower() or lane
