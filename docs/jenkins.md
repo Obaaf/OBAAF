@@ -73,10 +73,20 @@ agents; a pod `yamlFile`). Modelling and the rules are linear in the size of the
 pipeline takes a few seconds. A file the model cannot handle is reported as not analyzed, and the
 other files are still checked.
 
-It finds Jenkinsfiles at any depth up to six directories: `Jenkinsfile`, `Jenkinsfile.<name>`,
-`Jenkinsfile-<name>` and `<name>.jenkinsfile`. Other files, such as `ci/*.groovy`, are added with
-`jenkins.files`; test fixtures are left out with `jenkins.exclude` (see [Configuration](#configuration)).
-A single `.groovy` file given on the command line is read as a pipeline.
+It finds Jenkinsfiles by name, in any letter case: `Jenkinsfile`, `Jenkinsfile.<name>`, `Jenkinsfile-<name>`,
+`Jenkinsfile_<name>`, `Jenkinsfile<name>` (`Jenkinsfile2`, `JenkinsfileRelease`), `<name>.jenkinsfile`,
+`<name>-jenkinsfile` and `<name>_jenkinsfile`, but not one ending in `.md`, `.txt`, `.html`, `.png`, `.svg`,
+`.yml`, `.yaml`, `.json`, `.xml`, `.properties`, `.orig` or `.bak`, which a note names. In a git work tree
+it looks at every file git lists (tracked, or not committed and not ignored), in any folder and at any
+depth, because the file a Jenkins job runs is set on the controller and can be any path; elsewhere it walks
+the folders, skipping `build`, `dist`, `target`, `vendor`, `node_modules` and similar folders and anything
+deeper than six folders, and a note names the folders it did not enter. A Jenkinsfile that is a link is
+read, under its own path, when it leads to a file in the repository, and is an error otherwise. Other files,
+such as `ci/*.groovy`, are added with `jenkins.files` (`**/` there also matches no folder, and a pattern that
+matches nothing is a note); test fixtures are left out with `jenkins.exclude`, and a note names what it left
+out (see [Configuration](#configuration)). A single `.groovy` file given on the command line is read as a
+pipeline. A Jenkinsfile with a name none of these has, which a job runs because the controller says so, is
+not read unless `jenkins.files` names it.
 
 ## What it models
 
