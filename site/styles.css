@@ -91,6 +91,7 @@ button, a { touch-action: manipulation; }
 .header nav { display: flex; flex-wrap: wrap; gap: 18px 22px; font-size: 14px; }
 .header nav a { text-decoration: none; }
 .header nav a:hover { text-decoration: underline; }
+.header nav a[aria-current="page"] { text-decoration: underline; text-decoration-thickness: 2px; }
 .header { flex-wrap: wrap; }
 .header .subnav { flex-basis: 100%; gap: 8px 20px; font-size: 13px; color: var(--muted); }
 .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; padding-top: 64px; padding-bottom: 36px; align-items: start; }
@@ -220,7 +221,7 @@ footer {
   padding: 28px 0 40px;
 }
 footer p, footer a { font-size: 14px; color: var(--muted); }
-.format code { overflow-wrap: anywhere; }
+.format code, .format a { overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   .hero, .section-grid, .pair, .ideas, .cmds, .cards { grid-template-columns: 1fr 1fr; }
   .ideas { grid-template-columns: 1fr; }
