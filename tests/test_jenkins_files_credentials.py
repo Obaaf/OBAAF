@@ -1,8 +1,9 @@
-"""Flagship slice 2d.2i: which Jenkinsfiles are read, and the credential rules OBAAF-JEN-013, 014 and 015.
+"""Flagship slice 2d.2i: which Jenkinsfiles are read, and OBAAF-JEN-001, 013, 014 and 015.
 
-Each case is one that got past the adapter in the attack recorded in docs/bypass-attempts.md, section
-2d.2i, under its id there (A for files and line ends, B for the three rules). The Jenkinsfiles are kept
-here as text, not as files, so `obaaf check` on this repository does not read them as pipelines.
+Most cases are ones that got past the adapter in the attacks recorded in docs/bypass-attempts.md,
+section 2d.2i, under their ids there (A: files and line ends; B: OBAAF-JEN-013 to 015; C:
+OBAAF-JEN-001); a few are the safe forms beside them. The Jenkinsfiles are kept here as text, not as
+files, so `obaaf check` on this repository does not read them as pipelines.
 """
 
 import json
@@ -68,7 +69,38 @@ CASES = {
  "B087": "properties([pipelineTriggers([[$class: 'GitLabPushTrigger', triggerOnPush: true, triggerOnMergeRequest: false, secretToken: 'abcdefghijklmnop0123']])])\nnode {\n  sh 'make'\n}\n",
  "B089": "properties([pipelineTriggers([GenericTrigger(genericVariables: [[key: 'ref', value: '$.ref']], token: env.JOB_NAME)])])\nnode {\n  sh 'make'\n}\n",
  "B094": "pipeline {\n  agent any\n  triggers {\n    GenericTrigger(genericVariables: [[key: 'ref', value: '$.ref']], token: 'abc123secret'.trim())\n  }\n  stages {\n    stage('Build') {\n      steps {\n        sh 'make'\n      }\n    }\n  }\n}\n",
- "B096": "pipeline {\n  agent any\n  environment {\n    HOOK = 'abc123secret'\n  }\n  triggers {\n    GenericTrigger(genericVariables: [[key: 'ref', value: '$.ref']], token: env.HOOK)\n  }\n  stages {\n    stage('Build') {\n      steps {\n        sh 'make'\n      }\n    }\n  }\n}\n"
+ "B096": "pipeline {\n  agent any\n  environment {\n    HOOK = 'abc123secret'\n  }\n  triggers {\n    GenericTrigger(genericVariables: [[key: 'ref', value: '$.ref']], token: env.HOOK)\n  }\n  stages {\n    stage('Build') {\n      steps {\n        sh 'make'\n      }\n    }\n  }\n}\n",
+ "C021": "def creds = [string(credentialsId: 'k', variable: 'K')]\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        withCredentials(bindings: creds) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C022": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      options { withAWS(credentials: 'k', region: 'us-east-1') }\n      steps {\n        sh './gradlew test'\n      }\n    }\n  }\n}\n",
+ "C026": "def runTests() {\n  sh './gradlew test'\n}\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          this.runTests()\n        }\n  }\n}\n",
+ "C027": "def runTests() {\n  sh './gradlew test'\n}\nnode {\n  stage('Build') {\n    def f = this.&runTests\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          f()\n        }\n  }\n}\n",
+ "C029": "def body = { sh './gradlew test' }\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          body.call()\n        }\n  }\n}\n",
+ "C030": "def body = { sh './gradlew test' }\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          body()\n        }\n  }\n}\n",
+ "C031": "def body = { sh './gradlew test' }\nnode {\n  stage('Build') {\n    withCredentials([string(credentialsId: 'k', variable: 'K')], body)\n  }\n}\n",
+ "C034": "def tasks = [:]\ntasks['a'] = { sh './gradlew test' }\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          parallel tasks\n        }\n  }\n}\n",
+ "C040": "node {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          steps.sh './gradlew test'\n        }\n  }\n}\n",
+ "C041": "def withTok(Closure body, String id) {\n  withCredentials([string(credentialsId: id, variable: 'K')]) {\n    body()\n  }\n}\nnode {\n  stage('Build') {\n    withTok({ sh './gradlew test' }, 'k')\n  }\n}\n",
+ "C043": "def tasks = [build: { sh './gradlew test' }]\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          tasks.build()\n        }\n  }\n}\n",
+ "C052": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'MR-*' }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C053": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { not { branch 'PR-*' } }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C054": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { not { branch pattern: 'PR-\\\\d+', comparator: 'REGEXP' } }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C055": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          if (env.GIT_BRANCH.startsWith('PR-')) {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n          }\n        }\n      }\n    }\n  }\n}\n",
+ "C056": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { expression { env.BRANCH_NAME != 'main' } }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C057": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { not { not { changeRequest() } } }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C062": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'main' }\n      steps {\n        script {\n          def agentCmd = 'claude'\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh \"${agentCmd} -p 'review'\"\n        }\n        }\n      }\n    }\n  }\n}\n",
+ "C063": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'main' }\n      steps {\n        script {\n          def cmd = 'codex exec \"fix the tests\"'\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh cmd\n        }\n        }\n      }\n    }\n  }\n}\n",
+ "C070": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh '''\n            claude \\\\\n              -p \"review\"\n          '''\n        }\n      }\n    }\n  }\n}\n",
+ "C072": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'main' }\n      steps {\n        script {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          steps.sh 'claude -p review'\n        }\n        }\n      }\n    }\n  }\n}\n",
+ "C088": "node {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          this.sh './gradlew test'\n        }\n  }\n}\n",
+ "C096": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        withCredentials(bindings: [string(credentialsId: 'k', variable: 'K')] + []) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C097": "def runTests() {\n  sh './gradlew test'\n}\nnode {\n  stage('Build') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          this.&runTests.call()\n        }\n  }\n}\n",
+ "C098": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      options { withCredentials([string(credentialsId: 'k', variable: 'K')]) }\n      steps {\n        sh './gradlew test'\n      }\n    }\n  }\n}\n",
+ "C045": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { not { changeRequest() } }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C051": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n      }\n    }\n  }\n}\n",
+ "C091": "node {\n  stage('Build') {\n    if (env.BRANCH_NAME == 'main') {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n    }\n  }\n}\n",
+ "C092": "node {\n  stage('Build') {\n    if (env.CHANGE_ID) {\n      echo 'pr'\n    } else {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh './gradlew test'\n        }\n    }\n  }\n}\n",
+ "C093": "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          echo 'hello'\n        }\n      }\n    }\n  }\n}\n",
+ "C094": "pipeline {\n  agent any\n  stages {\n    stage('Review') { steps { sh 'claude -p \"review\"' } }\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        withCredentials([string(credentialsId: 'k', variable: 'K')]) {\n          sh 'curl -X POST https://deploy.example'\n        }\n      }\n    }\n  }\n}\n"
 }
 
 # (case, rule, what the adapter must say: a finding, "unknown" (never a pass) or nothing, severity)
@@ -124,6 +156,37 @@ EXPECT = [
     ('B089', 'OBAAF-JEN-015', 'unknown', None),
     ('B094', 'OBAAF-JEN-015', 'finding', 'medium'),
     ('B096', 'OBAAF-JEN-015', 'finding', 'medium'),
+    ('C021', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C022', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C026', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C027', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C029', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C030', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C031', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C034', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C040', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C041', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C043', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C052', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C053', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C054', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C055', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C056', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C057', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C062', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C063', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C070', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C072', 'OBAAF-JEN-001', 'finding', 'high'),
+    ('C088', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C096', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C097', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C098', 'OBAAF-JEN-001', 'finding', 'medium'),
+    ('C045', 'OBAAF-JEN-001', 'none', None),
+    ('C051', 'OBAAF-JEN-001', 'none', None),
+    ('C091', 'OBAAF-JEN-001', 'none', None),
+    ('C092', 'OBAAF-JEN-001', 'none', None),
+    ('C093', 'OBAAF-JEN-001', 'none', None),
+    ('C094', 'OBAAF-JEN-001', 'none', None),
 ]
 
 A018 = b'// Review pipeline\rpipeline {\r  agent any\r  stages {\r    stage(\'Review\') {\r      steps {\r        withCredentials([string(credentialsId: \'gh-token\', variable: \'GH_TOKEN\')]) {\r          sh \'claude -p "review this change"\'\r        }\r      }\r    }\r  }\r}\r'

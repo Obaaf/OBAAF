@@ -342,8 +342,11 @@ class JenkinsRules:
             return f"step {info.use.name} is declared an agent in the checker configuration"
         if not info.shell:
             return None
+        # The script as the shell reads it: continued lines joined, literal variables of this file put in
+        # (flagship slice 2d.2i: `sh cmd` and `claude \\` + `-p` on the next line were not recognised).
+        script = self.script_text(info)
         for rx in self.agent_cmds:
-            m = rx.search(info.script)
+            m = rx.search(script)
             if m:
                 return f"runs an agent CLI ({m.group(0).strip()})"
         for rel in self._scripts(info.script):
