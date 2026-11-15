@@ -35,12 +35,6 @@ def _placeholders_in(text: str, where: str) -> list[str]:
     if _SHA_PLACEHOLDER_RE.search(text) or (where.rsplit(".", 1)[-1] == "uses" and text.strip() == PLACEHOLDER_SHA):
         out.append(PLACEHOLDER_SHA)
     return out
-# A command that downloads code into the workspace in a form the checker does not follow (OBAAF-GHA-008,
-# for a `./` action that runs after it): git or gh cloning, fetching or adding a submodule or worktree,
-# and an archive unpacked from a download. Searched in every script of the step, comments included.
-_CLONE_RE = re.compile(r"\bgit\b[^\n]*\b(?:clone|pull|submodule|worktree|subtree|checkout|switch|reset|restore)\b"
-                       r"|\bgh\b[^\n]*\brepo\b[^\n]*\bclone\b"
-                       r"|\btar\b\s+(?:-?[A-Za-z]*x[A-Za-z]*|--extract|--get)\b|\b(?:unzip|bsdtar|7z|unrar)\b", re.I)
 
 
 VERIFIED, NOT_MET, CANNOT_TELL = "verified", "not met", "cannot tell"
@@ -364,7 +358,12 @@ class WorkflowRules:
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
+        done: set = set()
         for line, job, step, where, placeholder in found:
+            key = (job.id if job else None, step.index if step else None, where, placeholder)
+            if key in done:
+                continue        # the placeholder in a key and in its value is one place
+            done.add(key)
             self.add("OBAAF-GHA-023", line, "Template placeholder '{placeholder}' is still present in {where}.",
                      job, step, placeholder=placeholder, where=Fact(where, f"'{one_line(where, 80)}'"),
                      legacy="Template placeholder '{placeholder}' is still present.")
@@ -1392,7 +1391,11 @@ class WorkflowRules:
                         found.append("github.token")
         return found
 
-    _CREDENTIAL_NAME_RE = re.compile(r"key|token|secret|passw|credential|auth|bearer|cookie", re.I)
+    # A name that says it holds a credential: `ANTHROPIC_API_KEY`, `deploy-token`, `DB_PASSWORD`; not
+    # `author` or `cache-key` (found by the review of 2d.2f).
+    _CREDENTIAL_NAME_RE = re.compile(
+        r"api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw|credential|bearer|cookie|authorization"
+        r"|(?:^|[_-])auth(?:$|[_-])|(?:anthropic|openai|gemini|claude|codex|model|llm)[_-]?key", re.I)
 
     def _credential_like(self, value) -> list[str]:
         """Values a part of the workflow is given that are not secrets but whose name says they may be a
@@ -1437,6 +1440,15 @@ class WorkflowRules:
                     envs(sub, depth + 1)
         envs(value)
         return found
+
+    def _agent_patterns(self) -> list:
+        """The agent command patterns, the catalog's and the configuration's, compiled once."""
+        cached = self.__dict__.get("_agent_patterns_cache")
+        if cached is None:
+            cached = [re.compile(p, re.M) for p in
+                      list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
+            self.__dict__["_agent_patterns_cache"] = cached
+        return cached
 
     def _agent_step(self, step: Step, text: str) -> str | None:
         """Why the checker takes the step to run an agent, or None."""
@@ -1540,7 +1552,7 @@ class WorkflowRules:
         exec`, `pnpm dlx`, `yarn dlx`, `bunx`) and no other agent pattern. Such a step, when it is not
         read as an install, is "cannot tell" rather than an agent outside (slice 2c.8)."""
         packages = {str(name) for name in (self.detection.get("agent_installs") or {})}
-        text = step.agent_text()
+        text = step.agent_text(self._agent_patterns())
         if not packages or not text or self._PACKAGE_RUNNER_RE.search(text):
             return False
         if any(f"{name}/" in text for name in packages):
@@ -1907,7 +1919,7 @@ class WorkflowRules:
         concurrent = any(step.background for step in confined)
         agents_outside = []
         for step in others:
-            why = self._agent_step(step, step.agent_text())
+            why = self._agent_step(step, step.agent_text(self._agent_patterns()))
             before = (step.index < first and not step.background and not concurrent
                       and (step.group is None or step.group not in groups))
             if why == "runs an agent CLI" and before and step.index not in job.agent_script_steps:
@@ -1936,7 +1948,7 @@ class WorkflowRules:
             problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
                             "(the checker tells where an agent runs by where its key goes)")
         elif not agents_outside and not any(place.reaches for place in placements):
-            recognised = [step for step in confined if self._agent_step(step, step.agent_text())
+            recognised = [step for step in confined if self._agent_step(step, step.agent_text(self._agent_patterns()))
                           or step.index in job.agent_script_steps]
             if not recognised:
                 unsure.append("no credential reaches the confined command or AWF's API proxy, no other step is given "
@@ -2422,7 +2434,7 @@ class WorkflowRules:
                         or (holder.group is not None and step.group == holder.group)):
                     nearby[step.index] = step
         evidence = any(place.reaches for place in placements) or any(
-            self._agent_step(step, step.agent_text()) or step.index in job.agent_script_steps for step in confined)
+            self._agent_step(step, step.agent_text(self._agent_patterns())) or step.index in job.agent_script_steps for step in confined)
         first = min(holder.index for holder in keyed) if keyed else 0
         agent_seen = False           # an agent recognised in a step before or beside a key, said as "not met"
         for step in sorted(nearby.values(), key=lambda s: s.index):
@@ -2440,7 +2452,7 @@ class WorkflowRules:
                                   "lists as released, before or beside the step that holds the key, and what that "
                                   "version's own steps do outside the sandbox is not established")
                 continue
-            why = self._agent_step(step, step.agent_text())
+            why = self._agent_step(step, step.agent_text(self._agent_patterns()))
             plain_before = step.index < first and not step.background and step.group is None
             if why == "runs an agent CLI" and plain_before and step.index not in job.agent_script_steps:
                 if self._installs_only(job, step):
@@ -3055,6 +3067,8 @@ class WorkflowRules:
                          where=where)
                 continue
             for value in self._image_values(job, image):
+                if value is not None and not value.strip():
+                    continue    # an empty image is no container (a matrix row run on the runner itself)
                 if value is None:
                     self.add("OBAAF-GHA-008", line,
                              "Image '{image}' of {where} is computed when the job runs, so the checker cannot tell "
@@ -3118,21 +3132,23 @@ class WorkflowRules:
 
     def _local_from_elsewhere(self, job: Job, step: Step, severity: str) -> None:
         """A `./` action is the files at that path in the workspace when the step runs. Where an earlier
-        step put another repository's files there, the action is that repository's, at the ref it was
-        fetched at, which can move unless it is a full commit SHA (flagship slice 2d.2f): a checkout
-        with `repository:` whose `path` holds the action's path, or a clone the checker does not follow."""
+        step put code from outside the run's own commit there, the action is that code, which can move
+        (flagship slice 2d.2f): a checkout with `repository:` whose `path` holds the action's path, at a ref
+        that is not a full commit SHA (`local-from-checkout`); an artifact downloaded from another run or
+        repository, or a cache restored, over that path; or a script line that clones or downloads
+        (`git clone`, `gh repo clone`, `git worktree add`, `git submodule add`, `curl`, `wget`,
+        `gh release download`, `gh run download`, `degit`, `tar x`, `unzip`, `bsdtar`, `7z`) and names
+        the action's top directory (`local-after-download`). Paths are compared after `.` and `..` are
+        resolved; an absolute path, or one written with an expression or a variable, is taken to hold
+        the action."""
         target = self._workspace_path(step.uses[2:])
+        if target is None:
+            return
+        top = target.split("/", 1)[0]
         for earlier in reversed(job.steps[:step.index]):
             if earlier.uses_action("actions/checkout"):
                 given = earlier.with_
-                path = given.get("path", "")
-                path_text = as_text(path) if path is not None else ""
-                if "${{" in path_text:
-                    covers = True
-                else:
-                    root = self._workspace_path(path_text)
-                    covers = root == "" or target == root or target.startswith(root + "/")
-                if not covers:
+                if not self._covers(given.get("path", ""), target):
                     continue
                 repository = given.get("repository")
                 repo_text = as_text(repository).strip() if repository is not None else ""
@@ -3149,35 +3165,78 @@ class WorkflowRules:
                          checkout=Fact(earlier.name, one_line(earlier.name, 80)),
                          ref=Fact(ref_text, f"'{one_line(ref_text, 60)}'" if ref_text else "its default branch"))
                 return
-            if earlier.uses_action("actions/download-artifact") or earlier.uses_action("actions/cache") \
-                    or earlier.uses_action("actions/cache/restore"):
-                path = earlier.with_.get("path", "")
-                path_text = as_text(path) if path is not None else ""
-                root = self._workspace_path(path_text.replace("${{ github.workspace }}", "")
-                                            .replace("$GITHUB_WORKSPACE", ""))
-                if "${{" in path_text or "$" in path_text or "\n" in path_text or "*" in path_text \
-                        or root == "" or target == root or target.startswith(root + "/"):
-                    self.add("OBAAF-GHA-008", step.line,
-                             "Action '{uses}' runs from the workspace after step '{clone}' downloads files into it, "
-                             "so the checker cannot tell which repository and commit the action comes from.", job,
-                             step, severity, kind="local-after-download", uses=step.uses,
-                             clone=Fact(earlier.name, one_line(earlier.name, 80)))
-                    return
-                continue
-            text = earlier.scripts()
-            if _CLONE_RE.search(text):
+            if self._fetches_over(earlier, target, top):
                 self.add("OBAAF-GHA-008", step.line,
-                         "Action '{uses}' runs from the workspace after step '{clone}' downloads code into it, so "
-                         "the checker cannot tell which repository and commit the action comes from.", job, step,
-                         severity, kind="local-after-download", uses=step.uses,
+                         "Action '{uses}' runs from the workspace after step '{clone}' puts code from outside this "
+                         "run's commit there, so the checker cannot tell which repository and commit the action "
+                         "comes from.", job, step, severity, kind="local-after-download", uses=step.uses,
                          clone=Fact(earlier.name, one_line(earlier.name, 80)))
                 return
 
+    # A download that can bring another run's or repository's files: actions/download-artifact given a run,
+    # a repository or a token, and any other repository's download-artifact action.
+    _CROSS_RUN_INPUTS = ("run-id", "repository", "github-token")
+    # Words that clone, download or unpack code on a script line (`_fetches_over`), as whole words.
+    _FETCH_WORDS = frozenset({"curl", "wget", "degit", "unzip", "bsdtar", "7z", "unrar"})
+
+    def _fetches_over(self, earlier: Step, target: str, top: str) -> bool:
+        if earlier.uses_action("actions/cache") or earlier.uses_action("actions/cache/restore"):
+            paths = as_text(earlier.with_.get("path", "") or "")
+            return any(self._covers(line, target, literal_only=True) for line in paths.splitlines() if line.strip())
+        action = (earlier.action or "").lower()
+        if action.endswith("download-artifact") or "/download-artifact" in action:
+            given = earlier.with_
+            if action == "actions/download-artifact" and not any(given.get(k) for k in self._CROSS_RUN_INPUTS):
+                return False    # this run's own artifact
+            return self._covers(given.get("path", ""), target)
+        for line in earlier.scripts().splitlines():
+            if top not in line:
+                continue        # cheap test first: the line must name the action's top directory
+            words = re.split(r"[\s;&|()`'\"]+", line)
+            fetches = bool(self._FETCH_WORDS & set(words))
+            for n, word in enumerate(words[:-1]):
+                nxt = words[n + 1]
+                if (word == "git" and any(w in ("clone", "worktree", "submodule") for w in words[n + 1:n + 4])) \
+                        or (word == "gh" and nxt in ("repo", "release", "run") and "download" in words[n + 1:n + 4]) \
+                        or (word == "gh" and nxt == "repo" and "clone" in words[n + 1:n + 4]) \
+                        or (word == "tar" and re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*|--extract|--get", nxt)):
+                    fetches = True
+                    break
+            if fetches and any(top in re.split(r"[/=]", word) or word.rstrip("/") == top for word in words):
+                return True
+        return False
+
+    def _covers(self, path, target: str, literal_only: bool = False) -> bool:
+        """Whether files put at `path` (as a step's input gives it) can be the action at `target`: the
+        workspace root, the target or a folder above it, after `.` and `..` are resolved. An absolute
+        path, `~`, or one with an expression or a variable is taken to hold the action, unless
+        `literal_only` (a cache's paths), where it is taken not to (a cache path is usually outside the
+        workspace, `~/.cargo`)."""
+        text = as_text(path).strip() if path is not None else ""
+        for prefix in ("${{ github.workspace }}/", "$GITHUB_WORKSPACE/", "${GITHUB_WORKSPACE}/"):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+        if text.startswith(("/", "~")) or "${{" in text or "$" in text or "*" in text:
+            return not literal_only
+        root = self._workspace_path(text)
+        if root is None:
+            return False        # outside the workspace
+        return root == "" or target == root or target.startswith(root + "/")
+
     @staticmethod
-    def _workspace_path(text: str) -> str:
-        """A path in the workspace as written in a step, without `./`, `.` parts or the slashes at its
-        ends; `..` is kept (it points outside, which no checkout path here holds)."""
-        parts = [part for part in str(text).replace("\\", "/").split("/") if part not in ("", ".")]
+    def _workspace_path(text: str) -> str | None:
+        """A path in the workspace as written in a step, with `.` and `..` resolved and no slashes at its
+        ends; None when it points outside the workspace."""
+        parts: list[str] = []
+        for part in str(text).replace("\\", "/").split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not parts:
+                    return None
+                parts.pop()
+            else:
+                parts.append(part)
         return "/".join(parts)
 
     # -------------------------------------------------------------- GHA-011

@@ -255,12 +255,18 @@ rules:
       which are read one by one, and one written in a form the checker does not read (not text, a key in
       another letter case, services not written as a mapping) is reported too (`image-unreadable`). An
       action in the repository itself (`./path`, `$/path`) has nothing to pin, except that a `./` action
-      after a step that checks out another repository at that path is that repository at the ref it was
-      checked out at (`local-from-checkout`), and one after a step that clones, downloads or unpacks code
-      into the workspace is reported as one the checker cannot place (`local-after-download`). Not
-      followed: the actions a local composite action or a called workflow uses (they are checked where
-      their own files are), whether a pinned commit is on the repository's own branches or only in a fork
-      of it, and what a pinned action fetches or runs when it runs.
+      after a step that checks out another repository at that path (after `.` and `..` are resolved; an
+      absolute path or one with an expression is taken to hold it) is that repository at the ref it was
+      checked out at (`local-from-checkout`), and one after an artifact downloaded from another run or
+      repository, a cache restored at a workspace path that holds it, or a script line that runs `git
+      clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`,
+      `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names the action's top directory, is
+      reported as one the checker cannot place (`local-after-download`). An empty image is no container.
+      Not followed: code merged or patched into the workspace (`git fetch` and `git merge`, `git am`,
+      `git apply`), an artifact of the same run, a cache restored at a path written with `~`, an absolute
+      path or an expression, the actions a local composite action or a called workflow uses (they are
+      checked where their own files are), whether a pinned commit is on the repository's own branches or
+      only in a fork of it, and what a pinned action fetches or runs when it runs.
     fix: >-
       Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep
       the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot
@@ -597,11 +603,14 @@ rules:
       is exactly that, with no `.`, `..` or empty part; a cache or an earlier step that may name the
       scratch directory (also by a pattern such as `/t[m]p`, or through `mktemp`), and an earlier step
       that may leave a process running (`&`, `nohup`, a container engine, a service or process manager,
-      `ssh -f`, `sudo -b`, a script language's fork or spawn), are "cannot tell" or "not met"; a value
-      given outside the confined command whose name says it may be a credential (`vars.*_KEY`, a job's
-      or step's output named like a token, an `env` name of a model key) is "cannot tell". The agent is
-      looked for in every script a step runs and every input it gives an action, with quotes and
-      backslashes taken out. Not followed, and so never a reason the finding clears: an agent run by a
+      `ssh -f`, `sudo -b`, a script language's fork or spawn, as written in lower case), are "cannot tell"
+      or "not met"; a value given outside the confined command whose name says it may be a credential
+      (`vars.*_API_KEY`, a job's or step's output named like a token or a secret, an `env` name of a model
+      key) is "cannot tell". The agent is looked for in the run script, a github-script script and the
+      action's `run`, also with quotes and backslashes taken out, and in each command in any other input
+      of an action, a `docker://` step's entrypoint and arguments, the step's `shell`, its `env` values
+      and the default shell, whose first word (after assignments and wrappers such as `sudo` or `npx`) is
+      an agent's; free text in an input is not a command. Not followed, and so never a reason the finding clears: an agent run by a
       package script (`npm run`), a called workflow or a local composite action; code an earlier action
       runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a

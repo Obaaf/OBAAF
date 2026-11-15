@@ -15,8 +15,6 @@ from helpers import TempDir, run_cli
 from test_egress_recognised import CHECKOUT, RELEASED, action, catalog, run_check, workflow
 
 from obaaf import checker
-from obaaf.checker import egress as egress_mod
-from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED
 
 SHA = "1111111111111111111111111111111111111111"
 DIGEST = "sha256:" + "a" * 64
@@ -119,6 +117,15 @@ class ImageTest(unittest.TestCase):
                 result = check(tmp, job(extra=extra))
                 self.assertEqual([f.kind for f in of(result, "OBAAF-GHA-008")], [kind])
 
+    def test_an_empty_image_is_no_container(self):
+        matrix = (f"    strategy:\n      matrix:\n        include: [{{container: ''}}, {{container: 'fedora@{DIGEST}'}}]\n"
+                  "    container: ${{ matrix.container }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, job(extra=matrix))
+            literal = check(tmp, job(extra="    container: {image: ''}\n"))
+        self.assertEqual(of(result, "OBAAF-GHA-008"), [])
+        self.assertEqual(of(literal, "OBAAF-GHA-008"), [])
+
     def test_a_short_digest_is_not_a_pin(self):
         with TempDir() as tmp:
             result = check(tmp, job(extra="    container: node@sha256:abcd\n"))
@@ -137,7 +144,21 @@ class LocalActionTest(unittest.TestCase):
                 (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions}}\n",
                  "local-from-checkout"),
                 ("      - run: git clone https://github.com/someorg/actions ext\n", "local-after-download"),
-                (f"      - uses: actions/download-artifact@{SHA}\n", "local-after-download"),
+                (f"      - uses: actions/download-artifact@{SHA}\n        with: {{run-id: '1', github-token: x}}\n",
+                 "local-after-download"),
+                (f"      - uses: dawidd6/action-download-artifact@{SHA}\n        with: {{repo: someorg/actions}}\n",
+                 "local-after-download"),
+                ("      - run: curl -fsSL -o ext/deploy/action.yml https://example.com/action.yml\n",
+                 "local-after-download"),
+                (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions, ref: main, "
+                 "path: ./x/../ext}\n", "local-from-checkout"),
+                (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions, ref: main, "
+                 "path: /home/runner/work/r/r/ext}\n", "local-from-checkout"),
+                (f"      - uses: actions/download-artifact@{SHA}\n", None),
+                (f"      - uses: actions/cache@{SHA}\n        with:\n          key: k\n          path: |\n"
+                 "            ~/.cargo/registry\n            ~/.cargo/git\n", None),
+                ("      - run: curl -o /tmp/p.zip https://example.com/p.zip && unzip /tmp/p.zip -d $HOME/.local\n", None),
+                ("      - run: git fetch --tags && git checkout -b release && git submodule update --init\n", None),
                 (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions, ref: {SHA}, "
                  "path: ext}\n", None),
                 (f"      - uses: actions/checkout@{SHA}\n        with: {{repository: someorg/actions, ref: main, "
@@ -148,6 +169,14 @@ class LocalActionTest(unittest.TestCase):
             with self.subTest(checkout=checkout), TempDir() as tmp:
                 result = check(tmp, job(checkout + "      - uses: ./ext/deploy\n"))
                 self.assertEqual([f.kind for f in of(result, "OBAAF-GHA-008")], [kind] if kind else [])
+
+    def test_a_path_with_dots_in_the_action_is_resolved(self):
+        steps = (f"      - uses: actions/checkout@{SHA}\n      - uses: actions/checkout@{SHA}\n"
+                 "        with: {repository: someorg/actions, ref: main, path: ext}\n"
+                 "      - uses: ./.github/../ext/deploy\n")
+        with TempDir() as tmp:
+            result = check(tmp, job(steps))
+        self.assertEqual([f.kind for f in of(result, "OBAAF-GHA-008")], ["local-from-checkout"])
 
     def test_the_facts_name_the_repository_and_the_ref(self):
         with TempDir() as tmp:
@@ -176,10 +205,11 @@ class FileFormTest(unittest.TestCase):
         for first, second in (("null", "None"), ("true", "'True'"), ("1", "'1'")):
             text = (f"on: push\npermissions: {{}}\njobs:\n  {first}:\n    runs-on: ubuntu-latest\n    steps:\n"
                     f"      - uses: some/action@v1\n  {second}:\n    runs-on: ubuntu-latest\n    steps:\n"
-                    "      - run: echo hi\n")
+                    "      - uses: other/action@v2\n")
             with self.subTest(first=first), TempDir() as tmp:
                 result = check(tmp, text)
-                self.assertEqual(len(of(result, "OBAAF-GHA-008")), 1)
+                self.assertEqual(sorted(f.facts["uses"] for f in of(result, "OBAAF-GHA-008")),
+                                 ["other/action@v2", "some/action@v1"])
                 self.assertTrue(any("job id written as" in e for e in result.errors), result.errors)
 
     def test_a_merge_key_is_an_error(self):
@@ -221,6 +251,11 @@ class PlaceholderTest(unittest.TestCase):
             longer = check(tmp, job(f"      - uses: some/action@{'0' * 41}\n"))
         self.assertEqual(of(comment, "OBAAF-GHA-023"), [])
         self.assertEqual(of(longer, "OBAAF-GHA-023"), [])
+
+    def test_a_placeholder_in_a_key_and_its_value_is_one_finding(self):
+        with TempDir() as tmp:
+            result = check(tmp, job("      - uses: some/a@v1\n        with: {OBAAF_OWNER: OBAAF_OWNER}\n"))
+        self.assertEqual(len(of(result, "OBAAF-GHA-023")), 1)
 
     def test_each_placeholder_is_its_own_finding_named_by_where_it_is(self):
         zeros = "0" * 40
@@ -265,8 +300,6 @@ class FirewallPolicyTest(unittest.TestCase):
                        "mode: enforce\nallow: [api.example.com]\nallow-ips: [0.0.0.0/0]\n",
                        "mode: enforce\nallow: [api.example.com]\noverrides: {}\n"):
             with self.subTest(policy=policy):
-                policy_read = egress_mod.read_firewall_policy
-                self.assertIsNotNone(policy_read)
                 result = self.firewall(policy)
                 f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
                 self.assertEqual(f.state, "cannot-tell")
@@ -302,6 +335,30 @@ class AgentFoundTest(unittest.TestCase):
             with self.subTest(name), TempDir() as tmp:
                 result = check(tmp, job(body))
                 self.assertEqual([f.rule for f in result.findings if f.rule == "OBAAF-GHA-020"], ["OBAAF-GHA-020"])
+
+
+    def test_free_text_in_an_input_is_not_an_agent(self):
+        steps = {
+            "a French comment": f"      - uses: peter-evans/create-or-update-comment@{SHA}\n"
+                                "        with: {body: 'Merci ! Un mainteneur va vous aider bientôt.'}\n",
+            "release notes": f"      - uses: softprops/action-gh-release@{SHA}\n"
+                             "        with: {body: 'Use with cline or aider out of the box'}\n",
+        }
+        for name, body in steps.items():
+            with self.subTest(name), TempDir() as tmp:
+                result = check(tmp, job(body))
+                self.assertEqual(of(result, "OBAAF-GHA-020"), [])
+
+    def test_an_agent_as_the_shell_or_in_an_env_value(self):
+        cases = {
+            "shell": ("      - run: review\n        shell: claude -p {0}\n", ""),
+            "default shell": ("      - run: review\n", "    defaults:\n      run:\n        shell: npx -y @anthropic-ai/claude-code -p {0}\n"),
+            "env value": ("      - run: $AGENT triage\n        env: {AGENT: claude -p}\n", ""),
+        }
+        for name, (body, extra) in cases.items():
+            with self.subTest(name), TempDir() as tmp:
+                result = check(tmp, job(body, extra=extra))
+                self.assertEqual(len(of(result, "OBAAF-GHA-020")), 1)
 
 
 class EgressActionTest(unittest.TestCase):
@@ -341,6 +398,11 @@ class EgressActionTest(unittest.TestCase):
             with self.subTest(given=given):
                 before = f"      - run: curl https://api.anthropic.com\n        env: {{K: {json.dumps(given)}}}\n"
                 self.assertEqual(self.state(CHECKOUT + "\n" + before + action()), "cannot-tell")
+
+    def test_an_agent_before_it_in_a_docker_step(self):
+        before = (f"      - uses: docker://node@sha256:{'a' * 64}\n"
+                  "        with: {entrypoint: npx, args: --yes @anthropic-ai/claude-code -p triage}\n")
+        self.assertEqual(self.state(CHECKOUT + "\n" + before + action()), "new")
 
     def test_an_agent_before_it_spelt_with_a_backslash(self):
         before = "      - run: cl\\aude -p triage\n"

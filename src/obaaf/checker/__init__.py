@@ -30,6 +30,18 @@ from obaaf.checker.rules import FIXED, Finding
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
 CONFIG_LOCATIONS = (".github/obaaf.yml", ".github/obaaf.yaml", "obaaf.yml")
+def _same_as_read(root: Path, rel: str) -> bool:
+    """Whether a file is one the checker reads under another spelling, which a file system that ignores
+    letter case gives for `.github/obaaf.yml` (`.github/OBAAF.yml` on macOS or Windows)."""
+    for location in CONFIG_LOCATIONS:
+        try:
+            if (root / location).is_file() and os.path.samefile(root / location, root / rel):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 # Names a checker configuration may be given by mistake, in any letter case, at the root or in .github
 # (flagship slice 2d.2f): the checker refuses to run beside one it would not read.
 _CONFIG_LOOKALIKES = frozenset({"obaaf.yml", "obaaf.yaml", ".obaaf.yml", ".obaaf.yaml"})
@@ -261,7 +273,8 @@ class Config:
                     names = []
                 for name in names:
                     rel = f"{folder}/{name}" if folder else name
-                    if name.lower() in _CONFIG_LOOKALIKES and rel not in CONFIG_LOCATIONS and (root / rel).is_file():
+                    if name.lower() in _CONFIG_LOOKALIKES and rel not in CONFIG_LOCATIONS and (root / rel).is_file() \
+                            and not _same_as_read(root, rel):
                         raise ConfigError(f"{root}: {rel} looks like a checker configuration, and the checker does not "
                                           f"read it (it reads {', '.join(CONFIG_LOCATIONS)}); rename or remove it")
         for path in candidates:

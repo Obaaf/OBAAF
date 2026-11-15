@@ -378,11 +378,14 @@ _AMPERSAND_RE = re.compile(r"(?<![&|>])&(?![&>])")
 _DETACHING_RE = re.compile(
     r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|systemctl|initctl|coproc"
     r"|docker|dockerd|docker-compose|containerd|podman|podman-compose|nerdctl|screen|tmux|batch|pm2|forever"
-    r"|supervisord|supervisorctl|ssh-agent|autossh|sshd|socat|fork|spawn|popen|subprocess|child_process|detached"
-    r"|crontab|atd)\b"
-    r"|(?<!no-)\bdaemon\b|\bservice[ \t]+\S+[ \t]+(?:start|restart)\b|\bssh\b[^\n]*[ \t]-[A-Za-z]*[fN]"
-    r"|\bsudo\b[^\n]*[ \t](?:-[A-Za-z]*b|--background)\b"
-    r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])", re.I)
+    r"|supervisord|supervisorctl|ssh-agent|autossh|sshd|socat|fork|spawn|popen|Popen|subprocess|child_process"
+    r"|detached|crontab|atd)\b"
+    r"|(?<![.\w-])daemon\b(?![ \t]*=)|\bservice[ \t]+\S+[ \t]+(?:start|restart)\b"
+    r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])")
+# `ssh -f` or `-N`, and `sudo -b` or `--background`, read word by word on each line (a pattern with
+# `[^\n]*` between two words is quadratic on a line that repeats the first: found by the review of 2d.2f).
+_SSH_DETACH = re.compile(r"-[A-Za-z]*[fN][A-Za-z]*")
+_SUDO_DETACH = re.compile(r"-[A-Za-z]*b[A-Za-z]*|--background")
 
 
 def leaves_process(script: str) -> str | None:
@@ -399,7 +402,21 @@ def leaves_process(script: str) -> str | None:
     if _AMPERSAND_RE.search(text):
         return "&"
     found = _DETACHING_RE.search(text)
-    return found.group(0).split()[0] if found else None
+    if found:
+        return found.group(0).split()[0]
+    for line in text.splitlines():
+        if "ssh" not in line and "sudo" not in line:
+            continue
+        words = re.split(r"[\s;&|()`]+", line)
+        command = ""
+        for word in words:
+            if word in ("ssh", "sudo") or word.endswith(("/ssh", "/sudo")):
+                command = word.rsplit("/", 1)[-1]
+            elif command == "ssh" and _SSH_DETACH.fullmatch(word):
+                return "ssh"
+            elif command == "sudo" and _SUDO_DETACH.fullmatch(word):
+                return "sudo"
+    return None
 
 
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).

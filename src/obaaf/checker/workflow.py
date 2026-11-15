@@ -1803,23 +1803,42 @@ class Step:
             parts.append(given if isinstance(given, str) else "")
         return "\n".join(p for p in parts if p)
 
-    def agent_text(self) -> str:
-        """What an agent CLI is looked for in, read the widest way (flagship slice 2d.2f): everything
-        `scripts()` reads, every input given to any other action (a fork or copy of OBAAF's egress action,
-        or any action that runs a command it is given, runs an agent the same way), and each of those with
-        lines continued by a backslash joined and with quotes taken out, so that `cl''aude -p` is the
-        command it runs. Before, only the run script, a github-script script and the `run` of OBAAF's own
-        action were read, so an agent given to another action was in no lane and got no agent rule."""
-        parts = [self.scripts()]
-        if self.uses and not self.confines and not self.uses.strip().lower().startswith("docker://"):
+    def agent_text(self, commands=None) -> str:
+        """What an agent CLI is looked for in, read the widest way (flagship slice 2d.2f): the run script,
+        a github-script script and the command OBAAF's egress action runs, as before, each also with lines
+        continued by a backslash joined and with quotes and backslashes taken out (`cl''aude -p`); and,
+        from every other place a step can give a command line (every input of any other action, a fork
+        or copy of OBAAF's egress action included, a `docker://` step's entrypoint and arguments, the
+        step's `shell`, its `env` values), each command whose first word, after assignments and wrappers
+        such as `sudo` or `npx`, is one `commands` (compiled patterns; the catalog's `agent_commands` by
+        default) match. Free text in an input ("vous aider", "works with cline") is not a command and is
+        not read as one (found by the review of 2d.2f). Before, only the first three were read, so an
+        agent given to another action was in no lane and got no agent rule."""
+        if commands is None:
+            commands = [re.compile(p, re.M) for p in load_catalog().detection.get("agent_commands", [])]
+        own = self._command_text()
+        found: list[str] = []
+        lines: list = []
+        if self.uses and self.uses.strip().lower().startswith("docker://"):
+            entry, args = self.with_.get("entrypoint"), self.with_.get("args")
+            lines.append(" ".join(v for v in (entry, args) if isinstance(v, str)))
+        elif self.uses and not self.confines:
             for name, given in self.with_.items():
                 if isinstance(given, str) and not (name == "script" and self.uses_action("actions/github-script")):
-                    parts.append(given)
-        text = "\n".join(p for p in parts if p)
-        readings = upload_readings(text)
-        # A backslash before a letter is taken out by the shell (`cl\aude` runs claude).
-        readings.append(re.sub(r"\\(?=[^\n])", "", readings[-1]))
-        return "\n".join(dict.fromkeys(v for v in readings if v))
+                    lines.append(given)
+        shell = self.raw.get("shell")
+        if isinstance(shell, str):
+            lines.append(shell)
+        lines.extend(v for v in self.env.values() if isinstance(v, str))
+        for value in lines:
+            for variant in _readings(value):
+                if any(rx.match(candidate) for segment in command_segments(variant)
+                       for candidate in _first_word_forms(segment) for rx in commands):
+                    # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
+                    found.append(variant)
+                    break
+        text = "\n".join(p for p in [own, *found] if p)
+        return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 
     @property
     def clean_action(self) -> str | None:
@@ -2236,15 +2255,28 @@ class Job:
             for prefix in actions:
                 if step.uses_action(prefix):
                     return f"uses {step.action}"
-            text = step.agent_text()
+            text = step.agent_text(commands)
             for rx in commands:
                 if text and rx.search(text):
                     return f"runs an agent CLI in '{step.name}'"
+        # The default shell a `run` step is given (flagship slice 2d.2f, from its review): `shell: claude -p
+        # {0}` under `defaults.run` runs the agent with every script.
+        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
+            run = defaults.get("run") if isinstance(defaults, dict) else None
+            shell = run.get("shell") if isinstance(run, dict) else None
+            if isinstance(shell, str) and any(self.steps_run()) and any(
+                    rx.match(form) for variant in _readings(shell) for segment in command_segments(variant)
+                    for form in _first_word_forms(segment) for rx in commands):
+                return "runs an agent CLI as the default shell"
         if self.reusable:
             for prefix in actions:
                 if self.reusable.lower().startswith(prefix.lower()):
                     return f"calls {self.reusable}"
         return None
+
+    def steps_run(self) -> list[Step]:
+        """The steps that run a script (`run:`), which the default shell runs."""
+        return [step for step in self.steps if step.raw.get("run") is not None and step.raw.get("shell") is None]
 
     def upload_steps(self, detection: dict) -> list[Step]:
         actions = detection.get("upload_actions", [])
@@ -2281,6 +2313,53 @@ class Job:
             elif step.text() and any(rx.search(step.text()) for rx in rxs):
                 out.append(step)
         return out
+
+
+def _readings(text: str) -> list[str]:
+    """`upload_readings`, and the last of them with each backslash before a character taken out, as the
+    shell takes it out (`cl\\aude` runs claude)."""
+    readings = upload_readings(text)
+    readings.append(re.sub(r"\\(?=[^\n])", "", readings[-1]))
+    return readings
+
+
+_SEGMENT_SPLIT_RE = re.compile(r"\$\(|[;&|`(){}\n]")
+_WRAPPERS = frozenset({"sudo", "env", "exec", "nohup", "time", "xargs", "npx", "bunx", "command", "builtin", "nice",
+                       "stdbuf", "setsid"})
+_TWO_WORD_WRAPPERS = {("pnpm", "dlx"), ("pnpm", "exec"), ("yarn", "dlx"), ("npm", "exec"), ("npm", "x"), ("bun", "x")}
+
+
+def command_segments(text: str) -> list[str]:
+    """The commands a line of text holds, split where a shell starts a new one (`;`, `&`, `|`, a line break,
+    a substitution, a group), each without the assignments, wrappers (`sudo`, `env`, `npx`, `timeout 5m`)
+    and their options before its first word. Word by word, so linear in the length of the text."""
+    out: list[str] = []
+    for segment in _SEGMENT_SPLIT_RE.split(text or ""):
+        words = segment.split()
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", word) or word in _WRAPPERS or \
+                    (word.startswith("-") and i > 0):
+                i += 1
+            elif word == "timeout" and i + 1 < len(words):
+                i += 2
+            elif i + 1 < len(words) and (word, words[i + 1]) in _TWO_WORD_WRAPPERS:
+                i += 2
+            else:
+                break
+        if i < len(words):
+            out.append(" ".join(words[i:]))
+    return out
+
+
+def _first_word_forms(segment: str) -> list[str]:
+    """A command as written, and with its first word's directories taken off (`/usr/local/bin/claude`),
+    unless the word is a package name (`@scope/name`)."""
+    first, _, rest = segment.partition(" ")
+    if "/" in first and not first.startswith("@"):
+        return [segment, f"{first.rsplit('/', 1)[-1]} {rest}".rstrip()]
+    return [segment]
 
 
 def upload_readings(text: str) -> list[str]:
@@ -2686,7 +2765,7 @@ def is_lane_variable_spelling(name) -> bool:
     `OBAAFLANE` or one edit from it, once case, spaces, separators, invisible characters and look-alike
     letters are set aside (`obaaf-lane`, `OBAAF.LANE`, `OBAAF_LANES`, `OBAAF LANE` with a zero-width
     space, a Cyrillic `О`). Before, only case, spaces and `-` or a space for `_` were set aside."""
-    if not isinstance(name, str) or name == _LANE_VARIABLE or len(name) > 4096:
+    if not isinstance(name, str) or name == _LANE_VARIABLE:
         return False
     return _within_one_edit(lane_variable_skeleton(name), _LANE_SKELETON)
 

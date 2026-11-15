@@ -730,7 +730,7 @@ GitHub's documentation was read for the workflow syntax and contexts (by reviewe
 - **An image written as an expression was skipped** (025 to 030, 032, 133): `container: ${{ matrix.image }}`, `node:${{ matrix.v }}`, an image with `${{ '' }}` at its end, a service's image from `vars`. Every image is now read. One that is exactly `${{ matrix.x }}` with the matrix written out in the file is read value by value (the reader 2d.7 wrote for runner labels); any other is reported as kind `image-expression`, at the job's severity.
 - **Forms of `container` and `services` that were not read** (033, 034, 037, 128, 129, 131, 147): a service written as text, `Image:`, `Container:` or `Services:` in another letter case, a number, services as a list. One function now reads the container and every service; text is an image, and anything else is kind `image-unreadable`. GitHub may refuse some of these files (not verified); none is taken for "no image".
 - **A 64-digit ref counted as a commit** (004, 005, 006): github.com has no SHA-256 repositories, so such a ref can only be a tag or a branch. A pin is now 40 hexadecimal digits in lower case, matched in full (the old pattern's `$` also took a ref ending in a line break, 009). An image's digest must be `@sha256:` and 64 hexadecimal digits at its end; before, the text `@sha256:` anywhere counted.
-- **A `./` action loaded from another repository** (013, 014, 145): a checkout of `someorg/actions` at `main` (or at its default branch) into `ext`, then `uses: ./ext/deploy`, runs that repository's code at a ref that moves, and was taken for the workflow's own. It is now kind `local-from-checkout`, with the repository and the ref as facts, unless the checkout's `ref` is a full commit SHA (146 is the control). A `./` action after a step that clones, pulls or checks out with git, unpacks an archive, or downloads an artifact or restores a cache over that path is kind `local-after-download`.
+- **A `./` action loaded from another repository** (013, 014, 145): a checkout of `someorg/actions` at `main` (or at its default branch) into `ext`, then `uses: ./ext/deploy`, runs that repository's code at a ref that moves, and was taken for the workflow's own. It is now kind `local-from-checkout`, with the repository and the ref as facts, unless the checkout's `ref` is a full commit SHA (146 is the control); paths are compared after `.` and `..` are resolved, and an absolute path or one with an expression is taken to hold the action. A `./` action after an artifact from another run or repository (`actions/download-artifact` given `run-id`, `repository` or `github-token`, or another repository's download-artifact action), a cache restored at a workspace path that holds it, or a script line that clones or downloads (`git clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`, `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar`, `7z`) and names the action's top directory is kind `local-after-download`. Not followed: `git fetch` and `git merge`, `git am`, `git apply`, an artifact of the same run, and a cache restored at a path written with `~`, an absolute path or an expression.
 - **A called workflow's severity** (050, 053, 135, weaker cases): a job in a workflow that only `workflow_call` starts was low with read-only permissions, though its callers may be started by `pull_request_target`. It is now never low.
 - **Tracebacks** (138 to 142): a number of thousands of hexadecimal digits as an image or a `uses` ended the run in Python's integer-to-text limit, and one such file lost every other file's findings. Values are now turned to text with `as_text`, and a `uses` that is not text is an error of the file.
 
@@ -762,7 +762,7 @@ Every odd `permissions` value already failed the file; keys in another case, loo
 
 **Got through, now fixed.**
 
-- **The agent was not found, so there was no finding at all** (279 to 285): the egress action with a trailing or doubled slash, from a fork, or copied into the repository; an agent CLI in another action's `command` input; in a `docker://` step's arguments; spelt `cl''aude -p` or `cl\aude -p`. Only the run script, a github-script script and the `run` of OBAAF's own action were read. The agent is now looked for in every input a step gives any action, a `docker://` step's arguments, and each with lines joined and quotes and backslashes taken out. A fork or copy of the action is not OBAAF's, so the finding is reported plainly; it never clears.
+- **The agent was not found, so there was no finding at all** (279 to 285): the egress action with a trailing or doubled slash, from a fork, or copied into the repository; an agent CLI in another action's `command` input; in a `docker://` step's arguments; spelt `cl''aude -p` or `cl\aude -p`. Only the run script, a github-script script and the `run` of OBAAF's own action were read. The agent is now looked for in each command in any input a step gives an action, a `docker://` step's entrypoint and arguments, the step's `shell` and `env` values and the default shell, where the command's first word (after assignments and wrappers such as `sudo` or `npx`) is an agent's; and the scripts read before are also read with lines joined and quotes and backslashes taken out. A fork or copy of the action is not OBAAF's, so the finding is reported plainly; it never clears.
 - **The firewall's policy read narrowly** (211 to 214): `mode: enforce` beside `MODE: log`, `Allow:` beside `allow:`, `allow-ips`, `overrides`. A key other than the README's three, or one of them in another letter case, is now "cannot tell".
 - **What may follow the confined command** (236): `actions/upload-artifact/../../../evil/act/v1@v4` was taken for upload-artifact (the path was normalised, then matched by prefix). Only `actions/upload-artifact` or `actions/upload-artifact/merge`, at a path with no `.`, `..` or empty part, may follow now.
 - **The scratch directory named by a pattern** (237, 239): `/t[m]p/obaaf-e*` in a cache's path and `$(dirname $(mktemp -u))` in an earlier step. A value names /tmp now also when quotes, backslashes and repeated slashes are taken out, when a top-level part of a path is a pattern or an expansion, and when it asks for a temporary directory by name (`mktemp`, `TMPDIR`, `tempfile`).
@@ -787,7 +787,16 @@ Every odd `permissions` value already failed the file; keys in another case, loo
 
 ### Review
 
-To be written after the review passes.
+One Opus 5.5 reviewer that did not write the code reviewed the slice. Its first pass found the full suite green, Expectrail's 43 findings unchanged, and six blocking findings, each fixed and tested in `tests/test_pins_egress_declaration_bypasses.py`:
+
+1. **Slow paths.** The first version's download pattern (`\bgit\b[^\n]*\b(clone|...)`) and the new `ssh` and `sudo` parts of the process pattern were quadratic: 37 s on a 12 KB line repeating `gh repo`, 10 s on 96 KB of `ssh `. Both are now read word by word on each line; the same inputs take under a second.
+2. **False positives of `local-after-download`** on common workflows: a cache with a multi-line path (`~/.cargo/registry`), `unzip` into `$HOME/.local`, `git checkout -b`, `git submodule update`, `git config ... safe.directory`, and any artifact download. The rule now names only what can bring code from outside the run's commit over the action's path (see above).
+3. **False positives of the agent reading**: every action input was searched with the agent patterns, and `aider` and `cline` are ordinary words ("vous aider bientôt" in a French comment made a stale-bot job an agent job, high OBAAF-GHA-003). Inputs are now read as commands, and only a command whose first word is an agent's counts.
+4. **Paths not resolved** in `local-from-checkout`: `path: ./ext/../ext2`, an absolute path, and `uses: ./.github/../ext/deploy` got past it.
+5. **A document claim the code contradicted**: the description said "clones, downloads or unpacks", and `curl -o`, `gh release download`, `degit` and another repository's artifact were not reported. The commands are now listed in the description, and those named are reported.
+6. **An empty image** (`include: [{container: ''}]`, the usual way to run some matrix rows on the runner) was reported as unpinned. It is no container now; that GitHub reads it so is not verified.
+
+Also fixed from its non-blocking points: `_credential_like` no longer takes `author` or `cache-key` for a credential; the process words are matched as written (lower case), and `org.gradle.daemon=false` is not a daemon; an agent as a step's `shell`, the default shell or an `env` value run as `$AGENT` is found; the job-id test now has a finding in the second job; a placeholder in both a key and its value is one finding; a single `.github/OBAAF.yml` on a file system that ignores case is the file the checker reads, not a look-alike; a name of any length is compared. Kept, and stated: `echo "no daemon here"` and `--grep spawn` count as leaving a process (failing closed); Cherokee look-alike letters are not mapped.
 
 ### What changed for adopters
 
@@ -939,11 +948,11 @@ What the checker reported for the attempt's rule on each attempt's workflow, wit
 | 135 | GHA-008 | OBAAF-GHA-008 low reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
 | 136 | GHA-008 | OBAAF-GHA-008 medium reusable-workflow | OBAAF-GHA-008 medium reusable-workflow |
 | 137 | GHA-008 | nothing | OBAAF-GHA-008 medium container |
-| 138 | GHA-008 | crash (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
-| 139 | GHA-008 | crash (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
-| 140 | GHA-008 | crash (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
-| 141 | GHA-008 | crash (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | nothing + file error |
-| 142 | GHA-008 | crash (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
+| 138 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
+| 139 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium image-unreadable |
+| 140 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
+| 141 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | nothing + file error |
+| 142 | GHA-008 | traceback (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use s) | OBAAF-GHA-008 medium action + file error |
 | 143 | GHA-008 | nothing | nothing |
 | 144 | GHA-008 | nothing + file error | nothing + file error |
 | 145 | GHA-008 | nothing | OBAAF-GHA-008 medium local-after-download |
@@ -1007,7 +1016,7 @@ What the checker reported for the attempt's rule on each attempt's workflow, wit
 | 249 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
 | 250 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
 | 251 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action (cannot-tell) |
-| 252 | GHA-020 | nothing | nothing |
+| 252 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action |
 | 253 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
 | 254 | GHA-020 | nothing | OBAAF-GHA-020 low egress-action |
 | 255 | GHA-020 | OBAAF-GHA-020 low egress-action | OBAAF-GHA-020 low egress-action |
@@ -1090,9 +1099,9 @@ What the checker reported for the attempt's rule on each attempt's workflow, wit
 | 332 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
 | 333 | CFG-001 | OBAAF-CFG-001 high entry-no-file | OBAAF-CFG-001 high entry-no-file |
 | 334 | CFG-001 | OBAAF-CFG-001 high entry-not-a-lane | OBAAF-CFG-001 high entry-not-a-lane |
-| 335 | CFG-001 | nothing | crash (error: /tmp/claude-0/attacks/B/335: more than one checker configuration (.github) |
-| 336 | CFG-001 | nothing | nothing |
-| 337 | CFG-001 | nothing | crash (error: /tmp/claude-0/attacks/B/337: more than one checker configuration (.github) |
+| 335 | CFG-001 | nothing | configuration error, exit 2 |
+| 336 | CFG-001 | nothing | configuration error, exit 2 |
+| 337 | CFG-001 | nothing | configuration error, exit 2 |
 | 338 | CFG-001 | nothing | nothing |
 | 339 | CFG-001 | nothing | OBAAF-CFG-001 high workflow-elsewhere + file error |
 | 340 | CFG-001 | nothing | nothing |
