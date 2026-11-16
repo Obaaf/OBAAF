@@ -1348,7 +1348,9 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
                    {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()},
                    {"steps": before + "        env: {' ACTIONS_ALLOW_UNSECURE_COMMANDS ': 'true'}\n" + keyed()},
                    {"steps": before + "        env: {\"${{ 'ACTIONS_ALLOW_UNSECURE_COMMANDS' }}\": 'true'}\n"
-                    + keyed()}):
+                    + keyed()},
+                   # Found by 2c.11b's review: a whole env computed when the job runs was read as no env.
+                   {"steps": before + "        env: ${{ fromJSON(vars.E) }}\n" + keyed()}):
             with self.subTest(**kw):
                 control = self.key(**kw)
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
@@ -1478,6 +1480,53 @@ def _program_starts(tree):
     return frozenset(starts)
 
 
+def _start_sites(tree):
+    """Every call that starts a program, as a sorted list of (enclosing function, callable), one
+    entry per call: the same calls `_program_starts` reads, counted rather than merged. The floor's
+    list is the programs the action's own steps start, outside the sandbox, with the key in their
+    process; a commit that starts one more, even in a form the floor uses with a clean `env=`, can
+    hand it the key through its arguments or its input, which no static read follows (found by slice
+    2c.11b's own search: `subprocess.run(["env", "OPENSSL_CONF=...", ...], env={"PATH": ...})`)."""
+    import ast
+    imported = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _PROGRAM_MODULES:
+            for alias in node.names:
+                if alias.name in _START_METHODS or alias.name.startswith(_START_PREFIXES):
+                    imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    enclosing = {}
+    for func in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for node in ast.walk(func):
+            enclosing[node] = func.name
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and (func.attr in _START_METHODS or func.attr.startswith(_START_PREFIXES)):
+            sites.append((enclosing.get(node) or "", f"{getattr(func.value, 'id', '?')}.{func.attr}"))
+        elif isinstance(func, ast.Name) and func.id in imported:
+            sites.append((enclosing.get(node) or "", imported[func.id]))
+    return sorted(sites)
+
+
+def _literal_env_keys(tree):
+    """The keys of every dict literal given as `env=` to a call that starts a program (as
+    `_program_starts` reads it), upper-cased and trimmed. In the floor that is only `PATH`. A clean
+    dict holds nothing of the process's environment, but it can name a variable itself: `env={"PATH":
+    FIXED_PATH, "OPENSSL_CONF": ...}` or `"LD_PRELOAD"` beside a value that carries the key (found by
+    slice 2c.11b's own search; the guard of 2c.10b read only that the dict was clean)."""
+    import ast
+    keys = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "env" and _clean_dict(kw.value):
+                keys.update(str(key.value).strip().upper() for key in kw.value.keys)
+    return keys
+
+
 def _const_dump(tree, name):
     """The AST of every module-level assignment `name = ...`, as a sorted list of strings. All of them,
     not the first: Python uses the last binding at run time, so a commit that keeps the floor's line
@@ -1511,8 +1560,16 @@ _ENV_MAPPINGS = ("environ", "environb")
 # Reading `os.environ` this way leaves it as it is.
 _ENV_READ_METHODS = ("get", "copy", "keys", "items", "values")
 _ENV_COPIES = ("dict", "list", "tuple", "set", "frozenset", "sorted", "len")
-# Builtins that run code the reader cannot see.
-_DYNAMIC_CODE = ("exec", "eval", "compile", "__import__", "breakpoint")
+# Builtins that run code the reader cannot see, or hand over a namespace the reader does not follow.
+_DYNAMIC_CODE = ("exec", "eval", "compile", "__import__", "breakpoint", "vars", "globals", "locals")
+# Attributes and names that reach a module, a namespace or code the reader does not follow (found by
+# 2c.11b's own search: `__builtins__.__import__("ctypes")`, `().__class__.__base__.__subclasses__()`).
+_HIDDEN_ATTRIBUTES = ("__dict__", "__globals__", "__builtins__", "__subclasses__", "__code__", "__closure__",
+                      "__import__", "__loader__", "__spec__", "__getattribute__", "__setattr__", "__delattr__")
+_HIDDEN_NAMES = ("__builtins__", "__loader__", "__spec__")
+# Attribute names that reach the environment, or a module that holds it, through `getattr`, `setattr`
+# or `delattr`, which the reader cannot follow unless the name is written out and harmless.
+_HIDDEN_BY_NAME = ("environ", "environb", "putenv", "unsetenv", "os", "_os", "posix", "modules", "_data")
 
 
 def _import_spellings(tree):
@@ -1558,7 +1615,10 @@ def _environment_writes(tree, skip):
     `os.environ` or `os.environb` (a store or a delete through a subscript, a method that changes it,
     an assignment that aliases it, an argument to a function, `|=`) is one, and so is any `putenv` or
     `unsetenv`, a look at a module's `__dict__` or `vars()`, `sys.modules`, and a call of a builtin that
-    runs code the reader cannot see (`exec`, `eval`, `compile`, `__import__`)."""
+    runs code the reader cannot see (`exec`, `eval`, `compile`, `__import__`, and `vars`, `globals`,
+    `locals`), an attribute or name that reaches one (`__builtins__`, `__subclasses__`, `__globals__`
+    and the rest of `_HIDDEN_ATTRIBUTES`), and a `getattr`, `setattr` or `delattr` whose name is not
+    written out or is one of `_HIDDEN_BY_NAME`."""
     import ast
     parents = {}
     for parent in ast.walk(tree):
@@ -1574,12 +1634,18 @@ def _environment_writes(tree, skip):
         line = getattr(node, "lineno", 0)
         if isinstance(node, ast.Attribute) and node.attr in ("putenv", "unsetenv"):
             found.append((line, node.attr))
-        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
-            found.append((line, "__dict__"))
+        elif isinstance(node, ast.Attribute) and node.attr in _HIDDEN_ATTRIBUTES:
+            found.append((line, node.attr))
+        elif isinstance(node, ast.Name) and node.id in _HIDDEN_NAMES:
+            found.append((line, node.id))
         elif isinstance(node, ast.Attribute) and node.attr == "modules" and getattr(node.value, "id", None) == "sys":
             found.append((line, "sys.modules"))
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _DYNAMIC_CODE + ("vars",):
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _DYNAMIC_CODE:
             found.append((line, f"{node.func.id}()"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("getattr", "setattr", "delattr", "hasattr") and len(node.args) >= 2 \
+                and (not isinstance(node.args[1], ast.Constant) or node.args[1].value in _HIDDEN_BY_NAME):
+            found.append((line, f"{node.func.id}(..., {ast.unparse(node.args[1])})"))
         elif isinstance(node, ast.Attribute) and node.attr in _ENV_MAPPINGS:
             parent = parents.get(node)
             what = f"{getattr(node.value, 'id', '?')}.{node.attr}"
@@ -1623,8 +1689,8 @@ def openssl_removal_differs(tree, floor_tree):
     writes = _environment_writes(tree, prefix)
     if writes:
         line, what = writes[0]
-        return (f"egress.py may change its own environment after OpenSSL's variables are removed ({what}, line "
-                f"{line}), so one may be put back; it needs a fresh review")
+        return (f"egress.py may change its own environment after OpenSSL's variables are removed, or reach it in a "
+                f"way the guard does not read ({what}, line {line}), so one may be put back; it needs a fresh review")
     return ""
 
 
@@ -1643,8 +1709,10 @@ def own_steps_differ(sha, root=None):
     runs beside it). Since slice 2c.11b it also holds egress.py's statements up to and including
     `import hashlib` to the floor's (the removal of OpenSSL's variables before libcrypto is
     initialised), and refuses a new import or any write of the process's environment after them
-    (`openssl_removal_differs`). A start or a write reached through an indirection it cannot read is
-    left to the escape tests on the listed commit, which are the proof."""
+    (`openssl_removal_differs`); and it refuses an `env=` dict that names a variable the floor's do not
+    (`_literal_env_keys`) and a program start the floor does not have, counted by enclosing function
+    (`_start_sites`). A start or a write reached through an indirection it cannot read is left to the
+    escape tests on the listed commit, which are the proof."""
     import ast
     import subprocess
     import yaml
@@ -1691,6 +1759,16 @@ def own_steps_differ(sha, root=None):
             return "egress.py calls which without path=FIXED_PATH, so a program is found through the job's PATH"
         if call != "which" and state == "bad":
             return f"egress.py calls {call} without a clean dict env= of its own, so a program may get the step's environment"
+    import collections
+    extra_sites = sorted(collections.Counter(_start_sites(tree)) - collections.Counter(_start_sites(floor_tree)))
+    if extra_sites:
+        func_name, call = extra_sites[0]
+        return (f"egress.py starts a program the floor does not ({call} in {func_name or 'the module'}()), which may "
+                "be handed the key through its arguments or input; it needs a fresh review")
+    new_keys = sorted(_literal_env_keys(tree) - _literal_env_keys(floor_tree))
+    if new_keys:
+        return (f"egress.py gives a program {new_keys[0]} in an env= dict, which the floor's programs are not given; "
+                "it needs a fresh review")
     # Second pass: a program given a named dict (the command launch, `env=child_env` in run()). Its
     # contents cannot be vetted piecemeal, so the whole function that builds it is pinned to the floor.
     for call, state, ref, has_path in starts:
@@ -1788,7 +1866,7 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             control = self.key(**kw)
             with self.subTest(name="an expression key", place=place):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-                self.assertIn("a name the checker does not work out", control.detail)
+                self.assertIn("holds names the checker does not work out", control.detail)
 
     def test_openssl_variables_set_through_github_env_still_count_as_a_write_to_github_env(self):
         """The name no longer counts; the write still does, for what else it could set."""
@@ -2037,6 +2115,37 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("__import__ of os", lambda: in_summary('__import__("os").putenv("OPENSSL_CONF", "x")'),
                           put_back))
             cases.append(("os.environb set later", lambda: in_summary('os.environb[b"OPENSSL_CONF"] = b"x"'), put_back))
+            # Found by this slice's own search after its reviewers were stopped: names the walker did not
+            # see because they are strings, or reached through a namespace.
+            cases.append(("getattr chain by string names",
+                          lambda: in_summary('getattr(getattr(shutil, "os"), "environ")["OPENSSL_CONF"] = "x"'),
+                          put_back))
+            cases.append(("getattr with computed names",
+                          lambda: in_summary('getattr(getattr(shutil, "o" + "s"), "put" + "env")("OPENSSL_CONF", "x")'),
+                          put_back))
+            cases.append(("__builtins__.__import__",
+                          lambda: in_summary('__builtins__.__import__("ctypes")'), put_back))
+            cases.append(("a class's subclasses",
+                          lambda: in_summary('_all = ().__class__.__base__.__subclasses__()'), put_back))
+            cases.append(("globals()", lambda: in_summary('globals()["o" + "s"].environ.clear()'), put_back))
+            new_key = "in an env= dict, which the floor's programs are not given"
+            cases.append(("a program given OPENSSL_CONF in its clean dict",
+                          lambda: edit("egress.py", 'env={"PATH": FIXED_PATH}',
+                                       'env={"PATH": FIXED_PATH, "OPENSSL_CONF": "/tmp/x.cnf"}'),
+                          new_key))
+            cases.append(("a program given LD_PRELOAD in its clean dict",
+                          lambda: edit("egress.py", 'env={"PATH": FIXED_PATH}',
+                                       'env={"PATH": FIXED_PATH, "LD_PRELOAD": "/tmp/x.so"}'),
+                          new_key))
+            cases.append(("one more program, in a form the floor uses, with a clean dict",
+                          lambda: in_summary('subprocess.run(["/usr/bin/env", "X=1", "/usr/bin/true"], '
+                                             'env={"PATH": FIXED_PATH}, check=False)'),
+                          "starts a program the floor does not (subprocess.run in _summary()"))
+            cases.append(("a second start in a function that has one",
+                          lambda: edit("egress.py", '        subprocess.run(["sudo", "-n", "kill", "-TERM", str(process.pid)]',
+                                       '        subprocess.run(["/usr/bin/true"], env={"PATH": FIXED_PATH}, check=False)\n'
+                                       '        subprocess.run(["sudo", "-n", "kill", "-TERM", str(process.pid)]'),
+                          "starts a program the floor does not (subprocess.run in stop_resolver()"))
             new_import = "which the floor does not, so it may write the environment"
             cases.append(("import ctypes",
                           lambda: edit("egress.py", "import urllib.request\n", "import urllib.request\nimport ctypes\n"),

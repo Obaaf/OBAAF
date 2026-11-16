@@ -2285,8 +2285,8 @@ class WorkflowRules:
     # for them; and their own `env` empties the loader's variables (`LD_PRELOAD`, `LD_AUDIT`,
     # `LD_LIBRARY_PATH` and the rest), which outranks the job's `env`, the workflow's and `GITHUB_ENV`
     # (the escape tests' job `own-steps` shows it for the job's, the step's and `GITHUB_ENV`).
-    # Slice 2c.11b dropped OpenSSL's, which 2c.10b had added: the action's Python imports `hashlib`, and
-    # `OPENSSL_CONF` (or, with Ubuntu's libcrypto, `OPENSSL_FORCE_FIPS_MODE` or
+    # Slice 2c.11b (decision D-072) dropped OpenSSL's, which 2c.10b had added: the action's Python
+    # imports `hashlib`, and `OPENSSL_CONF` (or, with Ubuntu's libcrypto, `OPENSSL_FORCE_FIPS_MODE` or
     # `OPENSSL_FIPS_MODE_SWITCH_PATH` beside `OPENSSL_MODULES`) made libcrypto load into that process a
     # module the job named; from slice 2c.11a's change on, `egress.py` removes every variable whose name,
     # trimmed and upper-cased, begins `OPENSSL_` from its own process before that import (decision
@@ -2444,8 +2444,9 @@ class WorkflowRules:
             what = self._names(sorted(set(loaded))) if loaded else "an env computed when the job runs"
             unsure.append(f"the job sets {what}, which may set a variable for the action's own steps outside the "
                           "sandbox, where the key is held: ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step "
-                          "prints set one, as a write to GITHUB_ENV does, and a key or an env computed when the job "
-                          "runs is a name the checker does not work out (slices 2c.10b and 2c.11b)")
+                          "prints set one, as a write to GITHUB_ENV does, and a key written as an expression, or an "
+                          "env computed when the job runs, holds names the checker does not work out (slices 2c.10b "
+                          "and 2c.11b)")
         services = job.raw.get("services")
         if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
                                               for svc in services.values()):
@@ -2527,9 +2528,18 @@ class WorkflowRules:
                 if isinstance(own_env, dict) else []
             if unsecure:
                 unsure.append(f"{where}, before or beside the step that holds the key, sets "
-                              f"{one_line(', '.join(unsecure), 120)} in its env, where "
-                              "ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line it prints set a variable for the "
-                              "steps after it")
+                              f"{one_line(', '.join(repr(key) for key in unsecure), 120)} in its env "
+                              "(ACTIONS_ALLOW_UNSECURE_COMMANDS, or a key written as an expression, whose name the "
+                              "checker does not work out), and ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line it "
+                              "prints set a variable for the steps after it")
+            elif own_env is not None and not isinstance(own_env, dict):
+                # A whole env computed when the job runs may hold it too (found by 2c.11b's review: it was
+                # read as no env at all, where the key's own step, the job and the workflow read it as
+                # "cannot tell").
+                unsure.append(f"{where}, before or beside the step that holds the key, has an env computed when "
+                              "the job runs, which may hold ACTIONS_ALLOW_UNSECURE_COMMANDS, and "
+                              "ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line it prints set a variable for the steps "
+                              "after it")
             if self._SETS_FOR_LATER_RE.search(text + " " + str(step.raw.get("env", "")) + " "
                                               + str(step.raw.get("with", ""))):
                 unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV, which "

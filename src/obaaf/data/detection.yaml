@@ -447,7 +447,7 @@ harden_runner_releases:
 # OPENSSL_MODULES) made libcrypto load a module the job named into those steps' Python, where the key
 # is held; from it, egress.py removes every OPENSSL_ variable before the import that initialises
 # libcrypto, which the escape tests' openssl-modules job showed on a GitHub-hosted runner (run
-# 43817685428; decision D-071), so the checker no longer counts those names (decision D-070). A test
+# 43817685428; decision D-071), so the checker no longer counts those names (decision D-072). A test
 # refuses a listed commit that does not have the floor as an ancestor in this repository's history, or
 # whose action's own steps differ from the floor's where the checker's verdicts rest on them. A later
 # commit that reads its inputs another way must not be listed until the checker reads it that way too.
