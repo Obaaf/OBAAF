@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """OBAAF egress control: run one command with its network limited to an allow-list.
 
-This file is the whole of the action's logic. ``action.yml`` calls it with
-``python3 -I`` (so nothing in the working directory can be imported in place of
-the standard library) in two steps: ``install`` and ``run``.
+This file is the whole of the action's logic. ``action.yml`` runs it in three
+steps, ``check-allow``, ``install`` and ``run``, each with ``/usr/bin/python3 -I
+-S`` as the step's shell (slice 2c.9): no bash, so nothing the job's
+environment tells bash (``BASH_ENV``, ``SHELLOPTS``, ``PS4``, an exported
+function) has any effect; nothing found through the ``PATH``; nothing imported
+from the working directory, ``PYTHONPATH`` or a ``site`` directory in place of
+the standard library. Each step's own ``env`` empties the variables that make
+the dynamic loader load other code (``LOADER_VARIABLES``), and ``main`` refuses
+to go on if one still has a value. These steps hold what the workflow put in the
+step's ``env``, model keys included, outside the sandbox.
 
 The command runs under the Agent Workflow Firewall (AWF, github/gh-aw-firewall,
 MIT licence) at one version that OBAAF's CI has tested, in AWF's default mode
@@ -156,6 +163,36 @@ MODEL_KEYS = {
 }
 
 RUNNER_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY")
+
+# Variables that make the dynamic loader, or the C library the action's Python
+# runs on, load or read files the job chose: of the 34 names the dynamic loader
+# of Ubuntu 24.04 (glibc 2.39) itself removes from the environment of a setuid
+# program, read from /lib64/ld-linux-x86-64.so.2 on 2026-11-16 (the escape
+# tests compare them with the runner's own loader), the 32 the loader reads by
+# their value. The action's steps run outside the sandbox with the step's env,
+# model keys included, so each step's own env in action.yml sets every one of
+# them to "" (slice 2c.9), and main() refuses to go on if one still has a value:
+# that would mean the runner did not apply the step's env, and the loader may
+# already have obeyed it.
+LOADER_VARIABLES = (
+    "GCONV_PATH", "GETCONF_DIR", "GLIBC_TUNABLES", "HOSTALIASES", "LD_AUDIT", "LD_BIND_NOT", "LD_BIND_NOW",
+    "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_HWCAP_MASK", "LD_LIBRARY_PATH", "LD_ORIGIN_PATH",
+    "LD_PRELOAD", "LD_PROFILE", "LD_VERBOSE", "LD_WARN", "LOCALDOMAIN", "LOCPATH",
+    "MALLOC_ARENA_MAX", "MALLOC_ARENA_TEST", "MALLOC_MMAP_MAX_", "MALLOC_MMAP_THRESHOLD_", "MALLOC_PERTURB_",
+    "MALLOC_TOP_PAD_", "MALLOC_TRACE", "MALLOC_TRIM_THRESHOLD_", "NIS_PATH", "NLSPATH", "RESOLV_HOST_CONF",
+    "RES_OPTIONS", "TMPDIR", "TZDIR",
+)
+# The other two the loader acts on when they are present, whatever their value,
+# so an empty value would switch them on (the 2c.9 review saw LD_SHOW_AUXV=""
+# print the auxiliary vector in every step). Neither makes the loader load a
+# file: LD_SHOW_AUXV prints what the kernel passed the process, LD_DYNAMIC_WEAK
+# changes which of the libraries already loaded a weak symbol resolves to. They
+# are left as the job sets them. LD_TRACE_LOADED_OBJECTS is not on the loader's
+# list but is read the same way, and it stops the program before it starts and
+# ends it with status 0; it cannot be emptied either, so the action's last step
+# fails the action when the run step ended 0 without reporting that the sandbox
+# held (action.yml).
+LOADER_PRESENCE_VARIABLES = ("LD_DYNAMIC_WEAK", "LD_SHOW_AUXV")
 
 # The resolver the action gives AWF's proxy (slice 2c.4). Squid resolves every
 # name it is asked for before it refuses an unlisted one (AWF v0.29.13 puts an
@@ -824,7 +861,7 @@ def start_resolver(environ: dict[str, str], names: list[str], private: Path, log
     names_file = private / "dns-names.txt"
     names_file.write_text("\n".join(names) + "\n")
     script = os.path.abspath(__file__)
-    argv = ["sudo", "-n", "/usr/bin/python3", "-I", script, "dns-filter", address, upstream,
+    argv = ["sudo", "-n", "/usr/bin/python3", "-I", "-S", script, "dns-filter", address, upstream,
             str(names_file), str(log), f"{os.getuid()}:{os.getgid()}"]
     try:
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
@@ -1318,11 +1355,42 @@ def run(environ: dict[str, str]) -> int:
     return status
 
 
+def runner_problem(uname=os.uname) -> str | None:
+    """Why this is not a runner the action was tested on, or None.
+
+    Read from the kernel, not from ``RUNNER_OS`` or a ``uname`` found through
+    the ``PATH``, either of which the job can set (issue #145)."""
+    info = uname()
+    if info.sysname != "Linux" or info.machine != "x86_64":
+        return f"the OBAAF egress control runs on Linux x64 runners only (this is {info.sysname} {info.machine})"
+    return None
+
+
+def inherited_hooks(environ: dict[str, str]) -> list[str]:
+    """The loader variables that still have a value in this step (slice 2c.9).
+
+    action.yml sets every one to "" in each step's own env, which overrides
+    the job's env, the workflow's and GITHUB_ENV. One with a value means that
+    did not happen, so the step stops before it does anything."""
+    return [name for name in LOADER_VARIABLES if environ.get(name)]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[1] == "dns-filter":
         return dns_filter(argv[2:])
     if len(argv) != 2 or argv[1] not in ("install", "run", "check-allow"):
         print("usage: egress.py install|run|check-allow", file=sys.stderr)
+        return 2
+    problem = runner_problem()
+    if problem:
+        print(f"::error::{problem}.")
+        return 2
+    hooks = inherited_hooks(dict(os.environ))
+    if hooks:
+        print(f"::error::obaaf-egress: this step's environment still sets {', '.join(hooks)}, which the action's "
+              "own env empties, so the runner did not apply it and the dynamic loader may have obeyed them; "
+              "nothing was run")
+        _set_output(dict(os.environ), "refused", "environment")
         return 2
     try:
         if argv[1] == "install":
