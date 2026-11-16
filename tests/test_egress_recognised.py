@@ -1250,8 +1250,17 @@ class KeyOutOfReachTest(unittest.TestCase):
         result = run_check(workflow(keyed(step_env=step_env, env_input="OPENSSL_CONF")))
         control = key_control(result)
         self.assertEqual(control.verdict, NOT_MET, control.detail)
-        self.assertIn("names OPENSSL_CONF under env, and the action removes every OPENSSL_ variable", control.detail)
+        self.assertIn("names OPENSSL_CONF under env, and the action at a listed commit removes every OPENSSL_ variable",
+                      control.detail)
         self.assertNotIn("passed to the command as OPENSSL_CONF", control.detail)
+        # Only at a listed commit: what another version does is not established, so that is "cannot tell"
+        # as before (the review of the first fix: at c1b590c the action does not remove them).
+        for ref in ("c1b590c970e6246305415ad4d61a6136a7786d99", "v1"):
+            result = run_check(workflow(keyed(step_env=step_env, env_input="OPENSSL_CONF", ref=ref)))
+            control = key_control(result)
+            with self.subTest(ref=ref):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                self.assertNotIn("removes every OPENSSL_ variable", control.detail)
 
     def test_with_every_control_the_checker_reads_in_place_only_the_setting_is_left(self):
         """The fifth control does not make OBAAF-GHA-005 clearable on its own: the environment's settings
@@ -1574,6 +1583,8 @@ def _getattr_on_program_module(tree):
 # the process's environment after them. Like the rest of the guard it is the belt, not the proof: the
 # escape tests' openssl-modules job on the commit is that.
 _ENV_MAPPINGS = ("environ", "environb")
+# PEP 263's coding declaration, as Python's tokenizer finds it in a file's first two lines.
+_CODING_RE = __import__("re").compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*[-_.a-zA-Z0-9]+")
 # Reading `os.environ` this way leaves it as it is.
 _ENV_READ_METHODS = ("get", "copy", "keys", "items", "values")
 _ENV_COPIES = ("dict", "list", "tuple", "set", "frozenset", "sorted", "len")
@@ -1791,7 +1802,18 @@ def own_steps_differ(sha, root=None):
                                timeout=30)
         if shown.returncode != 0:
             return f"actions/egress/{name} is not readable at {sha[:12]}"
-        texts[name] = shown.stdout.decode("utf-8")
+        # Python reads a source file's bytes, and a coding declaration in its first two lines changes
+        # what they say; the guard reads text. So the file must be UTF-8 with no such declaration, and
+        # the code is parsed from its bytes as well (2c.11b's review: `# coding: ...` would make the
+        # guard and the interpreter read different code).
+        if name == "egress.py" and any(_CODING_RE.match(line) for line in shown.stdout.splitlines()[:2]):
+            return "egress.py declares a source encoding, so Python may read other code than the guard; it needs a fresh review"
+        try:
+            texts[name] = shown.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"actions/egress/{name} at {sha[:12]} is not UTF-8; the guard cannot read it as Python does"
+        if name == "egress.py" and ast.dump(ast.parse(shown.stdout)) != ast.dump(ast.parse(texts[name])):
+            return "egress.py's bytes and its text parse differently; it needs a fresh review"
     floor = _floor_facts(root)
     steps = (yaml.safe_load(texts["action.yml"]).get("runs") or {}).get("steps") or []
     if len(steps) < 2:
@@ -1845,7 +1867,7 @@ def own_steps_differ(sha, root=None):
         if func_name is None:
             return f"egress.py passes {var} as a program's env outside any function; the guard cannot pin its build"
         if _function_dump(tree, func_name) != _function_dump(floor_tree, func_name):
-            return (f"egress.py's {func_name}(), which builds the env {var} a program is given, differs from "
+            return (f"egress.py's {func_name}(), which builds `{var}`, the env a program is given, differs from "
                     "the floor; a change to the launch env's build needs a fresh review")
     # The launch env's inline values come from one module constant, FIXED_PATH, that neither this pin
     # (it reads the Name) nor lists_differ covers; pin it too (round 5's review, NOTE 2). The functions
@@ -2095,17 +2117,17 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                           "without a clean dict env="))
             cases.append(("child_env built from os.environ",
                           lambda: edit("egress.py", "    child_env = {\n", "    child_env = dict(os.environ)\n    _unused = {\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             # Round 3 (B1/B2/B6) and round 4 (C1/C2/C4): the launch env's final contents, which no
             # piecemeal check proves. The whole run() function is pinned to the floor.
             cases.append(("child_env.update(os.environ) (B6)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    child_env.update(os.environ)\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             cases.append(("child_env rebound to dict(os.environ) (B1)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    child_env = dict(os.environ)\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             cases.append(("env={**os.environ} spread (B2)",
                           lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
                                        "completed = subprocess.run(argv, env={**os.environ}, cwd=str(copy)"),
@@ -2113,15 +2135,15 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("model_keys.update(os.environ) merged into child_env (C2)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    model_keys.update(os.environ)\n    child_env.update(model_keys)\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             cases.append(("model_keys = dict(os.environ) before the merge (C4)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    model_keys = dict(os.environ)\n    child_env.update(model_keys)\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             cases.append(("alias e = child_env; e.update(os.environ) (C1)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    e = child_env; e.update(os.environ)\n"),
-                          "which builds the env child_env a program is given, differs"))
+                          "which builds `child_env`, the env a program is given, differs"))
             # Round 5 (NOTE 2): the one launch-env input neither own_steps_differ nor lists_differ read.
             cases.append(("FIXED_PATH gains a job-writable dir",
                           lambda: edit("egress.py", 'FIXED_PATH = "/usr/local/sbin:/usr/local/bin',
@@ -2262,6 +2284,9 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("a new read of the environment",
                           lambda: in_summary('_seen = dict(os.environ).get("GITHUB_STEP_SUMMARY") or os.environ.get("X")'),
                           other_code))
+            cases.append(("a source encoding declared",
+                          lambda: edit("egress.py", "#!/usr/bin/env python3\n", "#!/usr/bin/env python3\n# -*- coding: latin-1 -*-\n"),
+                          "egress.py declares a source encoding"))
             cases.append(("action.yml points the script at another file",
                           lambda: edit("action.yml", "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py",
                                        "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/other.py"),

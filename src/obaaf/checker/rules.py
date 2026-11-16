@@ -1647,6 +1647,11 @@ class WorkflowRules:
                 else:
                     names[label] = egress_mod.split_list(value)
         env_names, key_names = names["env"], names["model-keys"]
+        # What the action does with an OPENSSL_ name under `env` is known only for a commit OBAAF lists:
+        # from the floor on it refuses it (2c.11b's review: the refusal was said of every version).
+        uses = (step.uses or "").strip()
+        ref = uses.split("@", 1)[1] if "@" in uses else ""
+        listed = ref in {str(sha).lower() for sha in self.detection.get("egress_action_releases", []) or []}
         for name in env_names or []:
             if not egress_mod.NAME_RE.match(name):
                 place.problems.append(f"{where} names {one_line(name, 60)!r} under env, which is not a variable name, "
@@ -1654,10 +1659,10 @@ class WorkflowRules:
             elif name in egress_mod.WITHHELD_BY_AWF:
                 place.problems.append(f"{where} names {name} under env, a name AWF withholds from the command, so "
                                       "the action refuses to run (a model key goes under model-keys)")
-            elif egress_mod.removed_before_inputs(name):
-                place.problems.append(f"{where} names {name} under env, and the action removes every OPENSSL_ "
-                                      "variable from its own steps before it reads env (slice 2c.11a), so it finds "
-                                      "the name unset and refuses to run (issue #197)")
+            elif listed and egress_mod.removed_before_inputs(name):
+                place.problems.append(f"{where} names {name} under env, and the action at a listed commit removes "
+                                      "every OPENSSL_ variable from its own steps before it reads env (slice 2c.11a), "
+                                      "so it finds the name unset and refuses to run (issue #197)")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
@@ -1743,7 +1748,7 @@ class WorkflowRules:
                 place.proxy.append((name, found))
             elif name in env_names:
                 if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
-                        or egress_mod.removed_before_inputs(name):
+                        or (listed and egress_mod.removed_before_inputs(name)):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:
