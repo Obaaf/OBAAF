@@ -8,7 +8,9 @@ see (tests/egress/runner-variables-probe). This script gives the values to set a
 seen against the file's `expected`. Every value is a made-up path or word; none is a secret.
 
   python3 -I runner-variables.py --github-env CHANNEL     lines for GITHUB_ENV
-  python3 -I runner-variables.py --judge DIR              read DIR/<channel>-<plain|composite>.json
+  python3 -I runner-variables.py --judge DIR [OUTCOME]    read DIR/<channel>-<plain|composite>.json;
+                                                          OUTCOME is how the step that wrote
+                                                          NODE_OPTIONS to GITHUB_ENV ended
 """
 from __future__ import annotations
 
@@ -28,6 +30,12 @@ _HOSTS = {"NO_PROXY", "no_proxy", "LOCALDOMAIN"}
 _URLS = {"GITHUB_API_URL", "GITHUB_SERVER_URL"}
 _WORDS = {"GITHUB_ACTIONS", "CI"}
 _RES_OPTIONS = {"job": "timeout:1", "step": "timeout:2", "genv": "timeout:3"}
+# The runner refuses a NODE_OPTIONS line in GITHUB_ENV: it reports "Can't store NODE_OPTIONS output
+# parameter using '$GITHUB_ENV' command" as an error, the step that wrote the line still ends in
+# success, and the name is unset afterwards. The job writes that line in a step of its own and passes
+# the judge the step's outcome: had the step failed, the line may never have been written, and the
+# name would be unset for that reason, so the record would pass on the wrong grounds.
+NODE_OPTIONS_WRITE = "success"
 
 
 def load() -> dict:
@@ -88,7 +96,7 @@ def classify(data: dict, channel: str, seen: dict | None) -> dict[str, str]:
     return out
 
 
-def judge(directory: Path) -> int:
+def judge(directory: Path, node_options_write: str | None = None) -> int:
     data = load()
     observed: dict[str, dict[str, str]] = {}
     shown: dict[str, dict] = {}
@@ -123,6 +131,13 @@ def judge(directory: Path) -> int:
             if want != got:
                 print(f"FAILED: {label} {name}: expected {want!r}, saw {got!r}")
                 fail = 1
+    if node_options_write is not None:
+        if node_options_write == NODE_OPTIONS_WRITE:
+            print(f"ok: the step that wrote NODE_OPTIONS to GITHUB_ENV ended in {node_options_write}, as recorded")
+        else:
+            print(f"FAILED: the step that wrote NODE_OPTIONS to GITHUB_ENV ended in {node_options_write!r}, "
+                  f"not {NODE_OPTIONS_WRITE!r}: the record has the line written and the runner refuse it")
+            fail = 1
     if not fail:
         print("ok: every name came back as recorded for every channel and probe")
     return fail
@@ -134,8 +149,8 @@ def main(argv: list[str]) -> int:
         for name in set_in(data, argv[1]):
             print(f"{name}={marker(argv[1], name)}")
         return 0
-    if len(argv) == 2 and argv[0] == "--judge":
-        return judge(Path(argv[1]))
+    if len(argv) in (2, 3) and argv[0] == "--judge":
+        return judge(Path(argv[1]), argv[2] if len(argv) == 3 else None)
     print(__doc__, file=sys.stderr)
     return 2
 

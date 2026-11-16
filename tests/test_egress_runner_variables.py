@@ -120,5 +120,71 @@ class Workflow(unittest.TestCase):
             self.assertNotIn("\n", line)
 
 
+class Judge(unittest.TestCase):
+    """The judge on made-up readings: what the first review found the tests did not pin."""
+
+    def setUp(self):
+        self.data = rv.load()
+
+    def _seen(self, channel):
+        """A reading in which every name the channel set came back with the test's value."""
+        return {name: rv.marker(channel, name) for name in rv.set_in(self.data, channel)}
+
+    def test_a_reading_is_sorted_by_what_came_back(self):
+        seen = self._seen("step")
+        seen["RUNNER_TEMP"] = "/home/runner/work/_temp"     # the runner's own
+        seen["CI"] = None                                    # not in the step's environment
+        del seen["HOME"]                                     # the probe did not report it
+        got = rv.classify(self.data, "step", seen)
+        self.assertEqual(got["RUNNER_TEMP"], rv.RUNNER)
+        self.assertEqual(got["CI"], rv.UNSET)
+        self.assertEqual(got["HOME"], rv.NOT_MEASURED)
+        self.assertEqual(got["TEMP"], rv.WORKFLOW)
+        # Another channel's value is not this channel's: it reads as the runner's, never as set.
+        seen["TMP"] = rv.marker("job", "TMP")
+        self.assertEqual(rv.classify(self.data, "step", seen)["TMP"], rv.RUNNER)
+
+    def test_a_missing_reading_is_not_measured_for_every_name(self):
+        self.assertEqual(set(rv.classify(self.data, "genv", None).values()), {rv.NOT_MEASURED})
+
+    def test_the_judge_fails_without_the_readings_and_on_the_wrong_outcome_of_the_node_options_write(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(rv.judge(Path(tmp), rv.NODE_OPTIONS_WRITE), 1)      # no readings at all
+            self.assertIn("not measured", out.getvalue())
+            # Readings that give back the record, name for name.
+            how = {rv.WORKFLOW: lambda c, n: rv.marker(c, n), rv.RUNNER: lambda c, n: "the runner's own",
+                   rv.UNSET: lambda c, n: None}
+            for label, outcomes in self.data["expected"].items():
+                channel = label.split("-")[0]
+                seen = {}
+                for name, outcome in outcomes.items():
+                    twin = self.data["case_twins"].get(name)
+                    if outcome == rv.NOT_SET_HERE:
+                        continue
+                    seen[name] = how[outcome](channel, twin if name not in rv.set_in(self.data, channel) and twin else name)
+                (Path(tmp) / f"{label}.json").write_text(json.dumps(seen))
+            for outcome, status in ((rv.NODE_OPTIONS_WRITE, 0), (None, 0), ("failure", 1), ("skipped", 1)):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(rv.judge(Path(tmp), outcome), status, (outcome, out.getvalue()[-400:]))
+            self.assertEqual(rv.NODE_OPTIONS_WRITE, "success")
+
+    def test_the_job_gives_the_judge_the_outcome_of_the_step_that_wrote_node_options(self):
+        steps = WORKFLOW["jobs"]["runner-variables"]["steps"]
+        wrote = [s for s in steps if s.get("id") == "genv_node_options"]
+        self.assertEqual(len(wrote), 1)
+        self.assertIn("grep '^NODE_OPTIONS='", wrote[0]["run"])
+        judged = [s for s in steps if "OBAAF_RV_JUDGE" in (s.get("env") or {})]
+        self.assertEqual(len(judged), 1)
+        self.assertEqual(judged[0]["env"]["NODE_OPTIONS_WRITE"], "${{ steps.genv_node_options.outcome }}")
+        self.assertIn('os.environ["NODE_OPTIONS_WRITE"]]', judged[0]["run"])
+
+
 if __name__ == "__main__":
     unittest.main()
