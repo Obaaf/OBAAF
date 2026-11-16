@@ -1387,31 +1387,74 @@ def _floor_facts(root):
             "starts": _program_starts(tree)}
 
 
-def _dict_literal_names(tree):
-    """Names in egress.py whose first assignment is a dict literal (`child_env = {...}`). A program's
-    `env=` must be one of these, or a dict literal directly, so a poisoned value such as
-    `dict(os.environ)` or `os.environ.copy()` (round 2's B1, A4/A5) is caught."""
+def _clean_dict(node):
+    """A dict literal with no `**` spread (an `os.environ` spread, round 3's B2) and only constant
+    keys — so it holds nothing of the process's environment the reader cannot see."""
     import ast
-    first = {}
+    return (isinstance(node, ast.Dict) and all(key is not None for key in node.keys)
+            and all(isinstance(key, ast.Constant) for key in node.keys))
+
+
+def _safe_env_names(tree):
+    """Names in egress.py that are only ever assigned a clean dict literal, so a program's `env=`
+    naming one holds nothing of the environment at the point it is built. A name assigned a dict
+    literal and then rebound to `dict(os.environ)` (round 3's B1) is not safe: EVERY assignment must
+    be a clean dict literal. A later `.update(...)` is an assignment this does not see, so the
+    command-launch env is also pinned to the floor's build (`_env_build`, for round 3's B6)."""
+    import ast
+    assigned, bad = set(), set()
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    assigned.add(target.id)
+                    if isinstance(node, ast.Assign) and _clean_dict(node.value):
+                        continue
+                    bad.add(target.id)      # a non-dict-literal assignment (or an aug/ann assignment)
+    return assigned - bad
+
+
+def _env_build(tree, func_name, env_name):
+    """The statements in function `func_name` that build the dict passed as `env_name`: an assignment
+    to it, a subscript assignment, or a method call on it (`child_env.update(...)`). Sorted dumps, so
+    a later run can compare a listed commit's command-launch env build to the floor's and fail closed
+    on any change (round 3's B6: `child_env.update(os.environ)` is shape-identical to the floor's
+    `.update(model_keys)` but changes what the one subprocess that holds the key is given)."""
+    import ast
+    func = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+    if func is None:
+        return None
+    stmts = []
+    for node in ast.walk(func):
+        hit = False
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in first:
-                    first[target.id] = isinstance(node.value, ast.Dict)
-    return {name for name, is_dict in first.items() if is_dict}
+                base = target.value if isinstance(target, ast.Subscript) else target
+                if isinstance(base, ast.Name) and base.id == env_name:
+                    hit = True
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if (isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == env_name):
+                hit = True
+        if hit:
+            stmts.append(ast.dump(node))
+    return sorted(stmts)
 
 
 def _program_starts(tree):
-    """Every call in egress.py that starts a program, as a set of (callable, env_ok, has_path) facts.
-    A call of one of `_START_METHODS` on any receiver, an `os`/`posix` exec/spawn, or a name imported
-    from one of those modules (`from subprocess import run`): read on any receiver so a module alias
-    (`import subprocess as sp`) does not hide it. `env_ok` is whether it passes `env=` with a value
-    that is a dict literal or a name first assigned a dict literal (so `env=dict(os.environ)` is not
-    `env_ok`); `has_path` whether a `which` call passes `path=`. A bare name is a program start only
-    when imported from one of those modules, so egress.py's own `run()` function is not taken for one.
-    `getattr` on subprocess/os/posix is reported separately, by `own_steps_differ`."""
+    """Every call in egress.py that starts a program, as a set of (callable, env_state, env_ref,
+    has_path) facts. A call of one of `_START_METHODS` on any receiver, an `os`/`posix` exec/spawn, or
+    a name imported from one of those modules (`from subprocess import run`): read on any receiver so a
+    module alias (`import subprocess as sp`) does not hide it (round 2's B1). `env_state` is "dict" for
+    a clean dict-literal `env=`, "name" for `env=<name>` (with `env_ref` the (enclosing-function, name)
+    pair, checked against `_safe_env_names` and pinned by `_env_build` in `own_steps_differ`), "bad"
+    for no `env=` or a poisoned one (`env=dict(os.environ)`, `env={**os.environ}`), and "na" for a
+    `which` call. A bare name is a program start only when imported from one of those modules, so
+    egress.py's own `run()` function is not taken for one. `getattr` on subprocess/os/posix is reported
+    separately, by `own_steps_differ`."""
     import ast
-    safe = _dict_literal_names(tree)
     imported = {}      # local name -> "subprocess.run" etc., for names brought in by `from ... import`
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in _PROGRAM_MODULES:
@@ -1419,28 +1462,41 @@ def _program_starts(tree):
                 if alias.name in _START_METHODS or alias.name.startswith(_START_PREFIXES):
                     imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
 
-    def env_ok(call):
+    def env_of(call, func_name):
         for kw in call.keywords:
             if kw.arg == "env":
-                return isinstance(kw.value, ast.Dict) or (isinstance(kw.value, ast.Name) and kw.value.id in safe)
-        return False
+                if _clean_dict(kw.value):
+                    return "dict", None
+                if isinstance(kw.value, ast.Name):
+                    return "name", (func_name, kw.value.id)
+                return "bad", None      # a poisoned value: dict(os.environ), {**os.environ}, os.environ
+        return "bad", None
+
+    def callable_of(call):
+        func = call.func
+        if isinstance(func, ast.Attribute) and (func.attr in _START_METHODS or func.attr.startswith(_START_PREFIXES)):
+            return f"{getattr(func.value, 'id', '?')}.{func.attr}"
+        if isinstance(func, ast.Name) and func.id in imported:
+            return imported[func.id]
+        return None
+
+    # The innermost enclosing FunctionDef for every node, so each start is attributed to one function.
+    enclosing = {}
+    for func in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for node in ast.walk(func):
+            enclosing[node] = func.name       # a later (inner) function overwrites an outer one
 
     starts = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        name = None
-        if isinstance(func, ast.Attribute) and func.attr == "which":
-            starts.add(("which", True, any(k.arg == "path" for k in node.keywords)))
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "which":
+            starts.add(("which", "na", None, any(k.arg == "path" for k in node.keywords)))
             continue
-        if isinstance(func, ast.Attribute) and (func.attr in _START_METHODS or func.attr.startswith(_START_PREFIXES)):
-            recv = getattr(func.value, "id", "?")
-            name = f"{recv}.{func.attr}"
-        elif isinstance(func, ast.Name) and func.id in imported:
-            name = imported[func.id]
-        if name:
-            starts.add((name, env_ok(node), False))
+        call = callable_of(node)
+        if call:
+            state, ref = env_of(node, enclosing.get(node))
+            starts.add((call, state, ref, False))
     return frozenset(starts)
 
 
@@ -1460,9 +1516,11 @@ def own_steps_differ(sha, root=None):
     `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
     have is a problem. Not a proof the steps are confined (the escape tests on the commit are that):
     it reads program starts statically and fails closed on a changed shell, a shrunk loader list, a
-    changed `run` text, a start spelled a way the floor does not use, one without a dict `env=`, or a
-    `getattr` on subprocess/os/posix, so those are reviewed before listing; a spelling it cannot read
-    (a start reached through a deeper indirection) is left to the escape tests."""
+    changed `run` text, a start spelled a way the floor does not use, a `getattr` on subprocess/os/
+    posix, an `env=` that is not a clean dict literal or a name only ever assigned one, and (for the
+    name case) a build of that name's dict that differs from the floor's, so those are reviewed before
+    listing. A start reached through an indirection it cannot read, and the final contents of an env
+    whose build it cannot pin, are left to the escape tests on the listed commit, which are the proof."""
     import ast
     import subprocess
     import yaml
@@ -1497,15 +1555,27 @@ def own_steps_differ(sha, root=None):
     got = _getattr_on_program_module(tree)
     if got:
         return f"egress.py starts a program through getattr({got}, ...), which the guard cannot read; it needs a fresh review"
+    floor_tree = ast.parse(subprocess.run(["git", "-C", root, "show", f"{FLOOR}:actions/egress/egress.py"],
+                                          capture_output=True, timeout=30).stdout.decode("utf-8"))
+    safe = _safe_env_names(tree)
     starts = _program_starts(tree)
-    floor_callables = {call for call, _, _ in floor["starts"]}
-    for call, env_ok, has_path in starts:
+    floor_callables = {call for call, *_ in floor["starts"]}
+    for call, state, ref, has_path in starts:
         if call not in floor_callables:
             return f"egress.py starts a program in a way the floor does not ({call}); it needs a fresh review"
         if call == "which" and not has_path:
             return "egress.py calls which without path=FIXED_PATH, so a program is found through the job's PATH"
-        if call != "which" and not env_ok:
-            return f"egress.py calls {call} without an env= of its own (a dict), so a program may get the step's environment"
+        if call == "which":
+            continue
+        if state == "bad":
+            return f"egress.py calls {call} without a clean dict env= of its own, so a program may get the step's environment"
+        if state == "name":
+            func_name, var = ref
+            if var not in safe:
+                return f"egress.py passes {var} as a program's env, and it is not only ever a clean dict literal"
+            if _env_build(tree, func_name, var) != _env_build(floor_tree, func_name, var):
+                return (f"egress.py builds the env {var} in {func_name}() differently from the floor "
+                        "(a later .update or assignment changes what a program is given); it needs a fresh review")
     return ""
 
 
@@ -1681,7 +1751,7 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("drop env on run",
                           lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
                                        "completed = subprocess.run(argv, cwd=str(copy)"),
-                          "without an env="))
+                          "without a clean dict env="))
             cases.append(("which without path",
                           lambda: edit("egress.py", 'shutil.which("docker", path=FIXED_PATH)',
                                        'shutil.which("docker")'),
@@ -1710,16 +1780,32 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("env=dict(os.environ)",
                           lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
                                        "completed = subprocess.run(argv, env=dict(os.environ), cwd=str(copy)"),
-                          "without an env="))
+                          "without a clean dict env="))
             cases.append(("child_env built from os.environ",
                           lambda: edit("egress.py", "    child_env = {\n", "    child_env = dict(os.environ)\n    _unused = {\n"),
-                          "without an env="))
+                          "not only ever a clean dict literal"))
+            # Round 3 (B1/B2/B6): the env's final contents, which a dict env= alone does not prove.
+            cases.append(("child_env.update(os.environ) after the floor's build (B6)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    child_env.update(model_keys)\n    child_env.update(os.environ)\n"),
+                          "differently from the floor"))
+            cases.append(("child_env rebound to dict(os.environ) after its literal (B1)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    child_env.update(model_keys)\n    child_env = dict(os.environ)\n"),
+                          "not only ever a clean dict literal"))
+            cases.append(("env={**os.environ} spread (B2)",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, env={**os.environ}, cwd=str(copy)"),
+                          "without a clean dict env="))
 
             for name, mutate, expect in cases:
+                mutate()
+                try:
+                    result = own(commit(name))
+                finally:
+                    reset()      # always, so one failed case does not leave the clone dirty for the next
                 with self.subTest(name):
-                    mutate()
-                    self.assertIn(expect, own(commit(name)))
-                    reset()
+                    self.assertIn(expect, result)
 
 
 if __name__ == "__main__":
