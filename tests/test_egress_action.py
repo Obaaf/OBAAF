@@ -399,11 +399,89 @@ class ActionFile(unittest.TestCase):
         self.assertIn("value: ${{ steps.run.outputs.removed }}", text)
 
     def test_python_runs_isolated(self):
+        # Every call of Python, the steps' own shell and the resolver's sudo, is isolated and skips site.
         text = (ROOT / "actions" / "egress" / "action.yml").read_text()
-        calls = re.findall(r"python3[^\n]*OBAAF_EGRESS_SCRIPT", text)
-        self.assertTrue(calls)
-        for call in calls:
-            self.assertIn("python3 -I", call)
+        source = (ROOT / "actions" / "egress" / "egress.py").read_text()
+        self.assertEqual(re.findall(r"python3[^\n]*", text), ["python3 -I -S {0}"] * 3)
+        self.assertIn('"/usr/bin/python3", "-I", "-S", script, "dns-filter"', source)
+
+
+class ActionSteps(unittest.TestCase):
+    """The action's own steps run outside the sandbox with the step's env, model keys included (slice 2c.9)."""
+
+    STEPS = ("check-allow", "install", "run")
+
+    def setUp(self):
+        import yaml
+
+        self.action = yaml.safe_load((ROOT / "actions" / "egress" / "action.yml").read_text())
+        self.steps = self.action["runs"]["steps"]
+
+    def test_three_steps_each_only_running_egress_py(self):
+        self.assertEqual(len(self.steps), len(self.STEPS))
+        for step, sub in zip(self.steps, self.STEPS):
+            self.assertEqual(step["run"], "import os, runpy, sys\n"
+                                          f"sys.argv = [os.environ[\"OBAAF_EGRESS_SCRIPT\"], \"{sub}\"]\n"
+                                          "runpy.run_path(sys.argv[0], run_name=\"__main__\")\n")
+            self.assertEqual(step["env"]["OBAAF_EGRESS_SCRIPT"], "${{ github.action_path }}/egress.py")
+
+    def test_no_step_is_bash_or_found_through_the_path(self):
+        # #139: bash sources BASH_ENV and obeys SHELLOPTS, PS4 and exported functions from the job;
+        # #145: `shell: bash` and `uname` were found through the PATH, which GITHUB_PATH puts first.
+        for step in self.steps:
+            self.assertEqual(step["shell"], "/usr/bin/python3 -I -S {0}")
+            self.assertNotIn("bash", step["run"])
+            self.assertNotIn("uname", step["run"])
+
+    def test_every_step_empties_every_loader_variable(self):
+        for step in self.steps:
+            env = step["env"]
+            for name in egress.LOADER_VARIABLES:
+                self.assertIn(name, env, f"{step['name']}: {name}")
+                self.assertEqual(env[name], "", f"{step['name']}: {name}")
+            # Nothing else is emptied or set beyond the inputs and the script.
+            others = {k for k in env if k not in egress.LOADER_VARIABLES}
+            self.assertTrue(others <= {"INPUT_ALLOW", "INPUT_ENV", "INPUT_MODEL_KEYS", "INPUT_RUN", "OBAAF_EGRESS_SCRIPT"})
+
+    def test_the_loader_variables_are_the_ones_ubuntu_24_04s_loader_removes_for_setuid_programs(self):
+        # Read from glibc 2.39's ld.so on 2026-11-16; the escape tests compare them with the runner's loader.
+        self.assertEqual(len(egress.LOADER_VARIABLES), 34)
+        self.assertEqual(len(set(egress.LOADER_VARIABLES)), 34)
+        for name in ("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "GCONV_PATH", "LOCPATH", "TMPDIR"):
+            self.assertIn(name, egress.LOADER_VARIABLES)
+        self.assertEqual(list(egress.LOADER_VARIABLES), sorted(egress.LOADER_VARIABLES))
+
+    def test_a_loader_variable_with_a_value_is_reported(self):
+        self.assertEqual(egress.inherited_hooks({"LD_PRELOAD": "", "TMPDIR": ""}), [])
+        self.assertEqual(egress.inherited_hooks({"LD_PRELOAD": "/tmp/x.so", "LD_AUDIT": "/tmp/a.so", "PATH": "/x"}),
+                         ["LD_AUDIT", "LD_PRELOAD"])
+
+    def test_main_refuses_to_go_on_with_a_loader_variable_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.write_text("")
+            env = {"GITHUB_OUTPUT": str(out), "LD_PRELOAD": "/tmp/planted.so", "INPUT_ALLOW": "api.github.com"}
+            saved = dict(os.environ)
+            try:
+                os.environ.clear()
+                os.environ.update(env)
+                for sub in self.STEPS:
+                    with self.subTest(sub=sub):
+                        self.assertEqual(egress.main(["egress.py", sub]), 2)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(out.read_text(), "refused=environment\n" * 3)
+
+    def test_the_runner_is_read_from_the_kernel(self):
+        import collections
+
+        Uname = collections.namedtuple("Uname", "sysname machine")
+        self.assertIsNone(egress.runner_problem(lambda: Uname("Linux", "x86_64")))
+        self.assertIn("Linux x64 runners only", egress.runner_problem(lambda: Uname("Linux", "aarch64")))
+        self.assertIn("Linux x64 runners only", egress.runner_problem(lambda: Uname("Darwin", "x86_64")))
+        source = (ROOT / "actions" / "egress" / "egress.py").read_text()
+        self.assertNotIn('"RUNNER_OS"', source)
 
 
 if __name__ == "__main__":

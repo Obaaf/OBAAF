@@ -327,6 +327,79 @@ jobs:
           allow: api.github.com
           run: "true"
 
+      # Issue #136 (slice 2c.9): what the command can read of what earlier steps
+      # left on the runner's disk. Checkout v6 and later keep the token in a file
+      # under RUNNER_TEMP that the workspace's .git/config includes; the action
+      # refuses that workspace (above). With the checkout moved out of the
+      # workspace, the file is still there: can the command read it, or files
+      # an earlier step wrote under RUNNER_TEMP, the home directory or the
+      # folder that holds the workspace?
+      - name: Where that checkout keeps its token, and marked files beside it (paths only, no values)
+        id: leftovers
+        run: |
+          set -euo pipefail
+          cred="$(git config --file kept-token/.git/config --get-regexp '^includeif\..*\.path$' | awk 'NR == 1 {print $2}')"
+          echo "credential file: $cred"
+          case "$cred" in "$RUNNER_TEMP"/*) ;; *) echo "::error::the credential file is not under RUNNER_TEMP: $cred"; exit 1 ;; esac
+          test -r "$cred"
+          mark="obaafread$(openssl rand -hex 8)"
+          work="$(dirname "$GITHUB_WORKSPACE")"
+          mkdir -p "$HOME/.config/obaaf-read-test"
+          for f in "$RUNNER_TEMP/obaaf-read-test.txt" "$HOME/.obaaf-read-test" "$HOME/.config/obaaf-read-test/hosts.yml" "$work/obaaf-read-test.txt"; do
+            printf 'not a secret: %s\n' "$mark" > "$f"
+            chmod 600 "$f"
+          done
+          mv kept-token "$RUNNER_TEMP/kept-token-away"
+          {
+            echo "cred=$cred"
+            echo "mark=$mark"
+            echo "work=$work"
+            echo "home=$HOME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: What the command can read of those
+        id: reads
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          CRED_FILE: ${{ steps.leftovers.outputs.cred }}
+          READ_MARK: ${{ steps.leftovers.outputs.mark }}
+          RUNNER_TEMP_REAL: ${{ runner.temp }}
+          HOME_REAL: ${{ steps.leftovers.outputs.home }}
+          WORK_REAL: ${{ steps.leftovers.outputs.work }}
+        with:
+          allow: api.github.com
+          env: CRED_FILE READ_MARK RUNNER_TEMP_REAL HOME_REAL WORK_REAL
+          run: bash tests/egress/reads.sh reads-results.txt
+
+      - name: Put the checkout back for its post step, and check what the command could read
+        if: always() && steps.leftovers.outcome == 'success'
+        env:
+          READS_OUTCOME: ${{ steps.reads.outcome }}
+          READS_CONFINED: ${{ steps.reads.outputs.confined }}
+          READS_WORKSPACE: ${{ steps.reads.outputs.workspace }}
+        run: |
+          set -euo pipefail
+          mv "$RUNNER_TEMP/kept-token-away" kept-token
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          results="$READS_WORKSPACE/reads-results.txt"
+          cat "$results" || true
+          line() { grep -m1 "^$1 " "$results" | sed "s/^$1 //" || true; }
+          if [ "$READS_OUTCOME" = success ] && [ "$READS_CONFINED" = true ]; then ok "the command ran in a sandbox that held"; else bad "outcome $READS_OUTCOME, confined '$READS_CONFINED'"; fi
+          if grep -qx DONE "$results"; then ok "the read test finished"; else bad "the read test did not finish"; fi
+          for what in credential runner-temp home home-config work; do
+            seen="$(line "READ $what")"
+            case "$seen" in
+              absent|unreadable) ok "$what: $seen inside the sandbox" ;;
+              *) bad "$what: '$seen' inside the sandbox" ;;
+            esac
+          done
+          case "$(line GREP_STATUS)" in 1|2) ok "the search for the mark finished (grep status $(line GREP_STATUS))";; *) bad "the search for the mark did not finish cleanly (grep status '$(line GREP_STATUS)')";; esac
+          if [ "$(line MARK_IN_FILES)" = none ]; then ok "the mark is in no file the command could read under /home, /tmp, /run, /var or /etc"; else bad "the mark is in: $(line MARK_IN_FILES)"; fi
+          exit "$fail"
+
       - name: Check what happened
         env:
           KEPTOKEN_OUTCOME: ${{ steps.keptoken.outcome }}
@@ -361,4 +434,92 @@ jobs:
           if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"
           if [ -z "$found" ]; then ok "what the command wrote to its home and to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp"; else bad "left behind: $found"; fi
+          exit "$fail"
+
+  own-steps:
+    # Slice 2c.9, issues #139 and #145. The action's own steps run outside the
+    # sandbox, holding what the workflow put in the step's env (model keys
+    # included). This job sets, for the whole job and for the action's step,
+    # each thing that makes bash, the dynamic loader or Python run a planted
+    # file: BASH_ENV, SHELLOPTS and PS4, LD_PRELOAD and LD_AUDIT, PYTHONPATH,
+    # and programs named like the real ones first on the PATH. Each planted
+    # file writes a line only in a process that holds OBAAF_EGRESS_SCRIPT, as
+    # the action's steps do. A plain step and the action at its floor commit
+    # must set off each one (so the test can see them); the action now must
+    # set off none.
+    name: The action's own steps ignore the job's shell, PATH and loader variables
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+      LD_PRELOAD: /tmp/obaaf-plant/preload.so
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plant the hooks
+        run: bash tests/egress/plant.sh /tmp/obaaf-plant
+
+      - name: The runner's loader removes no variable the action does not empty
+        run: python3 -I -S tests/egress/loader-names.py actions/egress/egress.py
+
+      - name: Control, a plain step that holds OBAAF_EGRESS_SCRIPT (each hook must fire)
+        env:
+          OBAAF_EGRESS_SCRIPT: control
+        run: |
+          uname -m
+          python3 -c 'print("python")'
+
+      - name: Keep the control's lines
+        run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-control || touch /tmp/obaaf-plant/markers-control
+
+      - name: The action at its floor commit, with the same hooks
+        id: before
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@7c1bded84f32a86135f89dde30396a32f44de9e0
+        env:
+          BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+          LD_PRELOAD: /tmp/obaaf-plant/preload.so
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines
+        run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-before || touch /tmp/obaaf-plant/markers-before
+
+      - name: The action now, with the same hooks
+        id: after
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+          LD_PRELOAD: /tmp/obaaf-plant/preload.so
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Check which hooks fired
+        env:
+          AFTER_OUTCOME: ${{ steps.after.outcome }}
+          AFTER_CONFINED: ${{ steps.after.outputs.confined }}
+          AFTER_EXIT: ${{ steps.after.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          dir=/tmp/obaaf-plant
+          touch "$dir/markers"
+          for f in control before; do echo "--- $f"; sort "$dir/markers-$f" | uniq -c; done
+          echo "--- after"; sort "$dir/markers" | uniq -c
+          for hook in "BASH_ENV sourced" "PS4 expanded" "LD_PRELOAD loaded" "LD_AUDIT loaded" "PATH: bash " "PATH: uname " "PATH: python3 " "PYTHONPATH sitecustomize"; do
+            if grep -qF -- "$hook" "$dir/markers-control"; then ok "control: $hook"; else bad "control: '$hook' did not fire, so this test would not see it"; fi
+          done
+          for hook in "BASH_ENV sourced" "PS4 expanded" "LD_PRELOAD loaded" "LD_AUDIT loaded" "PATH: bash " "PATH: uname "; do
+            if grep -qF -- "$hook" "$dir/markers-before"; then ok "the action at its floor: $hook (issues #139, #145)"; else bad "the action at its floor: '$hook' did not fire"; fi
+          done
+          if [ -s "$dir/markers" ]; then bad "the action now: $(sort -u "$dir/markers" | tr '\n' ';')"; else ok "the action now: no hook fired in any of its steps"; fi
+          if [ "$AFTER_OUTCOME" = success ] && [ "$AFTER_CONFINED" = true ] && [ "$AFTER_EXIT" = 0 ]; then ok "the action ran its command in a sandbox that held"; else bad "the action now: outcome $AFTER_OUTCOME, confined '$AFTER_CONFINED', exit '$AFTER_EXIT'"; fi
           exit "$fail"

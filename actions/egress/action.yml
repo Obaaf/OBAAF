@@ -77,8 +77,10 @@ outputs:
     description: >-
       "credential" when the action refused to run anything because a checkout
       in the workspace kept its token; "input" when the run step refused
-      another input. (Inputs refused by the first step, such as allow, env and
-      model-keys, leave it empty; that step fails first.)
+      another input; "environment" when the run step found a variable set that
+      would make the dynamic loader load other code, which the action's own
+      env empties. (What the first step refuses, such as allow, env and
+      model-keys, leaves it empty; that step fails first.)
     value: ${{ steps.run.outputs.refused }}
   exit-code:
     description: >-
@@ -93,35 +95,148 @@ outputs:
     value: ${{ steps.run.outputs.confined }}
 runs:
   using: composite
+  # Each step runs outside the sandbox and holds what the workflow put in the
+  # step's env, model keys included. So none is started by bash, and none is
+  # found through the PATH: the shell is Python by its full path, isolated (-I:
+  # no PYTHON* variable, no script or user directory on sys.path) and without
+  # site directories (-S), and it only runs egress.py. Each step's env empties
+  # the variables that make the dynamic loader load other code (the list is
+  # LOADER_VARIABLES in egress.py, which refuses to go on if one still has a
+  # value). Slice 2c.9, issues #139 and #145; see docs/egress-control.md.
   steps:
     - name: Check the inputs and the runner
-      shell: bash
+      shell: /usr/bin/python3 -I -S {0}
       env:
         INPUT_ALLOW: ${{ inputs.allow }}
         INPUT_ENV: ${{ inputs.env }}
         INPUT_MODEL_KEYS: ${{ inputs.model-keys }}
         OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
+        GCONV_PATH: ""
+        GETCONF_DIR: ""
+        GLIBC_TUNABLES: ""
+        HOSTALIASES: ""
+        LD_AUDIT: ""
+        LD_BIND_NOT: ""
+        LD_BIND_NOW: ""
+        LD_DEBUG: ""
+        LD_DEBUG_OUTPUT: ""
+        LD_DYNAMIC_WEAK: ""
+        LD_HWCAP_MASK: ""
+        LD_LIBRARY_PATH: ""
+        LD_ORIGIN_PATH: ""
+        LD_PRELOAD: ""
+        LD_PROFILE: ""
+        LD_SHOW_AUXV: ""
+        LD_VERBOSE: ""
+        LD_WARN: ""
+        LOCALDOMAIN: ""
+        LOCPATH: ""
+        MALLOC_ARENA_MAX: ""
+        MALLOC_ARENA_TEST: ""
+        MALLOC_MMAP_MAX_: ""
+        MALLOC_MMAP_THRESHOLD_: ""
+        MALLOC_PERTURB_: ""
+        MALLOC_TOP_PAD_: ""
+        MALLOC_TRACE: ""
+        MALLOC_TRIM_THRESHOLD_: ""
+        NIS_PATH: ""
+        NLSPATH: ""
+        RESOLV_HOST_CONF: ""
+        RES_OPTIONS: ""
+        TMPDIR: ""
+        TZDIR: ""
       run: |
-        set -euo pipefail
-        if [ "$RUNNER_OS" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
-          echo "::error::The OBAAF egress control runs on Linux x64 runners only."
-          exit 2
-        fi
-        /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" check-allow
+        import os, runpy, sys
+        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]
+        runpy.run_path(sys.argv[0], run_name="__main__")
 
     - name: Install the pinned Agent Workflow Firewall
-      shell: bash
+      shell: /usr/bin/python3 -I -S {0}
       env:
         OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
-      run: /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" install
+        GCONV_PATH: ""
+        GETCONF_DIR: ""
+        GLIBC_TUNABLES: ""
+        HOSTALIASES: ""
+        LD_AUDIT: ""
+        LD_BIND_NOT: ""
+        LD_BIND_NOW: ""
+        LD_DEBUG: ""
+        LD_DEBUG_OUTPUT: ""
+        LD_DYNAMIC_WEAK: ""
+        LD_HWCAP_MASK: ""
+        LD_LIBRARY_PATH: ""
+        LD_ORIGIN_PATH: ""
+        LD_PRELOAD: ""
+        LD_PROFILE: ""
+        LD_SHOW_AUXV: ""
+        LD_VERBOSE: ""
+        LD_WARN: ""
+        LOCALDOMAIN: ""
+        LOCPATH: ""
+        MALLOC_ARENA_MAX: ""
+        MALLOC_ARENA_TEST: ""
+        MALLOC_MMAP_MAX_: ""
+        MALLOC_MMAP_THRESHOLD_: ""
+        MALLOC_PERTURB_: ""
+        MALLOC_TOP_PAD_: ""
+        MALLOC_TRACE: ""
+        MALLOC_TRIM_THRESHOLD_: ""
+        NIS_PATH: ""
+        NLSPATH: ""
+        RESOLV_HOST_CONF: ""
+        RES_OPTIONS: ""
+        TMPDIR: ""
+        TZDIR: ""
+      run: |
+        import os, runpy, sys
+        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "install"]
+        runpy.run_path(sys.argv[0], run_name="__main__")
 
     - name: Run the command with its network limited
       id: run
-      shell: bash
+      shell: /usr/bin/python3 -I -S {0}
       env:
         INPUT_ALLOW: ${{ inputs.allow }}
         INPUT_ENV: ${{ inputs.env }}
         INPUT_MODEL_KEYS: ${{ inputs.model-keys }}
         INPUT_RUN: ${{ inputs.run }}
         OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py
-      run: /usr/bin/python3 -I "$OBAAF_EGRESS_SCRIPT" run
+        GCONV_PATH: ""
+        GETCONF_DIR: ""
+        GLIBC_TUNABLES: ""
+        HOSTALIASES: ""
+        LD_AUDIT: ""
+        LD_BIND_NOT: ""
+        LD_BIND_NOW: ""
+        LD_DEBUG: ""
+        LD_DEBUG_OUTPUT: ""
+        LD_DYNAMIC_WEAK: ""
+        LD_HWCAP_MASK: ""
+        LD_LIBRARY_PATH: ""
+        LD_ORIGIN_PATH: ""
+        LD_PRELOAD: ""
+        LD_PROFILE: ""
+        LD_SHOW_AUXV: ""
+        LD_VERBOSE: ""
+        LD_WARN: ""
+        LOCALDOMAIN: ""
+        LOCPATH: ""
+        MALLOC_ARENA_MAX: ""
+        MALLOC_ARENA_TEST: ""
+        MALLOC_MMAP_MAX_: ""
+        MALLOC_MMAP_THRESHOLD_: ""
+        MALLOC_PERTURB_: ""
+        MALLOC_TOP_PAD_: ""
+        MALLOC_TRACE: ""
+        MALLOC_TRIM_THRESHOLD_: ""
+        NIS_PATH: ""
+        NLSPATH: ""
+        RESOLV_HOST_CONF: ""
+        RES_OPTIONS: ""
+        TMPDIR: ""
+        TZDIR: ""
+      run: |
+        import os, runpy, sys
+        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "run"]
+        runpy.run_path(sys.argv[0], run_name="__main__")
