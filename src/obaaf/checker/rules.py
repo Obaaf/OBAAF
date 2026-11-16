@@ -2297,7 +2297,7 @@ class WorkflowRules:
     _REACHES_OWN_STEPS = frozenset({"ACTIONS_ALLOW_UNSECURE_COMMANDS"})
     _REACHES_OWN_STEPS_PREFIXES = ("OPENSSL_",)
     _OPENSSL_BUILD_NAMES = frozenset({"OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
-                                      "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR"})
+                                      "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR", "OPENSSL_LIBS"})
     # A step that sets variables for the steps after it, the action's own included. The `PATH` it can
     # change for them (`GITHUB_PATH`, `addPath`) and bash's `BASH_ENV` no longer reach them (2c.10b).
     # The runner's folder for those files (`_runner_file_commands`) counts too, and the words are looked

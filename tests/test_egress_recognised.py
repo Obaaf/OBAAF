@@ -1352,12 +1352,19 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
 # YAML and a static read of egress.py can show it: each of its steps but the last is Python by its
 # full path, isolated and without site, and empties the loader's variables; the last step is the one
 # that fails the action; and egress.py's `run` text and every program-starting call are the floor's,
-# so a later commit that changes how a program is started is flagged for a fresh review before it is
-# listed. The escape tests on the commit itself, which the maintainer requires before listing, are
-# what establish that those starts stay confined (D-070); this is the belt, not the proof.
+# each with an `env` of its own. The escape tests on the commit itself, which the maintainer requires
+# before listing, are what establish that those starts stay confined (D-070); this is the belt, not
+# the proof. The guard reads program starts through a fixed set of method names on any receiver, and
+# flags `getattr` on or an alias of subprocess/os/posix, so a one-line evasion (round 2's B1) is
+# caught, but any spelling it cannot read statically is left to the escape tests.
 OWN_STEP_SHELL = "/usr/bin/python3 -I -S {0}"
-# The names a program-starting call must be read through, so a new spelling is caught, not missed.
-_START_CALLS = ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput")
+# Method names that start a program, matched on any receiver (a module alias included). `which` is
+# read on its own because it is checked for `path=`, not `env=`.
+_START_METHODS = ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+                  "system", "popen")
+# os methods that start a program, by prefix (`execv`, `execl`, `spawnv`, `posix_spawn`, …).
+_START_PREFIXES = ("exec", "spawn", "posix_spawn")
+_PROGRAM_MODULES = ("subprocess", "os", "posix")
 
 
 def _floor_facts(root):
@@ -1380,44 +1387,82 @@ def _floor_facts(root):
             "starts": _program_starts(tree)}
 
 
-def _program_starts(tree):
-    """Every call in egress.py that starts a program, as a set of (callable, has_env, has_path) facts.
-    A `subprocess.*` or `os.exec/spawn/system/popen` call, or one of those names imported from
-    subprocess or os (`from subprocess import run`). `has_env` is whether it passes `env=`; `has_path`
-    whether a `shutil.which` call passes `path=`. A bare name is a program start only when it was
-    imported from one of those modules, so egress.py's own `run()` function is not taken for one."""
+def _dict_literal_names(tree):
+    """Names in egress.py whose first assignment is a dict literal (`child_env = {...}`). A program's
+    `env=` must be one of these, or a dict literal directly, so a poisoned value such as
+    `dict(os.environ)` or `os.environ.copy()` (round 2's B1, A4/A5) is caught."""
     import ast
+    first = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in first:
+                    first[target.id] = isinstance(node.value, ast.Dict)
+    return {name for name, is_dict in first.items() if is_dict}
+
+
+def _program_starts(tree):
+    """Every call in egress.py that starts a program, as a set of (callable, env_ok, has_path) facts.
+    A call of one of `_START_METHODS` on any receiver, an `os`/`posix` exec/spawn, or a name imported
+    from one of those modules (`from subprocess import run`): read on any receiver so a module alias
+    (`import subprocess as sp`) does not hide it. `env_ok` is whether it passes `env=` with a value
+    that is a dict literal or a name first assigned a dict literal (so `env=dict(os.environ)` is not
+    `env_ok`); `has_path` whether a `which` call passes `path=`. A bare name is a program start only
+    when imported from one of those modules, so egress.py's own `run()` function is not taken for one.
+    `getattr` on subprocess/os/posix is reported separately, by `own_steps_differ`."""
+    import ast
+    safe = _dict_literal_names(tree)
     imported = {}      # local name -> "subprocess.run" etc., for names brought in by `from ... import`
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in ("subprocess", "os"):
+        if isinstance(node, ast.ImportFrom) and node.module in _PROGRAM_MODULES:
             for alias in node.names:
-                if alias.name in _START_CALLS or alias.name.startswith(("exec", "spawn", "posix_spawn", "system", "popen")):
+                if alias.name in _START_METHODS or alias.name.startswith(_START_PREFIXES):
                     imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def env_ok(call):
+        for kw in call.keywords:
+            if kw.arg == "env":
+                return isinstance(kw.value, ast.Dict) or (isinstance(kw.value, ast.Name) and kw.value.id in safe)
+        return False
+
     starts = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         name = None
-        if isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "subprocess" and func.attr in _START_CALLS:
-            name = f"subprocess.{func.attr}"
-        elif isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "os" and func.attr.startswith(("exec", "spawn", "posix_spawn", "system", "popen")):
-            name = f"os.{func.attr}"
+        if isinstance(func, ast.Attribute) and func.attr == "which":
+            starts.add(("which", True, any(k.arg == "path" for k in node.keywords)))
+            continue
+        if isinstance(func, ast.Attribute) and (func.attr in _START_METHODS or func.attr.startswith(_START_PREFIXES)):
+            recv = getattr(func.value, "id", "?")
+            name = f"{recv}.{func.attr}"
         elif isinstance(func, ast.Name) and func.id in imported:
             name = imported[func.id]
-        elif isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "shutil" and func.attr == "which":
-            starts.add(("shutil.which", False, any(k.arg == "path" for k in node.keywords)))
-            continue
         if name:
-            starts.add((name, any(k.arg == "env" for k in node.keywords), False))
+            starts.add((name, env_ok(node), False))
     return frozenset(starts)
+
+
+def _getattr_on_program_module(tree):
+    """A `getattr(subprocess, ...)` / `getattr(os, ...)` / `getattr(posix, ...)`, which `_program_starts`
+    cannot read as a start (round 2's B1, A3). Returns the module name or ""."""
+    import ast
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in _PROGRAM_MODULES):
+            return node.args[0].id
+    return ""
 
 
 def own_steps_differ(sha, root=None):
     """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
     `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
-    have is a problem. Not a proof the steps are confined (the escape tests on the commit are that);
-    it fails closed on any change to how a program is started, so such a change is reviewed first."""
+    have is a problem. Not a proof the steps are confined (the escape tests on the commit are that):
+    it reads program starts statically and fails closed on a changed shell, a shrunk loader list, a
+    changed `run` text, a start spelled a way the floor does not use, one without a dict `env=`, or a
+    `getattr` on subprocess/os/posix, so those are reviewed before listing; a spelling it cannot read
+    (a start reached through a deeper indirection) is left to the escape tests."""
     import ast
     import subprocess
     import yaml
@@ -1449,15 +1494,18 @@ def own_steps_differ(sha, root=None):
     if not str(last.get("shell", "")).startswith("/obaaf-egress/") or "steps.run.outcome == 'success'" not in str(last.get("if")):
         return "the last step is not the one that fails the action when the run step reports nothing"
     tree = ast.parse(texts["egress.py"])
+    got = _getattr_on_program_module(tree)
+    if got:
+        return f"egress.py starts a program through getattr({got}, ...), which the guard cannot read; it needs a fresh review"
     starts = _program_starts(tree)
     floor_callables = {call for call, _, _ in floor["starts"]}
-    for call, has_env, has_path in starts:
+    for call, env_ok, has_path in starts:
         if call not in floor_callables:
             return f"egress.py starts a program in a way the floor does not ({call}); it needs a fresh review"
-        if call == "shutil.which" and not has_path:
-            return "egress.py calls shutil.which without path=FIXED_PATH, so a program is found through the job's PATH"
-        if call != "shutil.which" and not has_env:
-            return f"egress.py calls {call} without env=, so a program gets the step's whole environment"
+        if call == "which" and not has_path:
+            return "egress.py calls which without path=FIXED_PATH, so a program is found through the job's PATH"
+        if call != "which" and not env_ok:
+            return f"egress.py calls {call} without an env= of its own (a dict), so a program may get the step's environment"
     return ""
 
 
@@ -1553,7 +1601,7 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         libssl (checked against Ubuntu 24.04's libraries), and Rust workflows set them for the whole
         job, so they are not "cannot tell"; another spelling still is."""
         for name in ("OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
-                     "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR"):
+                     "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR", "OPENSSL_LIBS"):
             for place, kw in self.where(name, value="/usr").items():
                 with self.subTest(name=name, place=place):
                     self.assertEqual(self.key(**kw).verdict, VERIFIED, self.key(**kw).detail)
@@ -1583,11 +1631,12 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
 
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
     def test_the_guard_fails_closed_on_a_commit_that_breaks_a_premise(self):
-        """What 2c.10b's review (B1) got past the first guard: a shrunk loader list, a program started
-        without env= or in a new call form, which() without path=, and a changed run text. Each is
-        built on a scratch clone and must be caught. The escape tests on a listed commit are the proof;
-        this guard only keeps a later commit's change to how a program is started from being listed
-        without a fresh review."""
+        """Mutant commits on a scratch clone at the floor, from both review rounds. Round 1: a shrunk
+        loader list, a program started without env=, which() without path=, a new call form, a changed
+        run text. Round 2 (B1): a module alias (`import subprocess as sp`), `import posix`, a `getattr`
+        on subprocess, and a poisoned env value (`env=dict(os.environ)`, or `child_env` built from it).
+        Each must be caught. The escape tests on a listed commit are the proof; this guard keeps a
+        change to how a program is started from being listed without a fresh review."""
         import subprocess
         import tempfile
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1610,34 +1659,67 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                 assert old in text, (name, old)
                 path.write_text(text.replace(old, new, 1))
 
+            def reset():
+                subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+
             def own(sha):
                 return own_steps_differ(sha, root=tmp)
 
+            # A mutant that adds a line to run()'s body, so it is reached as a start; keep the floor's
+            # own command launch untouched unless the case replaces it.
+            def in_run(code):
+                edit("egress.py", "def run(environ: dict[str, str]) -> int:\n",
+                     f"def run(environ: dict[str, str]) -> int:\n    {code}\n")
+
             self.assertEqual(own(FLOOR), "")
-            # A dropped loader name: the step no longer empties it, and the list shrank with it.
-            edit("egress.py", '    "RES_OPTIONS", "TMPDIR", "TZDIR",\n', '    "RES_OPTIONS", "TZDIR",\n')
-            edit("action.yml", "        TMPDIR: \"\"\n        TZDIR: \"\"", "        TZDIR: \"\"")
-            self.assertIn("does not empty", own(commit("shrink loader list")))
-            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
-            # A program started without env=.
-            edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
-                 "completed = subprocess.run(argv, cwd=str(copy)")
-            self.assertIn("without env=", own(commit("drop env on run")))
-            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
-            # which() without path=.
-            edit("egress.py", 'shutil.which("docker", path=FIXED_PATH)', 'shutil.which("docker")')
-            self.assertIn("shutil.which without path", own(commit("which without path")))
-            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
-            # A new program-start form (os.posix_spawnp).
-            edit("egress.py", "import urllib.request\n", "import urllib.request\nimport posix\n")
-            edit("egress.py", "def run(environ: dict[str, str]) -> int:\n",
-                 "def run(environ: dict[str, str]) -> int:\n    os.posix_spawnp('x', ['x'], os.environ)\n")
-            self.assertIn("in a way the floor does not", own(commit("new start form")))
-            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
-            # A changed run text (the review's M7: subprocess in the step's run block).
-            edit("action.yml", 'sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]',
-                 'import subprocess as sp; sp.call("uname -a", shell=True)\n        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]')
-            self.assertIn("run text is not the floor's", own(commit("change run text")))
+            cases = []
+            # Round 1.
+            def shrink():
+                edit("egress.py", '    "RES_OPTIONS", "TMPDIR", "TZDIR",\n', '    "RES_OPTIONS", "TZDIR",\n')
+                edit("action.yml", "        TMPDIR: \"\"\n        TZDIR: \"\"", "        TZDIR: \"\"")
+            cases.append(("shrink loader list", shrink, "does not empty"))
+            cases.append(("drop env on run",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, cwd=str(copy)"),
+                          "without an env="))
+            cases.append(("which without path",
+                          lambda: edit("egress.py", 'shutil.which("docker", path=FIXED_PATH)',
+                                       'shutil.which("docker")'),
+                          "which without path"))
+            cases.append(("new start form os.posix_spawnp",
+                          lambda: (edit("egress.py", "import urllib.request\n", "import urllib.request\nimport posix\n"),
+                                   in_run("os.posix_spawnp('x', ['x'], {})")),
+                          "in a way the floor does not"))
+            cases.append(("changed run text",
+                          lambda: edit("action.yml", 'sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]',
+                                       'import subprocess as sp; sp.call("x", shell=True)\n'
+                                       '        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]'),
+                          "run text is not the floor's"))
+            # Round 2 (B1).
+            cases.append(("module alias import subprocess as sp",
+                          lambda: (edit("egress.py", "import subprocess\n", "import subprocess\nimport subprocess as sp\n"),
+                                   in_run('sp.run(["/bin/sh", "-c", "env"])')),
+                          "in a way the floor does not"))
+            cases.append(("import posix; posix.system",
+                          lambda: (edit("egress.py", "import subprocess\n", "import subprocess\nimport posix\n"),
+                                   in_run('posix.system("env")')),
+                          "in a way the floor does not"))
+            cases.append(("getattr(subprocess, 'run')",
+                          lambda: in_run('getattr(subprocess, "run")(["/bin/sh", "-c", "env"])'),
+                          "getattr(subprocess, ...)"))
+            cases.append(("env=dict(os.environ)",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, env=dict(os.environ), cwd=str(copy)"),
+                          "without an env="))
+            cases.append(("child_env built from os.environ",
+                          lambda: edit("egress.py", "    child_env = {\n", "    child_env = dict(os.environ)\n    _unused = {\n"),
+                          "without an env="))
+
+            for name, mutate, expect in cases:
+                with self.subTest(name):
+                    mutate()
+                    self.assertIn(expect, own(commit(name)))
+                    reset()
 
 
 if __name__ == "__main__":
