@@ -16,6 +16,8 @@ from typing import Any
 from obaaf import yamlutil
 
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
+# The longest a rule's `why` may be: one line of the text report (slice 3.2b).
+WHY_MAX = 160
 
 
 def _read(name: str) -> Any:
@@ -197,9 +199,15 @@ class Catalog:
             for rid in rule.get("agent_controls", []):
                 if rid not in self.agent_requirements:
                     out.append(f"{rule_id}: unknown agent control {rid}")
-            for key in ("title", "description", "fix"):
+            for key in ("title", "why", "description", "fix"):
                 if not str(rule.get(key, "")).strip():
                     out.append(f"{rule_id}: missing {key}")
+            # The line the text report prints under each finding (slice 3.2b): one sentence a stranger
+            # reads on a first run, so it is short and says one thing.
+            why = " ".join(str(rule.get("why", "")).split())
+            if why and (len(why) > WHY_MAX or not why.endswith(".") or ". " in why[:-1]):
+                out.append(f"{rule_id}: why must be one sentence of at most {WHY_MAX} characters ending with a "
+                           f"full stop ({len(why)} characters)")
             if rule.get("category") not in ("authority", "hygiene"):
                 out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
             if rule.get("remediation") not in (None, "config", "architecture"):

@@ -51,6 +51,11 @@ def _category(catalog: Catalog, rule_id: str) -> str:
     return cat if cat in ("authority", "hygiene") else "authority"
 
 
+def _why(rule: dict) -> str:
+    """Why a finding of this rule matters, as one line (slice 3.2b)."""
+    return " ".join(str(rule.get("why", "")).split())
+
+
 def _remediation(catalog: Catalog, rule_id: str) -> str:
     return catalog.rules[rule_id].get("remediation") or "config"
 
@@ -288,6 +293,10 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else "")
                      + ("  (baseline)" if f.baselined else ""))
         lines.append(f"        {one_line(f.message)}")
+        if show_fixes:
+            # Why it matters, in one sentence of the catalogue (slice 3.2b); --no-fixes leaves it out
+            # with the fix, for a team that knows the rules and wants the short report.
+            lines.append(f"        Why: {_why(rule)}")
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
@@ -466,6 +475,8 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
                 "message": f.message,
                 "requirements": catalog.rules[f.rule].get("requirements", []),
                 "agentControls": catalog.rules[f.rule].get("agent_controls", []),
+                # Added in 0.4: why a finding of this rule matters, in one sentence (slice 3.2b).
+                "why": _why(catalog.rules[f.rule]),
                 "fix": " ".join(catalog.rules[f.rule]["fix"].split()),
                 "suppressed": f.suppressed,
                 **({"scope": f.scope} if f.scope else {}),
@@ -614,8 +625,10 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None,
             "shortDescription": {"text": rule["title"]},
             "fullDescription": {"text": " ".join(rule["description"].split())},
             "help": {
-                "text": "Fix: " + " ".join(rule["fix"].split()),
-                "markdown": f"**Fix:** {' '.join(rule['fix'].split())}\n\n**Requirements:** {_requirements(rule)}",
+                # Why it matters comes first, as in the text report (slice 3.2b).
+                "text": f"Why it matters: {_why(rule)} Fix: " + " ".join(rule["fix"].split()),
+                "markdown": f"**Why it matters:** {_why(rule)}\n\n**Fix:** {' '.join(rule['fix'].split())}\n\n"
+                            f"**Requirements:** {_requirements(rule)}",
             },
             "defaultConfiguration": {"level": SARIF_LEVEL[severity]},
             "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[severity],

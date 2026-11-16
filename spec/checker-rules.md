@@ -60,6 +60,8 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 
 **Secret available to a workflow started by untrusted input** (high). Requirements: G3.4, G8.1, G9.1. Supports: FR3.
 
+**Why it matters.** People without write access can start this workflow, and whoever steers the job through its code or the text it reads can read the secret.
+
 The workflow can be started by people without write access (for example through pull_request_target, issue_comment, issues or workflow_run) and a job references a repository or organization secret. Anyone who can steer that job, through its code or through text it reads, can read the secret. Jobs behind an environment named in plain text are reported at medium severity, because environment secrets are released only after required reviewers approve; an environment named by an expression, or not as text, keeps the finding high, because GitHub creates an environment it does not know on first use with no protection rules, and an expression can name one the event's author picks. Pull-request workflows are reported at low severity: forks receive no secrets, but branches pushed by anyone with write access do. The job's environment is part of the finding, because a secret of the same name in another environment is another secret. Not followed: whether a named environment really requires reviewers (a repository setting; `obaaf audit` reads it); events an app can raise for an outsider's change (`check_run`, `check_suite`, `status`, `deployment`, `deployment_status`) and `merge_group`, which are not treated as untrusted; a workflow another workflow calls, whose caller's trigger is not known from its own file; and secrets that reach the job through artifacts, caches or another job's outputs. An event name written other than in lower-case letters and underscores is a problem of the file, which fails the check.
 
 **Fix.** Move the step that needs the secret into a workflow that runs only after review (for example on a push to a protected branch, or behind an environment with required reviewers), and pass only data, never secrets, out of the untrusted workflow.
@@ -68,6 +70,8 @@ The workflow can be started by people without write access (for example through 
 
 **Untrusted code checked out in a privileged workflow** (high). Requirements: G3.1, G9.1. Supports: FR3.
 
+**Why it matters.** The workflow holds the base repository's token, secrets and cache, so building or running the pull request's code hands them to its author.
+
 A pull_request_target, workflow_run or comment-triggered workflow checks out or fetches the code of a pull request. These workflows run with the base repository's token, secrets and cache scope, so building or running that code hands them to its author (a "pwn request"). An actions/checkout step's `ref` and `repository` are read as expressions, in any letter case, with index syntax, through `format`, `join`, `fromJSON` and `toJSON`, and through `env` on the step, job or workflow (a value set in one reads the ones outside it, as GitHub evaluates it): the head commit, branch, repository or its owner (with or without a `ref`), the merge commit, `after` on a synchronize, a review's commit, the pull request's number (from which `refs/pull/N/...` is built) and `refs/pull/` written out are the pull request's code. A `ref` or `repository` taken from anything else the checker cannot read to a value (a step's or job's output, an input, a variable, a matrix, an `env` name set nowhere in the file, inputs written as one expression) is reported at medium as "cannot tell". Scripts (`run`, a `docker://` step's `entrypoint` and `args`, the command OBAAF's egress action runs, and a quoted script given to `sh -c`, `bash -c` or `eval`) are split as a shell splits them, comments dropped, command by command (a pipeline is one command): a command that brings code in (git, after any global options and their values, by path or quoted, with fetch, pull, clone, checkout, switch, reset, worktree, merge, rebase, cherry-pick, show, apply, am and others; `gh pr checkout`; `gh repo clone`; `patch`; `gh api`, curl or wget of an archive, contents, a diff or the pull request's patch or diff address) is reported when the same command names the pull request's code: directly, through `env`, from the event file, `gh pr view` or `gh pr diff`, by its number, through a variable set earlier in the step (`NAME=`, `export`, `read`, `for NAME in`, `mapfile`), through a file an earlier command wrote from one of these, or through a git remote added with the head's address. A command counts only where a command starts: at the start, after `|`, `then` and the like, after `NAME=value`, after `sudo`, `env`, `timeout`, `xargs` or another command that runs the next (with its options), and inside a backquote or `$(`. The name of a branch that `git switch -c` or `git checkout -b` creates is not read. A script in another language (`shell: python`, `node`, PowerShell) and an `actions/github-script` script are split roughly, and git, gh and downloads count anywhere in them, also inside a string; their variables count by name. In a github-script script a REST call for contents or an archive is read from its own arguments, and a name given to it from where the script defines it, and a call for the diff or patch counts when the script applies it. Such a command with a step's or job's output, or a field an outsider writes, is "cannot tell"; a "cannot tell" finding is identified with everything in the file the value can depend on (the workflow's and job's env, the job's strategy, its earlier steps, and the jobs it needs). The job's and step's `if:` are part of the finding. Not followed: values passed between steps through `GITHUB_ENV`, `GITHUB_OUTPUT` or files; shell functions, arrays and aliases, and a variable set in a `while read` loop fed from its end; actions other than actions/checkout that check out code (local, composite or marketplace actions); a reusable workflow called from such a workflow, whose checkout is read with its own triggers; and commands the list above does not name.
 
 **Fix.** Build pull-request code in a pull_request workflow, which runs with a read-only token and no secrets. If a privileged step must follow, pass results through artifacts and treat them as untrusted data.
@@ -75,6 +79,8 @@ A pull_request_target, workflow_run or comment-triggered workflow checks out or 
 ## OBAAF-GHA-003
 
 **Agent job can write** (high). Requirements: G8.1, R2, R4. Supports: FR8.
+
+**Why it matters.** Text the agent reads can direct what it writes, so whoever can put text in front of the agent can change the repository through it.
 
 A job that runs an AI agent holds write permissions, or does not declare its permissions and so may inherit write access: the repository default, or, in a workflow another can call (`workflow_call`), whatever the calling job grants. Text the agent reads can then direct those writes. Permissions written in a form GitHub does not document (a scope name in another case, a level other than `read`, `write` or `none`, a string other than exactly `read-all` or `write-all`, an expression) are a problem of the file, which fails the check, and are read as the widest grant they could be; `permissions:` with no value is taken as not written, and a scope name in lower-case letters and hyphens that GitHub does not know is read as written. Not followed: the repository's or organization's default token permissions (an undeclared job is reported whatever they are); what a calling workflow grants; write access through a token taken from a secret, which OBAAF-GHA-005 reports as a secret; and a local composite action that runs an agent, which does not make the job an agent job.
 
@@ -86,6 +92,8 @@ A job that runs an AI agent holds write permissions, or does not declare its per
 
 **Agent job can request cloud credentials** (high). Requirements: G8.1, R3. Supports: FR7.
 
+**Why it matters.** The agent can request an OIDC token and exchange it for cloud or signing credentials, so text that steers the agent can reach them too.
+
 A job that runs an AI agent has `id-token: write`, so the agent can request an OIDC token and exchange it for cloud or signing credentials. A scope written in another case counts as `id-token`. An agent job that declares no permissions in a workflow another can call (`workflow_call`) is reported too, because the calling job can grant `id-token: write`. Not followed: what a calling workflow really grants; and the repository default, which the checker takes never to include `id-token: write`, so an undeclared job in a workflow nothing calls is not reported. Cloud credentials held as long-lived secrets are OBAAF-GHA-005's.
 
 **Fix.** Remove `id-token: write` from the agent job. Sign the agent-run record in a separate job that the agent cannot influence.
@@ -95,6 +103,8 @@ A job that runs an AI agent has `id-token: write`, so the agent can request an O
 ## OBAAF-GHA-005
 
 **Secret available to an agent job** (high). Requirements: G8.1, R2, R3. Supports: FR7.
+
+**Why it matters.** Text the agent reads can make it disclose any secret in its environment, so the secret is exposed to whoever can put text in front of the agent.
 
 A job that runs an AI agent references a secret, inherits secrets, or uses an environment whose secrets it receives. Prompt injection can make the agent disclose any secret in its environment. The job's environment is part of the finding, because a secret of the same name in another environment is another secret, so an acceptance written for one environment does not cover another. Not followed by the finding itself: in a called workflow, which secret the caller maps onto each parameter (the caller is not read as an agent job; slice 2d.4); and secrets that reach the agent through artifacts, caches, files or another job's outputs. When the job references secrets, the finding lists five controls and is cleared only when the checker has verified all five. (1) Each secret is listed in `protected_secrets` and the job declares the environment named there. (2) The secrets are stored only in that environment and only protected branches may use it; this is a repository setting, which `obaaf check` does not read, so it is reported as "cannot tell". (3) No pull request, issue or comment can start the job, no checkout step names a pull request's ref, and no expression or `if:` in the job reads a field someone without write access can write. (4) A control the checker recognises limits the job's network access to an allow-list (as OBAAF-GHA-020 reads it). (5) The agent's command cannot read any of the job's secrets (`GITHUB_TOKEN` aside, which OBAAF-GHA-003 covers), because a key the agent can read can leave in the job's log or an artifact whatever the network allows: verified only where every secret of the job is set in the `env` of steps that use OBAAF's egress action, at a commit OBAAF lists as released, on the runner it was tested on, and goes to AWF's API proxy (named in `model-keys`) or to nothing the command runs; it says where each credential given to such a step goes, whatever its verdict. A secret passed to the command, given to another step or to the job's or the workflow's `env`, a job with no confined command (GitHub's native firewall holds no key), or an agent or a credential in a step that can run before or beside the step that holds the key is "not met". That step holds the key outside the sandbox, so what could reach it there is "cannot tell": `ACTIONS_ALLOW_UNSECURE_COMMANDS`, or a key or an `env` computed when the job runs, in an `env`, a step before or beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose words may leave a process running, a parallel step, and service containers given volumes or options. Since those steps run no shell, look nothing up through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and the loader's variables and a write to `GITHUB_PATH` no longer count (slice 2c.10b); since the action removes every `OPENSSL_` variable from them before libcrypto loads (slice 2c.11a), OpenSSL's no longer count either (slice 2c.11b). The second control is never verified by `obaaf check`, so today the finding can be accepted and cannot be cleared. Not read for the third control: what a script, an action other than `actions/checkout` or the agent itself fetches while the job runs, apart from a few commands the checker knows (`gh pr checkout`, `git fetch` of `pull/N/head`); a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; a value handed over through `needs.*.outputs`; and the callers of a reusable workflow, which are reported as "cannot tell".
 
@@ -106,6 +116,8 @@ A job that runs an AI agent references a secret, inherits secrets, or uses an en
 
 **Release job can read a shared cache** (high). Requirements: G4.1, G4.2, R7. Supports: FR4.
 
+**Why it matters.** Other workflows on the same branch or the default branch can write the cache, so a poisoned entry would be built into the release.
+
 A release job restores a GitHub Actions cache, directly or through a setup action that caches by default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the same branch or the default branch, so a poisoned entry would reach the release build. A release job with no cache step but no `cache-mode: none` is reported at low severity. Since flagship slice 2d.2e: an input written as an expression is read as the value that restores, a local action is taken to restore (it is not read; slice 2d.4), `lookup-only: true` restores nothing, and a release job that downloads artifacts is reported when a job it needs, directly or not, restores a cache (kind `needed-job-restores`; it may name a job whose output the release does not use). Not followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), a cache-mode a calling workflow sets for a reusable workflow it calls (the called job is reported), outputs passed between jobs, and actions that cache that are not listed (`nix-community/cache-nix-action`, `denoland/setup-deno` and others).
 
 **Fix.** Set `cache-mode: none` on release jobs and remove cache restore steps, or regenerate derived data inside the release lane.
@@ -113,6 +125,8 @@ A release job restores a GitHub Actions cache, directly or through a setup actio
 ## OBAAF-GHA-007
 
 **Low-trust workflow can write the default-branch cache** (high). Requirements: G4.1, R7. Supports: FR4.
+
+**Why it matters.** Code or an agent an outsider steers could write cache entries that release workflows later restore, as in the Clinejection case.
 
 The workflow runs on triggers that outsiders can start (for example pull_request_target, issue_comment or workflow_run) and declares a write-capable `cache-mode`. Code or an agent steered by an outsider could then poison caches that release workflows restore, as in the Clinejection case. GitHub gives some of these triggers read-only cache access by default (pull_request_target, issue_comment, and workflow_run runs that follow a pull request from a fork), but not every case, and this rule cannot see the default a job gets when it declares nothing. The value is read the widest way (flagship slice 2d.2e): a value that is not exactly `none`, `read`, `write` or `write-only` (another case, an expression, a number, a block scalar) is reported as one the checker cannot read, a null at the job does not hide the workflow's value, and a key in another spelling is read. Not followed: `check_run`, `check_suite`, `status` and `deployment_status` (issue #166), and an `if:` that keeps forks or outsiders out (reported anyway).
 
@@ -122,6 +136,8 @@ The workflow runs on triggers that outsiders can start (for example pull_request
 
 **Action or container not pinned to a full digest** (medium). Requirements: G2.1, R6. Supports: FR10, FR12.
 
+**Why it matters.** A tag or branch can be moved by its publisher, or by anyone who compromises the publisher, so code nobody reviewed would run in the job.
+
 A third-party action, reusable workflow or container image is referenced by a tag or branch, which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs are reported at high severity. Ordinary jobs with explicitly limited token permissions, no secrets and no privileged outside trigger are reported at low severity; a job in a workflow other workflows can call (`workflow_call`) is never low, because its callers' triggers are not in the file. Other jobs remain medium: missing token permissions must not silently downgrade a privileged job. An action or reusable workflow is pinned only by a full commit SHA as github.com writes one, 40 hexadecimal digits in lower case (a 64-digit ref can only be a tag or a branch there), and an image only by `@sha256:` and 64 hexadecimal digits at its end. Every image is read: the container's and each service's, also written as text; one computed when the job runs is reported as such (kind `image-expression`) unless it is exactly `${{ matrix.x }}` with the values written out in the file, which are read one by one, and one written in a form the checker does not read (not text, a key in another letter case, services not written as a mapping) is reported too (`image-unreadable`). An action in the repository itself (`./path`, `$/path`) has nothing to pin, except that a `./` action after a step that checks out another repository at that path (after `.` and `..` are resolved; an absolute path or one with an expression is taken to hold it) is that repository at the ref it was checked out at (`local-from-checkout`), and one after an artifact downloaded from another run or repository, a cache restored at a workspace path that holds it, or a script line that runs `git clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`, `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names a workspace path at or under the action's top directory (not in a URL) in the same command, or that clones a repository of that name with no folder given, is reported as one the checker cannot place (`local-after-download`). An empty image is no container. Not followed: code merged or patched into the workspace (`git fetch` and `git merge`, `git am`, `git apply`), a download whose target is on another line or in `working-directory`, downloads before an action at the workspace root (`uses: ./`), an artifact of the same run, a cache restored at a path written with `~`, an absolute path, a glob or an expression, the actions a local composite action or a called workflow uses (they are checked where their own files are), whether a pinned commit is on the repository's own branches or only in a fork of it, and what a pinned action fetches or runs when it runs.
 
 **Fix.** Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep the version in a comment (for example `uses: actions/checkout@<sha> # v7.0.1`). Let Dependabot propose updates to the pin.
@@ -129,6 +145,8 @@ A third-party action, reusable workflow or container image is referenced by a ta
 ## OBAAF-GHA-009
 
 **Token permissions not declared** (medium). Requirements: G3.4. Supports: FR3, FR8.
+
+**Why it matters.** The job token then gets the repository or organization default, which may include write access that no step of the job needs.
 
 Neither the workflow nor the job declares `permissions`, so the job token gets the repository or organization default, which may include write access. The finding is the job's: which events can start the job is not part of it (other rules report what a trigger adds), so an acceptance keeps covering the job when its triggers change. A `permissions` value the checker cannot read, and a file it reads in a way GitHub may not (a YAML merge key, a job id this reader takes for a value other than text), are errors of the file, which fail the check. Not followed: the repository's or organization's default itself, which `obaaf audit` reads.
 
@@ -138,6 +156,8 @@ Neither the workflow nor the job declares `permissions`, so the job token gets t
 
 **Untrusted event text expanded inside a script** (high). Requirements: G8.1, G3.1, R1. Supports: FR3.
 
+**Why it matters.** The text is pasted into the script before the shell runs it, so whoever writes it, such as a title or a branch name, can run commands in the job.
+
 A script interpolates text that an outsider controls, such as an issue title, a pull-request title or body, a branch name, a commit message, author or file name, a review comment's file path, an edited title's old value or a fork's description, with `${{ }}`: written plainly, with index syntax, in any letter case, through `toJSON` or another function given the event object, through a group (`(github.event.issue).title`), or through a wildcard or computed index (`github.event.*.title`, `github.event[inputs.kind].body`). `${{ env.NAME }}` counts when the step, job or workflow sets NAME from one of these fields, directly, through other env values, the matrix, another job's output or an `env:` written as one expression; `${{ matrix.x }}` when the job's matrix holds one; `${{ needs.a.outputs.x }}` when job a's `outputs` written in the file do. A script is a step's `run`, its `shell` (or `defaults.run.shell`), an `actions/github-script` script, the command OBAAF's egress action runs, a `docker://` step's `entrypoint` and `args`, and the inputs of the actions listed under `script_inputs` in the detection data. Every field a step reaches, the references and expressions that reach them, and the job's triggers are the finding's facts. It is high when an outsider's event (a pull request, a comment on a commit, `check_suite`, `check_run` and `status` included) or another workflow's call can start the job, and for a commit's text on `push`, `merge_group` and a `workflow_run` after a push, where a merged pull request's title and branch name are in the merge commit's message; medium otherwise. Not followed: values set while the job runs (`GITHUB_ENV`, step outputs), values passed into reusable workflows (`inputs`) and composite actions, the inputs of other actions, a `with:` written as one expression, and the `env` of a `parallel` group. It does not work out whether an expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is reported too; an acceptance of it names the expression. A matrix that holds one outsider-written field makes every `matrix` reference count. The text becomes part of the script before the shell runs, so it can run commands. This is how the Nx compromise began.
 
 **Fix.** Pass the value through an environment variable (`env: TITLE: ${{ github.event.issue.title }}`) and use it quoted in the script (`"$TITLE"`), so the shell treats it as data.
@@ -145,6 +165,8 @@ A script interpolates text that an outsider controls, such as an issue title, a 
 ## OBAAF-GHA-011
 
 **Checkout leaves the job token on disk** (medium). Requirements: G8.1, G3.4, R7. Supports: FR7.
+
+**Why it matters.** Any code or agent that runs later in the job can read the token from disk and act with it.
 
 In an agent job or a job started by untrusted input, actions/checkout persists the job token for later git commands. Any code or agent that runs later in the job can read it. A job counts when it runs an agent or when any event that starts it is one an outsider can cause (a pull request included), whatever else also starts it. actions/checkout keeps the credential unless `persist-credentials` is written as something other than `true` in any case; an expression counts as written only when it is a constant (`${{ false }}`), and otherwise is taken to keep it. The finding's facts are the credential kept (the job token, or the token or SSH key given in the step's `token` or `ssh-key` input), the triggers, whether the job runs an agent and what the job token can write, so an acceptance for a read-only pull_request job does not cover a job that can write or one given a personal token. Not followed: credentials kept by other means (`gh auth setup-git`, a `git config` a script writes, another action), reusable workflows and composite actions.
 
@@ -154,6 +176,8 @@ In an agent job or a job started by untrusted input, actions/checkout persists t
 
 **Agent reads instructions from the change under review** (high). Requirements: G8.2, R5. Supports: FR9.
 
+**Why it matters.** The change under review can rewrite the instructions, rules and MCP configuration the agent obeys while it reviews that change.
+
 The agent job checks out the pull request's version of the repository, so instruction files, rules files and MCP configuration come from the change being reviewed. The change can then rewrite what the agent obeys during its own run. The checkout's `ref` and `repository` and the job's scripts are read as for OBAAF-GHA-002; a value that also names the base (`head.sha || base.sha`) is the head. On pull_request, pull_request_review and pull_request_review_comment, a checkout with no `ref`, or with `github.sha`, `github.ref` or `github.ref_name`, takes the merge commit, which holds the pull request's files. A `ref` the checker cannot read to a value is reported at medium where an outsider's event can start the job. The triggers, the job's and step's `if:` and what was read are part of the finding. Not followed: what the agent itself fetches while it runs, the merge commit fetched by a script (`git fetch origin "$GITHUB_REF"`), values passed between steps, other checkout actions, reusable workflows and composite actions.
 
 **Fix.** Check out the protected base branch for instruction files (for example `ref: ${{ github.event.pull_request.base.sha }}`), and give the agent the pull request's changes only as data captured by the snapshot step.
@@ -161,6 +185,8 @@ The agent job checks out the pull request's version of the repository, so instru
 ## OBAAF-GHA-013
 
 **Self-hosted runner used for untrusted work** (high). Requirements: G3.1, G3.2, R7. Supports: FR3, FR4.
+
+**Why it matters.** Unless the runner is ephemeral, code from this job can stay on the host and tamper with later builds, as in the PyTorch case.
 
 A job that pull requests, outside events or an agent can drive runs on a self-hosted runner. Unless the runner is ephemeral, code from that job can persist on the host and tamper with later builds, as in the PyTorch case. A label is self-hosted when it is `self-hosted` in any letter case, also with spaces round it or as one word of a label with spaces or commas, or a runner group (which may also hold GitHub's larger runners: such a job is still reported high). A label is GitHub-hosted only when it is one of the labels GitHub names for its standard runners and macOS larger runners, or `ubuntu-24.04-firewall`, the runner of GitHub's native egress firewall (a technical preview), which OBAAF-GHA-020 also reads as GitHub's own (`HOSTED_LABELS`). As for every label on that list, the label is taken at its word: whether a self-hosted runner could be given the same label is not read. Any other label (`ubuntu-gpu`, a larger runner's name, an unresolved input) is reported at medium, because the checker cannot tell what runs the job. A runtime selector is informational only in the form `github.event.pull_request.head.repo.full_name == github.repository && <runner> || '<hosted label>'` (or `!=` the other way round), only when every outside event that starts the job carries the pull request, and only when the job runs no agent; any other selector naming `self-hosted`, including `head.repo.fork && 'ubuntu-latest' || 'self-hosted'`, which sends a pull request whose fork was deleted to the self-hosted runner, is medium. The selector, and the sets a matrix resolves the labels to, are facts. Literal matrices that include a self-hosted pool produce a high finding. `runs-on` written as one expression, `matrix.x` or `matrix.x || 'label'`, is resolved from a matrix written out in the file, the default counting wherever a row may lack the value; values of `x`, an `include` or an `include` entry computed when the job runs, a key written in another case, a key that is not plain ASCII text, a value YAML 1.2 could read as other than text, a merge key (`<<`) in the file, or any other expression is not resolved. A job that calls a reusable workflow is not reported (it has no runner); not followed: the events that start a local reusable workflow's callers (a called workflow's jobs are checked with `workflow_call` only, plan slice 2d.4), and agents the checker does not recognise. If you verify the selector and runner lifecycle, record the evidence in a job-scoped, expiring `ignore` entry (see the checker configuration guide). A declaration is not verification of runtime isolation.
 
@@ -170,6 +196,8 @@ A job that pull requests, outside events or an agent can drive runs on a self-ho
 
 **Release job not behind a protected environment** (medium). Requirements: G6.2. Supports: FR6.
 
+**Why it matters.** Without an environment no person has to approve the release, and its credentials are not held back until someone does.
+
 A release job that uploads or publishes does not reference an environment, so no person has to approve it and its credentials are not held back until approval. An environment counts only when its name is written as text, or as an expression whose every value the checker can list and none is blank (flagship slice 2d.2e); a blank name, a number, true or false, or an expression that can be blank or name something else is reported as cannot tell. A release job with no upload the lists know is reported when it holds what publishing needs (`packages: write`, a publishing action, a secret whose name says it publishes). Not read: whether the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a cloud service (not counted as publishing unless the job is declared a release job), a command built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local action or reusable workflow (slice 2d.4).
 
 **Fix.** Reference an environment (for example `environment: release`) configured with required reviewers, self-review prevention and no administrator bypass.
@@ -177,6 +205,8 @@ A release job that uploads or publishes does not reference an environment, so no
 ## OBAAF-GHA-015
 
 **Release workflow started by untrusted input** (high). Requirements: G3.1. Supports: FR4.
+
+**Why it matters.** Unreviewed changes or outsiders can reach the release lane, so what ships can come from code or input nobody approved.
 
 A release workflow can be started by pull requests, comments, issues or another workflow's run, so unreviewed changes or outsiders can reach the release lane. A release job is one that publishes by an action or command the detection data lists (read in `run`, github-script and `docker://` steps, with continued lines joined and quotes taken out) or that uses an environment whose name, or one of the names an expression or matrix gives it, says releases go there: `release`, `prod`, `publish`, `store`, `steam`, `itch` or `deploy` anywhere in it (`AppProd`, `euproduction`), once words that only hold those letters are taken out (`kitchen`, `restore`, `keystore`, `reproducible`, `product`), or `live`, `prd`, `cd`, `pypi`, `testpypi`, `npm`, `crates`, `rubygems`, `nuget`, `pages` or `testflight` as a word; not `preprod` or `non-prod`. It is medium when the only outside events are `pull_request`, `pull_request_review` and `pull_request_review_comment` (a run from a fork gets no secrets and a read-only token) and when the job names an environment in plain text, which may require a reviewer (as for OBAAF-GHA-001); high otherwise. Why the job is a release job, the steps that make it one (by the command or action that publishes, not where it publishes to: `docker push localhost:5000/t` and `docker push docker.io/org/app` are the same) and its environment are facts. A job nothing marks a release job, but that an outside event can start and that has `packages: write`, a secret whose name says it publishes, a step using an action under `publishing_actions`, or an environment name the checker cannot read, is reported at medium (low on pull request events only) as one that may release. Not followed: `id-token: write` on its own (it also signs and attests), publishing through a local reusable workflow or composite action (plan slice 2d.4), commands not in the lists, and the repository's default token permissions. A command named in an `echo` is still taken for one that runs.
 
@@ -186,6 +216,8 @@ A release workflow can be started by pull requests, comments, issues or another 
 
 **Upload without a provenance check** (high). Requirements: G7.2, G5.2, R8. Supports: FR6.
 
+**Why it matters.** Nothing stops the upload when an artifact's provenance, approvals or agent-run record is missing or wrong.
+
 A release job uploads or publishes artifacts without first verifying their provenance, approvals and agent-run records in an earlier step of the same job or in a job it depends on. A check counts only where its failure stops the upload (flagship slice 2d.2e). The reader accepts only what it can vouch for and stops at the first line it cannot: the check's line is that one command (optionally followed by `|| exit N` or `|| { ...; exit N; }`, or piped under pipefail), outside any compound command, in a `run` script in bash or sh with errexit on (GitHub's default `bash -e` on a runner labelled as Linux or macOS, `shell: bash`, `shell: sh`, a custom shell with only `-e`, `-u`, `-x` and `-o` options, or `set -e` before it), in a step that runs on success only; and every line before it is a simple command joined by `;`, `&&`, `||` or `|`, named by a plain word that cannot leave the script, run text as commands, or change what a name runs or how the shell behaves (no `exit`, `exec`, `eval`, `source`, `.`, `builtin`, `command`, `trap`, `set` but `-e`, `-u`, `-x`, `-o`, no assignment to `PATH` or `BASH_ENV`, no `&`, here-document, reserved word, backslash but at the end of a line, or expression whose value could hold shell syntax), or a plain `if ...; then`, `while ...; do`, `for NAME in ...; do`, `else`, `fi` or `done` line. No word before the check may name `PATH`, `BASH_CMDS`, `BASH_ENV` or the like, assign `PYTHONPATH`, `LD_PRELOAD` or another variable an interpreter reads at start, assign a variable bash evaluates as arithmetic (`RANDOM`, `OPTIND` and the like), or hold an expansion other than `$NAME`, a special parameter, a `$(...)` (a subshell), or `${NAME}` with nothing but `[@]`, `[*]`, a length, a default (`-`, `:-`, `+`, `:+`) or a pattern removed (`#`, `%`), since any other form (a subscript, an offset, `${!...}`, `$((`, `[[`) can evaluate a value as arithmetic that assigns; the check's own words are held to the same; and no earlier step may name `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH` (a search of its text, not a guarantee). Given `--help` or `--version` it is no check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own, early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://` step, a subshell, or on a runner that may be Windows does not count, and neither does a needed job with `continue-on-error`. Every upload step is checked, not only the first. Not read: what commands and actions earlier in the job, in this step or before it, do to the runner (replace the `obaaf` it runs, rewrite the policy it reads, export a variable through a file command the checker does not see); a `setup-obaaf` from a repository named `obaaf` is trusted to install the real `obaaf`; and whether the files verified are the files uploaded.
 
 **Fix.** Add `obaaf verify release` as a step before the upload, in the same job or in a job the upload job needs, and let a failure stop the job: no `|| true`, `continue-on-error` or `if: always()`. A provenance-only check such as `gh attestation verify` is reported at medium, because it does not check approvals or agent records.
@@ -193,6 +225,8 @@ A release job uploads or publishes artifacts without first verifying their prove
 ## OBAAF-GHA-017
 
 **Release builds without provenance** (medium). Requirements: G7.1. Supports: FR5.
+
+**Why it matters.** Without signed provenance, nobody who takes the release can check which workflow and commit produced it.
 
 A release workflow publishes artifacts but no job signs provenance for them. A provenance step counts only when it runs on success (no `continue-on-error` on the step or its job, no `if:` that may skip it, in a job some trigger reaches) and, for a command, when its failure stops the job as for OBAAF-GHA-016; an attestation of an SBOM only does not count (flagship slice 2d.2e). Provenance verified before the upload counts only when the check comes before every upload and stops it. Not read: whether the provenance signed is for the files published, and whether a provenance job is tied to the publishing job by `needs`.
 
@@ -202,6 +236,8 @@ A release workflow publishes artifacts but no job signs provenance for them. A p
 
 **Signing key available to build steps** (high). Requirements: G5.1, G3.4. Supports: FR11.
 
+**Why it matters.** Every step in the job, third-party actions and build scripts included, can read the key and sign with it.
+
 A workflow loads a signing key or certificate from a secret or a file, so any build step that runs in the job can read it. A job that can read every secret (a reference that is not one literal name, such as toJSON(secrets) or a computed index, or `secrets: inherit`) is reported as able to read any signing key stored for it, because which secrets exist is not in the workflow. The job's environment is part of a finding about its secrets. Not followed: a signing secret whose name matches none of the patterns in the detection data (names are guesses, and a key can be stored under any name); a signing command or action not in that data (commands are matched in `run` and `actions/github-script` scripts, with a line continued by a backslash, a PowerShell backtick or a cmd caret joined first); keys fetched at run time from a vault or a cloud key service; and, for a step reported for its command, what the command does: the finding names the step and not its text, so a harmless step that is accepted keeps its acceptance if it later loads a private key.
 
 **Fix.** Sign through a hardware-backed or managed signing service (a cloud key service, an HSM-backed signing service, or platform-managed signing), so no build step can read the private key.
@@ -209,6 +245,8 @@ A workflow loads a signing key or certificate from a secret or a file, so any bu
 ## OBAAF-GHA-019
 
 **Unsafe pull-request checkout explicitly allowed** (high). Requirements: G3.1, G9.1. Supports: FR3.
+
+**Why it matters.** The workflow holds the base repository's token and secrets, and this makes it check out fork code anyway.
 
 actions/checkout is told to check out fork pull-request code in a pull_request_target or workflow_run workflow with `allow-unsafe-pr-checkout: true`. Any value but a plainly false one (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and other text included: GitHub hands the action what an expression evaluates to, and how actions/checkout reads this input was not read. The workflow's triggers and the value are part of the finding.
 
@@ -218,6 +256,8 @@ actions/checkout is told to check out fork pull-request code in a pull_request_t
 
 **Agent job without an egress restriction** (low). Requirements: G8.1, R7. Supports: FR7.
 
+**Why it matters.** An agent steered by text it reads could send code, data or a secret it holds to any host, and nothing the checker can verify limits where it connects.
+
 Nothing the checker can verify limits the agent job's network access. The finding is reported for every agent job, with the one control that clears it, and it is cleared only when the checker read that control from the workflow and the repository and every condition that makes it hold. Two controls can be verified: GitHub's native egress firewall (the job runs on `ubuntu-24.04-firewall` and `.github/egress-firewall.yaml` sets `mode: enforce`), which covers the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the agent as its command (no other step and no `env` of the job is given a credential, and the job cannot request OIDC tokens) and no step but `actions/upload-artifact` after it. Each credential given to the action's step is placed as the action reads its inputs: a model key named in `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and one named in `env` or written in `run` (also through `${{ env.KEY }}`) is passed to the command; a name the action refuses in a way the checker reads is "not met", and a credential it cannot place is "cannot tell". OBAAF lists no released commit of the action yet, and lists only commits at or after the last change flagship slice 2c.9 made to it. Harden-Runner is "cannot tell" at best, because the repository's tier is not in the workflow, and "not met" at a listed release before v2.16.0 or with `sudo` and containers left to the job; its version is read only from a commit OBAAF lists. The Agent Workflow Firewall run from a script is "cannot tell". A policy declared in `OBAAF_EGRESS`, or a control behind a condition, is reported too, so it is not mistaken for enforcement. A baseline entry that accepts "cannot tell" is for the workflow file as it stood, byte for byte. A cleared finding still says what the control does not stop. The firewall's policy file is read with the three keys its README describes (`mode`, `allow`, `no-default-urls`); any other key, or one of them in another letter case, is "cannot tell". Under OBAAF's action, a step that may follow it is taken for `actions/upload-artifact` only when its path is exactly that, with no `.`, `..` or empty part; a cache or an earlier step that may name the scratch directory (also by a pattern such as `/t[m]p`, or through `mktemp`), and an earlier step that may leave a process running (`&`, `nohup`, a container engine, a service or process manager, `ssh -f`, `sudo -b`, a script language's fork or spawn, as written in lower case), are "cannot tell" or "not met"; a value given outside the confined command whose name says it may be a credential (`vars.*_API_KEY`, a job's or step's output named like a token or a secret, an `env` name of a model key) is "cannot tell". The agent is looked for in the run script, a github-script script and the action's `run`, also with quotes and backslashes taken out, and in each command in any other input of an action, a `docker://` step's entrypoint and arguments, the step's `shell`, its `env` values and the default shell, whose first word (after assignments, wrappers such as `sudo -u user`, `npx`, `nice -n 10` or `timeout 5m`, and a shell's `-c`) is an agent's, the step's env values also put into its run script and read as commands; free text in an input or an env value is not a command, unless a line of it begins with an agent's name and the words its pattern needs. Not followed, and so never a reason the finding clears: an agent run by a package script (`npm run`), a called workflow or a local composite action; code an earlier action runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022); whether a pinned commit of upload-artifact is on its repository's own branches; and whether a runner with the firewall's label has the firewall, which the label is taken to mean.
 
 **Fix.** Run the agent job on GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with a `.github/egress-firewall.yaml` in `enforce` mode) where the repository can use it, or wrap the agent's command in OBAAF's egress action with the host names it needs, or use GitHub Agentic Workflows for a new agent workflow. Under OBAAF's action, give an Anthropic or OpenAI key in `model-keys` rather than passing a key to the command in `env`, so that the command never holds it. Ephemeral self-hosted runners behind a network policy also limit egress, but outside what the checker reads: record them with an ignore entry that names an owner, a reason and an expiry date.
@@ -225,6 +265,8 @@ Nothing the checker can verify limits the agent job's network access. The findin
 ## OBAAF-GHA-021
 
 **Agent output applied without verifying its record** (high). Requirements: G8.3, R4, R8. Supports: FR8, FR10.
+
+**Why it matters.** Another run's output is applied without checking its agent-run record and its proposal, so a tampered artifact could change the repository.
 
 A workflow started by another workflow's run downloads that run's output and can write to the repository, but neither it nor a job it needs both verifies the agent-run record and checks the proposal before applying it. Doing only one of the two is reported at medium. The checks count only before the first step that may apply (anything but a checkout, a download of artifacts, a GitHub setup action, or a `setup-obaaf` from a repository named `obaaf`, which is trusted because the templates may point at a fork), each where its failure stops the job as for OBAAF-GHA-016, in a step that runs nothing but the checks and commands that only read or prepare (`set`, `echo`, `read`, `jq`, `sha256sum` and the like, with no substitution); none count when a step that may apply runs after a failure (flagship slice 2d.2e). `gh attestation verify` is no longer a record check: it checks a signature, not the record. What the job may write is one of the finding's facts, so a baseline entry does not cover the same job given wider write access; it does cover other commands with the same access, and an `ignore` entry (rule, file, job) covers both.
 
@@ -236,6 +278,8 @@ A workflow started by another workflow's run downloads that run's output and can
 
 **Agent output applied without an approval gate** (high). Requirements: G8.1, R4. Supports: FR8.
 
+**Why it matters.** Agent output is applied with write permissions, and no person other than the requester has to approve the change.
+
 A job applies agent output with write permissions, but neither it nor a job it needs references an environment, so no person other than the requester has to approve the change. An environment counts only when it is established as for OBAAF-GHA-014, on the job or on a job it needs that has no `continue-on-error` (flagship slice 2d.2e). Whether the environment has required reviewers is not read here; `obaaf audit` reads it.
 
 **Fix.** Reference an environment with required reviewers and self-review prevention on the job that applies agent proposals, or on a job it needs without `if: always()`.
@@ -246,6 +290,8 @@ A job applies agent output with write permissions, but neither it nor a job it n
 
 **Template placeholder left in a workflow** (high). Requirements: -. Supports: FR12.
 
+**Why it matters.** A template value left in place means the workflow will not run as intended, and a control the template was meant to give may be missing.
+
 The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all-zero commit SHA), so it will not run as intended. Each placeholder in a value GitHub reads is one finding, named by where it is (the job, the step and the key): values are read as YAML gives them, so an escape or a line joined inside double quotes is the placeholder it spells, and a comment is not read. `OBAAF_OWNER` is found in any letter case, and the all-zero SHA as exactly 40 zeros after `@` or as the ref of a `uses`.
 
 **Fix.** Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or replace the placeholders by hand.
@@ -253,6 +299,8 @@ The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all
 ## OBAAF-GHA-024
 
 **Protected secret used outside its environment** (high). Requirements: G3.4, G9.1. Supports: FR3, FR12.
+
+**Why it matters.** Anyone with write access can push a workflow that reads repository secrets, so a secret worth protecting has to stay in its environment.
 
 The checker configuration lists the secret under protected_secrets, but a job references it without declaring the environment that holds it. Anyone with write access can read every repository secret by pushing a branch with a new workflow, so a secret worth protecting must live only in an environment whose deployment branches are limited to the default branch (or that requires reviewers), and every job that uses it must declare that environment. A job that can take every secret counts as using each protected secret: that is any use of the secrets context other than one literal name, such as toJSON(secrets), secrets.* or secrets[...] with a computed index. A job that calls a reusable workflow cannot declare an environment, so passing it a protected secret is reported, by name or with secrets: inherit: either passes the secret's repository or organization copy wherever one exists. Every matching entry applies, so a looser pattern cannot relax a stricter one, and two entries for the same secret name in different case are a configuration error. Environment names are compared without regard to the case of the letters A to Z only. An environment named by an expression, one written as a number or true or false that could be the named environment in another reader's spelling, and one that differs from the named environment only in the case of letters outside ASCII cannot be confirmed and are reported at medium severity (an expression is never evaluated, even a constant one). A blank or missing name counts as no environment, and a list or a mapping as a name that is not the one wanted. The checker cannot see where the secret is stored or the environment's branch rule; check both in the repository settings, or with `obaaf audit`.
 
@@ -262,6 +310,8 @@ The checker configuration lists the secret under protected_secrets, but a job re
 
 **Lane declaration that does nothing** (high). Requirements: -. Supports: FR12.
 
+**Why it matters.** The declaration was meant to add a lane's rules to a job and adds none, so findings on that job can be missing without the report showing it.
+
 A lane declaration puts a job in a lane (untrusted, agent, effect, release) so that the lane's rules apply to it. This one changes nothing, so the job, stage or file it was written for gets none of the rules it was meant to add, and every other finding on that job can be missing without the report showing it. The cases: OBAAF_LANE, in a job's env, the workflow's env or a Jenkinsfile, set to a value that is not a lane (a misspelling such as `agnet`, an expression, an empty value, or in a Jenkinsfile a value computed when the build runs; in a Jenkinsfile, where the declaration reaches at least one step); the variable under another spelling in a job's env or the workflow's env (`obaaf_lane`, `OBAAF-LANE`); OBAAF_LANE set in a step's env, a container's or a service's, where the checker does not read it; and an entry under `lanes:` in the checker configuration whose value is not a lane, or that names a job or Jenkins stage its file does not have, or a file that is not there. The finding is reported where the declaration is written: in the workflow or Jenkinsfile, or in the checker configuration. It is high because the checker cannot know which findings are missing: the agent lane alone has high-severity rules. It is low when nothing can be missing: the declaration names `trusted`, which adds no rule even where it is read; it is written where it is not read, or under another spelling, in a job that is in the lane it names anyway; or it is an entry for a Jenkins stage that is not there and names `untrusted` or `effect`, which change nothing on a stage. An entry for a file outside the run (another file when one file is checked, a Jenkinsfile when only workflows are checked) is not looked at. An ignore entry cannot accept this finding, because it would accept every such declaration in the file it names; a baseline entry, which names the one declaration and its value, can. Another spelling is any name that looks like OBAAF_LANE, or is one letter from it, once case, separators, invisible characters and look-alike letters from other scripts are set aside (`OBAAF.LANE`, `OBAAF_LANES`, a Cyrillic `О`); it is reported in any env, in a Jenkinsfile's environment block or withEnv too. The variable in any spelling is also reported where nothing reads it as a declaration (kind `elsewhere`): a key of a step's `with`, of the matrix or of a called workflow's `with`, an `env` written as one expression that names it, a script that writes it to `GITHUB_ENV`, and in a Jenkinsfile an assignment to `env.OBAAF_LANE` in a script (`jenkins-scripted`). A name that only holds it (`MY_OBAAF_LANE`), and a definition under the name (an input of `workflow_call`, written as a mapping), are not declarations. Not followed: a lane variable set by a command the checker does not read as writing `GITHUB_ENV`, or written in a file a step sources.
 
 **Fix.** Correct the declaration or delete it. The value is one of untrusted, agent, effect, release or trusted, and the variable is spelled OBAAF_LANE. In a workflow it belongs in the job's env or the workflow's env; in a Jenkinsfile, in an environment block or a withEnv around the steps. A `lanes:` entry names a workflow's file and job as `obaaf check . --lanes` prints them, and a Jenkinsfile's stage by the file and the stage's own name (`Jenkinsfile#Ship`). Run `obaaf check . --lanes` afterwards and confirm the lane (see docs/checker-configuration.md#a-declaration-that-does-nothing).
@@ -269,6 +319,8 @@ A lane declaration puts a job in a lane (untrusted, agent, effect, release) so t
 ## OBAAF-JEN-001
 
 **Credentials available to change-request code or an AI agent** (high). Requirements: G3.4, G8.1, G9.1, R2, R3. Supports: FR3, FR7.
+
+**Why it matters.** The steps run the change's own code, so its author can read the credential, and an agent can be told to disclose it.
 
 A credential binding (withCredentials, an environment credentials() entry, sshagent, or a wrapper step that takes a credentialsId) surrounds build steps that a change request can reach, or an AI agent. The steps run the change's own code, so its author can read the credential even when Jenkins takes the Jenkinsfile from a trusted branch; an agent can be told to disclose it. Stages that run only for change requests and agent stages are high; stages that nothing in the Jenkinsfile keeps away from change requests are medium, because whether the job builds pull requests is job configuration. Conditions the checker cannot evaluate are reported as unknown.
 
@@ -278,6 +330,8 @@ A credential binding (withCredentials, an environment credentials() entry, sshag
 
 **Build steps on the controller or on agents shared with privileged work** (high). Requirements: G3.1, G3.2, R7. Supports: FR3, FR4.
 
+**Why it matters.** Build code on the controller can read the keys that decrypt every stored credential, and on a shared agent it can tamper with later privileged builds.
+
 A stage runs on the built-in node (label `built-in` or `master`), where build code can read $JENKINS_HOME and the keys that decrypt every stored credential; or one persistent agent label serves both work that change requests reach and a stage that holds credentials or publishes, so code from a change request can tamper with the later privileged build. Steps on the controller that change requests or an agent can steer are high; others are medium. `agent any` and computed labels are reported as unknown, because which agents exist is controller configuration.
 
 **Fix.** Set the built-in node's executors to 0 and run builds on agents. Give change-request and agent work ephemeral agents (a Kubernetes pod or a fresh container per build) and keep persistent agents with privileged labels for protected-branch and release work only.
@@ -285,6 +339,8 @@ A stage runs on the built-in node (label `built-in` or `master`), where build co
 ## OBAAF-JEN-003
 
 **AI agent stage can push, start jobs or publish** (high). Requirements: G8.1, R2, R4. Supports: FR8.
+
+**Why it matters.** What the agent wrote or was told reaches a push, another job or a release without review.
 
 A stage that runs an AI agent also pushes to the repository, starts another job with the build step, or publishes, in the same workspace. What the agent wrote or was told then reaches the effect without review. Builds started with the build step run as SYSTEM unless build authorization is configured, so job permissions shown to people do not limit them.
 
@@ -296,6 +352,8 @@ A stage that runs an AI agent also pushes to the repository, starts another job 
 
 **Pipeline code from an unapproved revision** (high). Requirements: G1.2, G3.1, G8.2, R5. Supports: FR9.
 
+**Why it matters.** Code the Jenkinsfile's reviewers never approved runs in the pipeline, and a trusted global library runs outside the Groovy sandbox.
+
 The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shared library at a version taken from a branch name, parameter or other run-time value (a trusted global library runs outside the Groovy sandbox), or Groovy loaded from the workspace with `load` or evaluated from a file in a stage that change requests reach. For a change request the workspace holds the change's own files. Library trust, version overrides and Replay permission are controller configuration and are reported as unknown.
 
 **Fix.** Pin libraries to a reviewed commit (`@Library('lib@<40-character SHA>')`) and disallow version overrides for privileged jobs. Read pipeline code with `readTrusted` and `evaluate`, or move it into a pinned library, instead of `load` from the workspace. Restrict Run/Replay on jobs that hold credentials.
@@ -303,6 +361,8 @@ The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shar
 ## OBAAF-JEN-005
 
 **Release without an approval by a named person** (medium). Requirements: G6.2, R4. Supports: FR6.
+
+**Why it matters.** Any user with Build permission, the person who started the build included, can approve the release, or nobody is asked at all.
 
 An input step sets no submitter, so any user with Build permission on the job can approve it, including the person who started the build; or the pipeline publishes with no input step before the publish. Whether approvers are independent of the requester, and whether an approval is bound to the exact artifacts, is reported as unknown.
 
@@ -312,6 +372,8 @@ An input step sets no submitter, so any user with Build permission on the job ca
 
 **Build container or pod can reach the host** (high). Requirements: G3.2, R7. Supports: FR4, FR7.
 
+**Why it matters.** Code in the container can take over the host and every build on it.
+
 A docker or Kubernetes agent runs privileged, mounts the Docker socket or host paths, shares the host's network, PID or IPC namespace, or adds powerful capabilities. Code in the container can then take over the host and every build on it. Agents that run change-request code or an AI agent are high; others are medium. Pod templates defined on the controller (inheritFrom) and pod files outside the checkout are reported as unknown.
 
 **Fix.** Remove the privileged settings. Build images with a rootless builder (for example BuildKit rootless or Kaniko) instead of the host's Docker socket, and run untrusted and agent work in pods without host mounts, host namespaces or extra capabilities, enforced by an admission policy.
@@ -319,6 +381,8 @@ A docker or Kubernetes agent runs privileged, mounts the Docker socket or host p
 ## OBAAF-JEN-007
 
 **AI agent stage without an egress restriction** (low). Requirements: G3.3, G8.1, R7. Supports: FR7.
+
+**Why it matters.** An agent steered by text it reads could send code or credentials to any host, and Jenkins has no egress control of its own.
 
 Nothing in the Jenkinsfile limits the network access of a stage that runs an AI agent, and Jenkins has no egress control of its own. A policy declared in `OBAAF_EGRESS` is reported too, so a declaration is not mistaken for enforcement.
 
@@ -328,6 +392,8 @@ Nothing in the Jenkinsfile limits the network access of a stage that runs an AI 
 
 **Image, library or agent CLI not pinned** (medium). Requirements: G2.1, R6. Supports: FR10, FR12.
 
+**Why it matters.** Whoever controls the tag, branch or registry entry chooses the code that runs in the pipeline.
+
 A container image is referenced by a tag instead of a sha256 digest, a shared library is loaded at its default version or at a branch or tag, or an agent CLI is installed without a fixed version. Whoever controls the tag, branch or registry entry then chooses the code that runs. References used by agent or publishing stages are high; stages with credentials are medium; others are low.
 
 **Fix.** Pin images to `@sha256:` digests, libraries to a full commit SHA, and agent CLIs to an exact version (for example `npm install -g @anthropic-ai/claude-code@1.2.3`), and update the pins through reviewed changes.
@@ -335,6 +401,8 @@ A container image is referenced by a tag instead of a sha256 digest, a shared li
 ## OBAAF-JEN-009
 
 **Untrusted text interpolated into a command** (high). Requirements: G3.1, G8.1, R1. Supports: FR3.
+
+**Why it matters.** The value becomes part of the command before the shell sees it, so whoever writes it can run commands on the agent.
 
 A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or concatenation of text that others control: a change request's title, source branch or author name (high), build parameters (medium), or branch and tag names (low), directly or through a variable assigned from them, or commit text read with git log. The value becomes part of the command before the shell runs. Parameters passed to other jobs from such values are reported at medium.
 
@@ -344,6 +412,8 @@ A sh, bat or powershell step builds its script with Groovy interpolation (`"${..
 
 **Artifact from another build used by a moving reference** (high). Requirements: G4.2, G7.2. Supports: FR6.
 
+**Why it matters.** A selector that moves can pick up another build's output, so what is published may not be what was built and checked.
+
 A pipeline that publishes copies artifacts from another job by a selector that moves (the default last successful build, last completed, latest saved, a permalink or a workspace) and does not check their digests before publishing, so a different build's output can be published. High when the same stage publishes.
 
 **Fix.** Copy from a specific build number recorded with the approval, and check the artifacts' sha256 digests against the signed build record (`obaaf verify release`) before publishing.
@@ -351,6 +421,8 @@ A pipeline that publishes copies artifacts from another job by a selector that m
 ## OBAAF-JEN-011
 
 **Publishing can run after a failed or skipped check** (high). Requirements: G7.2. Supports: FR6.
+
+**Why it matters.** The publish can run after verification failed or was skipped.
 
 A publish step sits in a post condition that runs after failure (always, failure, unstable, unsuccessful, changed, regression, aborted, cleanup) or in a Scripted catch or finally block, or a check before the publish ignores its own failure (catchError, warnError, returnStatus, `|| ...`). The publish can then run after verification failed or was skipped.
 
@@ -360,6 +432,8 @@ A publish step sits in a post condition that runs after failure (always, failure
 
 **Publish without a provenance check** (high). Requirements: G5.2, G7.2, R8. Supports: FR6.
 
+**Why it matters.** Nothing stops the publish when an artifact's provenance, approvals or agent-run record is missing or wrong.
+
 The pipeline publishes without first verifying provenance, approvals and agent-run records in an earlier step whose failure stops the build. A provenance-only check such as `cosign verify-attestation` is reported at medium.
 
 **Fix.** Run `obaaf verify release` in a step before the publish, without catchError, warnError, returnStatus or `|| true`, so a failure stops the build.
@@ -367,6 +441,8 @@ The pipeline publishes without first verifying provenance, approvals and agent-r
 ## OBAAF-JEN-013
 
 **Secret interpolated into a command** (medium). Requirements: G3.4. Supports: FR7.
+
+**Why it matters.** The secret appears in the command line, where other processes on the agent can read it, and escaping it breaks easily.
 
 A sh, bat or powershell step puts a bound secret into its script with Groovy interpolation. The secret then appears in the command line, where other processes on the agent can read it, and escaping it breaks easily. The Jenkins documentation warns against this.
 
@@ -376,6 +452,8 @@ A sh, bat or powershell step puts a bound secret into its script with Groovy int
 
 **Signing key available to build steps** (high). Requirements: G3.4, G5.1. Supports: FR11.
 
+**Why it matters.** Every step in the binding's scope can read the key and sign with it.
+
 A credential binding whose ID or variable names signing material (a code-signing certificate, keystore or private key), or a command that imports a key, makes the key readable by every step in its scope. High when the stage also publishes.
 
 **Fix.** Sign through a key service or HSM-backed signing service called by a dedicated signing stage or job, so no build step can read the private key.
@@ -383,6 +461,8 @@ A credential binding whose ID or variable names signing material (a code-signing
 ## OBAAF-JEN-015
 
 **Webhook trigger token written in the Jenkinsfile** (high). Requirements: G3.1, G9.1. Supports: FR3, FR4.
+
+**Why it matters.** Anyone who can read the repository can start the job and choose every value the trigger reads from the request.
 
 A webhook trigger (for example GenericTrigger) has its token written in the Jenkinsfile. The token alone authorizes a request, so anyone who can read the repository can start the job and choose every value the trigger reads from the request, and the Generic Webhook Trigger plugin runs token-started builds as SYSTEM. High when the pipeline holds credentials, publishes or runs an AI agent.
 
@@ -392,6 +472,8 @@ A webhook trigger (for example GenericTrigger) has its token written in the Jenk
 
 **CI definition files have no code owner** (medium). Requirements: G1.1, G1.2, G8.2, R5. Supports: FR9.
 
+**Why it matters.** A change to how the project builds, releases or runs agents then needs no owner's review.
+
 No CODEOWNERS rule gives an owner to the workflow files or Jenkinsfiles, the local actions the workflows use (`uses: ./path`), the workflow lockfile, or a workflow file not written yet (decided from the rules: the last rule that matches every name must give an owner, and no later rule that can match one may give none), so a change to how the project builds, releases or runs agents does not need an owner's review. A link is checked by its own path and by the file it leads to, and a file inside a submodule by the submodule's own entry, which is what a pull request changes. A second finding names the files that decide what the checks accept: the CODEOWNERS file in use and each place GitHub looks in before it, the checker's configuration (each place it is looked for while there is none), a baseline or configuration given by path, and the egress firewall policy's place. No ignore or baseline entry can accept that second finding, nor "no CODEOWNERS file" or a CODEOWNERS file GitHub does not load, because the acceptance would be kept in a file with no owner. CODEOWNERS is read as GitHub documents it (a line ends at a line feed; a pattern and its owners are separated by spaces or tabs; a comment begins at a `#` at the start of the line or after a space or tab; the last matching rule wins; `**` crosses folders only in `**/`, `/**/` and a trailing `/**`; a file of 3 MB or more is not loaded). A rule whose owners are not all in the form `@user`, `@org/team` or an e-mail address (with no space or control character; a user name may end in a hyphen or hold two in a row, as older accounts do), or that names OBAAF's template placeholder, gives no owner. A CODEOWNERS file that is a link, is not UTF-8, or needs more comparisons than the checker makes is an error. Limits: whether an owner exists and has write access, and whether code-owner review is required, are not checked (`obaaf audit` reads review requirements); the check reads the working tree, so on a pull request it reads that pull request's CODEOWNERS, while GitHub uses the base branch's; a line indented with spaces is read as a rule; scripts a workflow runs, actions a composite or JavaScript action uses, Jenkinsfiles in folders Jenkins discovery skips, and a Jenkinsfile that is a link are not counted.
 
 **Fix.** Add CODEOWNERS rules for `/.github/` (workflows, local actions, the checker configuration, the firewall policy and this file), every Jenkinsfile, a root `obaaf.yml` and `CODEOWNERS`, and any baseline kept elsewhere, and require code-owner review on protected branches (see templates/github-actions/CODEOWNERS.example).
@@ -400,6 +482,8 @@ No CODEOWNERS rule gives an owner to the workflow files or Jenkinsfiles, the loc
 
 **Agent instruction files have no code owner** (medium). Requirements: G8.2, R5. Supports: FR9.
 
+**Why it matters.** A change to what the agents are told to do then needs no owner's review, and the agents obey the changed text.
+
 The repository contains files that steer AI agents (for example AGENTS.md, CLAUDE.md, REVIEW.md, skills, rules files or MCP configuration) that no CODEOWNERS rule gives an owner. Files are found by the names the agents' own documentation gives, without regard to letter case: among the files git tracks (checked-out submodules included) when the checked folder is the top of a git work tree (git is taken from an absolute folder of the `PATH` outside the repository; when there is none, every folder is walked and a note says so), otherwise in every folder but `.git`. A link is followed while it stays inside the repository, a folder that holds it included (`.github -> .` makes the root's `copilot-instructions.md` an instruction file); a link back into a folder already entered on the way is followed again, at most once on a way and once for each link and set of patterns that could match beneath its name, by whichever way reaches it first (another first link on such a way may then go unnamed; the file behind it is still found); one name is kept for each file and each link that leads to it. Names are compared as the patterns compare them (`ſ` is `s`, `ı` is `i`). The link and the file it leads to need an owner too, and a file inside a submodule needs its owner on the submodule's own entry. A link out of the repository, to nothing or to something that is neither a file nor a folder is named in a note and not read when it, or a name the list gives beneath it other than through a leading `**/`, would be an instruction file (so a link out named `docs` is not named, though the folder it leads to may hold an AGENTS.md). More than 2,000,000 entries, more than 1,000,000 entries looked at behind links, more than 100,000,000 characters of names tested or built behind links, more than 200,000 instruction files and links reached through links, or more than eight links one through another, is an error. CODEOWNERS is read as for OBAAF-REPO-001. Limits: files an instruction file pulls in by reference (`@path` imports, Aider's `read:`, a context file name set in a tool's settings) are not followed, a tool whose file names are not in the list is not seen, and in a git work tree an untracked file is not looked at.
 
 **Fix.** Add CODEOWNERS rules for every agent instruction file and require code-owner review on protected branches.
@@ -407,6 +491,8 @@ The repository contains files that steer AI agents (for example AGENTS.md, CLAUD
 ## OBAAF-INS-001
 
 **Hidden characters in an agent instruction file** (high). Requirements: G8.2, R5. Supports: FR9.
+
+**Why it matters.** Reviewers cannot see these characters but agents read them, so a file can carry instructions nobody approved, as in the Rules File Backdoor case.
 
 An agent instruction or configuration file contains invisible or direction-changing Unicode characters. Reviewers cannot see them, but agents read them, which was the vector in the Rules File Backdoor case. Every format character, every control character but tab, line feed and carriage return, the line and paragraph separators, variation selectors, tag characters and the invisible letters (Hangul fillers, the braille blank, Khmer inherent vowels) are reported; an emoji sequence, a keycap, the three recommended subdivision flags, one presentation selector after a pictograph or arrow (U+2190 to U+21FF, U+2300 to U+23FF, U+2600 to U+27BF, U+2B00 to U+2BFF, U+1F000 to U+1FAFF, about 3,900 code points, more than the bases of Unicode's emoji variation sequences) or after one of the fifteen other such bases, and a joiner between two letters of a script that joins (Arabic, Syriac, Thaana, the Indic scripts, Tibetan, Myanmar, Khmer, Mongolian), or after a virama and before such a letter, are not. The format characters of Unicode 15.1 are listed, so Python 3.10 and 3.11, whose tables are older, report the same ones. A file that is not UTF-8 text, or is larger than two million bytes, is reported because the scan cannot see what it hides. A file an agent reads by the name of a picture, archive, document, office or compiled file is not scanned when it begins as such a file begins (PNG, JPEG, GIF, PDF, zip, gzip, tar, fonts, ELF, SQLite and others) or its bytes look binary (in the first 64 KiB, more than one byte in eight, or at least eight and more than one in 64, is a NUL, another control character or a byte that is part of no UTF-8 character); otherwise it is read like any other file. The finding is each character with a digest of its line; for a direction control, of its paragraph. A file is reported once, on its own path when that is an instruction file, otherwise on the first name an agent reads it by, with the other names. Limits: soft hyphens, right-to-left marks, ideographic variation selectors and Mongolian selectors in ordinary text, and Malayalam's old chillu spelling, are reported too; text hidden by Markdown (HTML comments, collapsed sections) and space characters are not; a joiner between two emoji, or a joiner or non-joiner between two letters of a script that joins, can still carry about one or two bits per gap, and so can a selector after a pictograph or arrow.
 

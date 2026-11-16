@@ -22,7 +22,7 @@ A file the checker could not read ends the check with 1 whatever `--fail-on` say
 obaaf check . --fail-on never
 ```
 
-Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, the requirement it threatens where it has one, and the fix.
+Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, why it matters in one sentence, the requirement it threatens where it has one, and the fix.
 
 Put this in CI first if you like. A step that runs it never fails a build for a finding, and still fails when a workflow cannot be read.
 
@@ -47,9 +47,9 @@ obaaf check . --write-baseline .github/obaaf-baseline.json \
   --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 ```
 
-Status 0, and a line on standard error that says how many findings were newly accepted, by whom and until when. Without `--owner`, `--reason` and `--expires` the status is 2 and nothing is written: an acceptance needs an owner (`@user`, `@org/team` or an e-mail address), a reason, and an expiry date at most 366 days ahead.
+Status 0, and a line on standard error that says how many findings were newly accepted, by whom and until when. Without `--owner`, `--reason` and `--expires` the status is 2 and nothing is written: an acceptance needs an owner (`@user`, `@org/team` or an e-mail address), a reason, and an expiry date at most 366 days ahead. `--fail-on` is medium here as everywhere; give step 4 the `--fail-on` step 5 will use.
 
-One case ends with 0 and leaves out a finding that step 5 then fails on. A finding that no valid baseline entry accepts yet, and that is named by an `ignore` entry that does not count (it has expired, names no owner, gives a reason of fewer than four letters or digits, or is dated more than 366 days ahead), is not written to the baseline: the command warns on standard error, and step 5 fails on that finding. Complete or remove the entry first. (A finding ignored by a valid entry is left out as well, without a warning, and stays accepted by that entry.)
+Two kinds of finding are not written to the baseline. One that no valid baseline entry accepts yet and that an `ignore` entry names without counting (it has expired, names no owner, gives a reason of fewer than four letters or digits, or is dated more than 366 days ahead): the decision about it was made in that entry, so it is renewed, completed or removed there. And one that no entry can accept, such as `OBAAF-REPO-001` when the repository has no CODEOWNERS file: it is fixed, not accepted. Step 5 counts both. So step 4 ends as step 5 would: status 1 when one of them is at or above `--fail-on`, with an `error:` line and a `not written:` line for each on standard error, and status 0 with a `warning:` when all are below it. The baseline is written either way, without them. A finding ignored by a valid entry is left out as well, without a word, and stays accepted by that entry.
 
 Commit the file and put it under CODEOWNERS. It is a list of accepted risks: review a change to it like a change to a workflow.
 

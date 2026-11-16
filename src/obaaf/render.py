@@ -312,7 +312,8 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
     for rid, rule in c.rules.items():
         refs = ", ".join(list(rule.get("requirements", [])) + list(rule.get("agent_controls", []))) or "-"
         out += [f"## {rid}", "", f"**{rule['title']}** ({rule['severity']}). Requirements: {refs}. "
-                f"Supports: {', '.join(rule.get('supports', [])) or '-'}.", "", _clean(rule["description"]), "",
+                f"Supports: {', '.join(rule.get('supports', [])) or '-'}.", "",
+                f"**Why it matters.** {_clean(rule['why'])}", "", _clean(rule["description"]), "",
                 f"**Fix.** {_clean(rule['fix'])}", ""]
         if rule.get("remediation") == "architecture":
             out += ["**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. "

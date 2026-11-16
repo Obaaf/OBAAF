@@ -156,9 +156,14 @@ class FromAReportToAGateTest(unittest.TestCase):
                 f"ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/ci.yml\n"
                 f"    reason: The vendor publishes no commit SHAs\n    until: {day(90)}\n", encoding="utf-8")
             code, _, err = accept(tmp, "Inherited on adoption; tracked in issue 12", day(120))
+            written = (tmp / BASELINE).is_file()
             gate = run_cli("check", tmp, "--baseline", tmp / BASELINE, "--fail-on", "medium")[0]
-        self.assertEqual(code, 0)
-        self.assertIn("warning: 1 finding(s) whose ignore entry has expired or does not count were not written", err)
+        # Step 4 ends as step 5 then does (slice 3.2b): 1, with the finding and its entry named.
+        self.assertEqual(code, 1, err)
+        self.assertTrue(written)
+        self.assertIn("error: 1 finding(s) were not written to the baseline, 1 of them at or above --fail-on medium", err)
+        self.assertIn("OBAAF-GHA-008 .github/workflows/ci.yml:", err)
+        self.assertIn("the ignore entry that names it does not count, because it names no owner", err)
         self.assertEqual(gate, 1)
 
     def test_pinning_the_action_of_an_unnamed_step_makes_its_accepted_finding_new(self):
@@ -284,7 +289,8 @@ class TheCommandsOnThePagesExistTest(unittest.TestCase):
         gate, upgrading = (path.read_text(encoding="utf-8") for path in DOCS)
         for text in ("tests/test_adoption_path.py", "| 0 |", "| 1 |", "| 2 |", "`never` included",
                      "Without `--owner`, `--reason` and `--expires` the status is 2", "no longer found",
-                     "`--lanes` lists and judges nothing", "the status is 1; a path with no workflow or Jenkinsfile is status 2", "is not written to the baseline",
+                     "`--lanes` lists and judges nothing", "the status is 1; a path with no workflow or Jenkinsfile is status 2",
+                     "So step 4 ends as step 5 would: status 1 when one of them is at or above `--fail-on`",
                      "A step with no `name` or `id` is known by the action it uses"):
             with self.subTest(page="from-report-to-gate.md", text=text):
                 self.assertIn(text, gate)

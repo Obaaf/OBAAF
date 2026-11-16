@@ -290,7 +290,9 @@ class PlaceholderTest(unittest.TestCase):
             root = tmp / "repo"
             code, _, err = run_cli("check", root, "--write-baseline", root / "b.json", "--owner", "@example",
                                    "--reason", "template kept for the docs", "--expires", "2026-12-31")
-            self.assertEqual(code, 0, err)
+            # 1: the fixture has no CODEOWNERS, a medium finding no entry can accept (slice 3.2b).
+            self.assertEqual(code, 1, err)
+            self.assertIn("not written: medium OBAAF-REPO-001", err)
             check(tmp, risky)
             code, out, _ = run_cli("check", root, "--baseline", root / "b.json", "--format", "json")
         states = sorted((f["facts"]["where"], f["state"]) for f in json.loads(out)["findings"]

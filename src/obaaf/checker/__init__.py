@@ -397,14 +397,17 @@ class CheckResult:
             out.append(entry)
         return out
 
-    def gating(self, spec: str, catalog: Catalog) -> list[Finding]:
-        """Active findings that make `--fail-on spec` fail (empty means it passes)."""
+    def gating(self, spec: str, catalog: Catalog, findings: list[Finding] | None = None) -> list[Finding]:
+        """Active findings that make `--fail-on spec` fail (empty means it passes). With `findings`,
+        those of them that would: what `--write-baseline` leaves out is judged so (slice 3.2b)."""
         category, severity = parse_fail_on(spec)
         if severity == "never":
             return []
         threshold = SEVERITY_ORDER[severity]
         out = []
-        for f in self.active():
+        for f in (self.active() if findings is None else findings):
+            if f.suppressed or f.state == FIXED:
+                continue
             if f.baselined:
                 continue
             if SEVERITY_ORDER[f.severity] < threshold:

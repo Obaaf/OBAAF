@@ -224,9 +224,18 @@ class BaselineIntegrityTest(unittest.TestCase):
             (tmp / ".github" / "obaaf.yml").write_text(ignore_entry("2000-01-01"))
             path = tmp / "b.json"
             code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "low", *ACCEPT)
-            self.assertEqual(code, 0)
-            self.assertIn("expired", err)
+            # Written without the finding, and 1, as a check with this baseline at --fail-on low ends (slice 3.2b).
+            self.assertEqual(code, 1, err)
+            self.assertIn("not written: low OBAAF-GHA-001 .github/workflows/ci0.yml:7 [job test] - the ignore "
+                          "entry that names it does not count, because it expired on 2000-01-01", err)
             self.assertEqual(json.loads(path.read_text())["findings"], [])
+            self.assertEqual(run_cli("check", tmp, "--baseline", path, "--fail-on", "low")[0], 1)
+            # Below the threshold it is a warning, and the check with the same threshold passes.
+            code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "medium", *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("warning: 1 finding(s) were not written to the baseline. They are below what --fail-on "
+                          "medium fails on", err)
+            self.assertEqual(run_cli("check", tmp, "--baseline", path, "--fail-on", "medium")[0], 0)
 
     def test_an_entry_for_a_finding_now_ignored_is_not_stale(self):
         with TempDir() as tmp:
