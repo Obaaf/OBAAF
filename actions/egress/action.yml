@@ -91,7 +91,9 @@ outputs:
     description: >-
       "true" when the step's status is the command's own, from a sandbox whose
       probe held and that left nothing behind; "false" when the action failed
-      the step itself (status 3).
+      the step itself (status 3); empty when the action refused to start, or
+      when its last step stopped it because the run step ended 0 without
+      reporting that the sandbox held.
     value: ${{ steps.run.outputs.confined }}
 runs:
   using: composite
@@ -243,8 +245,10 @@ runs:
     # before it runs and end 0, as every step above can). It runs only when
     # the run step ended 0 without setting confined to true, which egress.py
     # never does: it sets confined=true on the one path that ends with the
-    # command's own status, and every other path ends 2 or 3.
+    # command's own status, and every other path ends 1, 2 or 3. The condition
+    # reads the run step's own outcome, not success(), so it holds however the
+    # workflow's step that uses the action is conditioned.
     - name: Stop if the run step ended 0 without reporting that the sandbox held
-      if: success() && steps.run.outputs.confined != 'true'
+      if: ${{ !cancelled() && steps.run.outcome == 'success' && steps.run.outputs.confined != 'true' }}
       shell: /obaaf-egress/the-run-step-ended-0-without-reporting-that-the-sandbox-held {0}
       run: The run step ended 0 without setting confined to true, so egress.py did not finish; see docs/egress-control.md.

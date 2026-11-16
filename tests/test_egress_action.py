@@ -466,7 +466,8 @@ class ActionSteps(unittest.TestCase):
         # shell does not exist: the runner fails the step without starting anything.
         self.assertEqual(len(self.guard), 1)
         guard = self.guard[0]
-        self.assertEqual(guard["if"], "success() && steps.run.outputs.confined != 'true'")
+        self.assertEqual(guard["if"], "${{ !cancelled() && steps.run.outcome == 'success' "
+                                      "&& steps.run.outputs.confined != 'true' }}")
         shell = guard["shell"].split()[0]
         self.assertTrue(shell.startswith("/obaaf-egress/"))
         self.assertFalse(Path(shell).exists())

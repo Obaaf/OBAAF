@@ -537,6 +537,8 @@ jobs:
           TRACE_BEFORE_CONFINED: ${{ steps.trace_before.outputs.confined }}
           TRACE_AFTER_OUTCOME: ${{ steps.trace_after.outcome }}
           TRACE_AFTER_CONFINED: ${{ steps.trace_after.outputs.confined }}
+          TRACE_AFTER_REFUSED: ${{ steps.trace_after.outputs.refused }}
+          TRACE_AFTER_EXIT: ${{ steps.trace_after.outputs.exit-code }}
         run: |
           set -euo pipefail
           fail=0
@@ -554,5 +556,5 @@ jobs:
           if [ -s "$dir/markers-after" ]; then bad "the action now: $(sort -u "$dir/markers-after" | tr '\n' ';')"; else ok "the action now: no hook fired in any of its steps"; fi
           if [ "$AFTER_OUTCOME" = success ] && [ "$AFTER_CONFINED" = true ] && [ "$AFTER_EXIT" = 0 ]; then ok "the action ran its command in a sandbox that held"; else bad "the action now: outcome $AFTER_OUTCOME, confined '$AFTER_CONFINED', exit '$AFTER_EXIT'"; fi
           if [ "$TRACE_BEFORE_OUTCOME" = success ] && [ -z "$TRACE_BEFORE_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action at its floor succeeded without running anything (confined unset)"; else bad "the action at its floor with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_BEFORE_OUTCOME, confined '$TRACE_BEFORE_CONFINED'"; fi
-          if [ "$TRACE_AFTER_OUTCOME" = failure ] && [ -z "$TRACE_AFTER_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action now fails (its last step)"; else bad "the action now with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_AFTER_OUTCOME, confined '$TRACE_AFTER_CONFINED'"; fi
+          if [ "$TRACE_AFTER_OUTCOME" = failure ] && [ -z "$TRACE_AFTER_CONFINED$TRACE_AFTER_REFUSED$TRACE_AFTER_EXIT" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action now fails, and egress.py set no output, so its last step failed it"; else bad "the action now with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_AFTER_OUTCOME, confined '$TRACE_AFTER_CONFINED', refused '$TRACE_AFTER_REFUSED', exit-code '$TRACE_AFTER_EXIT'"; fi
           exit "$fail"
