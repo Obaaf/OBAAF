@@ -348,6 +348,7 @@ jobs:
           for f in "$RUNNER_TEMP/obaaf-read-test.txt" "$HOME/.obaaf-read-test" "$HOME/.config/obaaf-read-test/hosts.yml" "$work/obaaf-read-test.txt"; do
             printf 'not a secret: %s\n' "$mark" > "$f"
             chmod 600 "$f"
+            grep -qF -- "$mark" "$f"
           done
           mv kept-token "$RUNNER_TEMP/kept-token-away"
           {

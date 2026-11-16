@@ -39,7 +39,8 @@ for pair in "runner-temp:$RUNNER_TEMP_REAL" "home:$HOME_REAL" "work:$WORK_REAL";
   label="${pair%%:*}"
   dir="${pair#*:}"
   if [ -d "$dir" ]; then
-    note "DIR $label there, $(ls -A "$dir" 2>/dev/null | wc -l) entries listed"
+    names=$(ls -A "$dir" 2>/dev/null | head -5 | tr -c 'A-Za-z0-9._\n-' '?' | tr '\n' ' ')
+    note "DIR $label there, $(ls -A "$dir" 2>/dev/null | wc -l) entries listed: ${names:-none}"
   else
     note "DIR $label absent"
   fi
