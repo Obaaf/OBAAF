@@ -558,3 +558,92 @@ jobs:
           if [ "$TRACE_BEFORE_OUTCOME" = success ] && [ -z "$TRACE_BEFORE_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action at 7c1bded succeeded without running anything (confined unset)"; else bad "the action at 7c1bded with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_BEFORE_OUTCOME, confined '$TRACE_BEFORE_CONFINED'"; fi
           if [ "$TRACE_AFTER_OUTCOME" = failure ] && [ -z "$TRACE_AFTER_CONFINED$TRACE_AFTER_REFUSED$TRACE_AFTER_EXIT" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action now fails, and egress.py set no output, so its last step failed it"; else bad "the action now with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_AFTER_OUTCOME, confined '$TRACE_AFTER_CONFINED', refused '$TRACE_AFTER_REFUSED', exit-code '$TRACE_AFTER_EXIT'"; fi
           exit "$fail"
+
+  openssl-modules:
+    # Slice 2c.11, issue #195. The action's own steps import hashlib, so
+    # libcrypto is initialised in the process that holds the model key. OpenSSL
+    # reads OPENSSL_CONF at that point, and on Ubuntu loads a module from the
+    # directory OPENSSL_MODULES names when OPENSSL_FORCE_FIPS_MODE is set or
+    # OPENSSL_FIPS_MODE_SWITCH_PATH names a file holding "1"; a module the
+    # workflow named would then run in the key-holding process. This job plants
+    # such a module (it writes a marker line, nothing else, and only in a
+    # process that holds OBAAF_EGRESS_SCRIPT), sets the variables the three ways
+    # a workflow can (the job's env, GITHUB_ENV and the action step's env), and
+    # requires the marker for a plain step and for the action at the floor
+    # c1b590c (slice 2c.9, before this fix) and none for the action now, which
+    # removes every OPENSSL_ variable before libcrypto is initialised.
+    name: OpenSSL's variables do not reach the action's own steps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plant the module and its configuration
+        run: bash tests/egress/plant-openssl.sh /tmp/obaaf-openssl
+
+      - name: Set the FIPS route through GITHUB_ENV
+        run: |
+          {
+            echo "OPENSSL_MODULES=/tmp/obaaf-openssl/modules"
+            echo "OPENSSL_FORCE_FIPS_MODE=1"
+            echo "OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/obaaf-openssl/fipsswitch"
+          } >> "$GITHUB_ENV"
+
+      - name: Control, a plain step holding OBAAF_EGRESS_SCRIPT (the module must load)
+        env:
+          OBAAF_EGRESS_SCRIPT: control
+        run: python3 -c 'import hashlib; hashlib.sha256(b"x").hexdigest()'
+
+      - name: Keep the control's lines
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-control || touch /tmp/obaaf-openssl/markers-control
+
+      - name: The action at the floor c1b590c, before this fix (the module must load)
+        id: floor
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@c1b590c970e6246305415ad4d61a6136a7786d99
+        env:
+          OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-floor || touch /tmp/obaaf-openssl/markers-floor
+
+      - name: The action now (no module must load)
+        id: now
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines too
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-now || touch /tmp/obaaf-openssl/markers-now
+
+      - name: Check which loads happened
+        env:
+          NOW_OUTCOME: ${{ steps.now.outcome }}
+          NOW_CONFINED: ${{ steps.now.outputs.confined }}
+          NOW_EXIT: ${{ steps.now.outputs.exit-code }}
+          FLOOR_OUTCOME: ${{ steps.floor.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          dir=/tmp/obaaf-openssl
+          for f in control floor now; do echo "--- markers-$f"; cat "$dir/markers-$f" 2>/dev/null || echo "(none)"; done
+          if grep -qF "OPENSSL module loaded" "$dir/markers-control"; then ok "control: OpenSSL loaded the planted module (the mechanism works on this runner)"; else bad "control: the planted module did not load, so this test would not see it"; fi
+          if grep -qF "OPENSSL module loaded" "$dir/markers-floor"; then ok "the action at c1b590c: OpenSSL loaded the module in a step that holds the key (issue #195)"; else bad "the action at c1b590c: the module did not load, so the test proves nothing"; fi
+          if [ -s "$dir/markers-now" ]; then bad "the action now: a module loaded in its steps: $(tr '\n' ';' < "$dir/markers-now")"; else ok "the action now: no OpenSSL module loaded in any of its steps"; fi
+          if [ "$NOW_OUTCOME" = success ] && [ "$NOW_CONFINED" = true ] && [ "$NOW_EXIT" = 0 ]; then ok "the action still ran its command in a sandbox that held"; else bad "the action now: outcome $NOW_OUTCOME, confined '$NOW_CONFINED', exit '$NOW_EXIT'"; fi
+          echo "(the action at c1b590c had outcome $FLOOR_OUTCOME; it is continue-on-error and its own result is not asserted)"
+          exit "$fail"
