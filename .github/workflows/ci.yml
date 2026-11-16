@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
           # The full history: a test checks that every listed release of the egress action
-          # is at or after the merge of slice 2c.4 (egress_action_floor in detection.yaml).
+          # is at or after egress_action_floor in detection.yaml.
           fetch-depth: 0
 
       - name: Set up Python
