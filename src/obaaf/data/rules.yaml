@@ -20,8 +20,8 @@ rules:
     requirements: [G3.4, G8.1, G9.1]
     supports: [FR3]
     why: >-
-      People without write access can start this workflow, and whoever steers the job through its code or the text
-      it reads can read the secret.
+      Whoever steers this job through its code or the text it reads can read any secret it is given, and its
+      trigger lets less trusted people start it.
     description: >-
       The workflow can be started by people without write access (for example through pull_request_target,
       issue_comment, issues or workflow_run) and a job references a repository or organization secret. Anyone
@@ -104,8 +104,8 @@ rules:
     agent_controls: [R2, R4]
     supports: [FR8]
     why: >-
-      Text the agent reads can direct what it writes, so whoever can put text in front of the agent can change the
-      repository through it.
+      Text the agent reads can direct what it does, so whoever can put text in front of the agent can use any
+      write access the job holds or inherits.
     description: >-
       A job that runs an AI agent holds write permissions, or does not declare its permissions and so may
       inherit write access: the repository default, or, in a workflow another can call (`workflow_call`),
@@ -131,8 +131,8 @@ rules:
     agent_controls: [R3]
     supports: [FR7]
     why: >-
-      The agent can request an OIDC token and exchange it for cloud or signing credentials, so text that steers
-      the agent can reach them too.
+      The agent may be able to request an OIDC token and exchange it for cloud or signing credentials, so text
+      that steers the agent can reach them too.
     description: >-
       A job that runs an AI agent has `id-token: write`, so the agent can request an OIDC token and exchange
       it for cloud or signing credentials. A scope written in another case counts as `id-token`. An agent job
@@ -154,8 +154,8 @@ rules:
     agent_controls: [R2, R3]
     supports: [FR7]
     why: >-
-      Text the agent reads can make it disclose any secret in its environment, so the secret is exposed to whoever
-      can put text in front of the agent.
+      Text the agent reads can make it disclose a secret it can read, so a secret in an agent job may be exposed
+      to whoever can put text in front of the agent.
     description: >-
       A job that runs an AI agent references a secret, inherits secrets, or uses an environment whose secrets
       it receives. Prompt injection can make the agent disclose any secret in its environment. The job's
@@ -214,8 +214,8 @@ rules:
     agent_controls: [R7]
     supports: [FR4]
     why: >-
-      Other workflows on the same branch or the default branch can write the cache, so a poisoned entry would be
-      built into the release.
+      Other workflows on the same branch or the default branch can write caches, so a release job that restores
+      one can ship a poisoned entry.
     description: >-
       A release job restores a GitHub Actions cache, directly or through a setup action that caches by
       default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the
@@ -269,8 +269,8 @@ rules:
     agent_controls: [R6]
     supports: [FR10, FR12]
     why: >-
-      A tag or branch can be moved by its publisher, or by anyone who compromises the publisher, so code nobody
-      reviewed would run in the job.
+      A tag or branch can be moved by its publisher, or by anyone who compromises the publisher, so code you did
+      not review could run in the job.
     description: >-
       A third-party action, reusable workflow or container image is referenced by a tag or branch,
       which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs
@@ -335,8 +335,8 @@ rules:
     agent_controls: [R1]
     supports: [FR3]
     why: >-
-      The text is pasted into the script before the shell runs it, so whoever writes it, such as a title or a
-      branch name, can run commands in the job.
+      Text such as a title or a branch name is pasted into the script before the shell runs, so whoever writes it
+      can run commands in the job.
     description: >-
       A script interpolates text that an outsider controls, such as an issue title, a pull-request title
       or body, a branch name, a commit message, author or file name, a review comment's file path, an
@@ -374,7 +374,7 @@ rules:
     agent_controls: [R7]
     supports: [FR7]
     why: >-
-      Any code or agent that runs later in the job can read the token from disk and act with it.
+      Any code or agent that runs later in the job can read the credential from disk and act with it.
     description: >-
       In an agent job or a job started by untrusted input, actions/checkout persists the job token for
       later git commands. Any code or agent that runs later in the job can read it. A job counts when it
@@ -529,7 +529,8 @@ rules:
     agent_controls: [R8]
     supports: [FR6]
     why: >-
-      Nothing stops the upload when an artifact's provenance, approvals or agent-run record is missing or wrong.
+      Unless a check that stops it verifies the artifact's provenance, approvals and agent-run record, an
+      unapproved or tampered artifact can be uploaded.
     description: >-
       A release job uploads or publishes artifacts without first verifying their provenance, approvals
       and agent-run records in an earlier step of the same job or in a job it depends on. A check counts
@@ -596,7 +597,8 @@ rules:
     requirements: [G5.1, G3.4]
     supports: [FR11]
     why: >-
-      Every step in the job, third-party actions and build scripts included, can read the key and sign with it.
+      Every step in the job, third-party actions and build scripts included, can read any signing key it is given
+      and sign with it.
     description: >-
       A workflow loads a signing key or certificate from a secret or a file, so any build step that runs in
       the job can read it. A job that can read every secret (a reference that is not one literal name, such as
@@ -700,8 +702,8 @@ rules:
     agent_controls: [R4, R8]
     supports: [FR8, FR10]
     why: >-
-      Another run's output is applied without checking its agent-run record and its proposal, so a tampered
-      artifact could change the repository.
+      Another run's output is applied without both its agent-run record and its proposal being checked, so a
+      tampered artifact could change the repository.
     description: >-
       A workflow started by another workflow's run downloads that run's output and can write to the
       repository, but neither it nor a job it needs both verifies the agent-run record and checks the
@@ -804,8 +806,8 @@ rules:
     requirements: []
     supports: [FR12]
     why: >-
-      The declaration was meant to add a lane's rules to a job and adds none, so findings on that job can be
-      missing without the report showing it.
+      The job, stage or file does not get the lane rules the declaration was meant to add, so unless it is in that
+      lane anyway, findings can be missing unseen.
     description: >-
       A lane declaration puts a job in a lane (untrusted, agent, effect, release) so that the lane's
       rules apply to it. This one changes nothing, so the job, stage or file it was written for gets
@@ -858,7 +860,7 @@ rules:
     agent_controls: [R2, R3]
     supports: [FR3, FR7]
     why: >-
-      The steps run the change's own code, so its author can read the credential, and an agent can be told to
+      Any change-request code these steps run can read the credential, and an AI agent among them can be told to
       disclose it.
     description: >-
       A credential binding (withCredentials, an environment credentials() entry, sshagent, or a wrapper
@@ -1034,7 +1036,7 @@ rules:
     supports: [FR3]
     why: >-
       The value becomes part of the command before the shell sees it, so whoever writes it can run commands on the
-      agent.
+      build agent.
     description: >-
       A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or
       concatenation of text that others control: a change request's title, source branch or author
@@ -1093,7 +1095,8 @@ rules:
     agent_controls: [R8]
     supports: [FR6]
     why: >-
-      Nothing stops the publish when an artifact's provenance, approvals or agent-run record is missing or wrong.
+      Unless a check that stops it verifies the artifact's provenance, approvals and agent-run record, an
+      unapproved or tampered artifact can be published.
     description: >-
       The pipeline publishes without first verifying provenance, approvals and agent-run records in an
       earlier step whose failure stops the build. A provenance-only check such as `cosign
@@ -1110,8 +1113,8 @@ rules:
     requirements: [G3.4]
     supports: [FR7]
     why: >-
-      The secret appears in the command line, where other processes on the agent can read it, and escaping it
-      breaks easily.
+      The secret appears in the command line, where other processes on the build agent can read it, and escaping
+      it breaks easily.
     description: >-
       A sh, bat or powershell step puts a bound secret into its script with Groovy interpolation. The
       secret then appears in the command line, where other processes on the agent can read it, and
@@ -1164,7 +1167,8 @@ rules:
     agent_controls: [R5]
     supports: [FR9]
     why: >-
-      A change to how the project builds, releases or runs agents then needs no owner's review.
+      A change to how the project builds, releases or runs agents, or to what its checks accept, can then be
+      merged without an owner's review.
     description: >-
       No CODEOWNERS rule gives an owner to the workflow files or Jenkinsfiles, the local actions the
       workflows use (`uses: ./path`), the workflow lockfile, or a workflow file not written yet (decided
@@ -1243,8 +1247,8 @@ rules:
     agent_controls: [R5]
     supports: [FR9]
     why: >-
-      Reviewers cannot see these characters but agents read them, so a file can carry instructions nobody
-      approved, as in the Rules File Backdoor case.
+      Reviewers cannot see such characters but agents read them, so a file can carry instructions nobody approved,
+      as in the Rules File Backdoor case.
     description: >-
       An agent instruction or configuration file contains invisible or direction-changing Unicode
       characters. Reviewers cannot see them, but agents read them, which was the vector in the Rules

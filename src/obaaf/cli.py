@@ -176,8 +176,10 @@ def cmd_check(args) -> int:
               "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
-    # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h).
-    gate_files = [Path(p) for p in (args.baseline, args.config) if p]
+    # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
+    # baseline being written: the gate will read it with --baseline, and --write-baseline ends as that
+    # gate would (slice 3.2b).
+    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     # What a command the report suggests has to repeat to check the same thing.
@@ -242,9 +244,9 @@ def cmd_check(args) -> int:
                       f"at or above --fail-on {args.fail_on}, so a check with this baseline and the same --fail-on "
                       "fails on them. The baseline was written without them.", file=sys.stderr)
             else:
-                print(f"warning: {len(left_out)} finding(s) were not written to the baseline. They are below what "
+                print(f"warning: {len(left_out)} finding(s) were not written to the baseline. None of them is one "
                       f"--fail-on {args.fail_on} fails on, so a check with this baseline and the same --fail-on "
-                      "passes; a check that fails on more fails on them.", file=sys.stderr)
+                      "passes; with another --fail-on it may fail on them.", file=sys.stderr)
             for f in left_out:
                 where = f" [{f.scope or 'job'} {f.job}]" if f.job else ""
                 problems = "; ".join(f.acceptance.problems) if f.acceptance is not None else ""
@@ -801,8 +803,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write the baseline to FILE. Entries of FILE that are still valid keep their owner, "
                         "reason and expiry date; every other finding is newly accepted with --owner, --reason and "
                         "--expires, and without them nothing is written (exit 2). Findings ignored by "
-                        "configuration are left out, and a finding named by an ignore entry that has expired or "
-                        "does not count is not newly accepted")
+                        "configuration are left out. A finding named by an ignore entry that has expired or does "
+                        "not count, and one no entry can accept, are not written and are listed; the exit status "
+                        "is 1 when one of them is at or above --fail-on, as for the check that reads FILE")
     x.add_argument("--expiry-warning", metavar="DAYS", type=int, default=30,
                    help="list the acceptances that expire within DAYS days as expiring soon (default: 30; 0 turns "
                         "the list off). It never changes the exit status")

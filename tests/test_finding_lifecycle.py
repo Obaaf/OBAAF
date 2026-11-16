@@ -684,8 +684,8 @@ class WriteBaselineTest(unittest.TestCase):
             # The same two left out as the check below finds: 1 with --fail-on medium, 0 with high.
             self.assertEqual(code, 1, err)
             self.assertIn("0 finding(s) newly accepted, 15 kept", err)
-            self.assertEqual(run_cli("check", repo, "--write-baseline", out, "--fail-on", "high")[0], 0)
             self.assertEqual(json.loads(out.read_text())["findings"], before["findings"])
+            self.assertEqual(run_cli("check", repo, "--write-baseline", tmp / "other.json", "--fail-on", "high", *ACCEPT)[0], 0)
             # Everything is accepted but the fixture's "no CODEOWNERS file" (medium), which no entry can
             # accept since slice 2d.2h.
             self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "high")[0], 0)

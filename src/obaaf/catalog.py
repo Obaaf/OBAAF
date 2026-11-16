@@ -18,6 +18,10 @@ from obaaf import yamlutil
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
 # The longest a rule's `why` may be: one line of the text report (slice 3.2b).
 WHY_MAX = 160
+# Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then a space or a
+# letter. A full stop between two digits (v7.0.1) or after one lower-case letter of an abbreviation
+# followed by a lower-case word (e.g. this) is not an end.
+_SENTENCE_END = re.compile(r"[!?](?=\s|[A-Za-z])|\.(?=\s+[A-Z]|[A-Z])")
 
 
 def _read(name: str) -> Any:
@@ -205,9 +209,12 @@ class Catalog:
             # The line the text report prints under each finding (slice 3.2b): one sentence a stranger
             # reads on a first run, so it is short and says one thing.
             why = " ".join(str(rule.get("why", "")).split())
-            if why and (len(why) > WHY_MAX or not why.endswith(".") or ". " in why[:-1]):
-                out.append(f"{rule_id}: why must be one sentence of at most {WHY_MAX} characters ending with a "
-                           f"full stop ({len(why)} characters)")
+            if why and len(why) > WHY_MAX:
+                out.append(f"{rule_id}: why must be at most {WHY_MAX} characters, not {len(why)}")
+            if why and not why.endswith("."):
+                out.append(f"{rule_id}: why must end with a full stop")
+            if why and _SENTENCE_END.search(why[:-1]):
+                out.append(f"{rule_id}: why must be one sentence")
             if rule.get("category") not in ("authority", "hygiene"):
                 out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
             if rule.get("remediation") not in (None, "config", "architecture"):

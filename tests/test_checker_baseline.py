@@ -233,7 +233,7 @@ class BaselineIntegrityTest(unittest.TestCase):
             # Below the threshold it is a warning, and the check with the same threshold passes.
             code, _, err = run_cli("check", tmp, "--write-baseline", path, "--fail-on", "medium", *ACCEPT)
             self.assertEqual(code, 0, err)
-            self.assertIn("warning: 1 finding(s) were not written to the baseline. They are below what --fail-on "
+            self.assertIn("warning: 1 finding(s) were not written to the baseline. None of them is one --fail-on "
                           "medium fails on", err)
             self.assertEqual(run_cli("check", tmp, "--baseline", path, "--fail-on", "medium")[0], 0)
 
