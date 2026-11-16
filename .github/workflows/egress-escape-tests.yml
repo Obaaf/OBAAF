@@ -655,8 +655,9 @@ jobs:
     # as the egress action's own steps are (Python by its full path, -I -S),
     # plain and inside a composite action. The values are made-up paths and
     # words. The names that would cut the job off from GitHub (proxies, CA
-    # files, the resolver's) are not set here; the next job sets them in a
-    # step's env and through GITHUB_ENV.
+    # files, the resolver's) are not set here, and a workflow's env keys are
+    # case-insensitive, so the lower-case proxy names are set only through
+    # GITHUB_ENV, in the next job.
     name: "Runner variables: what the job's env can set for the action's own steps"
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -781,12 +782,9 @@ jobs:
           TEMP: "/tmp/obaaf-rv-step/TEMP"
           TMP: "/tmp/obaaf-rv-step/TMP"
           HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
-          https_proxy: "http://obaaf-rv-step.invalid:9"
           HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
-          http_proxy: "http://obaaf-rv-step.invalid:9"
           ALL_PROXY: "http://obaaf-rv-step.invalid:9"
           NO_PROXY: "obaaf-rv-step.invalid"
-          no_proxy: "obaaf-rv-step.invalid"
           SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
           SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
           LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"
@@ -836,12 +834,9 @@ jobs:
           TEMP: "/tmp/obaaf-rv-step/TEMP"
           TMP: "/tmp/obaaf-rv-step/TMP"
           HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
-          https_proxy: "http://obaaf-rv-step.invalid:9"
           HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
-          http_proxy: "http://obaaf-rv-step.invalid:9"
           ALL_PROXY: "http://obaaf-rv-step.invalid:9"
           NO_PROXY: "obaaf-rv-step.invalid"
-          no_proxy: "obaaf-rv-step.invalid"
           SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
           SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
           LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"

@@ -55,21 +55,27 @@ def marker(channel: str, name: str) -> str:
 
 
 def set_in(data: dict, channel: str) -> list[str]:
-    """The names the test sets through `channel`. The job's env leaves out the names that would cut
-    the job off from GitHub (its checkout, its upload), which the other two channels cover."""
+    """The names the test sets through `channel`. A workflow's env keys are case-insensitive, so the
+    lower-case twins are set only through GITHUB_ENV. The job's env leaves out the names that would
+    cut the job off from GitHub (its checkout, its upload), which the other two channels cover."""
     names = list(data["names"])
+    if channel != "genv":
+        names = [n for n in names if n not in data["case_twins"]]
     if channel == "job":
         names = [n for n in names if n not in data["network_names"]]
     return names
 
 
 def classify(data: dict, channel: str, seen: dict | None) -> dict[str, str]:
+    """How each name came back. A lower-case twin the channel did not set is judged by its upper-case
+    twin's value, which is the same text, so the record shows whether setting one sets the other."""
     out = {}
     wanted = set(set_in(data, channel))
     for name in data["names"]:
+        twin = data["case_twins"].get(name)
         if seen is None:
             out[name] = NOT_MEASURED
-        elif name not in wanted:
+        elif name not in wanted and not (twin and twin in wanted):
             out[name] = NOT_SET_HERE
         elif name not in seen:
             out[name] = NOT_MEASURED

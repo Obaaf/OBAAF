@@ -1,9 +1,24 @@
 {
-  "about": "Slice 2c.12a (issue #198). The variables a workflow might set, in the job's env, the step's env or a GITHUB_ENV write, to change what the egress action's own steps do with the key they hold. tests/egress/runner-variables.py reads this file; the escape tests' runner-variables jobs set every name in 'names' each of the three ways and record what a step run as the action's own steps are (/usr/bin/python3 -I -S, plain and inside a composite action) sees. 'expected' is what GitHub-hosted ubuntu-24.04 showed; a difference fails the job. Values are made-up paths and words, never secrets.",
+  "about": "Slice 2c.12a (issue #198). The variables a workflow might set, in the job's env, the step's env or a GITHUB_ENV write, to change what the egress action's own steps do with the key they hold. tests/egress/runner-variables.py reads this file; the escape tests' runner-variables jobs set every name in 'names' each of the three ways and record what a step run as the action's own steps are (/usr/bin/python3 -I -S, plain and inside a composite action) sees. A workflow's env keys are case-insensitive (actionlint refuses HTTPS_PROXY beside https_proxy, and GitHub then does not run the workflow), so the lower-case names in 'case_twins' are set only through GITHUB_ENV; through the other two channels they are recorded as their upper-case twin left them. 'expected' is what GitHub-hosted ubuntu-24.04 showed; a difference fails the job. Values are made-up paths and words, never secrets.",
   "network_names": [
-    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN"
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HOSTALIASES",
+    "RES_OPTIONS",
+    "LOCALDOMAIN"
   ],
+  "case_twins": {
+    "https_proxy": "HTTPS_PROXY",
+    "http_proxy": "HTTP_PROXY",
+    "no_proxy": "NO_PROXY"
+  },
   "names": {
     "RUNNER_TEMP": "egress.py puts AWF's binary and each run's private directory under it",
     "RUNNER_TOOL_CACHE": "a runner directory; the command can read /opt, the tool cache",
