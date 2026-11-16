@@ -2275,15 +2275,35 @@ class WorkflowRules:
             (fixed, f"{fixed} checkout step(s) take a ref written in the workflow")) if count) or "no checkout step"
         return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
 
-    # Variables bash or the dynamic loader act on, which the action's own bash steps would obey outside
-    # the sandbox, where the key is held (issue #139, and the review of 2c.7).
-    # ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step prints set them (`::set-env::`, `::add-path::`;
-    # found by the second review of 2c.7).
-    _LOADED_BY_BASH = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD",
-                                 "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
-                                 "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
-    # A step that sets variables or the PATH for the steps after it, the action's own included.
-    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|GITHUB_PATH|BASH_ENV|exportVariable|addPath", re.I)
+    # Variables that still reach the action's own steps, which hold the key outside the sandbox, at every
+    # commit that can be listed (from `egress_action_floor`, slice 2c.9's last change to the action, on).
+    # Slice 2c.10b (decision D-070) dropped the rest of the list slice 2c.7 began with (issue #139): since
+    # 2c.9 those steps are `/usr/bin/python3 -I -S` by its full path, so bash's variables (`BASH_ENV`,
+    # `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `BASH_FUNC_*`) and Python's (`PYTHONPATH`,
+    # `PYTHONSTARTUP`, `PYTHONHOME`) have nothing to act on; every program they start is given a fixed
+    # `PATH` and nothing else of the environment, so the `PATH` finds nothing for them; and their own
+    # `env` empties the loader's variables (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` and the rest),
+    # which outranks the job's, the workflow's and `GITHUB_ENV` (the escape tests' job `own-steps`).
+    # OpenSSL's are not emptied: the action's Python imports `hashlib`, and `OPENSSL_CONF` (or, with
+    # Ubuntu's libcrypto, `OPENSSL_FORCE_FIPS_MODE` or `OPENSSL_FIPS_MODE_SWITCH_PATH` beside
+    # `OPENSSL_MODULES`) makes libcrypto load into that process a module the job names (run on Ubuntu
+    # 24.04, Python 3.12, libssl3 3.0.13, by slice 2c.10b). Every `OPENSSL_` name counts, because the
+    # library reads more than these. `ACTIONS_ALLOW_UNSECURE_COMMANDS` lets any line a step prints set
+    # such a variable for the steps after it (`::set-env::`; found by the second review of 2c.7).
+    _REACHES_OWN_STEPS = frozenset({"ACTIONS_ALLOW_UNSECURE_COMMANDS"})
+    _REACHES_OWN_STEPS_PREFIXES = ("OPENSSL_",)
+    # A step that sets variables for the steps after it, the action's own included. The `PATH` it can
+    # change for them (`GITHUB_PATH`, `addPath`) and bash's `BASH_ENV` no longer reach them (2c.10b).
+    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|exportVariable", re.I)
+
+    @classmethod
+    def _reaches_own_steps(cls, key) -> bool:
+        """Whether an `env` key names a variable the egress action's own steps would still obey (slice
+        2c.10b), read the widest way: any letter case, space around it, and a key written as an
+        expression, whose name the checker does not work out."""
+        name = str(key).strip().upper()
+        return (name in cls._REACHES_OWN_STEPS or name.startswith(cls._REACHES_OWN_STEPS_PREFIXES)
+                or expr_mod.OPEN in str(key))
 
     KEY_NAME = ("the agent's command cannot read any of the job's secrets: each goes only to a proxy that holds it "
                 "for the command, or to nothing the command runs")
@@ -2310,9 +2330,9 @@ class WorkflowRules:
         job's or the workflow's `env`) is where an agent outside the sandbox could read it, and the
         checker tells where the agent runs by where its key goes, so that is "not met"; so is a secret
         passed to the command. GitHub's native firewall holds no key. The step that uses the action
-        still holds the key in its own process, outside the sandbox: a `BASH_ENV` anywhere in the job
-        (issue #139) or a process an earlier step leaves running could reach it there, and either is
-        "cannot tell"."""
+        still holds the key in its own process, outside the sandbox: a variable the action's own steps
+        still obey (an `OPENSSL_` one, slice 2c.10b), a write to `GITHUB_ENV` that could set one, or a
+        process an earlier step leaves running could reach it there, and each is "cannot tell"."""
         name, ident = self.KEY_NAME, self.KEY_ID
         reach = "a key the agent can read can leave in the job's log or an artifact whatever the network allows"
         if job.reusable:
@@ -2402,19 +2422,20 @@ class WorkflowRules:
         if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
             unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
                           "the action and its API proxy were tested only on GitHub-hosted ubuntu-24.04 runners")
-        # The step that uses the action holds the key in its own process, outside the sandbox, and its
-        # own bash steps run there with the key in their environment. What the job's env and the
-        # step's env set reaches them; so does anything a step before or beside it writes to
-        # GITHUB_ENV or GITHUB_PATH, leaves running, or is: an agent outside the sandbox can reach the
-        # key through any of those. Found by the review of 2c.7: an agent CLI in the step before, a
-        # decoy use of the action first, parallel steps and service containers all passed.
+        # The step that uses the action holds the key in its own process, outside the sandbox, and the
+        # action's own steps run there with the key in their environment. What the workflow's, the
+        # job's and the step's env set reaches them; so does anything a step before or beside it
+        # writes to GITHUB_ENV, leaves running, or is: an agent outside the sandbox can reach the key
+        # through any of those. Found by the review of 2c.7: an agent CLI in the step before, a decoy
+        # use of the action first, parallel steps and service containers all passed. Which variables
+        # still reach those steps is slice 2c.10b's (`_REACHES_OWN_STEPS`).
         envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in keyed)]
-        loaded = [str(key) for env in envs if isinstance(env, dict) for key in env
-                  if str(key).upper() in self._LOADED_BY_BASH or str(key).upper().startswith("BASH_FUNC_")]
+        loaded = [str(key) for env in envs if isinstance(env, dict) for key in env if self._reaches_own_steps(key)]
         if loaded or any(env is not None and not isinstance(env, dict) for env in envs):
             unsure.append(f"the job sets {self._names(sorted(set(loaded))) if loaded else 'an env computed when the job runs'}"
-                          ", which the action's own bash steps would load or obey outside the sandbox, where the key "
-                          "is held (issue #139)")
+                          ", which the action's own steps would obey outside the sandbox, where the key is held: "
+                          "an OPENSSL_ variable can make the C library their Python loads run a module it names, "
+                          "and ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step prints set one (slice 2c.10b)")
         services = job.raw.get("services")
         if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
                                               for svc in services.values()):
@@ -2495,9 +2516,10 @@ class WorkflowRules:
                               "ACTIONS_ALLOW_UNSECURE_COMMANDS, so any line it prints can set a variable or the PATH "
                               "for the steps after it")
             if self._SETS_FOR_LATER_RE.search(text):
-                unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV or "
-                              "GITHUB_PATH, or names BASH_ENV, which can make the action's own steps, which hold the "
-                              "key, load or run something else (issue #139)")
+                unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV, which "
+                              "can set a variable the action's own steps, which hold the key, obey (an OPENSSL_ "
+                              "variable can make the C library their Python loads run a module it names; slice "
+                              "2c.10b)")
         if nearby and not evidence and not agent_seen:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "
@@ -2516,7 +2538,7 @@ class WorkflowRules:
                       f"the command can use a key the proxy holds and cannot read it.{said} The step's own process "
                       "holds each key outside the sandbox. The steps that can run before or beside it were read for "
                       "an agent, a credential, and, by the words in their scripts, a process left running and a write "
-                      "to GITHUB_ENV or GITHUB_PATH; what an action used before it does, what an accepted install's "
+                      "to GITHUB_ENV; what an action used before it does, what an accepted install's "
                       "own scripts do, and what a script file a step runs writes, were not. Not stopped: "
                       "the command can use the key through the proxy, so it can make the provider act for it (calls "
                       "charged to the key, remote MCP servers, URLs the provider fetches)")

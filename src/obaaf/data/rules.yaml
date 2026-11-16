@@ -162,10 +162,13 @@ rules:
       command, given to another step or to the job's or the workflow's `env`, a job with no confined command
       (GitHub's native firewall holds no key), or an agent or a credential in a step that can run before or
       beside the step that holds the key is "not met". That step holds the key outside the sandbox, so what
-      could reach it there is "cannot tell": a variable bash or the loader obeys (`BASH_ENV`, `PATH`,
-      `LD_PRELOAD` and others), or `ACTIONS_ALLOW_UNSECURE_COMMANDS`, in an `env`, a step before or beside it
-      whose script names `GITHUB_ENV` or `GITHUB_PATH` or may leave a process running (read from its words), a
-      parallel step, and service containers given volumes or options. The second control is never verified by
+      could reach it there is "cannot tell": a variable the action's own steps still obey (any `OPENSSL_`
+      name, since OpenSSL can load a module the job names into their Python), or
+      `ACTIONS_ALLOW_UNSECURE_COMMANDS`, in an `env`, a step before or beside it whose script names
+      `GITHUB_ENV` or `exportVariable` or may leave a process running (read from its words), a parallel step,
+      and service containers given volumes or options. Since those steps run no shell, look nothing up
+      through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and
+      the loader's variables and a write to `GITHUB_PATH` no longer count (slice 2c.10b). The second control is never verified by
       `obaaf check`, so today the finding can be accepted and cannot be cleared. Not read for the third
       control: what a script, an action other than `actions/checkout` or the agent itself fetches while the
       job runs, apart from a few commands the checker knows (`gh pr checkout`, `git fetch` of `pull/N/head`);

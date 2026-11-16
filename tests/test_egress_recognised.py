@@ -1028,6 +1028,9 @@ def floor_problems(releases, floor):
         differs = lists_differ(sha)
         if differs:
             problems.append(f"{sha[:12]}: {differs}")
+        own = own_steps_differ(sha)      # what slice 2c.10b's decision rests on (D-070)
+        if own:
+            problems.append(f"{sha[:12]}: {own}")
     return problems
 
 
@@ -1186,14 +1189,16 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("REVIEW_KEY (secrets.REVIEW_KEY) is named under neither env nor model-keys", control.detail)
 
     def test_what_the_step_that_holds_the_key_could_load_is_cannot_tell(self):
-        """The action's own steps hold the key outside the sandbox. A BASH_ENV would be loaded by its
-        bash steps there (issue #139), and a process an earlier step leaves running runs as the same
-        user; the checker reads neither to the end."""
+        """The action's own steps hold the key outside the sandbox. An OPENSSL_ variable would make the
+        C library their Python loads run a module it names (slice 2c.10b), a write to GITHUB_ENV could
+        set one, and a process an earlier step leaves running runs as the same user; the checker reads
+        none of them to the end. (Until 2c.10b a BASH_ENV counted here too; since 2c.9 those steps are
+        not bash, and `KeyReasonsSinceOwnStepsTest` below has what no longer counts.)"""
         cases = {
-            "BASH_ENV in the job's env": dict(steps=keyed(), job_extra="    env: {BASH_ENV: ./setup.sh}"),
-            "bash_env in the step's env": dict(steps=keyed(step_env={
-                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "bash_env": "./x"})),
-            "BASH_ENV written by an earlier step": dict(
+            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./ssl.cnf}"),
+            "openssl_modules in the step's env": dict(steps=keyed(step_env={
+                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "openssl_modules": "./x"})),
+            "BASH_ENV written by an earlier step, through GITHUB_ENV": dict(
                 steps="      - run: echo \"BASH_ENV=$PWD/x\" >> \"$GITHUB_ENV\"\n" + keyed()),
             "the job's env computed": dict(steps=keyed(), job_extra="    env: ${{ fromJSON(vars.ENV) }}"),
             "a process left running": dict(steps="      - run: nohup ./server.sh\n" + keyed()),
@@ -1202,7 +1207,8 @@ class KeyOutOfReachTest(unittest.TestCase):
             control = self.key(**case)
             with self.subTest(name):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-        self.assertIn("issue #139", self.key(**cases["BASH_ENV in the job's env"]).detail)
+        self.assertIn("slice 2c.10b", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
+        self.assertIn("OPENSSL_CONF", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
         self.assertIn("may leave a process running (nohup) as the same user",
                       self.key(**cases["a process left running"]).detail)
 
@@ -1252,9 +1258,10 @@ class KeyOutOfReachTest(unittest.TestCase):
 
 class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
     """What can run before or beside the step that holds the key (found by the first review of 2c.7).
-    That step's own bash steps run outside the sandbox with the key in their environment, so an agent
+    The action's own steps run outside the sandbox with the key in their environment, so an agent
     outside the sandbox before it, a process left running, a parallel step, a service container or a
-    write to GITHUB_ENV or GITHUB_PATH could reach the key there."""
+    write to GITHUB_ENV could reach the key there (until slice 2c.10b a write to GITHUB_PATH counted
+    too; those steps no longer look anything up through the PATH)."""
 
     def key(self, steps, **kw):
         return key_control(run_check(workflow(steps, **kw)))
@@ -1301,13 +1308,12 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
             "a step after one that runs in the background": (
                 keyed().replace("      - id: agent\n", "      - id: agent\n        background: true\n")
                 + "\n      - run: ./watch.sh"),
-            "GITHUB_PATH before it": "      - run: echo \"$HOME/bin\" >> \"$GITHUB_PATH\"\n" + keyed(),
-            "GITHUB_ENV before it": "      - run: echo \"LD_PRELOAD=$PWD/x.so\" >> \"$GITHUB_ENV\"\n" + keyed(),
+            "GITHUB_ENV before it": "      - run: echo \"OPENSSL_CONF=$PWD/x.cnf\" >> \"$GITHUB_ENV\"\n" + keyed(),
             "core.exportVariable before it": (f"      - uses: actions/github-script@{SHA}\n"
                                               "        with: {script: \"core.exportVariable('X', '1')\"}\n" + keyed()),
-            "LD_PRELOAD in the job's env": dict(steps=keyed(), job_extra="    env: {LD_PRELOAD: ./x.so}"),
-            "PATH in the step's env": keyed(step_env={"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
-                                                       "PATH": "./bin:/usr/bin"}),
+            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./x.cnf}"),
+            "OPENSSL_MODULES in the step's env": keyed(step_env={
+                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "OPENSSL_MODULES": "./lib"}),
             "a service container with options": dict(
                 steps=keyed(), job_extra="    services:\n      helper:\n        image: someone/tool:latest\n"
                                          "        options: --privileged --pid=host"),
@@ -1327,8 +1333,8 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
         self.assertIn("cannot tell where the agent runs", control.detail)
 
     def test_unsecure_workflow_commands_are_cannot_tell(self):
-        """Found by the second review: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step prints
-        (`::set-env name=BASH_ENV::...`) sets a variable for the step that holds the key."""
+        """Found by the second review of 2c.7: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step
+        prints (`::set-env name=OPENSSL_CONF::...`) sets a variable for the step that holds the key."""
         before = "      - run: gh issue view 1\n"
         for kw in ({"steps": before + keyed(), "job_extra": "    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"},
                    {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()}):
@@ -1340,6 +1346,170 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
         steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
                           "      - run: nohup ./later.sh &"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
+
+
+# What slice 2c.10b's decision (D-070) rests on, at a commit of the action: each of its steps but the
+# last is Python by its full path, isolated and without site; each empties the loader's variables in
+# its own env; every program egress.py starts is given an env of its own; and whether OpenSSL's
+# variables are among the ones its steps set, which decides whether the checker must keep them.
+OWN_STEP_SHELL = "/usr/bin/python3 -I -S {0}"
+
+
+def own_steps_differ(sha):
+    """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
+    `action.yml` and `egress.py` at that commit; a commit the repository does not have is a problem."""
+    import ast
+    import subprocess
+    import yaml
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    texts = {}
+    for name in ("action.yml", "egress.py"):
+        shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/{name}"], capture_output=True,
+                               timeout=30)
+        if shown.returncode != 0:
+            return f"actions/egress/{name} is not readable at {sha[:12]}"
+        texts[name] = shown.stdout.decode("utf-8")
+    steps = (yaml.safe_load(texts["action.yml"]).get("runs") or {}).get("steps") or []
+    if len(steps) < 2:
+        return "action.yml has fewer than two steps"
+    for step in steps[:-1]:
+        if step.get("shell") != OWN_STEP_SHELL:
+            return f"step {step.get('name')!r} has the shell {step.get('shell')!r}, not {OWN_STEP_SHELL!r}"
+    tree = ast.parse(texts["egress.py"])
+    loader = next((node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and any(getattr(t, "id", None) == "LOADER_VARIABLES" for t in node.targets)), None)
+    if loader is None:
+        return "egress.py has no LOADER_VARIABLES"
+    names = set(ast.literal_eval(loader))
+    for step in steps[:-1]:
+        env = step.get("env") or {}
+        missing = sorted(name for name in names if env.get(name) != "")
+        if missing:
+            return f"step {step.get('name')!r} does not empty {', '.join(missing[:3])}"
+    last = steps[-1]
+    if not str(last.get("shell", "")).startswith("/obaaf-egress/") or "steps.run.outcome == 'success'" not in str(last.get("if")):
+        return "the last step is not the one that fails the action when the run step reports nothing"
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and getattr(node.func.value, "id", None) == "subprocess" and node.func.attr in ("run", "Popen")):
+            if not any(keyword.arg == "env" for keyword in node.keywords):
+                return f"egress.py line {node.lineno} starts a program with the step's whole environment"
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and getattr(node.func.value, "id", None) == "os" and node.func.attr.startswith(("system", "exec", "spawn", "popen"))):
+            return f"egress.py line {node.lineno} starts a program through os.{node.func.attr}"
+    return ""
+
+
+def own_steps_set_openssl(sha):
+    """Whether every step of the action at `sha` but the last sets OpenSSL's configuration variable in
+    its own env. None does at the floor; a commit that does would let the checker drop OPENSSL_ names."""
+    import subprocess
+    import yaml
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/action.yml"], capture_output=True,
+                           timeout=30)
+    steps = (yaml.safe_load(shown.stdout.decode("utf-8")).get("runs") or {}).get("steps") or []
+    return bool(steps[:-1]) and all("OPENSSL_CONF" in (step.get("env") or {}) for step in steps[:-1])
+
+
+class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
+    """Which reasons `key-out-of-reach` gives for "cannot tell" still hold now that every commit of the
+    action that can be listed has slice 2c.9's fixes (flagship slice 2c.10b, decision D-070). Those
+    steps are Python by its full path, isolated and without site; every program they start gets a
+    fixed PATH and nothing else of the environment; and their own env, which outranks the job's,
+    the workflow's and GITHUB_ENV, empties the loader's variables. So bash's, Python's, the PATH's
+    and the loader's variables no longer reach the key, and nor does a step that changes the PATH.
+    OpenSSL's still do: the action's Python imports hashlib, and OPENSSL_CONF makes libcrypto load a
+    module the job names into the process that holds the key (run on Ubuntu 24.04 with Python 3.12
+    and libssl3 3.0.13 for this slice). A write to GITHUB_ENV can set one, and so can any line a step
+    prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a process left running is read as before."""
+
+    def key(self, steps=None, **kw):
+        return key_control(run_check(workflow(steps if steps is not None else keyed(), **kw)))
+
+    DROPPED = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH",
+               "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "BASH_FUNC_setup%%")
+
+    def where(self, name, value="./x"):
+        """The same variable in the workflow's, the job's and the step's env."""
+        # keyed() writes each key as it is given, so the key is given quoted, as YAML reads it.
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", json.dumps(name): value}
+        return {"the workflow's env": dict(top=f"env: {{{json.dumps(name)}: {json.dumps(value)}}}"),
+                "the job's env": dict(job_extra=f"    env: {{{json.dumps(name)}: {json.dumps(value)}}}"),
+                "the step's env": dict(steps=keyed(step_env=step_env))}
+
+    def test_baseline_is_verified(self):
+        self.assertEqual(self.key().verdict, VERIFIED)
+
+    def test_bash_python_path_and_loader_variables_no_longer_count(self):
+        for name in self.DROPPED:
+            for place, kw in self.where(name).items():
+                control = self.key(**kw)
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(control.verdict, VERIFIED, control.detail)
+
+    def test_a_step_that_changes_the_path_or_names_bash_env_no_longer_counts(self):
+        cases = {
+            "GITHUB_PATH": "      - run: echo \"$HOME/bin\" >> \"$GITHUB_PATH\"\n",
+            "core.addPath": (f"      - uses: actions/github-script@{SHA}\n"
+                             "        with: {script: \"core.addPath('/opt/tool/bin')\"}\n"),
+            "BASH_ENV for its own commands": "      - run: BASH_ENV=./profile.sh make setup\n",
+        }
+        for name, before in cases.items():
+            control = self.key(before + keyed())
+            with self.subTest(name):
+                self.assertEqual(control.verdict, VERIFIED, control.detail)
+
+    def test_openssl_variables_still_count_in_every_spelling(self):
+        names = ("OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_FORCE_FIPS_MODE", "OPENSSL_FIPS_MODE_SWITCH_PATH",
+                 "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "openssl_conf", " OPENSSL_CONF ", "${{ 'OPENSSL_CONF' }}")
+        for name in names:
+            for place, kw in self.where(name).items():
+                control = self.key(**kw)
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                    self.assertIn("an OPENSSL_ variable can make the C library their Python loads run a module",
+                                  control.detail)
+
+    def test_github_env_and_unsecure_commands_still_count(self):
+        cases = {
+            "GITHUB_ENV": dict(steps="      - run: echo \"FOO=1\" >> \"$GITHUB_ENV\"\n" + keyed()),
+            "github_env, any case": dict(steps="      - run: echo FOO=1 >> $github_env\n" + keyed()),
+            "core.exportVariable": dict(steps=(f"      - uses: actions/github-script@{SHA}\n"
+                                               "        with: {script: \"core.exportVariable('FOO', '1')\"}\n"
+                                               + keyed())),
+            "unsecure commands in the workflow's env": dict(top="env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"),
+            "unsecure commands in the job's env": dict(job_extra="    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"),
+            "unsecure commands in an earlier step's env": dict(
+                steps="      - run: gh issue view 1\n        env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}\n"
+                      + keyed()),
+            "a process left running": dict(steps="      - run: ./server.sh &\n" + keyed()),
+        }
+        for name, kw in cases.items():
+            control = self.key(**kw)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+        detail = self.key(**cases["GITHUB_ENV"]).detail
+        self.assertIn("writes to GITHUB_ENV, which can set a variable the action's own steps", detail)
+        self.assertNotIn("GITHUB_PATH", detail)
+
+    def test_a_verified_verdict_no_longer_says_github_path_was_read(self):
+        detail = self.key().detail
+        self.assertIn("a process left running and a write to GITHUB_ENV;", detail)
+        self.assertNotIn("GITHUB_PATH", detail)
+
+    @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
+    def test_the_floor_and_this_commit_keep_the_action_s_steps_as_the_decision_assumes(self):
+        self.assertEqual(own_steps_differ(FLOOR), "")
+        self.assertEqual(own_steps_differ("HEAD"), "")
+        # Before 2c.9 the steps were bash: the check must see that.
+        self.assertIn("has the shell", own_steps_differ(OLD_FLOOR))
+
+    @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
+    def test_openssl_names_stay_while_the_floor_does_not_set_them(self):
+        from obaaf.checker.rules import WorkflowRules
+        if not own_steps_set_openssl(FLOOR):
+            self.assertIn("OPENSSL_", WorkflowRules._REACHES_OWN_STEPS_PREFIXES)
 
 
 if __name__ == "__main__":
