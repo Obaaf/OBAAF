@@ -1,0 +1,62 @@
+name: A finding changed what we shipped
+description: An OBAAF finding made you change something before it was merged or released, or after (docs/send-us-the-result.md). This issue is public.
+title: "A finding changed what we shipped: OBAAF-"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public and shows your GitHub account. Please put no code, secret or name you would rather keep in any field.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule
+      placeholder: OBAAF-GHA-008
+    validations:
+      required: true
+  - type: textarea
+    id: pointed-at
+    attributes:
+      label: What it pointed at, in your words
+    validations:
+      required: true
+  - type: textarea
+    id: changed
+    attributes:
+      label: What you changed, and when
+      description: Before merging, before a release, or after shipping.
+    validations:
+      required: true
+  - type: dropdown
+    id: without
+    attributes:
+      label: Would you have found it without OBAAF?
+      options:
+        - "Yes"
+        - Probably
+        - "No"
+        - Don't know
+  - type: dropdown
+    id: real
+    attributes:
+      label: Was the risk real?
+      options:
+        - "Yes"
+        - Partly
+        - No, but the change was worth making
+        - Don't know
+  - type: input
+    id: version
+    attributes:
+      label: OBAAF version or commit
+  - type: dropdown
+    id: mention
+    attributes:
+      label: May we mention it?
+      options:
+        - "No"
+        - Yes, without naming me or my organisation
+        - Yes, and you may name the organisation given below
+  - type: input
+    id: name
+    attributes:
+      label: The name we may use, if any
