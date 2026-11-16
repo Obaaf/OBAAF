@@ -20,11 +20,12 @@ DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "framewo
 WHY_MAX = 160
 # Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then white space
 # and anything but a lower-case ASCII letter (a capital in any script, a digit, a backtick, a quote);
-# a question or exclamation mark straight before a letter; or a full stop straight before a capital
-# and a lower-case letter (One.Two). A full stop inside a name or number (Node.JS, v7.0.1) is not an
-# end, and neither is one followed by a lower-case word: an abbreviation such as "e.g. this" passes,
-# and so would a second sentence that begins in lower case, which the catalogue tests catch by
-# refusing ". " anywhere in a `why`.
+# a question or exclamation mark straight before an ASCII letter; or a full stop straight before an
+# ASCII capital and a lower-case letter (One.Two). A full stop inside a name or number (Node.JS,
+# v7.0.1) is not an end, and neither is one followed by a lower-case word: an abbreviation such as
+# "e.g. this" passes, and so would a second sentence that begins in lower case, which the catalogue
+# tests catch by refusing ". " anywhere in a `why`. Not caught either: a full stop followed by a
+# closing quote or bracket before the next sentence (`it." Then`), and "One.Écrit".
 _SENTENCE_END = re.compile(r"[.!?](?=\s+[^a-z\s])|[!?](?=[A-Za-z])|\.(?=[A-Z][a-z])")
 
 

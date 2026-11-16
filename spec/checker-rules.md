@@ -246,9 +246,9 @@ A workflow loads a signing key or certificate from a secret or a file, so any bu
 
 **Unsafe pull-request checkout explicitly allowed** (high). Requirements: G3.1, G9.1. Supports: FR3.
 
-**Why it matters.** This lets actions/checkout check out fork code, and in a pull_request_target or workflow_run job that code can use the base repository's token and secrets.
+**Why it matters.** This lets actions/checkout check out fork code, which in pull_request_target, workflow_run or another privileged workflow can use the base's token and secrets.
 
-actions/checkout is allowed to check out fork pull-request code with `allow-unsafe-pr-checkout: true`, which matters in a pull_request_target or workflow_run workflow and is reported whatever the trigger (flagship slice 3.2b's review). Any value but a plainly false one (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and other text included: GitHub hands the action what an expression evaluates to, and how actions/checkout reads this input was not read. The workflow's triggers and the value are part of the finding.
+actions/checkout is allowed to check out fork pull-request code with `allow-unsafe-pr-checkout: true`, which matters in a workflow that runs with the base repository's token and secrets on an event outsiders can cause (pull_request_target, workflow_run, issue_comment and the others the checker counts as privileged) and is reported whatever the trigger (flagship slice 3.2b's review). Any value but a plainly false one (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and other text included: GitHub hands the action what an expression evaluates to, and how actions/checkout reads this input was not read. The workflow's triggers and the value are part of the finding.
 
 **Fix.** Remove `allow-unsafe-pr-checkout` and build pull-request code in a pull_request workflow.
 
