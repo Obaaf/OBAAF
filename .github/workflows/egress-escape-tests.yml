@@ -446,7 +446,7 @@ jobs:
     # file: BASH_ENV, SHELLOPTS and PS4, LD_PRELOAD and LD_AUDIT, PYTHONPATH,
     # and programs named like the real ones first on the PATH. Each planted
     # file writes a line only in a process that holds OBAAF_EGRESS_SCRIPT, as
-    # the action's steps do. A plain step and the action at its floor commit
+    # the action's steps do. A plain step and the action at 7c1bded (the floor before slice 2c.10a)
     # must set off each one (so the test can see them); the action now must
     # set off none.
     name: The action's own steps ignore the job's shell, PATH and loader variables
@@ -477,7 +477,7 @@ jobs:
       - name: Keep the control's lines
         run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-control || touch /tmp/obaaf-plant/markers-control
 
-      - name: The action at its floor commit, with the same hooks
+      - name: The action at 7c1bded, the floor before slice 2c.10a, with the same hooks
         id: before
         continue-on-error: true
         uses: Obaaf/OBAAF/actions/egress@7c1bded84f32a86135f89dde30396a32f44de9e0
@@ -508,7 +508,7 @@ jobs:
       # LD_TRACE_LOADED_OBJECTS stops every program the loader starts, whatever
       # its value, and ends it with status 0, so a step's env cannot empty it.
       # Set only on these steps, because it stops every later program it reaches.
-      - name: The action at its floor commit, with LD_TRACE_LOADED_OBJECTS
+      - name: The action at 7c1bded, the floor before slice 2c.10a, with LD_TRACE_LOADED_OBJECTS
         id: trace_before
         continue-on-error: true
         uses: Obaaf/OBAAF/actions/egress@7c1bded84f32a86135f89dde30396a32f44de9e0
@@ -551,10 +551,10 @@ jobs:
             if grep -qF -- "$hook" "$dir/markers-control"; then ok "control: $hook"; else bad "control: '$hook' did not fire, so this test would not see it"; fi
           done
           for hook in "BASH_ENV sourced" "PS4 expanded" "LD_PRELOAD loaded" "LD_AUDIT loaded" "PATH: bash " "PATH: uname "; do
-            if grep -qF -- "$hook" "$dir/markers-before"; then ok "the action at its floor: $hook (issues #139, #145)"; else bad "the action at its floor: '$hook' did not fire"; fi
+            if grep -qF -- "$hook" "$dir/markers-before"; then ok "the action at 7c1bded: $hook (issues #139, #145)"; else bad "the action at 7c1bded: '$hook' did not fire"; fi
           done
           if [ -s "$dir/markers-after" ]; then bad "the action now: $(sort -u "$dir/markers-after" | tr '\n' ';')"; else ok "the action now: no hook fired in any of its steps"; fi
           if [ "$AFTER_OUTCOME" = success ] && [ "$AFTER_CONFINED" = true ] && [ "$AFTER_EXIT" = 0 ]; then ok "the action ran its command in a sandbox that held"; else bad "the action now: outcome $AFTER_OUTCOME, confined '$AFTER_CONFINED', exit '$AFTER_EXIT'"; fi
-          if [ "$TRACE_BEFORE_OUTCOME" = success ] && [ -z "$TRACE_BEFORE_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action at its floor succeeded without running anything (confined unset)"; else bad "the action at its floor with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_BEFORE_OUTCOME, confined '$TRACE_BEFORE_CONFINED'"; fi
+          if [ "$TRACE_BEFORE_OUTCOME" = success ] && [ -z "$TRACE_BEFORE_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action at 7c1bded succeeded without running anything (confined unset)"; else bad "the action at 7c1bded with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_BEFORE_OUTCOME, confined '$TRACE_BEFORE_CONFINED'"; fi
           if [ "$TRACE_AFTER_OUTCOME" = failure ] && [ -z "$TRACE_AFTER_CONFINED$TRACE_AFTER_REFUSED$TRACE_AFTER_EXIT" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action now fails, and egress.py set no output, so its last step failed it"; else bad "the action now with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_AFTER_OUTCOME, confined '$TRACE_AFTER_CONFINED', refused '$TRACE_AFTER_REFUSED', exit-code '$TRACE_AFTER_EXIT'"; fi
           exit "$fail"

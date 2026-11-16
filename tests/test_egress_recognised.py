@@ -967,8 +967,8 @@ class ReleaseDataTest(unittest.TestCase):
         """Only a commit at or after the floor may be listed: the checker reads the action's
         model-keys input and describes its resolver, both of which exist from the merge of slice 2c.4
         (slice 2c.5), the runner's sockets in /tmp and links left in the copy are dealt with from
-        slice 2c.6's last change to the action, and the action's own steps ignore the job's shell, PATH
-        and loader variables from slice 2c.9's (slice 2c.10a). Checked against the repository's
+        slice 2c.6's last change to the action, and the action's own steps run no shell, look nothing up
+        through the PATH and empty the loader's variables from slice 2c.9's (slice 2c.10a). Checked against the repository's
         history, which CI's test job fetches in full."""
         detection = checker.load().detection
         self.assertEqual(detection["egress_action_floor"], FLOOR)
@@ -978,16 +978,18 @@ class ReleaseDataTest(unittest.TestCase):
         if not has_history(FLOOR):
             self.skipTest("this checkout does not hold the repository's history (CI's test job fetches it)")
         self.assertEqual(floor_problems([FLOOR, AFTER_FLOOR], FLOOR), [])
-        problems = floor_problems([BEFORE_FLOOR, "0" * 40, "v1"], FLOOR)
-        self.assertEqual(len(problems), 3, problems)
+        problems = floor_problems([BEFORE_FLOOR, OLD_FLOOR, "0" * 40, "v1"], FLOOR)
+        self.assertEqual(len(problems), 4, problems)
         self.assertIn("not at or after", problems[0])
+        self.assertIn("not at or after", problems[1])
         self.assertEqual(lists_differ(FLOOR), "")
         self.assertEqual(lists_differ(AFTER_FLOOR), "")
 
 
 FLOOR = "c1b590c970e6246305415ad4d61a6136a7786d99"          # slice 2c.9's last change to the action
 AFTER_FLOOR = "f2f99c977a7a531fecaf0319dcd1a9632f4f6972"    # the merge of #190, slice 2c.9
-BEFORE_FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"   # slice 2c.6's last change: the floor before 2c.10a
+BEFORE_FLOOR = "278670dee06d946208679a3489008475a0ab731d"   # slice 2c.9's change before its last: just before the floor
+OLD_FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"      # the floor before slice 2c.10a
 
 
 def has_history(commit):
