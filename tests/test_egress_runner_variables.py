@@ -99,6 +99,20 @@ class Workflow(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(_step(job, label)["uses"], "./tests/egress/runner-variables-probe")
 
+    def test_the_names_the_action_empties_are_the_ones_the_guide_names(self):
+        # docs/egress-control.md (item 13) says which of the candidates the action's three code steps
+        # empty in their own env, which outranks the job's, a step's and GITHUB_ENV; a change to the
+        # action's env makes this test say the guide is out of date.
+        action = yaml.safe_load((ROOT / "actions" / "egress" / "action.yml").read_text(encoding="utf-8"))
+        code_steps = [s for s in action["runs"]["steps"] if s["shell"] == "/usr/bin/python3 -I -S {0}"]
+        self.assertEqual(len(code_steps), 3)
+        for step in code_steps:
+            with self.subTest(step=step["name"]):
+                emptied = {n for n, v in (step.get("env") or {}).items() if n in self.data["names"] and v == ""}
+                self.assertEqual(emptied, {"TMPDIR", "LOCPATH", "TZDIR", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN"})
+                others = {n for n in (step.get("env") or {}) if n in self.data["names"]} - emptied
+                self.assertEqual(others, set())
+
     def test_github_env_lines_are_the_judges_values(self):
         lines = [f"{n}={rv.marker('genv', n)}" for n in rv.set_in(self.data, "genv")]
         self.assertEqual(len(lines), len(self.data["names"]))

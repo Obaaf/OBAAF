@@ -858,6 +858,7 @@ jobs:
         run: python3 -I tests/egress/runner-variables.py --github-env genv | grep -v '^NODE_OPTIONS=' >> "$GITHUB_ENV"
 
       - name: Set NODE_OPTIONS through GITHUB_ENV (the runner may refuse it)
+        id: genv_node_options
         continue-on-error: true
         run: python3 -I tests/egress/runner-variables.py --github-env genv | grep '^NODE_OPTIONS=' >> "$GITHUB_ENV"
 
@@ -884,7 +885,9 @@ jobs:
         shell: /usr/bin/python3 -I -S {0}
         env:
           OBAAF_RV_JUDGE: ${{ github.workspace }}/tests/egress/runner-variables.py
+          NODE_OPTIONS_WRITE: ${{ steps.genv_node_options.outcome }}
         run: |
           import os, runpy, sys
+          print("the step that wrote NODE_OPTIONS to GITHUB_ENV: outcome " + os.environ["NODE_OPTIONS_WRITE"])
           sys.argv = [os.environ["OBAAF_RV_JUDGE"], "--judge", "/tmp/obaaf-rv/seen"]
           runpy.run_path(sys.argv[0], run_name="__main__")
