@@ -1348,20 +1348,81 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
 
 
-# What slice 2c.10b's decision (D-070) rests on, at a commit of the action: each of its steps but the
-# last is Python by its full path, isolated and without site; each empties the loader's variables in
-# its own env; every program egress.py starts is given an env of its own; and whether OpenSSL's
-# variables are among the ones its steps set, which decides whether the checker must keep them.
+# What slice 2c.10b's decision (D-070) rests on, at a commit of the action, as far as the workflow
+# YAML and a static read of egress.py can show it: each of its steps but the last is Python by its
+# full path, isolated and without site, and empties the loader's variables; the last step is the one
+# that fails the action; and egress.py's `run` text and every program-starting call are the floor's,
+# so a later commit that changes how a program is started is flagged for a fresh review before it is
+# listed. The escape tests on the commit itself, which the maintainer requires before listing, are
+# what establish that those starts stay confined (D-070); this is the belt, not the proof.
 OWN_STEP_SHELL = "/usr/bin/python3 -I -S {0}"
+# The names a program-starting call must be read through, so a new spelling is caught, not missed.
+_START_CALLS = ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput")
 
 
-def own_steps_differ(sha):
-    """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
-    `action.yml` and `egress.py` at that commit; a commit the repository does not have is a problem."""
+def _floor_facts(root):
+    """The floor commit's action.yml steps and egress.py text and tree, to compare a listed commit
+    against. Read once; a commit is held to the floor's loader set, run text and program starts."""
     import ast
     import subprocess
     import yaml
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {}
+    for name in ("action.yml", "egress.py"):
+        shown = subprocess.run(["git", "-C", root, "show", f"{FLOOR}:actions/egress/{name}"], capture_output=True,
+                               timeout=30)
+        out[name] = shown.stdout.decode("utf-8")
+    steps = (yaml.safe_load(out["action.yml"]).get("runs") or {}).get("steps") or []
+    tree = ast.parse(out["egress.py"])
+    loader = next((node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and any(getattr(t, "id", None) == "LOADER_VARIABLES" for t in node.targets)), None)
+    return {"runs": [str(step.get("run", "")) for step in steps[:-1]],
+            "loader": set(ast.literal_eval(loader)) if loader is not None else set(),
+            "starts": _program_starts(tree)}
+
+
+def _program_starts(tree):
+    """Every call in egress.py that starts a program, as a set of (callable, has_env, has_path) facts.
+    A `subprocess.*` or `os.exec/spawn/system/popen` call, or one of those names imported from
+    subprocess or os (`from subprocess import run`). `has_env` is whether it passes `env=`; `has_path`
+    whether a `shutil.which` call passes `path=`. A bare name is a program start only when it was
+    imported from one of those modules, so egress.py's own `run()` function is not taken for one."""
+    import ast
+    imported = {}      # local name -> "subprocess.run" etc., for names brought in by `from ... import`
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("subprocess", "os"):
+            for alias in node.names:
+                if alias.name in _START_CALLS or alias.name.startswith(("exec", "spawn", "posix_spawn", "system", "popen")):
+                    imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    starts = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = None
+        if isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "subprocess" and func.attr in _START_CALLS:
+            name = f"subprocess.{func.attr}"
+        elif isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "os" and func.attr.startswith(("exec", "spawn", "posix_spawn", "system", "popen")):
+            name = f"os.{func.attr}"
+        elif isinstance(func, ast.Name) and func.id in imported:
+            name = imported[func.id]
+        elif isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "shutil" and func.attr == "which":
+            starts.add(("shutil.which", False, any(k.arg == "path" for k in node.keywords)))
+            continue
+        if name:
+            starts.add((name, any(k.arg == "env" for k in node.keywords), False))
+    return frozenset(starts)
+
+
+def own_steps_differ(sha, root=None):
+    """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
+    `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
+    have is a problem. Not a proof the steps are confined (the escape tests on the commit are that);
+    it fails closed on any change to how a program is started, so such a change is reviewed first."""
+    import ast
+    import subprocess
+    import yaml
+    if root is None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     texts = {}
     for name in ("action.yml", "egress.py"):
         shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/{name}"], capture_output=True,
@@ -1369,60 +1430,49 @@ def own_steps_differ(sha):
         if shown.returncode != 0:
             return f"actions/egress/{name} is not readable at {sha[:12]}"
         texts[name] = shown.stdout.decode("utf-8")
+    floor = _floor_facts(root)
     steps = (yaml.safe_load(texts["action.yml"]).get("runs") or {}).get("steps") or []
     if len(steps) < 2:
         return "action.yml has fewer than two steps"
     for step in steps[:-1]:
         if step.get("shell") != OWN_STEP_SHELL:
             return f"step {step.get('name')!r} has the shell {step.get('shell')!r}, not {OWN_STEP_SHELL!r}"
-    tree = ast.parse(texts["egress.py"])
-    loader = next((node.value for node in tree.body if isinstance(node, ast.Assign)
-                   and any(getattr(t, "id", None) == "LOADER_VARIABLES" for t in node.targets)), None)
-    if loader is None:
-        return "egress.py has no LOADER_VARIABLES"
-    names = set(ast.literal_eval(loader))
-    for step in steps[:-1]:
         env = step.get("env") or {}
-        missing = sorted(name for name in names if env.get(name) != "")
+        # Held to the floor's loader set, not the commit's own: the list cannot shrink and leave a name
+        # the step no longer empties.
+        missing = sorted(name for name in floor["loader"] if env.get(name) != "")
         if missing:
             return f"step {step.get('name')!r} does not empty {', '.join(missing[:3])}"
+    if [str(step.get("run", "")) for step in steps[:-1]] != floor["runs"]:
+        return "a step's run text is not the floor's; its program starts were not reviewed again"
     last = steps[-1]
     if not str(last.get("shell", "")).startswith("/obaaf-egress/") or "steps.run.outcome == 'success'" not in str(last.get("if")):
         return "the last step is not the one that fails the action when the run step reports nothing"
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and getattr(node.func.value, "id", None) == "subprocess" and node.func.attr in ("run", "Popen")):
-            if not any(keyword.arg == "env" for keyword in node.keywords):
-                return f"egress.py line {node.lineno} starts a program with the step's whole environment"
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and getattr(node.func.value, "id", None) == "os" and node.func.attr.startswith(("system", "exec", "spawn", "popen"))):
-            return f"egress.py line {node.lineno} starts a program through os.{node.func.attr}"
+    tree = ast.parse(texts["egress.py"])
+    starts = _program_starts(tree)
+    floor_callables = {call for call, _, _ in floor["starts"]}
+    for call, has_env, has_path in starts:
+        if call not in floor_callables:
+            return f"egress.py starts a program in a way the floor does not ({call}); it needs a fresh review"
+        if call == "shutil.which" and not has_path:
+            return "egress.py calls shutil.which without path=FIXED_PATH, so a program is found through the job's PATH"
+        if call != "shutil.which" and not has_env:
+            return f"egress.py calls {call} without env=, so a program gets the step's whole environment"
     return ""
-
-
-def own_steps_set_openssl(sha):
-    """Whether every step of the action at `sha` but the last sets OpenSSL's configuration variable in
-    its own env. None does at the floor; a commit that does would let the checker drop OPENSSL_ names."""
-    import subprocess
-    import yaml
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/action.yml"], capture_output=True,
-                           timeout=30)
-    steps = (yaml.safe_load(shown.stdout.decode("utf-8")).get("runs") or {}).get("steps") or []
-    return bool(steps[:-1]) and all("OPENSSL_CONF" in (step.get("env") or {}) for step in steps[:-1])
 
 
 class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
     """Which reasons `key-out-of-reach` gives for "cannot tell" still hold now that every commit of the
     action that can be listed has slice 2c.9's fixes (flagship slice 2c.10b, decision D-070). Those
-    steps are Python by its full path, isolated and without site; every program they start gets a
-    fixed PATH and nothing else of the environment; and their own env, which outranks the job's,
-    the workflow's and GITHUB_ENV, empties the loader's variables. So bash's, Python's, the PATH's
-    and the loader's variables no longer reach the key, and nor does a step that changes the PATH.
-    OpenSSL's still do: the action's Python imports hashlib, and OPENSSL_CONF makes libcrypto load a
-    module the job names into the process that holds the key (run on Ubuntu 24.04 with Python 3.12
-    and libssl3 3.0.13 for this slice). A write to GITHUB_ENV can set one, and so can any line a step
-    prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a process left running is read as before."""
+    steps are Python by its full path, isolated and without site; every program they start is given an
+    env of its own with a fixed PATH and found through it; and their own env, which outranks the job's,
+    the step's and GITHUB_ENV (and, by GitHub's documented precedence, the workflow's), empties the
+    loader's variables. So bash's, Python's, the PATH's and the loader's variables no longer reach the
+    key, and nor does a step that changes the PATH. OpenSSL's still do: the action's Python imports
+    hashlib, and OPENSSL_CONF makes libcrypto load a module the job names into the process that holds
+    the key (run on Ubuntu 24.04 with Python 3.12 and libssl3 3.0.13 for this slice). A write to
+    GITHUB_ENV can set one, and so can any line a step prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a
+    process left running is read as before."""
 
     def key(self, steps=None, **kw):
         return key_control(run_check(workflow(steps if steps is not None else keyed(), **kw)))
@@ -1498,6 +1548,32 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         self.assertIn("a process left running and a write to GITHUB_ENV;", detail)
         self.assertNotIn("GITHUB_PATH", detail)
 
+    def test_a_build_tools_openssl_name_is_not_counted(self):
+        """OpenSSL's build variables (Rust's openssl-sys crate, CMake) are not read by libcrypto or
+        libssl (checked against Ubuntu 24.04's libraries), and Rust workflows set them for the whole
+        job, so they are not "cannot tell"; another spelling still is."""
+        for name in ("OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
+                     "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR"):
+            for place, kw in self.where(name, value="/usr").items():
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(self.key(**kw).verdict, VERIFIED, self.key(**kw).detail)
+        # The exclusion is by the exact name: a case or space variant is still a configuration name.
+        self.assertEqual(self.key(**self.where("openssl_dir")["the job's env"]).verdict, CANNOT_TELL)
+
+    def test_github_env_words_in_a_steps_env_value_or_input_still_count(self):
+        """A write to GITHUB_ENV need not be in the script: `eval "$CMD"` with the write in an env
+        value, or the runner's own file written by its path (2c.10b's review, N2)."""
+        cases = {
+            "the write in an env value": dict(steps='      - run: eval "$CMD"\n'
+                                              '        env: {CMD: \'echo "OPENSSL_CONF=x" >> "$GITHUB_ENV"\'}\n' + keyed()),
+            "a github-script input other than script": dict(steps=(f"      - uses: actions/github-script@{SHA}\n"
+                                                             "        with: {script: run, foo: core.exportVariable}\n" + keyed())),
+            "the file written by its runner path": dict(steps='      - run: echo x > "$RUNNER_TEMP/_runner_file_commands/set_env_1"\n' + keyed()),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.key(**kw).verdict, CANNOT_TELL, self.key(**kw).detail)
+
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
     def test_the_floor_and_this_commit_keep_the_action_s_steps_as_the_decision_assumes(self):
         self.assertEqual(own_steps_differ(FLOOR), "")
@@ -1506,10 +1582,62 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         self.assertIn("has the shell", own_steps_differ(OLD_FLOOR))
 
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
-    def test_openssl_names_stay_while_the_floor_does_not_set_them(self):
-        from obaaf.checker.rules import WorkflowRules
-        if not own_steps_set_openssl(FLOOR):
-            self.assertIn("OPENSSL_", WorkflowRules._REACHES_OWN_STEPS_PREFIXES)
+    def test_the_guard_fails_closed_on_a_commit_that_breaks_a_premise(self):
+        """What 2c.10b's review (B1) got past the first guard: a shrunk loader list, a program started
+        without env= or in a new call form, which() without path=, and a changed run text. Each is
+        built on a scratch clone and must be caught. The escape tests on a listed commit are the proof;
+        this guard only keeps a later commit's change to how a program is started from being listed
+        without a fresh review."""
+        import subprocess
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "clone", "-q", "--shared", root, tmp], check=True, timeout=120)
+            subprocess.run(["git", "-C", tmp, "checkout", "-q", FLOOR], check=True, timeout=60)
+            action = os.path.join(tmp, "actions", "egress")
+
+            def commit(message):
+                subprocess.run(["git", "-C", tmp, "commit", "-aqm", message], check=True, timeout=60,
+                               env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+                return subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"], capture_output=True, text=True,
+                                      timeout=30).stdout.strip()
+
+            def edit(name, old, new):
+                import pathlib
+                path = pathlib.Path(action) / name
+                text = path.read_text()
+                assert old in text, (name, old)
+                path.write_text(text.replace(old, new, 1))
+
+            def own(sha):
+                return own_steps_differ(sha, root=tmp)
+
+            self.assertEqual(own(FLOOR), "")
+            # A dropped loader name: the step no longer empties it, and the list shrank with it.
+            edit("egress.py", '    "RES_OPTIONS", "TMPDIR", "TZDIR",\n', '    "RES_OPTIONS", "TZDIR",\n')
+            edit("action.yml", "        TMPDIR: \"\"\n        TZDIR: \"\"", "        TZDIR: \"\"")
+            self.assertIn("does not empty", own(commit("shrink loader list")))
+            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+            # A program started without env=.
+            edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                 "completed = subprocess.run(argv, cwd=str(copy)")
+            self.assertIn("without env=", own(commit("drop env on run")))
+            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+            # which() without path=.
+            edit("egress.py", 'shutil.which("docker", path=FIXED_PATH)', 'shutil.which("docker")')
+            self.assertIn("shutil.which without path", own(commit("which without path")))
+            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+            # A new program-start form (os.posix_spawnp).
+            edit("egress.py", "import urllib.request\n", "import urllib.request\nimport posix\n")
+            edit("egress.py", "def run(environ: dict[str, str]) -> int:\n",
+                 "def run(environ: dict[str, str]) -> int:\n    os.posix_spawnp('x', ['x'], os.environ)\n")
+            self.assertIn("in a way the floor does not", own(commit("new start form")))
+            subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+            # A changed run text (the review's M7: subprocess in the step's run block).
+            edit("action.yml", 'sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]',
+                 'import subprocess as sp; sp.call("uname -a", shell=True)\n        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]')
+            self.assertIn("run text is not the floor's", own(commit("change run text")))
 
 
 if __name__ == "__main__":

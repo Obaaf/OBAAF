@@ -2280,21 +2280,30 @@ class WorkflowRules:
     # Slice 2c.10b (decision D-070) dropped the rest of the list slice 2c.7 began with (issue #139): since
     # 2c.9 those steps are `/usr/bin/python3 -I -S` by its full path, so bash's variables (`BASH_ENV`,
     # `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `BASH_FUNC_*`) and Python's (`PYTHONPATH`,
-    # `PYTHONSTARTUP`, `PYTHONHOME`) have nothing to act on; every program they start is given a fixed
-    # `PATH` and nothing else of the environment, so the `PATH` finds nothing for them; and their own
-    # `env` empties the loader's variables (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` and the rest),
-    # which outranks the job's, the workflow's and `GITHUB_ENV` (the escape tests' job `own-steps`).
+    # `PYTHONSTARTUP`, `PYTHONHOME`) have nothing to act on; every program they start is given an `env`
+    # of its own with a fixed `PATH`, and found through that `PATH`, so the job's `PATH` finds nothing
+    # for them; and their own `env` empties the loader's variables (`LD_PRELOAD`, `LD_AUDIT`,
+    # `LD_LIBRARY_PATH` and the rest), which outranks the job's `env`, the workflow's and `GITHUB_ENV`
+    # (the escape tests' job `own-steps` shows it for the job's, the step's and `GITHUB_ENV`).
     # OpenSSL's are not emptied: the action's Python imports `hashlib`, and `OPENSSL_CONF` (or, with
     # Ubuntu's libcrypto, `OPENSSL_FORCE_FIPS_MODE` or `OPENSSL_FIPS_MODE_SWITCH_PATH` beside
     # `OPENSSL_MODULES`) makes libcrypto load into that process a module the job names (run on Ubuntu
     # 24.04, Python 3.12, libssl3 3.0.13, by slice 2c.10b). Every `OPENSSL_` name counts, because the
-    # library reads more than these. `ACTIONS_ALLOW_UNSECURE_COMMANDS` lets any line a step prints set
-    # such a variable for the steps after it (`::set-env::`; found by the second review of 2c.7).
+    # library reads more than these, except a few that build tools read and libcrypto and libssl do
+    # not contain (`_OPENSSL_BUILD_NAMES`: the Rust `openssl-sys` crate's and CMake's; checked against
+    # Ubuntu 24.04's libraries by 2c.10b's review, because Rust workflows set them for the whole job).
+    # `ACTIONS_ALLOW_UNSECURE_COMMANDS` lets any line a step prints set such a variable for the steps
+    # after it (`::set-env::`; found by the second review of 2c.7).
     _REACHES_OWN_STEPS = frozenset({"ACTIONS_ALLOW_UNSECURE_COMMANDS"})
     _REACHES_OWN_STEPS_PREFIXES = ("OPENSSL_",)
+    _OPENSSL_BUILD_NAMES = frozenset({"OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
+                                      "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR"})
     # A step that sets variables for the steps after it, the action's own included. The `PATH` it can
     # change for them (`GITHUB_PATH`, `addPath`) and bash's `BASH_ENV` no longer reach them (2c.10b).
-    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|exportVariable", re.I)
+    # The runner's folder for those files (`_runner_file_commands`) counts too, and the words are looked
+    # for in the step's `env` values and inputs as well as its script (2c.10b's review: `eval "$CMD"`
+    # with the write in `env`, or the file written by its path).
+    _SETS_FOR_LATER_RE = re.compile(r"GITHUB_ENV|exportVariable|_runner_file_commands", re.I)
 
     @classmethod
     def _reaches_own_steps(cls, key) -> bool:
@@ -2302,8 +2311,11 @@ class WorkflowRules:
         2c.10b), read the widest way: any letter case, space around it, and a key written as an
         expression, whose name the checker does not work out."""
         name = str(key).strip().upper()
-        return (name in cls._REACHES_OWN_STEPS or name.startswith(cls._REACHES_OWN_STEPS_PREFIXES)
-                or expr_mod.OPEN in str(key))
+        if expr_mod.OPEN in str(key):
+            return True
+        if str(key) in cls._OPENSSL_BUILD_NAMES:      # exactly as written: another spelling still counts
+            return False
+        return name in cls._REACHES_OWN_STEPS or name.startswith(cls._REACHES_OWN_STEPS_PREFIXES)
 
     KEY_NAME = ("the agent's command cannot read any of the job's secrets: each goes only to a proxy that holds it "
                 "for the command, or to nothing the command runs")
@@ -2432,10 +2444,11 @@ class WorkflowRules:
         envs = [self.wf.raw.get("env"), job.raw.get("env"), *(step.raw.get("env") for step in keyed)]
         loaded = [str(key) for env in envs if isinstance(env, dict) for key in env if self._reaches_own_steps(key)]
         if loaded or any(env is not None and not isinstance(env, dict) for env in envs):
-            unsure.append(f"the job sets {self._names(sorted(set(loaded))) if loaded else 'an env computed when the job runs'}"
-                          ", which the action's own steps would obey outside the sandbox, where the key is held: "
-                          "an OPENSSL_ variable can make the C library their Python loads run a module it names, "
-                          "and ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a step prints set one (slice 2c.10b)")
+            what = self._names(sorted(set(loaded))) if loaded else "an env computed when the job runs"
+            unsure.append(f"the job sets {what}, which may hold a variable the action's own steps would obey outside "
+                          "the sandbox, where the key is held: an OPENSSL_ variable can make the C library their "
+                          "Python loads run a module it names, and ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line a "
+                          "step prints set one (slice 2c.10b)")
         services = job.raw.get("services")
         if isinstance(services, dict) and any(isinstance(svc, dict) and ("volumes" in svc or "options" in svc)
                                               for svc in services.values()):
@@ -2513,9 +2526,10 @@ class WorkflowRules:
             own_env = step.raw.get("env")
             if isinstance(own_env, dict) and any(str(key).upper() == "ACTIONS_ALLOW_UNSECURE_COMMANDS" for key in own_env):
                 unsure.append(f"{where}, before or beside the step that holds the key, sets "
-                              "ACTIONS_ALLOW_UNSECURE_COMMANDS, so any line it prints can set a variable or the PATH "
-                              "for the steps after it")
-            if self._SETS_FOR_LATER_RE.search(text):
+                              "ACTIONS_ALLOW_UNSECURE_COMMANDS, so any line it prints can set a variable for the "
+                              "steps after it")
+            if self._SETS_FOR_LATER_RE.search(text + " " + str(step.raw.get("env", "")) + " "
+                                              + str(step.raw.get("with", ""))):
                 unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV, which "
                               "can set a variable the action's own steps, which hold the key, obey (an OPENSSL_ "
                               "variable can make the C library their Python loads run a module it names; slice "
