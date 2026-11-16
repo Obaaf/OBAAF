@@ -967,9 +967,10 @@ class ReleaseDataTest(unittest.TestCase):
         """Only a commit at or after the floor may be listed: the checker reads the action's
         model-keys input and describes its resolver, both of which exist from the merge of slice 2c.4
         (slice 2c.5), the runner's sockets in /tmp and links left in the copy are dealt with from
-        slice 2c.6's last change to the action, and the action's own steps run no shell, look nothing up
-        through the PATH and empty the loader's variables from slice 2c.9's (slice 2c.10a). Checked against the repository's
-        history, which CI's test job fetches in full."""
+        slice 2c.6's last change to the action, the action's own steps run no shell, look nothing up
+        through the PATH and empty the loader's variables from slice 2c.9's (slice 2c.10a), and they remove
+        every OPENSSL_ variable before libcrypto loads from slice 2c.11a's (slice 2c.11b). Checked against
+        the repository's history, which CI's test job fetches in full."""
         detection = checker.load().detection
         self.assertEqual(detection["egress_action_floor"], FLOOR)
         self.assertEqual(floor_problems(detection["egress_action_releases"], FLOOR), [])
@@ -978,18 +979,19 @@ class ReleaseDataTest(unittest.TestCase):
         if not has_history(FLOOR):
             self.skipTest("this checkout does not hold the repository's history (CI's test job fetches it)")
         self.assertEqual(floor_problems([FLOOR, AFTER_FLOOR], FLOOR), [])
-        problems = floor_problems([BEFORE_FLOOR, OLD_FLOOR, "0" * 40, "v1"], FLOOR)
-        self.assertEqual(len(problems), 4, problems)
-        self.assertIn("not at or after", problems[0])
-        self.assertIn("not at or after", problems[1])
+        problems = floor_problems([BEFORE_FLOOR, OLD_FLOOR, BASH_FLOOR, "0" * 40, "v1"], FLOOR)
+        self.assertEqual(len(problems), 5, problems)
+        for problem in problems[:3]:
+            self.assertIn("not at or after", problem)
         self.assertEqual(lists_differ(FLOOR), "")
         self.assertEqual(lists_differ(AFTER_FLOOR), "")
 
 
-FLOOR = "c1b590c970e6246305415ad4d61a6136a7786d99"          # slice 2c.9's last change to the action
-AFTER_FLOOR = "f2f99c977a7a531fecaf0319dcd1a9632f4f6972"    # the merge of #190, slice 2c.9
-BEFORE_FLOOR = "278670dee06d946208679a3489008475a0ab731d"   # slice 2c.9's change before its last: just before the floor
-OLD_FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"      # the floor before slice 2c.10a
+FLOOR = "cc2ba59d4dfb70b6dcdcd660ca700c6dbe20d13e"          # slice 2c.11a's change to the action
+AFTER_FLOOR = "a8b591b580c575fa134b0271f7504f6d75a019a8"    # the merge of #196, slice 2c.11a
+BEFORE_FLOOR = "186993c7339977e362ae9747f373630436364583"   # the commit 2c.11a's change was made on: just before the floor
+OLD_FLOOR = "c1b590c970e6246305415ad4d61a6136a7786d99"      # the floor before slice 2c.11b, slice 2c.9's last change
+BASH_FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"     # the floor before slice 2c.10a, when the steps were bash
 
 
 def has_history(commit):
@@ -1023,12 +1025,12 @@ def floor_problems(releases, floor):
             problems.append(f"{sha[:12]} could not be checked ({exc})")
             continue
         if found.returncode != 0:
-            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the floor (slice 2c.9's last change to the action)")
+            problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the floor (slice 2c.11a's change to the action)")
             continue
         differs = lists_differ(sha)
         if differs:
             problems.append(f"{sha[:12]}: {differs}")
-        own = own_steps_differ(sha)      # what slice 2c.10b's decision rests on (D-070)
+        own = own_steps_differ(sha)      # what slices 2c.10b's and 2c.11b's decisions rest on (D-070, D-071)
         if own:
             problems.append(f"{sha[:12]}: {own}")
     return problems
@@ -1055,7 +1057,14 @@ def lists_differ(sha):
             handle.write(shown.stdout)
         spec = importlib.util.spec_from_file_location("obaaf_egress_at_commit", path)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # From slice 2c.11a on, egress.py removes every OPENSSL_ variable from the process that loads
+        # it, at import; put this test process's environment back as it was.
+        saved = dict(os.environ)
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
     for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF)):
         if getattr(module, name, None) != mine:
             return f"its {name} is not the checker's"
@@ -1189,15 +1198,13 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("REVIEW_KEY (secrets.REVIEW_KEY) is named under neither env nor model-keys", control.detail)
 
     def test_what_the_step_that_holds_the_key_could_load_is_cannot_tell(self):
-        """The action's own steps hold the key outside the sandbox. An OPENSSL_ variable would make the
-        C library their Python loads run a module it names (slice 2c.10b), a write to GITHUB_ENV could
-        set one, and a process an earlier step leaves running runs as the same user; the checker reads
-        none of them to the end. (Until 2c.10b a BASH_ENV counted here too; since 2c.9 those steps are
-        not bash, and `KeyReasonsSinceOwnStepsTest` below has what no longer counts.)"""
+        """The action's own steps hold the key outside the sandbox. A write to GITHUB_ENV can set a
+        variable for them, an env computed when the job runs can hold any name, and a process an earlier
+        step leaves running runs as the same user; the checker reads none of them to the end. (Until
+        2c.10b a BASH_ENV counted here too, and until 2c.11b an OPENSSL_ variable; since 2c.9 those
+        steps are not bash, since 2c.11a they remove OpenSSL's variables before libcrypto loads, and
+        `KeyReasonsSinceOwnStepsTest` below has what no longer counts.)"""
         cases = {
-            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./ssl.cnf}"),
-            "openssl_modules in the step's env": dict(steps=keyed(step_env={
-                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "openssl_modules": "./x"})),
             "BASH_ENV written by an earlier step, through GITHUB_ENV": dict(
                 steps="      - run: echo \"BASH_ENV=$PWD/x\" >> \"$GITHUB_ENV\"\n" + keyed()),
             "the job's env computed": dict(steps=keyed(), job_extra="    env: ${{ fromJSON(vars.ENV) }}"),
@@ -1207,8 +1214,10 @@ class KeyOutOfReachTest(unittest.TestCase):
             control = self.key(**case)
             with self.subTest(name):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-        self.assertIn("slice 2c.10b", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
-        self.assertIn("OPENSSL_CONF", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
+        computed = self.key(**cases["the job's env computed"]).detail
+        self.assertIn("an env computed when the job runs", computed)
+        self.assertIn("slices 2c.10b and 2c.11b", computed)
+        self.assertNotIn("OPENSSL_", computed)
         self.assertIn("may leave a process running (nohup) as the same user",
                       self.key(**cases["a process left running"]).detail)
 
@@ -1311,9 +1320,6 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
             "GITHUB_ENV before it": "      - run: echo \"OPENSSL_CONF=$PWD/x.cnf\" >> \"$GITHUB_ENV\"\n" + keyed(),
             "core.exportVariable before it": (f"      - uses: actions/github-script@{SHA}\n"
                                               "        with: {script: \"core.exportVariable('X', '1')\"}\n" + keyed()),
-            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./x.cnf}"),
-            "OPENSSL_MODULES in the step's env": keyed(step_env={
-                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "OPENSSL_MODULES": "./lib"}),
             "a service container with options": dict(
                 steps=keyed(), job_extra="    services:\n      helper:\n        image: someone/tool:latest\n"
                                          "        options: --privileged --pid=host"),
@@ -1334,12 +1340,19 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
 
     def test_unsecure_workflow_commands_are_cannot_tell(self):
         """Found by the second review of 2c.7: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step
-        prints (`::set-env name=OPENSSL_CONF::...`) sets a variable for the step that holds the key."""
+        prints (`::set-env name=...::...`) sets a variable for the step that holds the key, as a write to
+        GITHUB_ENV does. Since slice 2c.11b an earlier step's env is read the same widest way as the
+        key's step's: any letter case, space around the name, and a key written as an expression."""
         before = "      - run: gh issue view 1\n"
         for kw in ({"steps": before + keyed(), "job_extra": "    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"},
-                   {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()}):
+                   {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()},
+                   {"steps": before + "        env: {' ACTIONS_ALLOW_UNSECURE_COMMANDS ': 'true'}\n" + keyed()},
+                   {"steps": before + "        env: {\"${{ 'ACTIONS_ALLOW_UNSECURE_COMMANDS' }}\": 'true'}\n"
+                    + keyed()}):
             with self.subTest(**kw):
-                self.assertEqual(self.key(**kw).verdict, CANNOT_TELL)
+                control = self.key(**kw)
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                self.assertIn("ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line", control.detail)
 
     def test_steps_after_it_cannot_reach_the_key(self):
         """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
@@ -1488,6 +1501,133 @@ def _getattr_on_program_module(tree):
     return ""
 
 
+# What slice 2c.11b's decision rests on (D-070, D-071): when libcrypto is first initialised in the
+# action's own step process, which is at `import hashlib`, that process holds no OPENSSL_ variable, and
+# nothing puts one back. The floor's egress.py removes them in its first statements, before that import;
+# the guard holds a listed commit to the floor's statements up to and including it, and to no write of
+# the process's environment after them. Like the rest of the guard it is the belt, not the proof: the
+# escape tests' openssl-modules job on the commit is that.
+_ENV_MAPPINGS = ("environ", "environb")
+# Reading `os.environ` this way leaves it as it is.
+_ENV_READ_METHODS = ("get", "copy", "keys", "items", "values")
+_ENV_COPIES = ("dict", "list", "tuple", "set", "frozenset", "sorted", "len")
+# Builtins that run code the reader cannot see.
+_DYNAMIC_CODE = ("exec", "eval", "compile", "__import__", "breakpoint")
+
+
+def _import_spellings(tree):
+    """Every import in the file, anywhere in it, in its exact spelling: (`import`, name, asname) or
+    (`from`, module, level, name, asname). A listed commit may import nothing the floor does not, in
+    no other spelling: a new module (`ctypes`, `operator`, `importlib`) can write the environment or
+    initialise libcrypto where the guard cannot see, and an alias (`import os as o`, `from os import
+    environ`) hides a write from the read below."""
+    import ast
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(("import", alias.name, alias.asname) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            out.update(("from", node.module, node.level, alias.name, alias.asname) for alias in node.names)
+    return out
+
+
+def _before_libcrypto(tree):
+    """The module's top-level statements from the first after its docstring up to and including the
+    first top-level `import hashlib`, or None if there is no such import. In the floor these are
+    `from __future__ import annotations`, `import os`, the removal and `import hashlib`: so a commit
+    whose statements are the same runs nothing before the removal, removes the same names, and
+    initialises libcrypto right after it. A docstring is text and is not held to the floor's."""
+    import ast
+    body = list(tree.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        body = body[1:]
+    out = []
+    for node in body:
+        out.append(node)
+        if isinstance(node, ast.Import) and any(alias.name == "hashlib" for alias in node.names):
+            return out
+    return None
+
+
+def _environment_writes(tree, skip):
+    """Every place after the statements in `skip` where egress.py may change its own process's
+    environment, or hands `os.environ` to something the reader does not follow, as (line, what)
+    pairs. Reads are `os.environ.get(...)` and the other read methods, `dict(os.environ)` and the
+    other copies, `os.environ[name]`, `name in os.environ` and iteration; anything else done with
+    `os.environ` or `os.environb` (a store or a delete through a subscript, a method that changes it,
+    an assignment that aliases it, an argument to a function, `|=`) is one, and so is any `putenv` or
+    `unsetenv`, a look at a module's `__dict__` or `vars()`, `sys.modules`, and a call of a builtin that
+    runs code the reader cannot see (`exec`, `eval`, `compile`, `__import__`)."""
+    import ast
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    skipped = set()
+    for node in skip:
+        skipped.update(id(n) for n in ast.walk(node))
+    found = []
+    for node in ast.walk(tree):
+        if id(node) in skipped:
+            continue
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Attribute) and node.attr in ("putenv", "unsetenv"):
+            found.append((line, node.attr))
+        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            found.append((line, "__dict__"))
+        elif isinstance(node, ast.Attribute) and node.attr == "modules" and getattr(node.value, "id", None) == "sys":
+            found.append((line, "sys.modules"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _DYNAMIC_CODE + ("vars",):
+            found.append((line, f"{node.func.id}()"))
+        elif isinstance(node, ast.Attribute) and node.attr in _ENV_MAPPINGS:
+            parent = parents.get(node)
+            what = f"{getattr(node.value, 'id', '?')}.{node.attr}"
+            if isinstance(parent, ast.Subscript) and parent.value is node:
+                if not isinstance(parent.ctx, ast.Load):
+                    found.append((line, f"{what}[...] {'deleted' if isinstance(parent.ctx, ast.Del) else 'set'}"))
+            elif isinstance(parent, ast.Attribute) and parent.value is node:
+                call = parents.get(parent)
+                if not (parent.attr in _ENV_READ_METHODS and isinstance(call, ast.Call) and call.func is parent):
+                    found.append((line, f"{what}.{parent.attr}"))
+            elif isinstance(parent, ast.Call) and node in parent.args and not parent.keywords \
+                    and isinstance(parent.func, ast.Name) and parent.func.id in _ENV_COPIES and len(parent.args) == 1:
+                pass
+            elif isinstance(parent, (ast.comprehension, ast.For)) and parent.iter is node:
+                pass
+            elif isinstance(parent, ast.Compare) and node in parent.comparators \
+                    and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops):
+                pass
+            else:
+                found.append((line, f"{what} used as a value ({type(parent).__name__})"))
+    return sorted(found)
+
+
+def openssl_removal_differs(tree, floor_tree):
+    """Why the egress.py in `tree` may not hold its process free of OPENSSL_ variables when libcrypto
+    is first initialised, as the floor's does (slice 2c.11b), or ""."""
+    import ast
+    floor_prefix = _before_libcrypto(floor_tree)
+    prefix = _before_libcrypto(tree)
+    if floor_prefix is None:
+        return "the floor's egress.py has no top-level import hashlib; the guard cannot read it"
+    if prefix is None or [ast.dump(n) for n in prefix] != [ast.dump(n) for n in floor_prefix]:
+        return ("egress.py's statements before and up to `import hashlib` are not the floor's, so OpenSSL's "
+                "variables may not be removed before libcrypto is initialised; it needs a fresh review")
+    extra = sorted(_import_spellings(tree) - _import_spellings(floor_tree), key=str)
+    if extra:
+        return (f"egress.py imports {extra[0]!r}, which the floor does not, so it may write the environment or "
+                "initialise libcrypto where the guard cannot see; it needs a fresh review")
+    # The removal itself (`del os.environ[...]`, over `os.environ`) is in those statements, which are
+    # the floor's; every other read and write of the environment is checked.
+    writes = _environment_writes(tree, prefix)
+    if writes:
+        line, what = writes[0]
+        return (f"egress.py may change its own environment after OpenSSL's variables are removed ({what}, line "
+                f"{line}), so one may be put back; it needs a fresh review")
+    return ""
+
+
 def own_steps_differ(sha, root=None):
     """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
     `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
@@ -1500,8 +1640,11 @@ def own_steps_differ(sha, root=None):
     env's values come from (`FIXED_PATH`) and the two functions that build what is merged into the
     launch env and the command's env-file (`parse_env_names`, `parse_model_keys`), so it is
     self-sufficient for the launch env rather than relying on `lists_differ` (which `floor_problems`
-    runs beside it). A start reached through an indirection it cannot read is left to the escape tests
-    on the listed commit, which are the proof."""
+    runs beside it). Since slice 2c.11b it also holds egress.py's statements up to and including
+    `import hashlib` to the floor's (the removal of OpenSSL's variables before libcrypto is
+    initialised), and refuses a new import or any write of the process's environment after them
+    (`openssl_removal_differs`). A start or a write reached through an indirection it cannot read is
+    left to the escape tests on the listed commit, which are the proof."""
     import ast
     import subprocess
     import yaml
@@ -1570,7 +1713,9 @@ def own_steps_differ(sha, root=None):
     for fn in ("parse_model_keys", "parse_env_names"):
         if _function_dump(tree, fn) != _function_dump(floor_tree, fn):
             return f"egress.py's {fn}(), which builds what the launch env or the command's env-file holds, differs from the floor"
-    return ""
+    # Slice 2c.11b: OpenSSL's variables are removed before libcrypto is first initialised, and none is
+    # put back (D-071); the checker no longer counts them only on that premise.
+    return openssl_removal_differs(tree, floor_tree)
 
 
 class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
@@ -1580,11 +1725,13 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
     env of its own with a fixed PATH and found through it; and their own env, which outranks the job's,
     the step's and GITHUB_ENV (and, by GitHub's documented precedence, the workflow's), empties the
     loader's variables. So bash's, Python's, the PATH's and the loader's variables no longer reach the
-    key, and nor does a step that changes the PATH. OpenSSL's still do: the action's Python imports
-    hashlib, and OPENSSL_CONF makes libcrypto load a module the job names into the process that holds
-    the key (run on Ubuntu 24.04 with Python 3.12 and libssl3 3.0.13 for this slice). A write to
-    GITHUB_ENV can set one, and so can any line a step prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a
-    process left running is read as before."""
+    key, and nor does a step that changes the PATH. Slice 2c.10b kept OpenSSL's: the action's Python
+    imports hashlib, and OPENSSL_CONF made libcrypto load a module the job named into the process that
+    holds the key. Since slice 2c.11a's change, the floor from slice 2c.11b on, egress.py removes every
+    OPENSSL_ variable before that import (D-071; the escape tests' openssl-modules job on a GitHub-hosted
+    runner), so they no longer count either. A write to GITHUB_ENV can still set a variable for those
+    steps, and so can any line a step prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a process left
+    running is read as before."""
 
     def key(self, steps=None, **kw):
         return key_control(run_check(workflow(steps if steps is not None else keyed(), **kw)))
@@ -1622,16 +1769,33 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(control.verdict, VERIFIED, control.detail)
 
-    def test_openssl_variables_still_count_in_every_spelling(self):
+    def test_openssl_variables_no_longer_count_in_any_spelling(self):
+        """Slice 2c.11b: the floor's egress.py removes every OPENSSL_ variable, matched trimmed and
+        upper-cased, before the import that initialises libcrypto, so none of these reaches the key; the
+        build tools' names (Rust's openssl-sys crate, CMake), which 2c.10b excluded by their exact
+        spelling, need no exclusion now. A key written as an expression is still a name the checker does
+        not work out, and stays "cannot tell"."""
         names = ("OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_FORCE_FIPS_MODE", "OPENSSL_FIPS_MODE_SWITCH_PATH",
-                 "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "openssl_conf", " OPENSSL_CONF ", "${{ 'OPENSSL_CONF' }}")
+                 "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "openssl_conf", " OPENSSL_CONF ", "OPENSSL_DIR",
+                 "OPENSSL_LIB_DIR", "OPENSSL_STATIC", "openssl_dir")
         for name in names:
             for place, kw in self.where(name).items():
                 control = self.key(**kw)
                 with self.subTest(name=name, place=place):
-                    self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-                    self.assertIn("an OPENSSL_ variable can make the C library their Python loads run a module",
-                                  control.detail)
+                    self.assertEqual(control.verdict, VERIFIED, control.detail)
+                    self.assertNotIn("OPENSSL_", control.detail)
+        for place, kw in self.where("${{ 'OPENSSL_CONF' }}").items():
+            control = self.key(**kw)
+            with self.subTest(name="an expression key", place=place):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                self.assertIn("a name the checker does not work out", control.detail)
+
+    def test_openssl_variables_set_through_github_env_still_count_as_a_write_to_github_env(self):
+        """The name no longer counts; the write still does, for what else it could set."""
+        control = self.key("      - run: echo \"OPENSSL_CONF=$PWD/x.cnf\" >> \"$GITHUB_ENV\"\n" + keyed())
+        self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+        self.assertIn("writes to GITHUB_ENV, which can set a variable the action's own steps", control.detail)
+        self.assertIn("OpenSSL's are handled", control.detail)
 
     def test_github_env_and_unsecure_commands_still_count(self):
         cases = {
@@ -1660,18 +1824,6 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         self.assertIn("a process left running and a write to GITHUB_ENV;", detail)
         self.assertNotIn("GITHUB_PATH", detail)
 
-    def test_a_build_tools_openssl_name_is_not_counted(self):
-        """OpenSSL's build variables (Rust's openssl-sys crate, CMake) are not read by libcrypto or
-        libssl (checked against Ubuntu 24.04's libraries), and Rust workflows set them for the whole
-        job, so they are not "cannot tell"; another spelling still is."""
-        for name in ("OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
-                     "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR", "OPENSSL_LIBS"):
-            for place, kw in self.where(name, value="/usr").items():
-                with self.subTest(name=name, place=place):
-                    self.assertEqual(self.key(**kw).verdict, VERIFIED, self.key(**kw).detail)
-        # The exclusion is by the exact name: a case or space variant is still a configuration name.
-        self.assertEqual(self.key(**self.where("openssl_dir")["the job's env"]).verdict, CANNOT_TELL)
-
     def test_github_env_words_in_a_steps_env_value_or_input_still_count(self):
         """A write to GITHUB_ENV need not be in the script: `eval "$CMD"` with the write in an env
         value, or the runner's own file written by its path (2c.10b's review, N2)."""
@@ -1689,9 +1841,12 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
     def test_the_floor_and_this_commit_keep_the_action_s_steps_as_the_decision_assumes(self):
         self.assertEqual(own_steps_differ(FLOOR), "")
+        self.assertEqual(own_steps_differ(AFTER_FLOOR), "")
         self.assertEqual(own_steps_differ("HEAD"), "")
-        # Before 2c.9 the steps were bash: the check must see that.
-        self.assertIn("has the shell", own_steps_differ(OLD_FLOOR))
+        # Before 2c.11a the steps left OpenSSL's variables in place, and before 2c.9 they were bash:
+        # the check must see both.
+        self.assertIn("OpenSSL's variables may not be removed", own_steps_differ(OLD_FLOOR))
+        self.assertIn("has the shell", own_steps_differ(BASH_FLOOR))
 
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
     def test_the_guard_fails_closed_on_a_commit_that_breaks_a_premise(self):
@@ -1734,6 +1889,12 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             def in_run(code):
                 edit("egress.py", "def run(environ: dict[str, str]) -> int:\n",
                      f"def run(environ: dict[str, str]) -> int:\n    {code}\n")
+
+            # A mutant in a function no other part of the guard pins, so only slice 2c.11b's check can
+            # catch it.
+            def in_summary(code):
+                edit("egress.py", "def _summary(environ: dict[str, str], text: str) -> None:\n",
+                     f"def _summary(environ: dict[str, str], text: str) -> None:\n    {code}\n")
 
             self.assertEqual(own(FLOOR), "")
             cases = []
@@ -1825,6 +1986,71 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                                        "    result.update(os.environ)\n    return result\n"),
                           "which builds what the launch env or the command's env-file holds"))
 
+            # Slice 2c.11b: OpenSSL's variables are removed before libcrypto is initialised, and none is
+            # put back after.
+            removal = ('OPENSSL_VARIABLES_REMOVED = sorted(\n'
+                       '    name for name in os.environ if name.strip().upper().startswith("OPENSSL_")\n'
+                       ')\n'
+                       'for _openssl_name in OPENSSL_VARIABLES_REMOVED:\n'
+                       '    del os.environ[_openssl_name]\n')
+            before = "egress.py's statements before and up to `import hashlib` are not the floor's"
+            cases.append(("hashlib imported before the removal",
+                          lambda: edit("egress.py", "import os\n\n# The action's own steps",
+                                       "import os\nimport hashlib\n\n# The action's own steps"),
+                          before))
+            cases.append(("ssl imported before the removal",
+                          lambda: edit("egress.py", "import os\n\n# The action's own steps",
+                                       "import os\nimport ssl\n\n# The action's own steps"),
+                          before))
+            cases.append(("the removal deleted", lambda: edit("egress.py", removal, ""), before))
+            cases.append(("the removal narrowed to OPENSSL_CONF",
+                          lambda: edit("egress.py", 'name.strip().upper().startswith("OPENSSL_")',
+                                       'name == "OPENSSL_CONF"'),
+                          before))
+            cases.append(("the removal moved after the imports",
+                          lambda: (edit("egress.py", removal, ""),
+                                   edit("egress.py", "from pathlib import Path\n", "from pathlib import Path\n" + removal)),
+                          before))
+            cases.append(("the removal inside a try that swallows its error",
+                          lambda: edit("egress.py", "for _openssl_name in OPENSSL_VARIABLES_REMOVED:\n"
+                                                    "    del os.environ[_openssl_name]\n",
+                                       "for _openssl_name in OPENSSL_VARIABLES_REMOVED:\n"
+                                       "    try:\n        os.environ.pop(_openssl_name)\n"
+                                       "    except KeyError:\n        pass\n"),
+                          before))
+            put_back = "may change its own environment after OpenSSL's variables are removed"
+            cases.append(("os.environ[...] set later",
+                          lambda: in_summary('os.environ["OPENSSL_CONF"] = environ.get("INPUT_RUN", "")'), put_back))
+            cases.append(("os.environ.update later", lambda: in_summary("os.environ.update(environ)"), put_back))
+            cases.append(("os.environ.setdefault later",
+                          lambda: in_summary('os.environ.setdefault("OPENSSL_CONF", "/tmp/x")'), put_back))
+            cases.append(("os.environ |= later", lambda: in_summary("os.environ |= environ"), put_back))
+            cases.append(("os.putenv later", lambda: in_summary('os.putenv("OPENSSL_CONF", "/tmp/x")'), put_back))
+            cases.append(("an alias of os.environ",
+                          lambda: in_summary('e = os.environ; e["OPENSSL_CONF"] = "/tmp/x"'), put_back))
+            cases.append(("os.environ handed to a function", lambda: in_summary("parse_env_names('', os.environ)"),
+                          put_back))
+            cases.append(("os.__dict__", lambda: in_summary('os.__dict__["environ"]["OPENSSL_CONF"] = "x"'), put_back))
+            cases.append(("vars(os)", lambda: in_summary('vars(os)["putenv"]("OPENSSL_CONF", "x")'), put_back))
+            cases.append(("sys.modules", lambda: in_summary('sys.modules["os"].environ.clear()'), put_back))
+            cases.append(("exec of hidden code", lambda: in_summary('exec("import os")'), put_back))
+            cases.append(("__import__ of os", lambda: in_summary('__import__("os").putenv("OPENSSL_CONF", "x")'),
+                          put_back))
+            cases.append(("os.environb set later", lambda: in_summary('os.environb[b"OPENSSL_CONF"] = b"x"'), put_back))
+            new_import = "which the floor does not, so it may write the environment"
+            cases.append(("import ctypes",
+                          lambda: edit("egress.py", "import urllib.request\n", "import urllib.request\nimport ctypes\n"),
+                          new_import))
+            cases.append(("from os import environ",
+                          lambda: edit("egress.py", "import urllib.request\n",
+                                       "import urllib.request\nfrom os import environ as _env\n"),
+                          new_import))
+            cases.append(("import os as o",
+                          lambda: edit("egress.py", "import urllib.request\n", "import urllib.request\nimport os as o\n"),
+                          new_import))
+            cases.append(("an import inside a function",
+                          lambda: in_summary("import importlib"), new_import))
+
             for name, mutate, expect in cases:
                 mutate()
                 try:
@@ -1833,6 +2059,24 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                     reset()      # always, so one failed case does not leave the clone dirty for the next
                 with self.subTest(name):
                     self.assertIn(expect, result)
+
+            # And what does not touch a premise is let through (slice 2c.11b): the module's docstring is
+            # text, and a read of the environment changes nothing in it.
+            allowed = [
+                ("a reworded module docstring",
+                 lambda: edit("egress.py", "This file is the whole of the action's logic.",
+                              "This file is all of the action's logic.")),
+                ("a new read of the environment",
+                 lambda: in_summary('_seen = dict(os.environ).get("GITHUB_STEP_SUMMARY") or os.environ.get("X")')),
+            ]
+            for name, mutate in allowed:
+                mutate()
+                try:
+                    result = own(commit(name))
+                finally:
+                    reset()
+                with self.subTest(name):
+                    self.assertEqual(result, "")
 
 
 if __name__ == "__main__":
