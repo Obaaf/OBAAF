@@ -569,8 +569,9 @@ jobs:
     # such a module (it writes a marker line, nothing else, and only in a
     # process that holds OBAAF_EGRESS_SCRIPT), sets the variables the three ways
     # a workflow can (the job's env, GITHUB_ENV and the action step's env), and
-    # requires the marker for a plain step and for the action at the floor
-    # c1b590c (slice 2c.9, before this fix) and none for the action now, which
+    # requires the marker for a plain step and for the action at c1b590c
+    # (slice 2c.9, the floor before slice 2c.11b, before this fix) and none for
+    # the action now, which
     # removes every OPENSSL_ variable before libcrypto is initialised.
     name: OpenSSL's variables do not reach the action's own steps
     runs-on: ubuntu-24.04
@@ -602,7 +603,7 @@ jobs:
       - name: Keep the control's lines
         run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-control || touch /tmp/obaaf-openssl/markers-control
 
-      - name: The action at the floor c1b590c, before this fix (the module must load)
+      - name: The action at c1b590c, the floor before slice 2c.11b, before this fix (the module must load)
         id: floor
         continue-on-error: true
         uses: Obaaf/OBAAF/actions/egress@c1b590c970e6246305415ad4d61a6136a7786d99
