@@ -536,7 +536,9 @@ class OpenSSLVariables(unittest.TestCase):
             "'left': sorted(k for k in os.environ if k.strip().upper().startswith('OPENSSL_')), "
             "'other': os.environ.get('OBAAF_KEEP')}))\n"
         )
-        env = dict(os.environ)
+        # Strip any OPENSSL_ the runner's own environment carries, so each test controls exactly which
+        # OPENSSL_ variables the subprocess starts with (and the "nothing set" case is not vacuous).
+        env = {k: v for k, v in os.environ.items() if not k.strip().upper().startswith("OPENSSL_")}
         env.update(environ)
         done = subprocess.run([sys.executable, "-I", "-S", "-c", code, self.EGRESS],
                               capture_output=True, text=True, env=env, check=True)
@@ -564,8 +566,10 @@ class OpenSSLVariables(unittest.TestCase):
         self.assertEqual(got["left"], [])
 
     def test_nothing_is_removed_when_no_openssl_variable_is_set(self):
+        # The helper strips the runner's own OPENSSL_ names, so this subprocess starts with none set.
         got = self._import_with({"OBAAF_KEEP": "stays"})
-        self.assertEqual([n for n in got["removed"] if n.strip().upper().startswith("OPENSSL_")], got["removed"])
+        self.assertEqual(got["removed"], [])
+        self.assertEqual(got["other"], "stays")
         self.assertEqual(got["left"], [])
 
     def test_the_removal_runs_before_the_imports_that_initialise_libcrypto(self):
