@@ -91,9 +91,9 @@ outputs:
     description: >-
       "true" when the step's status is the command's own, from a sandbox whose
       probe held and that left nothing behind; "false" when the action failed
-      the step itself (status 3); empty when the action refused to start, or
-      when its last step stopped it because the run step ended 0 without
-      reporting that the sandbox held.
+      the step itself (status 3); empty whenever egress.py did not finish the
+      run (a refusal, an error, or the last step stopping the action because
+      the run step ended 0 without reporting that the sandbox held).
     value: ${{ steps.run.outputs.confined }}
 runs:
   using: composite
