@@ -7,22 +7,25 @@ OBAAF checks a repository's GitHub Actions workflows (and, as advice only, its J
 It takes about ten minutes. You need:
 
 - a clone of a repository that has workflows in `.github/workflows` (or a Jenkinsfile);
-- Python 3.10 or later with `venv`, and `git`, on Linux or macOS. On Debian and Ubuntu, `python3 -m venv` needs the `python3-venv` package. On Windows, use WSL; nothing here was tried on Windows;
+- Python 3.10 to 3.14 with `venv`, and `git`, on Linux or macOS. On Debian and Ubuntu, `python3 -m venv` needs the `python3-venv` package. On Windows, use WSL; nothing here was tried on Windows;
 - network access to github.com and pypi.org, for the install only.
 
 ## 1. Install
 
 This installs a **development version** of OBAAF, not a release: release 0.3.0 on PyPI has no result file. It is pinned to one commit of OBAAF's repository, and its dependencies are installed by exact version and SHA-256 from that commit's lock (the way OBAAF's own GitHub Action installs it). Everything goes into one new directory, `~/obaaf-try`, which you delete at the end. If a command fails, the block stops; delete `~/obaaf-try` before you run it again.
 
+The block uses `python3`. If `python3 --version` says 3.15 or later, it stops: the locked PyYAML 6.0.3 has no file pip will take for Python 3.15 (seen on GitHub's macOS runner, whose `python3` is 3.15). Install a Python from 3.10 to 3.14 beside it and name it first, for example `export OBAAF_PYTHON=python3.14`.
+
 ```bash
 (
 set -e
 try_dir="$HOME/obaaf-try"
-python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'
+py="${OBAAF_PYTHON:-python3}"
+"$py" -c "import sys; v = sys.version_info[:2]; sys.exit(0 if (3, 10) <= v <= (3, 14) else 'This is Python %d.%d: use Python 3.10 to 3.14 (see step 1)' % v)"
 mkdir "$try_dir"
 git clone --quiet --no-checkout https://github.com/Obaaf/OBAAF.git "$try_dir/source"
-git -C "$try_dir/source" checkout --quiet --detach 71f5243c0c97760af8f154b7341bfb538778ad7b
-python3 -m venv "$try_dir/venv"
+git -C "$try_dir/source" checkout --quiet --detach 6e9970a7b76a19745955f50642497c34af2c0b29
+"$py" -m venv "$try_dir/venv"
 "$try_dir/venv/bin/python" -m pip install --quiet --require-hashes --only-binary=:all: -r "$try_dir/source/actions/setup-obaaf/requirements.txt"
 "$try_dir/venv/bin/python" -m pip install --quiet --no-deps --no-build-isolation "$try_dir/source"
 "$try_dir/venv/bin/obaaf" --version
@@ -81,7 +84,9 @@ It holds:
 - how much risk is accepted, and by how many owners (a number, not who);
 - with `--audit`: for each settings rule, its status and counts; for each setting OBAAF reads, whether it was read and, if not, a short reason code (`forbidden`, `no_token`); whether a token was used and which repository roles GitHub said it has; whether the repository is public, private or internal, and whether a person or an organisation owns it.
 
-It never holds a path, a file, job, step, environment, branch, secret or owner name, a message, a line of code, your repository's name, or a token. That is enforced, not hoped for: before writing, OBAAF checks every key and every piece of text in the file against its own words (its rule ids, severities, states, lane and setting names, reason codes) and writes nothing if anything else is there. A value it does not recognise is counted as `other`. The tests put a marker word in every place a repository's author can write text, and in every string of a settings report, and check that it is not in the file ([tests/test_result_file.py](../tests/test_result_file.py)). Still, read it: it is short.
+It never holds a path, a file, job, step, environment, branch, secret or owner name, a message, a line of code, your repository's name, or a token. That is enforced, not hoped for: before writing, OBAAF checks every key and every piece of text in the file against its own words (its rule ids, severities, states, lane and setting names, reason codes) and writes nothing if anything else is there. A value it does not recognise is counted as `other`. The tests put a marker word in file and directory names, workflow, job and step names, scripts, `env` names and values, secret and environment names, actions, runner labels, the configuration and its ignore entries, a baseline's owner and reason, CODEOWNERS, an instruction file, a Jenkinsfile and a file that does not parse, and in every string of a settings report, and check that it is not in the file ([tests/test_result_file.py](../tests/test_result_file.py)). Still, read it: it is a few hundred lines, all of them names of OBAAF's and numbers.
+
+**What the counts can still say.** To someone who knows who sent it, the file says something about the repository: whether it is private, how many agent jobs it has, and which kinds of weakness OBAAF found there and whether they are accepted (a high OBAAF-GHA-002, for example, is untrusted code checked out in a privileged workflow). If that matters, send it privately rather than in a public issue, or fix what it points at first.
 
 ## 6. Send it back
 
@@ -95,7 +100,7 @@ Reply to whoever asked you to try OBAAF, attach `obaaf-result.json`, and answer 
 5. May we mention this result? No / yes, without naming you or your organisation / yes, naming: ___
 ```
 
-Question 4 lets us compare what you know with what OBAAF recognised. If you would rather report in public, open an issue with the form [OBAAF result](https://github.com/Obaaf/OBAAF/issues/new?template=obaaf-result.yml). An issue is public and shows your GitHub account.
+Question 4 lets us compare what you know with what OBAAF recognised. If you would rather report in public, open an issue with the form [OBAAF result](https://github.com/Obaaf/OBAAF/issues/new?template=obaaf-result.yml). An issue is public and shows your GitHub account. GitHub shows the forms only once they are on OBAAF's default branch; if the link opens a blank issue, paste the questions above instead.
 
 ## 7. If a finding changed what you shipped
 
@@ -124,6 +129,6 @@ Nothing was written into your repository, and nothing was installed outside `~/o
 
 ## What has been run, and what has not
 
-- OBAAF's CI runs this page's blocks as written, on GitHub-hosted Ubuntu and macOS runners, against a checkout of OBAAF itself: the install, the check, the audit with no token, the result file, and a check of the file (the job "The send-us-the-result page, as written" in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
+- OBAAF's CI runs this page's blocks as written, on GitHub-hosted Ubuntu and macOS runners, against a checkout of OBAAF itself: the install, the check, the audit with no token, the result file, a check that the file holds counts only, and the clean-up (the job "The send-us-the-result page, as written" in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)). It tries the install with the runner's own `python3` first. On 2026-11-16 that was Python 3.14 on Ubuntu, where everything passed, and Python 3.15 on macOS, where pip found no PyYAML 6.0.3 it could take; the block now stops there with its message, and the job installs again with `OBAAF_PYTHON` naming Python 3.14, as step 1 says.
 - The result file's guarantees are tested offline in [tests/test_result_file.py](../tests/test_result_file.py), and the commit pinned in step 1 is checked to hold the same `src/obaaf/result.py` as this page's revision.
-- Not run: Windows or WSL, a private repository, the audit with a token, Python 3.14, a person's time from start to finish. The ten minutes above is an estimate, not a measurement.
+- Not run: Windows or WSL, Python 3.10 to 3.13 on this page's path (OBAAF's other CI jobs install the same lock on 3.13 and test on 3.10 and 3.13), a private repository, the audit with a token, an Intel Mac, an ARM Linux machine, and a person's time from start to finish. The ten minutes above is an estimate, not a measurement.

@@ -206,12 +206,37 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Step 1, install
+      # A Python the page says to use when the runner's own python3 is too new for the lock. It is not
+      # put on the PATH, so the first try below uses the runner's own python3.
+      - name: Set up Python 3.14 beside the runner's own
+        id: py
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          update-environment: false
+
+      - name: Step 1, install, with the runner's own python3
         run: |
           test "$(python3 scripts/page_blocks.py "$PAGE" --count)" = 6
           python3 --version
           python3 scripts/page_blocks.py "$PAGE" 1 > "$RUNNER_TEMP/install.sh"
-          time bash "$RUNNER_TEMP/install.sh"
+          if time bash "$RUNNER_TEMP/install.sh" 2> "$RUNNER_TEMP/install.err"; then
+            touch "$RUNNER_TEMP/installed"
+          else
+            cat "$RUNNER_TEMP/install.err"
+            # Allowed only where the page says the block stops: a python3 newer than 3.14, with its message.
+            python3 -c 'import sys; assert sys.version_info[:2] > (3, 14), "the install failed on a Python the page says works"'
+            grep -q 'use Python 3.10 to 3.14 (see step 1)' "$RUNNER_TEMP/install.err"
+            test ! -e "$HOME/obaaf-try"
+          fi
+
+      - name: Step 1 again with OBAAF_PYTHON, as the page says for a newer python3
+        env:
+          SETUP_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          if [ -e "$RUNNER_TEMP/installed" ]; then echo "installed with the runner's own python3"; exit 0; fi
+          "$SETUP_PYTHON" --version
+          time OBAAF_PYTHON="$SETUP_PYTHON" bash "$RUNNER_TEMP/install.sh"
 
       - name: Steps 2 to 5, with no token, in this checkout
         run: |
