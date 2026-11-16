@@ -589,9 +589,20 @@ class WhatTheReviewFoundTest(unittest.TestCase):
             audit = tmp / "audit.json"
             audit.write_text("{}", encoding="utf-8")
             files = {p: p.read_bytes() for p in (config, workflow, audit)}
+            (repo / ".git").mkdir()
+            (repo / "scripts").mkdir()
+            script = repo / "scripts" / "run.sh"
+            script.write_text("make\n", encoding="utf-8")
+            files[script] = script.read_bytes()
+            linked = tmp / "linked"
+            linked.symlink_to(repo, target_is_directory=True)
             for args in ((repo, "--config", config, "--output", config), (repo, "--output", config),
                          (workflow, "--output", workflow), (repo, "--output", repo / "result.json"),
-                         (repo, "--audit", audit, "--output", audit)):
+                         (repo, "--audit", audit, "--output", audit),
+                         # A workflows directory or one file is checked with the repository's configuration
+                         # (third review), and a link to the repository is the repository.
+                         (repo / ".github" / "workflows", "--output", config), (workflow, "--output", script),
+                         (repo, "--output", linked / "result.json"), (linked, "--output", repo / "result.json")):
                 with self.subTest(args=[str(a).replace(str(tmp), "") for a in args]):
                     code, _, err = run_result(*args)
                     self.assertEqual(code, 2, err)
@@ -687,6 +698,13 @@ class WhatTheReviewFoundTest(unittest.TestCase):
             counted = Counter({(kind, lane): n for kind in ("workflowJobs", "jenkinsStages")
                                for lane, n in check["jobs"]["withConfiguration"][kind].items() if n})
             self.assertEqual(counted, lanes)
+
+    def test_a_symlink_loop_in_the_output_ends_with_2(self):
+        with TempDir() as tmp:
+            (tmp / "a").symlink_to(tmp / "b")
+            (tmp / "b").symlink_to(tmp / "a")
+            code, _, err = run_result(marked_repository(tmp), "--output", tmp / "a" / "x.json")
+            self.assertEqual(code, 2, err)
 
 
 if __name__ == "__main__":

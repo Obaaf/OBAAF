@@ -339,6 +339,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _repository_root(target: Path) -> Path:
+    """The directory to keep the result file out of: the top of the git work tree the check's base is in
+    (`.git` there), or the base itself where there is none. The base is the one `obaaf check` uses: the
+    repository root it finds above a workflows directory, or a file's own directory."""
+    from obaaf.checker import workflow as wf_mod
+    base = target.parent if target.is_file() else target
+    if target.is_dir():
+        base, _ = wf_mod.locate(target)
+    base = base.resolve()
+    for folder in (base, *base.parents):
+        if (folder / ".git").exists():
+            return folder
+    return base
+
+
+def _inside(output: Path, root: Path) -> bool:
+    """Whether `output` would be written in `root` or under it. Compared as files, not as names, so a
+    symlink or a different letter case on a case-insensitive disk does not get past it."""
+    import os
+    where = output.resolve().parent
+    for folder in (where, *where.parents):
+        if folder.exists() and os.path.samefile(folder, root):
+            return True
+    return False
+
+
 def _fail_on_word(value: str) -> str:
     from obaaf.checker import parse_fail_on
     try:
@@ -378,13 +404,18 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}, so no result file was written.{left}", file=sys.stderr)
         return EXIT_USAGE
-    # The result is written outside what is checked, so that writing it (or removing an earlier one)
-    # can never change a workflow, the configuration or a baseline the check reads (second review).
-    checked = (target if target.is_dir() else target.parent).resolve()
-    where = output.resolve().parent
-    if where == checked or checked in where.parents:
-        print(f"error: --output {args.output} is inside {args.path}, which is being checked; write the result "
-              f"outside it (the page uses ~/obaaf-try).{left}", file=sys.stderr)
+    # The result is written outside the repository being checked, so that writing it (or removing an
+    # earlier one) can never change a workflow, the configuration or a baseline the check reads (second
+    # and third reviews).
+    try:
+        inside = _inside(output, _repository_root(target))
+    except (OSError, RuntimeError) as exc:      # a symlink loop is a RuntimeError before Python 3.13
+        print(f"error: cannot tell where --output {args.output} is ({exc}), so no result file was written."
+              f"{left}", file=sys.stderr)
+        return EXIT_USAGE
+    if inside:
+        print(f"error: --output {args.output} is inside the repository being checked; write the result outside "
+              f"it (the page uses ~/obaaf-try).{left}", file=sys.stderr)
         return EXIT_USAGE
     for name in ("audit", "config", "baseline"):
         given = getattr(args, name)
