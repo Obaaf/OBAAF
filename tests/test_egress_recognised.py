@@ -1465,6 +1465,16 @@ def _program_starts(tree):
     return frozenset(starts)
 
 
+def _const_dump(tree, name):
+    """The AST of a module-level assignment `name = ...`, as a string, or None. Used to pin a constant
+    the launch env's values come from (`FIXED_PATH`) to the floor's."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.dump(node)
+    return None
+
+
 def _getattr_on_program_module(tree):
     """A `getattr(subprocess, ...)` / `getattr(os, ...)` / `getattr(posix, ...)`, which `_program_starts`
     cannot read as a start (round 2's B1, A3). Returns the module name or ""."""
@@ -1484,8 +1494,12 @@ def own_steps_differ(sha, root=None):
     changed `run` text, a start spelled a way the floor does not use, a `getattr` on subprocess/os/
     posix, an `env=` that is not a clean dict literal or a name, and, where a program is given a named
     dict (the command launch, `env=child_env` in run()), an enclosing function that differs from the
-    floor's at all, so those are reviewed before listing. A start reached through an indirection it
-    cannot read is left to the escape tests on the listed commit, which are the proof."""
+    floor's at all, so those are reviewed before listing. It also pins the one constant the launch
+    env's values come from (`FIXED_PATH`) and the two functions that build what is merged into the
+    launch env and the command's env-file (`parse_env_names`, `parse_model_keys`), so it is
+    self-sufficient for the launch env rather than relying on `lists_differ` (which `floor_problems`
+    runs beside it). A start reached through an indirection it cannot read is left to the escape tests
+    on the listed commit, which are the proof."""
     import ast
     import subprocess
     import yaml
@@ -1543,6 +1557,17 @@ def own_steps_differ(sha, root=None):
         if _function_dump(tree, func_name) != _function_dump(floor_tree, func_name):
             return (f"egress.py's {func_name}(), which builds the env {var} a program is given, differs from "
                     "the floor; a change to the launch env's build needs a fresh review")
+    # The launch env's inline values come from one module constant, FIXED_PATH, that neither this pin
+    # (it reads the Name) nor lists_differ covers; pin it too (round 5's review, NOTE 2). The functions
+    # that produce what is merged into the launch env and the command's env-file (parse_model_keys,
+    # parse_env_names) are pinned by lists_differ, which floor_problems runs beside this (round 5's
+    # NOTE 1); they are pinned here as well so this check does not rely on that ordering.
+    for const in ("FIXED_PATH",):
+        if _const_dump(tree, const) != _const_dump(floor_tree, const):
+            return f"egress.py's {const}, used in the launch env, differs from the floor"
+    for fn in ("parse_model_keys", "parse_env_names"):
+        if _function_dump(tree, fn) != _function_dump(floor_tree, fn):
+            return f"egress.py's {fn}(), which builds what the launch env or the command's env-file holds, differs from the floor"
     return ""
 
 
@@ -1777,6 +1802,18 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    e = child_env; e.update(os.environ)\n"),
                           "differs from"))
+            # Round 5 (NOTE 2): the one launch-env input neither own_steps_differ nor lists_differ read.
+            cases.append(("FIXED_PATH gains a job-writable dir",
+                          lambda: edit("egress.py", 'FIXED_PATH = "/usr/local/sbin:/usr/local/bin',
+                                       'FIXED_PATH = "./bin:/usr/local/sbin:/usr/local/bin'),
+                          "FIXED_PATH, used in the launch env, differs"))
+            # Round 5 (NOTE 1): parse_env_names/parse_model_keys produce the command's env-file and what is
+            # merged into the launch env; own_steps_differ pins them too, so it does not rely on
+            # lists_differ's ordering. The first `return result` is parse_env_names'.
+            cases.append(("a parse_* function absorbs os.environ (D1)",
+                          lambda: edit("egress.py", "    return result\n",
+                                       "    result.update(os.environ)\n    return result\n"),
+                          "which builds what the launch env or the command's env-file holds"))
 
             for name, mutate, expect in cases:
                 mutate()
