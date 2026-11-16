@@ -1466,13 +1466,15 @@ def _program_starts(tree):
 
 
 def _const_dump(tree, name):
-    """The AST of a module-level assignment `name = ...`, as a string, or None. Used to pin a constant
-    the launch env's values come from (`FIXED_PATH`) to the floor's."""
+    """The AST of every module-level assignment `name = ...`, as a sorted list of strings. All of them,
+    not the first: Python uses the last binding at run time, so a commit that keeps the floor's line
+    and adds `name = "./bin:" + name` would change the value while the first line still matches (round
+    6's review). The floor has exactly one assignment, so a second one makes the list differ. Used to
+    pin a constant the launch env's values come from (`FIXED_PATH`) to the floor's."""
     import ast
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            return ast.dump(node)
-    return None
+    return sorted(ast.dump(node) for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == name for t in node.targets))
 
 
 def _getattr_on_program_module(tree):
@@ -1806,6 +1808,14 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("FIXED_PATH gains a job-writable dir",
                           lambda: edit("egress.py", 'FIXED_PATH = "/usr/local/sbin:/usr/local/bin',
                                        'FIXED_PATH = "./bin:/usr/local/sbin:/usr/local/bin'),
+                          "FIXED_PATH, used in the launch env, differs"))
+            # Round 6: a SECOND module-level FIXED_PATH assignment; Python uses the last binding, the
+            # first still matches the floor, and nothing else changes.
+            cases.append(("FIXED_PATH shadowed by a second assignment",
+                          lambda: edit("egress.py",
+                                       'FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n',
+                                       'FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+                                       'FIXED_PATH = "./bin:" + FIXED_PATH\n'),
                           "FIXED_PATH, used in the launch env, differs"))
             # Round 5 (NOTE 1): parse_env_names/parse_model_keys produce the command's env-file and what is
             # merged into the launch env; own_steps_differ pins them too, so it does not rely on
