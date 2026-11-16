@@ -438,8 +438,12 @@ harden_runner_releases:
 # there, and the text beside a cleared finding describes the action's own resolver, which exists from
 # there (slice 2c.5, decision D-052). Since slice 2c.6 it is the last commit of that slice's change to
 # the action: before it, a command in the sandbox could reach the runner's own programs through their
-# sockets in /tmp, and a link it left in the copy reached a later step (decision D-054). A test refuses
+# sockets in /tmp, and a link it left in the copy reached a later step (decision D-054). Since slice
+# 2c.10a it is slice 2c.9's last change to the action: before it, the job's env, GITHUB_ENV and
+# GITHUB_PATH could make the action's own steps, which hold the step's env outside the sandbox, run
+# or load other code (bash, BASH_ENV, LD_PRELOAD, a program first on the PATH), or succeed without
+# running (LD_TRACE_LOADED_OBJECTS) (decision D-069). A test refuses
 # a listed commit that does not have the floor as an ancestor in this repository's history. A later
 # commit that reads its inputs another way must not be listed until the checker reads it that way too.
-egress_action_floor: 7c1bded84f32a86135f89dde30396a32f44de9e0
+egress_action_floor: c1b590c970e6246305415ad4d61a6136a7786d99
 egress_action_releases: []
