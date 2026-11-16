@@ -1654,6 +1654,10 @@ class WorkflowRules:
             elif name in egress_mod.WITHHELD_BY_AWF:
                 place.problems.append(f"{where} names {name} under env, a name AWF withholds from the command, so "
                                       "the action refuses to run (a model key goes under model-keys)")
+            elif egress_mod.removed_before_inputs(name):
+                place.problems.append(f"{where} names {name} under env, and the action removes every OPENSSL_ "
+                                      "variable from its own steps before it reads env (slice 2c.11a), so it finds "
+                                      "the name unset and refuses to run (issue #197)")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
@@ -1738,7 +1742,8 @@ class WorkflowRules:
             if name in key_names and name in egress_mod.MODEL_KEYS and name not in env_names:
                 place.proxy.append((name, found))
             elif name in env_names:
-                if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name):
+                if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
+                        or egress_mod.removed_before_inputs(name):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:
@@ -2536,16 +2541,17 @@ class WorkflowRules:
                 # A whole env computed when the job runs may hold it too (found by 2c.11b's review: it was
                 # read as no env at all, where the key's own step, the job and the workflow read it as
                 # "cannot tell").
-                unsure.append(f"{where}, before or beside the step that holds the key, has an env computed when "
-                              "the job runs, which may hold ACTIONS_ALLOW_UNSECURE_COMMANDS, and "
+                unsure.append(f"{where}, before or beside the step that holds the key, has an env that is not a "
+                              "mapping the checker can read (one computed when the job runs, say), which may hold "
+                              "ACTIONS_ALLOW_UNSECURE_COMMANDS, and "
                               "ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line it prints set a variable for the steps "
                               "after it")
             if self._SETS_FOR_LATER_RE.search(text + " " + str(step.raw.get("env", "")) + " "
                                               + str(step.raw.get("with", ""))):
                 unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV, which "
-                              "can set a variable the action's own steps, which hold the key, read; the checker "
-                              "has not established that each such variable is harmless to them (the loader's, "
-                              "bash's, Python's, the PATH's and OpenSSL's are handled; slices 2c.10b and 2c.11b)")
+                              "can set variables for the steps after it, the action's own included, and the "
+                              "checker does not read which: one may be ACTIONS_ALLOW_UNSECURE_COMMANDS, which lets "
+                              "any line a step prints set more (slices 2c.10b and 2c.11b)")
         if nearby and not evidence and not agent_seen:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "

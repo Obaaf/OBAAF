@@ -1027,12 +1027,15 @@ def floor_problems(releases, floor):
         if found.returncode != 0:
             problems.append(f"{sha[:12]} is not at or after {floor[:12]}, the floor (slice 2c.11a's change to the action)")
             continue
+        # The static read first: lists_differ runs the commit's egress.py in this process, so it runs
+        # only on a commit whose action the static read found to be the floor's (2c.11b's review).
+        own = own_steps_differ(sha)      # what slices 2c.10b's and 2c.11b's decisions rest on (D-070, D-072)
+        if own:
+            problems.append(f"{sha[:12]}: {own}")
+            continue
         differs = lists_differ(sha)
         if differs:
             problems.append(f"{sha[:12]}: {differs}")
-        own = own_steps_differ(sha)      # what slices 2c.10b's and 2c.11b's decisions rest on (D-070, D-071)
-        if own:
-            problems.append(f"{sha[:12]}: {own}")
     return problems
 
 
@@ -1238,6 +1241,17 @@ class KeyOutOfReachTest(unittest.TestCase):
 
     def test_a_name_the_action_refuses_is_not_met(self):
         self.assertEqual(self.key(keyed(model_keys=None, env_input="ANTHROPIC_API_KEY")).verdict, NOT_MET)
+
+    def test_an_openssl_name_under_env_is_refused_as_the_action_refuses_it(self):
+        """From slice 2c.11a's change the action removes every OPENSSL_ variable before it reads `env`, so
+        a name like that under `env` is unset when it looks, and it refuses to run (2c.11b's review: the
+        checker said the variable was passed to the command)."""
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "OPENSSL_CONF": "/etc/ssl/x.cnf"}
+        result = run_check(workflow(keyed(step_env=step_env, env_input="OPENSSL_CONF")))
+        control = key_control(result)
+        self.assertEqual(control.verdict, NOT_MET, control.detail)
+        self.assertIn("names OPENSSL_CONF under env, and the action removes every OPENSSL_ variable", control.detail)
+        self.assertNotIn("passed to the command as OPENSSL_CONF", control.detail)
 
     def test_with_every_control_the_checker_reads_in_place_only_the_setting_is_left(self):
         """The fifth control does not make OBAAF-GHA-005 clearable on its own: the environment's settings
@@ -1482,7 +1496,9 @@ def _program_starts(tree):
 
 def _start_sites(tree):
     """Every call that starts a program, as a sorted list of (enclosing function, callable), one
-    entry per call: the same calls `_program_starts` reads, counted rather than merged. The floor's
+    entry per call: the calls `_program_starts` reads but `which`, counted rather than merged. A call
+    of a helper of egress.py's own that starts one (`_quiet`) is not counted here; `action_differs`,
+    which holds the whole action to the floor's code, is what refuses a new one. The floor's
     list is the programs the action's own steps start, outside the sandbox, with the key in their
     process; a commit that starts one more, even in a form the floor uses with a clean `env=`, can
     hand it the key through its arguments or its input, which no static read follows (found by slice
@@ -1511,8 +1527,9 @@ def _start_sites(tree):
 
 
 def _literal_env_keys(tree):
-    """The keys of every dict literal given as `env=` to a call that starts a program (as
-    `_program_starts` reads it), upper-cased and trimmed. In the floor that is only `PATH`. A clean
+    """The keys of every dict literal given as `env=` to any call, upper-cased and trimmed. In the
+    floor that is only `PATH` (the floor's `_quiet` also gives `HOME` to some programs, through its
+    `extra_env` argument, which this does not read; `action_differs` holds that to the floor's). A clean
     dict holds nothing of the process's environment, but it can name a variable itself: `env={"PATH":
     FIXED_PATH, "OPENSSL_CONF": ...}` or `"LD_PRELOAD"` beside a value that carries the key (found by
     slice 2c.11b's own search; the guard of 2c.10b read only that the dict was clean)."""
@@ -1694,6 +1711,56 @@ def openssl_removal_differs(tree, floor_tree):
     return ""
 
 
+def _code_without_docstrings(tree):
+    """The module's syntax tree as a string, with the docstring of the module and of every class and
+    function left out (comments are not in the tree): what the code does, not how it is described."""
+    import ast
+    import copy
+    tree = copy.deepcopy(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body \
+                and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant) \
+                and isinstance(node.body[0].value.value, str):
+            node.body = node.body[1:] or [ast.Pass()]
+    return ast.dump(tree)
+
+
+def _action_without_descriptions(data):
+    """action.yml as data, without the text that only describes it: the top-level `description` and
+    each input's and output's `description` (comments are not in the data)."""
+    import copy
+    data = copy.deepcopy(data) if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        data.pop("description", None)
+        for section in ("inputs", "outputs"):
+            for item in (data.get(section) or {}).values():
+                if isinstance(item, dict):
+                    item.pop("description", None)
+    return data
+
+
+def action_differs(texts, floor_texts):
+    """Whether the action's code is not the floor's, apart from comments and descriptions (slice 2c.11b,
+    after its review). The checks above each read one premise the checker's verdicts rest on, and each
+    of the last three reviews found a way past one of them: a program started through the floor's own
+    helper (`_quiet`) or with new arguments, a name reached through `getattr` or a namespace, an `env`
+    value in action.yml that points the pinned `run` text at another file. A static read of the
+    premises cannot be complete, so a listed commit's action must also be the floor's code: any change
+    to `egress.py` or `action.yml` beyond comments, docstrings and descriptions means the floor moves,
+    in a change to the checker that is reviewed with the action's escape tests."""
+    import ast
+    import yaml
+    if _code_without_docstrings(ast.parse(texts["egress.py"])) != _code_without_docstrings(ast.parse(floor_texts["egress.py"])):
+        which = "egress.py"
+    elif _action_without_descriptions(yaml.safe_load(texts["action.yml"])) != \
+            _action_without_descriptions(yaml.safe_load(floor_texts["action.yml"])):
+        which = "action.yml"
+    else:
+        return ""
+    return (f"the action's {which} is not the floor's, apart from comments and descriptions; a commit whose action "
+            "changed is listed only after the floor moves to it, in a reviewed change to the checker")
+
+
 def own_steps_differ(sha, root=None):
     """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
     `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
@@ -1793,7 +1860,14 @@ def own_steps_differ(sha, root=None):
             return f"egress.py's {fn}(), which builds what the launch env or the command's env-file holds, differs from the floor"
     # Slice 2c.11b: OpenSSL's variables are removed before libcrypto is first initialised, and none is
     # put back (D-071); the checker no longer counts them only on that premise.
-    return openssl_removal_differs(tree, floor_tree)
+    problem = openssl_removal_differs(tree, floor_tree)
+    if problem:
+        return problem
+    # And whatever the premises above do not name: the action's code must be the floor's (2c.11b's review).
+    floor_texts = {name: subprocess.run(["git", "-C", root, "show", f"{FLOOR}:actions/egress/{name}"],
+                                        capture_output=True, timeout=30).stdout.decode("utf-8")
+                   for name in ("action.yml", "egress.py")}
+    return action_differs(texts, floor_texts)
 
 
 class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
@@ -1872,8 +1946,9 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         """The name no longer counts; the write still does, for what else it could set."""
         control = self.key("      - run: echo \"OPENSSL_CONF=$PWD/x.cnf\" >> \"$GITHUB_ENV\"\n" + keyed())
         self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-        self.assertIn("writes to GITHUB_ENV, which can set a variable the action's own steps", control.detail)
-        self.assertIn("OpenSSL's are handled", control.detail)
+        self.assertIn("writes to GITHUB_ENV, which can set variables for the steps after it, the action's own "
+                      "included, and the checker does not read which", control.detail)
+        self.assertNotIn("OPENSSL_", control.detail)
 
     def test_github_env_and_unsecure_commands_still_count(self):
         cases = {
@@ -1894,7 +1969,7 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
         detail = self.key(**cases["GITHUB_ENV"]).detail
-        self.assertIn("writes to GITHUB_ENV, which can set a variable the action's own steps", detail)
+        self.assertIn("writes to GITHUB_ENV, which can set variables for the steps after it", detail)
         self.assertNotIn("GITHUB_PATH", detail)
 
     def test_a_verified_verdict_no_longer_says_github_path_was_read(self):
@@ -1928,11 +2003,15 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
 
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
     def test_the_guard_fails_closed_on_a_commit_that_breaks_a_premise(self):
-        """Mutant commits on a scratch clone at the floor, from both review rounds. Round 1: a shrunk
-        loader list, a program started without env=, which() without path=, a new call form, a changed
-        run text. Round 2 (B1): a module alias (`import subprocess as sp`), `import posix`, a `getattr`
-        on subprocess, and a poisoned env value (`env=dict(os.environ)`, or `child_env` built from it).
-        Each must be caught. The escape tests on a listed commit are the proof; this guard keeps a
+        """Mutant commits on a scratch clone at the floor. Slice 2c.10b's review rounds: a shrunk loader
+        list, a program started without env=, which() without path=, a new call form, a changed run
+        text (round 1); a module alias (`import subprocess as sp`), `import posix`, a `getattr` on
+        subprocess, and a poisoned env value (`env=dict(os.environ)`, or `child_env` built from it)
+        (round 2); the launch env's contents and `FIXED_PATH` (rounds 3 to 6). Slice 2c.11b: the removal
+        of OpenSSL's variables before `import hashlib`, writes of the environment after it, new
+        imports, an `env=` dict that names a new variable, one more program start, and, after its
+        review, any other change to the action's code (`action_differs`). Each must be caught, by the
+        check its expected text names. The escape tests on a listed commit are the proof; this guard keeps a
         change to how a program is started from being listed without a fresh review."""
         import subprocess
         import tempfile
@@ -2016,17 +2095,17 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                           "without a clean dict env="))
             cases.append(("child_env built from os.environ",
                           lambda: edit("egress.py", "    child_env = {\n", "    child_env = dict(os.environ)\n    _unused = {\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             # Round 3 (B1/B2/B6) and round 4 (C1/C2/C4): the launch env's final contents, which no
             # piecemeal check proves. The whole run() function is pinned to the floor.
             cases.append(("child_env.update(os.environ) (B6)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    child_env.update(os.environ)\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             cases.append(("child_env rebound to dict(os.environ) (B1)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    child_env = dict(os.environ)\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             cases.append(("env={**os.environ} spread (B2)",
                           lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
                                        "completed = subprocess.run(argv, env={**os.environ}, cwd=str(copy)"),
@@ -2034,15 +2113,15 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("model_keys.update(os.environ) merged into child_env (C2)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    model_keys.update(os.environ)\n    child_env.update(model_keys)\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             cases.append(("model_keys = dict(os.environ) before the merge (C4)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    model_keys = dict(os.environ)\n    child_env.update(model_keys)\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             cases.append(("alias e = child_env; e.update(os.environ) (C1)",
                           lambda: edit("egress.py", "    child_env.update(model_keys)\n",
                                        "    child_env.update(model_keys)\n    e = child_env; e.update(os.environ)\n"),
-                          "differs from"))
+                          "which builds the env child_env a program is given, differs"))
             # Round 5 (NOTE 2): the one launch-env input neither own_steps_differ nor lists_differ read.
             cases.append(("FIXED_PATH gains a job-writable dir",
                           lambda: edit("egress.py", 'FIXED_PATH = "/usr/local/sbin:/usr/local/bin',
@@ -2096,38 +2175,47 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                                        "    try:\n        os.environ.pop(_openssl_name)\n"
                                        "    except KeyError:\n        pass\n"),
                           before))
-            put_back = "may change its own environment after OpenSSL's variables are removed"
+            # Each case trips one check, and asserts which (2c.11b's review: four cases tripped two, so
+            # dropping one check would have left the test green).
+            def put_back(what):
+                return f"may change its own environment after OpenSSL's variables are removed, or reach it in a way the guard does not read ({what}, line"
             cases.append(("os.environ[...] set later",
-                          lambda: in_summary('os.environ["OPENSSL_CONF"] = environ.get("INPUT_RUN", "")'), put_back))
-            cases.append(("os.environ.update later", lambda: in_summary("os.environ.update(environ)"), put_back))
+                          lambda: in_summary('os.environ["OPENSSL_CONF"] = environ.get("INPUT_RUN", "")'),
+                          put_back("os.environ[...] set")))
+            cases.append(("os.environ.update later", lambda: in_summary("os.environ.update(environ)"),
+                          put_back("os.environ.update")))
             cases.append(("os.environ.setdefault later",
-                          lambda: in_summary('os.environ.setdefault("OPENSSL_CONF", "/tmp/x")'), put_back))
-            cases.append(("os.environ |= later", lambda: in_summary("os.environ |= environ"), put_back))
-            cases.append(("os.putenv later", lambda: in_summary('os.putenv("OPENSSL_CONF", "/tmp/x")'), put_back))
+                          lambda: in_summary('os.environ.setdefault("OPENSSL_CONF", "/tmp/x")'),
+                          put_back("os.environ.setdefault")))
+            cases.append(("os.environ |= later", lambda: in_summary("os.environ |= environ"),
+                          put_back("os.environ used as a value (AugAssign)")))
+            cases.append(("os.putenv later", lambda: in_summary('os.putenv("OPENSSL_CONF", "/tmp/x")'), put_back("putenv")))
             cases.append(("an alias of os.environ",
-                          lambda: in_summary('e = os.environ; e["OPENSSL_CONF"] = "/tmp/x"'), put_back))
+                          lambda: in_summary('e = os.environ; e["OPENSSL_CONF"] = "/tmp/x"'),
+                          put_back("os.environ used as a value (Assign)")))
             cases.append(("os.environ handed to a function", lambda: in_summary("parse_env_names('', os.environ)"),
-                          put_back))
-            cases.append(("os.__dict__", lambda: in_summary('os.__dict__["environ"]["OPENSSL_CONF"] = "x"'), put_back))
-            cases.append(("vars(os)", lambda: in_summary('vars(os)["putenv"]("OPENSSL_CONF", "x")'), put_back))
-            cases.append(("sys.modules", lambda: in_summary('sys.modules["os"].environ.clear()'), put_back))
-            cases.append(("exec of hidden code", lambda: in_summary('exec("import os")'), put_back))
-            cases.append(("__import__ of os", lambda: in_summary('__import__("os").putenv("OPENSSL_CONF", "x")'),
-                          put_back))
-            cases.append(("os.environb set later", lambda: in_summary('os.environb[b"OPENSSL_CONF"] = b"x"'), put_back))
-            # Found by this slice's own search after its reviewers were stopped: names the walker did not
-            # see because they are strings, or reached through a namespace.
+                          put_back("os.environ used as a value (Call)")))
+            cases.append(("os.__dict__", lambda: in_summary('os.__dict__["environ"]["OPENSSL_CONF"] = "x"'),
+                          put_back("__dict__")))
+            cases.append(("vars(os)", lambda: in_summary('vars(os)["putenv"]("OPENSSL_CONF", "x")'), put_back("vars()")))
+            cases.append(("sys.modules", lambda: in_summary("_m = sys.modules"), put_back("sys.modules")))
+            cases.append(("exec of hidden code", lambda: in_summary('exec("import os")'), put_back("exec()")))
+            cases.append(("__import__ of os", lambda: in_summary('_m = __import__("o" + "s")'), put_back("__import__()")))
+            cases.append(("os.environb set later", lambda: in_summary('os.environb[b"OPENSSL_CONF"] = b"x"'),
+                          put_back("os.environb[...] set")))
+            # Found by this slice's own search after its first two reviewers were stopped: names the walker
+            # did not see because they are strings, or reached through a namespace.
             cases.append(("getattr chain by string names",
                           lambda: in_summary('getattr(getattr(shutil, "os"), "environ")["OPENSSL_CONF"] = "x"'),
-                          put_back))
+                          put_back("getattr(..., 'environ')")))
             cases.append(("getattr with computed names",
                           lambda: in_summary('getattr(getattr(shutil, "o" + "s"), "put" + "env")("OPENSSL_CONF", "x")'),
-                          put_back))
-            cases.append(("__builtins__.__import__",
-                          lambda: in_summary('__builtins__.__import__("ctypes")'), put_back))
+                          put_back("getattr(..., 'o' + 's')")))
+            cases.append(("__builtins__", lambda: in_summary("_b = __builtins__"), put_back("__builtins__")))
+            cases.append(("a module's __import__", lambda: in_summary("_i = shutil.__import__"), put_back("__import__")))
             cases.append(("a class's subclasses",
-                          lambda: in_summary('_all = ().__class__.__base__.__subclasses__()'), put_back))
-            cases.append(("globals()", lambda: in_summary('globals()["o" + "s"].environ.clear()'), put_back))
+                          lambda: in_summary('_all = ().__class__.__base__.__subclasses__()'), put_back("__subclasses__")))
+            cases.append(("globals()", lambda: in_summary("_g = globals()"), put_back("globals()")))
             new_key = "in an env= dict, which the floor's programs are not given"
             cases.append(("a program given OPENSSL_CONF in its clean dict",
                           lambda: edit("egress.py", 'env={"PATH": FIXED_PATH}',
@@ -2160,6 +2248,25 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
             cases.append(("an import inside a function",
                           lambda: in_summary("import importlib"), new_import))
 
+            # Whatever no premise above names: the action's code must be the floor's (2c.11b's review found
+            # a program started through the floor's own helper, `_quiet`, with a variable in its extra env;
+            # new arguments for a start in a function nothing pinned; and action.yml's env pointing the
+            # pinned run text at another file).
+            other_code = "the action's egress.py is not the floor's, apart from comments and descriptions"
+            cases.append(("_quiet given LD_PRELOAD in its extra env",
+                          lambda: in_summary('_quiet(["/usr/bin/true"], {"LD_PRELOAD": "/tmp/x.so"})'), other_code))
+            cases.append(("a start's arguments changed in a function nothing else pins",
+                          lambda: edit("egress.py", '[ip_tool, "-4", "-o", "addr", "show", "dev", DNS_BRIDGE]',
+                                       '[ip_tool, "-4", "-o", "addr", "show", "dev", DNS_BRIDGE, "--", "x"]'),
+                          other_code))
+            cases.append(("a new read of the environment",
+                          lambda: in_summary('_seen = dict(os.environ).get("GITHUB_STEP_SUMMARY") or os.environ.get("X")'),
+                          other_code))
+            cases.append(("action.yml points the script at another file",
+                          lambda: edit("action.yml", "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py",
+                                       "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/other.py"),
+                          "the action's action.yml is not the floor's, apart from comments and descriptions"))
+
             for name, mutate, expect in cases:
                 mutate()
                 try:
@@ -2169,14 +2276,20 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                 with self.subTest(name):
                     self.assertIn(expect, result)
 
-            # And what does not touch a premise is let through (slice 2c.11b): the module's docstring is
-            # text, and a read of the environment changes nothing in it.
+            # And what only describes the action is let through (slice 2c.11b): docstrings, comments and
+            # descriptions are not code.
             allowed = [
                 ("a reworded module docstring",
                  lambda: edit("egress.py", "This file is the whole of the action's logic.",
                               "This file is all of the action's logic.")),
-                ("a new read of the environment",
-                 lambda: in_summary('_seen = dict(os.environ).get("GITHUB_STEP_SUMMARY") or os.environ.get("X")')),
+                ("a reworded function docstring",
+                 lambda: edit("egress.py", '"""Stop the resolver: it serves until its standard input closes."""',
+                              '"""Stop the resolver, which serves until its standard input closes."""')),
+                ("a reworded comment",
+                 lambda: edit("egress.py", "# The action's own steps run outside the sandbox and hold the step's env, model",
+                              "# The action's three steps run outside the sandbox and hold the step's env, model")),
+                ("a reworded input description",
+                 lambda: edit("action.yml", "A name covers its subdomains.", "Each name covers its subdomains.")),
             ]
             for name, mutate in allowed:
                 mutate()

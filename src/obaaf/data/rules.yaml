@@ -164,7 +164,7 @@ rules:
       beside the step that holds the key is "not met". That step holds the key outside the sandbox, so what
       could reach it there is "cannot tell": `ACTIONS_ALLOW_UNSECURE_COMMANDS`, or a key or an `env`
       computed when the job runs, in an `env`, a step before or
-      beside it whose script, `env` values or inputs name `GITHUB_ENV` or `exportVariable` or whose
+      beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose
       words may leave a process running, a parallel step,
       and service containers given volumes or options. Since those steps run no shell, look nothing up
       through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and

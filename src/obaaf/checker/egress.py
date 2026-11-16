@@ -59,6 +59,14 @@ WITHHELD_BY_AWF = frozenset({
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def removed_before_inputs(name: str) -> bool:
+    """Whether the action removes the variable `name` from its own steps before it reads its `env`
+    input, so a name under `env` that is one of these is refused as unset: every name that, trimmed
+    and upper-cased, begins `OPENSSL_` (egress.py from slice 2c.11a's change, the floor since 2c.11b;
+    issue #197 is about the message)."""
+    return str(name).strip().upper().startswith("OPENSSL_")
+
+
 def split_list(text: str) -> list[str]:
     """Entries separated by commas, spaces or new lines, as OBAAF's action splits `allow`."""
     return [item for item in re.split(r"[\s,]+", text or "") if item]
