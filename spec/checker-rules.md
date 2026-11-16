@@ -116,7 +116,7 @@ A job that runs an AI agent references a secret, inherits secrets, or uses an en
 
 **Release job can read a shared cache** (high). Requirements: G4.1, G4.2, R7. Supports: FR4.
 
-**Why it matters.** Other workflows on the same branch or the default branch can write caches, so a release job that restores one can ship a poisoned entry.
+**Why it matters.** Caches can be written by other workflows on the same branch or the default branch, so a release job left free to restore one can ship a poisoned entry.
 
 A release job restores a GitHub Actions cache, directly or through a setup action that caches by default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the same branch or the default branch, so a poisoned entry would reach the release build. A release job with no cache step but no `cache-mode: none` is reported at low severity. Since flagship slice 2d.2e: an input written as an expression is read as the value that restores, a local action is taken to restore (it is not read; slice 2d.4), `lookup-only: true` restores nothing, and a release job that downloads artifacts is reported when a job it needs, directly or not, restores a cache (kind `needed-job-restores`; it may name a job whose output the release does not use). Not followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), a cache-mode a calling workflow sets for a reusable workflow it calls (the called job is reported), outputs passed between jobs, and actions that cache that are not listed (`nix-community/cache-nix-action`, `denoland/setup-deno` and others).
 
@@ -136,7 +136,7 @@ The workflow runs on triggers that outsiders can start (for example pull_request
 
 **Action or container not pinned to a full digest** (medium). Requirements: G2.1, R6. Supports: FR10, FR12.
 
-**Why it matters.** A tag or branch can be moved by its publisher, or by anyone who compromises the publisher, so code you did not review could run in the job.
+**Why it matters.** Unless the reference is a full digest, whoever can change what it points to (its publisher, or anyone who compromises the publisher) chooses code the job runs.
 
 A third-party action, reusable workflow or container image is referenced by a tag or branch, which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs are reported at high severity. Ordinary jobs with explicitly limited token permissions, no secrets and no privileged outside trigger are reported at low severity; a job in a workflow other workflows can call (`workflow_call`) is never low, because its callers' triggers are not in the file. Other jobs remain medium: missing token permissions must not silently downgrade a privileged job. An action or reusable workflow is pinned only by a full commit SHA as github.com writes one, 40 hexadecimal digits in lower case (a 64-digit ref can only be a tag or a branch there), and an image only by `@sha256:` and 64 hexadecimal digits at its end. Every image is read: the container's and each service's, also written as text; one computed when the job runs is reported as such (kind `image-expression`) unless it is exactly `${{ matrix.x }}` with the values written out in the file, which are read one by one, and one written in a form the checker does not read (not text, a key in another letter case, services not written as a mapping) is reported too (`image-unreadable`). An action in the repository itself (`./path`, `$/path`) has nothing to pin, except that a `./` action after a step that checks out another repository at that path (after `.` and `..` are resolved; an absolute path or one with an expression is taken to hold it) is that repository at the ref it was checked out at (`local-from-checkout`), and one after an artifact downloaded from another run or repository, a cache restored at a workspace path that holds it, or a script line that runs `git clone`, `git worktree`, `git submodule`, `gh repo clone`, `gh release download`, `gh run download`, `curl`, `wget`, `degit`, `tar x`, `unzip`, `bsdtar` or `7z` and names a workspace path at or under the action's top directory (not in a URL) in the same command, or that clones a repository of that name with no folder given, is reported as one the checker cannot place (`local-after-download`). An empty image is no container. Not followed: code merged or patched into the workspace (`git fetch` and `git merge`, `git am`, `git apply`), a download whose target is on another line or in `working-directory`, downloads before an action at the workspace root (`uses: ./`), an artifact of the same run, a cache restored at a path written with `~`, an absolute path, a glob or an expression, the actions a local composite action or a called workflow uses (they are checked where their own files are), whether a pinned commit is on the repository's own branches or only in a fork of it, and what a pinned action fetches or runs when it runs.
 
@@ -156,7 +156,7 @@ Neither the workflow nor the job declares `permissions`, so the job token gets t
 
 **Untrusted event text expanded inside a script** (high). Requirements: G8.1, G3.1, R1. Supports: FR3.
 
-**Why it matters.** Text such as a title or a branch name is pasted into the script before the shell runs, so whoever writes it can run commands in the job.
+**Why it matters.** Text such as a title or a branch name is pasted into the script before the shell runs, so whoever writes it may be able to run commands in the job.
 
 A script interpolates text that an outsider controls, such as an issue title, a pull-request title or body, a branch name, a commit message, author or file name, a review comment's file path, an edited title's old value or a fork's description, with `${{ }}`: written plainly, with index syntax, in any letter case, through `toJSON` or another function given the event object, through a group (`(github.event.issue).title`), or through a wildcard or computed index (`github.event.*.title`, `github.event[inputs.kind].body`). `${{ env.NAME }}` counts when the step, job or workflow sets NAME from one of these fields, directly, through other env values, the matrix, another job's output or an `env:` written as one expression; `${{ matrix.x }}` when the job's matrix holds one; `${{ needs.a.outputs.x }}` when job a's `outputs` written in the file do. A script is a step's `run`, its `shell` (or `defaults.run.shell`), an `actions/github-script` script, the command OBAAF's egress action runs, a `docker://` step's `entrypoint` and `args`, and the inputs of the actions listed under `script_inputs` in the detection data. Every field a step reaches, the references and expressions that reach them, and the job's triggers are the finding's facts. It is high when an outsider's event (a pull request, a comment on a commit, `check_suite`, `check_run` and `status` included) or another workflow's call can start the job, and for a commit's text on `push`, `merge_group` and a `workflow_run` after a push, where a merged pull request's title and branch name are in the merge commit's message; medium otherwise. Not followed: values set while the job runs (`GITHUB_ENV`, step outputs), values passed into reusable workflows (`inputs`) and composite actions, the inputs of other actions, a `with:` written as one expression, and the `env` of a `parallel` group. It does not work out whether an expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is reported too; an acceptance of it names the expression. A matrix that holds one outsider-written field makes every `matrix` reference count. The text becomes part of the script before the shell runs, so it can run commands. This is how the Nx compromise began.
 
@@ -166,7 +166,7 @@ A script interpolates text that an outsider controls, such as an issue title, a 
 
 **Checkout leaves the job token on disk** (medium). Requirements: G8.1, G3.4, R7. Supports: FR7.
 
-**Why it matters.** Any code or agent that runs later in the job can read the credential from disk and act with it.
+**Why it matters.** Any code or agent that runs later in the job may be able to read the credential from disk and act with it.
 
 In an agent job or a job started by untrusted input, actions/checkout persists the job token for later git commands. Any code or agent that runs later in the job can read it. A job counts when it runs an agent or when any event that starts it is one an outsider can cause (a pull request included), whatever else also starts it. actions/checkout keeps the credential unless `persist-credentials` is written as something other than `true` in any case; an expression counts as written only when it is a constant (`${{ false }}`), and otherwise is taken to keep it. The finding's facts are the credential kept (the job token, or the token or SSH key given in the step's `token` or `ssh-key` input), the triggers, whether the job runs an agent and what the job token can write, so an acceptance for a read-only pull_request job does not cover a job that can write or one given a personal token. Not followed: credentials kept by other means (`gh auth setup-git`, a `git config` a script writes, another action), reusable workflows and composite actions.
 
@@ -176,7 +176,7 @@ In an agent job or a job started by untrusted input, actions/checkout persists t
 
 **Agent reads instructions from the change under review** (high). Requirements: G8.2, R5. Supports: FR9.
 
-**Why it matters.** The change under review can rewrite the instructions, rules and MCP configuration the agent obeys while it reviews that change.
+**Why it matters.** The change under review can rewrite the instructions, rules and MCP configuration the agent obeys during its run on that change.
 
 The agent job checks out the pull request's version of the repository, so instruction files, rules files and MCP configuration come from the change being reviewed. The change can then rewrite what the agent obeys during its own run. The checkout's `ref` and `repository` and the job's scripts are read as for OBAAF-GHA-002; a value that also names the base (`head.sha || base.sha`) is the head. On pull_request, pull_request_review and pull_request_review_comment, a checkout with no `ref`, or with `github.sha`, `github.ref` or `github.ref_name`, takes the merge commit, which holds the pull request's files. A `ref` the checker cannot read to a value is reported at medium where an outsider's event can start the job. The triggers, the job's and step's `if:` and what was read are part of the finding. Not followed: what the agent itself fetches while it runs, the merge commit fetched by a script (`git fetch origin "$GITHUB_REF"`), values passed between steps, other checkout actions, reusable workflows and composite actions.
 
@@ -196,7 +196,7 @@ A job that pull requests, outside events or an agent can drive runs on a self-ho
 
 **Release job not behind a protected environment** (medium). Requirements: G6.2. Supports: FR6.
 
-**Why it matters.** Without an environment no person has to approve the release, and its credentials are not held back until someone does.
+**Why it matters.** Unless an environment is sure to apply, no person has to approve the release, and its credentials are not held back until someone does.
 
 A release job that uploads or publishes does not reference an environment, so no person has to approve it and its credentials are not held back until approval. An environment counts only when its name is written as text, or as an expression whose every value the checker can list and none is blank (flagship slice 2d.2e); a blank name, a number, true or false, or an expression that can be blank or name something else is reported as cannot tell. A release job with no upload the lists know is reported when it holds what publishing needs (`packages: write`, a publishing action, a secret whose name says it publishes). Not read: whether the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a cloud service (not counted as publishing unless the job is declared a release job), a command built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local action or reusable workflow (slice 2d.4).
 
@@ -246,9 +246,9 @@ A workflow loads a signing key or certificate from a secret or a file, so any bu
 
 **Unsafe pull-request checkout explicitly allowed** (high). Requirements: G3.1, G9.1. Supports: FR3.
 
-**Why it matters.** The workflow holds the base repository's token and secrets, and this makes it check out fork code anyway.
+**Why it matters.** This lets actions/checkout check out fork code, and in a pull_request_target or workflow_run job that code can use the base repository's token and secrets.
 
-actions/checkout is told to check out fork pull-request code in a pull_request_target or workflow_run workflow with `allow-unsafe-pr-checkout: true`. Any value but a plainly false one (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and other text included: GitHub hands the action what an expression evaluates to, and how actions/checkout reads this input was not read. The workflow's triggers and the value are part of the finding.
+actions/checkout is allowed to check out fork pull-request code with `allow-unsafe-pr-checkout: true`, which matters in a pull_request_target or workflow_run workflow and is reported whatever the trigger (flagship slice 3.2b's review). Any value but a plainly false one (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and other text included: GitHub hands the action what an expression evaluates to, and how actions/checkout reads this input was not read. The workflow's triggers and the value are part of the finding.
 
 **Fix.** Remove `allow-unsafe-pr-checkout` and build pull-request code in a pull_request workflow.
 
@@ -352,7 +352,7 @@ A stage that runs an AI agent also pushes to the repository, starts another job 
 
 **Pipeline code from an unapproved revision** (high). Requirements: G1.2, G3.1, G8.2, R5. Supports: FR9.
 
-**Why it matters.** Code the Jenkinsfile's reviewers never approved runs in the pipeline, and a trusted global library runs outside the Groovy sandbox.
+**Why it matters.** Code the Jenkinsfile's reviewers never approved runs in the pipeline, outside the Groovy sandbox when it comes from a trusted global library.
 
 The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shared library at a version taken from a branch name, parameter or other run-time value (a trusted global library runs outside the Groovy sandbox), or Groovy loaded from the workspace with `load` or evaluated from a file in a stage that change requests reach. For a change request the workspace holds the change's own files. Library trust, version overrides and Replay permission are controller configuration and are reported as unknown.
 
@@ -372,9 +372,9 @@ An input step sets no submitter, so any user with Build permission on the job ca
 
 **Build container or pod can reach the host** (high). Requirements: G3.2, R7. Supports: FR4, FR7.
 
-**Why it matters.** Code in the container can take over the host and every build on it.
+**Why it matters.** Code in the container can reach the host and the other builds on it, and a privileged container or the Docker socket hands it the host.
 
-A docker or Kubernetes agent runs privileged, mounts the Docker socket or host paths, shares the host's network, PID or IPC namespace, or adds powerful capabilities. Code in the container can then take over the host and every build on it. Agents that run change-request code or an AI agent are high; others are medium. Pod templates defined on the controller (inheritFrom) and pod files outside the checkout are reported as unknown.
+A docker or Kubernetes agent runs privileged, mounts the Docker socket or host paths, shares the host's network, PID or IPC namespace, or adds powerful capabilities. Code in the container can then reach the host and other builds on it, and a privileged container or the Docker socket gives it the host. Agents that run change-request code or an AI agent are high; others are medium. Pod templates defined on the controller (inheritFrom) and pod files outside the checkout are reported as unknown.
 
 **Fix.** Remove the privileged settings. Build images with a rootless builder (for example BuildKit rootless or Kaniko) instead of the host's Docker socket, and run untrusted and agent work in pods without host mounts, host namespaces or extra capabilities, enforced by an admission policy.
 
@@ -402,7 +402,7 @@ A container image is referenced by a tag instead of a sha256 digest, a shared li
 
 **Untrusted text interpolated into a command** (high). Requirements: G3.1, G8.1, R1. Supports: FR3.
 
-**Why it matters.** The value becomes part of the command before the shell sees it, so whoever writes it can run commands on the build agent.
+**Why it matters.** The value is built into a command or Groovy code before it runs, or passed to another job, so whoever writes it may be able to run commands there.
 
 A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or concatenation of text that others control: a change request's title, source branch or author name (high), build parameters (medium), or branch and tag names (low), directly or through a variable assigned from them, or commit text read with git log. The value becomes part of the command before the shell runs. Parameters passed to other jobs from such values are reported at medium.
 

@@ -55,10 +55,15 @@ class CatalogueTest(unittest.TestCase):
                              ("Two sentences. Here.", "why must be one sentence"),
                              ("Danger! Anyone can read it.", "why must be one sentence"),
                              ("Is it? Yes.", "why must be one sentence"),
-                             ("One.Two.", "why must be one sentence")):
+                             ("One.Two.", "why must be one sentence"),
+                             # From the second review of slice 3.2b: a second sentence that begins with
+                             # a backtick, a digit or a capital outside ASCII is still a second sentence.
+                             ("Two sentences. `GITHUB_TOKEN` leaks.", "why must be one sentence"),
+                             ("Two. 3 more.", "why must be one sentence"),
+                             ("Two. \u00c9crit ici.", "why must be one sentence")):
             with self.subTest(why=bad[:20]):
                 self.assertIn(f"OBAAF-GHA-008: {problem}", _rules_with({"OBAAF-GHA-008": bad}).problems())
-        for good in ("Pinned to v7.0.1 it cannot move.", "A word, e.g. this one, is fine."):
+        for good in ("Pinned to v7.0.1 it cannot move.", "A word, e.g. this one, is fine.", "Node.JS reads it."):
             with self.subTest(why=good):
                 self.assertFalse([p for p in _rules_with({"OBAAF-GHA-008": good}).problems()
                                   if p.startswith("OBAAF-GHA-008:")])
@@ -161,6 +166,10 @@ class WriteBaselineStatusTest(unittest.TestCase):
                     self.assertEqual(code, gate, err)
                     self.assertIn("not written: medium OBAAF-REPO-001", err)
                     self.assertIn("error:" if code else "warning:", err)
+                    # The line says which file has no owner, here the baseline being written (the second
+                    # review): the finding is on CODEOWNERS line 1, which does not say it.
+                    if codeowners is not None:
+                        self.assertIn("decide what the checks accept: .github/obaaf-baseline.json", err)
 
     def test_a_baseline_the_check_owns_leaves_nothing_out(self):
         owned = OWNED_BUT_THE_BASELINE + "/.github/obaaf-baseline.json @octocat\n"

@@ -428,7 +428,8 @@ class IgnoreEntryTest(unittest.TestCase):
                           "medium", err)
             self.assertIn("not written: low OBAAF-GHA-001 .github/workflows/ci.yml:8 [job test] - the ignore entry "
                           "that names it does not count, because it names no owner", err)
-            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - no ignore or baseline entry can accept", err)
+            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - The repository has no CODEOWNERS file. No ignore "
+                          "or baseline entry can accept", err)
             written = json.loads(out.read_text())["findings"]
             self.assertEqual(len(written), 14)      # nor is "no CODEOWNERS file", which no entry accepts (2d.2h)
             self.assertFalse([e for e in written if e["path"].endswith("ci.yml")])
@@ -642,7 +643,8 @@ class WriteBaselineTest(unittest.TestCase):
             code, _, err = run_cli("check", repo, "--write-baseline", out, "--owner", "@octocat", "--reason",
                                    "The new token is read-only", "--expires", later)
             self.assertEqual(code, 1, err)
-            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - no ignore or baseline entry can accept", err)
+            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - The repository has no CODEOWNERS file. No ignore "
+                          "or baseline entry can accept", err)
             self.assertIn(f"1 finding(s) newly accepted by @octocat until {later}, 14 kept", err)
             entries = json.loads(out.read_text())["findings"]
             self.assertEqual(len(entries), 15)      # "no CODEOWNERS file" is never written (slice 2d.2h)

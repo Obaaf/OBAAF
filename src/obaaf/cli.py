@@ -250,7 +250,11 @@ def cmd_check(args) -> int:
             for f in left_out:
                 where = f" [{f.scope or 'job'} {f.job}]" if f.job else ""
                 problems = "; ".join(f.acceptance.problems) if f.acceptance is not None else ""
-                why_out = ("no ignore or baseline entry can accept this finding: fix it (the report gives the fix)"
+                # A finding no entry can accept is on CODEOWNERS line 1, which does not say which files
+                # have no owner (the baseline being written may be one), so its message is printed too:
+                # with --format json --output, standard error is all the person sees (slice 3.2b's review).
+                why_out = (f"{f.message} No ignore or baseline entry can accept this finding: fix it "
+                           "(the report gives the fix)"
                            if not acceptance_mod.acceptable(f) else
                            "the ignore entry that names it does not count"
                            + (f", because {problems}" if problems else "")

@@ -18,10 +18,14 @@ from obaaf import yamlutil
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
 # The longest a rule's `why` may be: one line of the text report (slice 3.2b).
 WHY_MAX = 160
-# Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then a space or a
-# letter. A full stop between two digits (v7.0.1) or after one lower-case letter of an abbreviation
-# followed by a lower-case word (e.g. this) is not an end.
-_SENTENCE_END = re.compile(r"[!?](?=\s|[A-Za-z])|\.(?=\s+[A-Z]|[A-Z])")
+# Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then white space
+# and anything but a lower-case ASCII letter (a capital in any script, a digit, a backtick, a quote);
+# a question or exclamation mark straight before a letter; or a full stop straight before a capital
+# and a lower-case letter (One.Two). A full stop inside a name or number (Node.JS, v7.0.1) is not an
+# end, and neither is one followed by a lower-case word: an abbreviation such as "e.g. this" passes,
+# and so would a second sentence that begins in lower case, which the catalogue tests catch by
+# refusing ". " anywhere in a `why`.
+_SENTENCE_END = re.compile(r"[.!?](?=\s+[^a-z\s])|[!?](?=[A-Za-z])|\.(?=[A-Z][a-z])")
 
 
 def _read(name: str) -> Any:

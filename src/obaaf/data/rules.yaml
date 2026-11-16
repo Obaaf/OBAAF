@@ -214,8 +214,8 @@ rules:
     agent_controls: [R7]
     supports: [FR4]
     why: >-
-      Other workflows on the same branch or the default branch can write caches, so a release job that restores
-      one can ship a poisoned entry.
+      Caches can be written by other workflows on the same branch or the default branch, so a release job left free
+      to restore one can ship a poisoned entry.
     description: >-
       A release job restores a GitHub Actions cache, directly or through a setup action that caches by
       default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the
@@ -269,8 +269,8 @@ rules:
     agent_controls: [R6]
     supports: [FR10, FR12]
     why: >-
-      A tag or branch can be moved by its publisher, or by anyone who compromises the publisher, so code you did
-      not review could run in the job.
+      Unless the reference is a full digest, whoever can change what it points to (its publisher, or anyone who
+      compromises the publisher) chooses code the job runs.
     description: >-
       A third-party action, reusable workflow or container image is referenced by a tag or branch,
       which its publisher, or anyone who compromises the publisher, can move. Release, effect and agent jobs
@@ -336,7 +336,7 @@ rules:
     supports: [FR3]
     why: >-
       Text such as a title or a branch name is pasted into the script before the shell runs, so whoever writes it
-      can run commands in the job.
+      may be able to run commands in the job.
     description: >-
       A script interpolates text that an outsider controls, such as an issue title, a pull-request title
       or body, a branch name, a commit message, author or file name, a review comment's file path, an
@@ -374,7 +374,7 @@ rules:
     agent_controls: [R7]
     supports: [FR7]
     why: >-
-      Any code or agent that runs later in the job can read the credential from disk and act with it.
+      Any code or agent that runs later in the job may be able to read the credential from disk and act with it.
     description: >-
       In an agent job or a job started by untrusted input, actions/checkout persists the job token for
       later git commands. Any code or agent that runs later in the job can read it. A job counts when it
@@ -398,8 +398,8 @@ rules:
     agent_controls: [R5]
     supports: [FR9]
     why: >-
-      The change under review can rewrite the instructions, rules and MCP configuration the agent obeys while it
-      reviews that change.
+      The change under review can rewrite the instructions, rules and MCP configuration the agent obeys during its
+      run on that change.
     description: >-
       The agent job checks out the pull request's version of the repository, so instruction files, rules
       files and MCP configuration come from the change being reviewed. The change can then rewrite what
@@ -467,8 +467,8 @@ rules:
     requirements: [G6.2]
     supports: [FR6]
     why: >-
-      Without an environment no person has to approve the release, and its credentials are not held back until
-      someone does.
+      Unless an environment is sure to apply, no person has to approve the release, and its credentials are not held
+      back until someone does.
     description: >-
       A release job that uploads or publishes does not reference an environment, so no person has to
       approve it and its credentials are not held back until approval.
@@ -622,10 +622,12 @@ rules:
     requirements: [G3.1, G9.1]
     supports: [FR3]
     why: >-
-      The workflow holds the base repository's token and secrets, and this makes it check out fork code anyway.
+      This lets actions/checkout check out fork code, and in a pull_request_target or workflow_run job that code can
+      use the base repository's token and secrets.
     description: >-
-      actions/checkout is told to check out fork pull-request code in a pull_request_target or
-      workflow_run workflow with `allow-unsafe-pr-checkout: true`. Any value but a plainly false one
+      actions/checkout is allowed to check out fork pull-request code with
+      `allow-unsafe-pr-checkout: true`, which matters in a pull_request_target or workflow_run workflow
+      and is reported whatever the trigger (flagship slice 3.2b's review). Any value but a plainly false one
       (`false`, `0`, `no`, or a constant expression of one) counts, an expression, an empty value and
       other text included: GitHub hands the action what an expression evaluates to, and how
       actions/checkout reads this input was not read. The workflow's triggers and the value are part of
@@ -929,8 +931,8 @@ rules:
     agent_controls: [R5]
     supports: [FR9]
     why: >-
-      Code the Jenkinsfile's reviewers never approved runs in the pipeline, and a trusted global library runs
-      outside the Groovy sandbox.
+      Code the Jenkinsfile's reviewers never approved runs in the pipeline, outside the Groovy sandbox when it comes
+      from a trusted global library.
     description: >-
       The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shared library at a
       version taken from a branch name, parameter or other run-time value (a trusted global library
@@ -974,11 +976,13 @@ rules:
     agent_controls: [R7]
     supports: [FR4, FR7]
     why: >-
-      Code in the container can take over the host and every build on it.
+      Code in the container can reach the host and the other builds on it, and a privileged container or the Docker
+      socket hands it the host.
     description: >-
       A docker or Kubernetes agent runs privileged, mounts the Docker socket or host paths, shares the
       host's network, PID or IPC namespace, or adds powerful capabilities. Code in the container can
-      then take over the host and every build on it. Agents that run change-request code or an AI agent
+      then reach the host and other builds on it, and a privileged container or the Docker socket gives
+      it the host. Agents that run change-request code or an AI agent
       are high; others are medium. Pod templates defined on the controller (inheritFrom) and pod files
       outside the checkout are reported as unknown.
     fix: >-
@@ -1035,8 +1039,8 @@ rules:
     agent_controls: [R1]
     supports: [FR3]
     why: >-
-      The value becomes part of the command before the shell sees it, so whoever writes it can run commands on the
-      build agent.
+      The value is built into a command or Groovy code before it runs, or passed to another job, so whoever writes
+      it may be able to run commands there.
     description: >-
       A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or
       concatenation of text that others control: a change request's title, source branch or author
