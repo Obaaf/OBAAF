@@ -2000,6 +2000,8 @@ A fourth pass (`32b5aa4`) found the same class in one more spelling: `$t` withou
 
 A fifth pass (`fcf053c`) found that the regular expression that found quoted text stopped at a quote inside `${...}` (`${"Bearer ${t ?: "X"}"}`) and that its placeholder read as an argument after a name (`${"""Bearer ${t}"""}`), so two more spellings were silent. Quoted text and `${...}` are now followed together by a small scanner (escapes, triple quotes, nesting to 50 levels, beyond which the text is read as it is), what a double-quoted text interpolates is ended by a `;`, and only text that interpolates nothing reads as an argument. Every spelling the five passes wrote is "unknown"; `"\$" + "{t}"`, single-quoted `'$t'` and the words of quoted text are not names.
 
+A sixth pass (`6671776`) found nothing blocking: every secret spelling it had, and six new ones, gave "unknown"; unterminated quotes and `${`, a backslash at the end, 200 levels of nesting and 20,000 random strings neither crashed nor looped. Its two notes were fixed in `fc0fb21`, which a last check confirmed changes no result: `$name` was matched on a copy of the rest of the text (5 seconds on 800 KB, now 0.13), and the scanner ran once per expansion of a step and is now cached by its text (B097's tree with one long interpolated `sh` took 11 seconds and takes 5.6; it took 8.4 before the slice, and what remains is that older cost).
+
 ### The attempts
 
 | ID | Rule | Case | Source | Before (at `c86e058`, C at `c031eff`) | After (at the slice's head) | Result |
