@@ -511,5 +511,75 @@ class ActionSteps(unittest.TestCase):
         self.assertNotIn('"RUNNER_OS"', source)
 
 
+class OpenSSLVariables(unittest.TestCase):
+    """The action removes OpenSSL's environment variables before libcrypto is initialised (slice 2c.11,
+    issue #195). The action's own steps import hashlib, which initialises libcrypto in the process that
+    holds the model key; OPENSSL_CONF (and, on Ubuntu, a FIPS module from OPENSSL_MODULES) would make it
+    load a module the workflow named. What the removal stops a module from doing is established by the
+    escape tests on a real runner; these tests pin that the removal happens and what it covers."""
+
+    EGRESS = str(ROOT / "actions" / "egress" / "egress.py")
+
+    def _import_with(self, environ):
+        """Import egress.py in a fresh subprocess with ``environ`` added, and read back what it removed
+        and what OPENSSL_ names are left in its environment afterwards."""
+        import json
+        import subprocess
+        import sys
+
+        code = (
+            "import importlib.util, json, os, sys\n"
+            "spec = importlib.util.spec_from_file_location('e', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "print(json.dumps({'removed': m.OPENSSL_VARIABLES_REMOVED, "
+            "'left': sorted(k for k in os.environ if k.strip().upper().startswith('OPENSSL_')), "
+            "'other': os.environ.get('OBAAF_KEEP')}))\n"
+        )
+        env = dict(os.environ)
+        env.update(environ)
+        done = subprocess.run([sys.executable, "-I", "-S", "-c", code, self.EGRESS],
+                              capture_output=True, text=True, env=env, check=True)
+        return json.loads(done.stdout.splitlines()[-1])
+
+    def test_every_openssl_variable_is_removed_and_others_are_kept(self):
+        got = self._import_with({
+            "OPENSSL_CONF": "/tmp/x.cnf",
+            "OPENSSL_MODULES": "/tmp/mods",
+            "OPENSSL_FORCE_FIPS_MODE": "1",
+            "OPENSSL_FIPS_MODE_SWITCH_PATH": "/tmp/switch",
+            "OBAAF_KEEP": "stays",
+        })
+        self.assertEqual(got["left"], [])
+        self.assertEqual(got["other"], "stays")
+        for name in ("OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_FORCE_FIPS_MODE", "OPENSSL_FIPS_MODE_SWITCH_PATH"):
+            self.assertIn(name, got["removed"])
+
+    def test_the_name_is_matched_trimmed_and_uppercased(self):
+        # A superset of what libcrypto reads (it reads the exact upper-case names); no spelling slips
+        # past the removal to be read by a later import.
+        got = self._import_with({"openssl_conf": "/tmp/x", " OPENSSL_ODD ": "/tmp/y"})
+        self.assertIn("openssl_conf", got["removed"])
+        self.assertIn(" OPENSSL_ODD ", got["removed"])
+        self.assertEqual(got["left"], [])
+
+    def test_nothing_is_removed_when_no_openssl_variable_is_set(self):
+        got = self._import_with({"OBAAF_KEEP": "stays"})
+        self.assertEqual([n for n in got["removed"] if n.strip().upper().startswith("OPENSSL_")], got["removed"])
+        self.assertEqual(got["left"], [])
+
+    def test_the_removal_runs_before_the_imports_that_initialise_libcrypto(self):
+        # libcrypto is initialised by the first of these imports; the removal must come before all of
+        # them in the source, or a reorder would silently reopen the hole.
+        source = (ROOT / "actions" / "egress" / "egress.py").read_text()
+        removal = source.index("del os.environ[_openssl_name]")
+        # The real import statements, at the start of a line (the explanatory comment above the removal
+        # names the same modules, so match the statement, not the prose).
+        for later in ("\nimport hashlib\n", "\nimport secrets\n", "\nimport urllib.request\n"):
+            self.assertLess(removal, source.index(later), f"the removal must precede `{later.strip()}`")
+        # And `import os`, which the removal needs, must itself precede it and not pull in libcrypto.
+        self.assertLess(source.index("\nimport os\n"), removal)
+
+
 if __name__ == "__main__":
     unittest.main()

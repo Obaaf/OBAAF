@@ -48,9 +48,35 @@ Only the Python standard library is used.
 
 from __future__ import annotations
 
+import os
+
+# The action's own steps run outside the sandbox and hold the step's env, model
+# keys included (see run()). OpenSSL reads part of its configuration from the
+# environment the first time libcrypto is initialised, which here is when
+# ``import hashlib`` below runs: ``OPENSSL_CONF`` can name a configuration file
+# that loads a provider or engine module, and on Ubuntu libcrypto loads a module
+# from the directory ``OPENSSL_MODULES`` names when ``OPENSSL_FORCE_FIPS_MODE`` is
+# set or ``OPENSSL_FIPS_MODE_SWITCH_PATH`` names a file holding ``1``. A module the
+# workflow chose would then run in this key-holding process. The dynamic loader's
+# own variables (``LD_*`` and the rest of ``LOADER_VARIABLES``) are emptied by each
+# step's env in action.yml, because ``ld.so`` reads them before Python starts;
+# OpenSSL's are read later, from inside Python, so the action removes every
+# ``OPENSSL_`` variable from this process's environment before the first import
+# that initialises libcrypto. This changes only the action's own step process:
+# not the job's other steps, and not the command AWF runs, which is given a clean
+# environment of its own (child_env in run(), and AWF's env-file). ``import os``
+# does not initialise libcrypto; ``import hashlib``, ``import secrets`` and
+# ``import urllib.request`` below do. The name is matched trimmed and upper-cased,
+# a superset of what libcrypto reads, so no spelling slips through. Slice 2c.11,
+# issue #195; see docs/egress-control.md.
+OPENSSL_VARIABLES_REMOVED = sorted(
+    name for name in os.environ if name.strip().upper().startswith("OPENSSL_")
+)
+for _openssl_name in OPENSSL_VARIABLES_REMOVED:
+    del os.environ[_openssl_name]
+
 import hashlib
 import json
-import os
 import re
 import secrets
 import shutil
