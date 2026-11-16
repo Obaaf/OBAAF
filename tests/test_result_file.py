@@ -495,7 +495,7 @@ class WhatTheReviewFoundTest(unittest.TestCase):
 
     def test_digits_of_other_scripts_and_large_numbers_are_refused(self):
         for bad in ({"tool": "obaaf \u0661.\u0662.\u0663"}, {"date": "\u0662\u0660\u0662\u0666-11-16"},
-                    {"python": "3.\u0669"}, {"check": {"exit": int.from_bytes(b"ghp_token")}},
+                    {"python": "3.\u0669"}, {"check": {"exit": int.from_bytes(b"ghp_token", "big")}},
                     {"check": {"seconds": 1e12}}, {"check": {"notes": -10**7}}):
             with self.subTest(bad=bad):
                 with self.assertRaises(result_mod.NotSendable):
@@ -508,7 +508,7 @@ class WhatTheReviewFoundTest(unittest.TestCase):
             run_cli("audit", ROOT, "--from-snapshot", ROOT / ".github" / "obaaf-settings.json",
                     "--format", "json", "--output", audit)
             doc = json.loads(audit.read_text(encoding="utf-8"))
-            doc["summary"]["findings"] = int.from_bytes(TOKEN_LIKE.encode())
+            doc["summary"]["findings"] = int.from_bytes(TOKEN_LIKE.encode(), "big")
             audit.write_text(json.dumps(doc), encoding="utf-8")
             repo = marked_repository(tmp)
             out = tmp / "result.json"
@@ -562,20 +562,90 @@ class WhatTheReviewFoundTest(unittest.TestCase):
 
     def test_a_failed_run_leaves_no_earlier_result_behind(self):
         with TempDir() as tmp:
+            repo = marked_repository(tmp)
+            (repo / ".github" / "obaaf.yml").write_text("lanes: [not, a, mapping\n", encoding="utf-8")
             out = tmp / "result.json"
             out.write_text('{"format": "obaaf-result/v0.1", "an": "earlier run"}', encoding="utf-8")
-            code, _, err = run_result(tmp / "missing", "--output", out)
+            code, _, err = run_result(repo, "--output", out)
             self.assertEqual(code, 2, err)
             self.assertFalse(out.exists())
 
-    def test_the_output_may_not_be_a_file_given_to_read(self):
+    def test_a_mistake_in_the_command_removes_nothing_and_says_the_old_file_is_not_this_runs(self):
+        with TempDir() as tmp:
+            out = tmp / "result.json"
+            out.write_text('{"format": "obaaf-result/v0.1", "an": "earlier run"}', encoding="utf-8")
+            for args in ((tmp / "missing",), (tmp, "--fail-on", "sometimes")):
+                with self.subTest(args=args):
+                    code, _, err = run_result(*args, "--output", out)
+                    self.assertEqual(code, 2, err)
+                    self.assertTrue(out.exists())
+                    self.assertIn("not this run's result, so do not send it", err)
+
+    def test_the_output_may_not_be_a_file_given_to_read_or_inside_what_is_checked(self):
         with TempDir() as tmp:
             repo = marked_repository(tmp)
             config = repo / ".github" / "obaaf.yml"
-            before = config.read_bytes()
-            code, _, err = run_result(repo, "--config", config, "--output", config)
+            workflow = repo / ".github" / "workflows" / f"{MARK}-agent.yml"
+            audit = tmp / "audit.json"
+            audit.write_text("{}", encoding="utf-8")
+            files = {p: p.read_bytes() for p in (config, workflow, audit)}
+            for args in ((repo, "--config", config, "--output", config), (repo, "--output", config),
+                         (workflow, "--output", workflow), (repo, "--output", repo / "result.json"),
+                         (repo, "--audit", audit, "--output", audit)):
+                with self.subTest(args=[str(a).replace(str(tmp), "") for a in args]):
+                    code, _, err = run_result(*args)
+                    self.assertEqual(code, 2, err)
+                    for path, before in files.items():
+                        self.assertEqual(path.read_bytes(), before)
+                    self.assertFalse((repo / "result.json").exists())
+
+    def test_an_option_the_check_refuses_removes_nothing(self):
+        with TempDir() as tmp:
+            keep = tmp / "keep.txt"
+            keep.write_text("mine", encoding="utf-8")
+            code, _, err = run_result(marked_repository(tmp), "--fail-on", "sometimes", "--output", keep)
             self.assertEqual(code, 2, err)
-            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(keep.read_text(encoding="utf-8"), "mine")
+
+    def test_a_device_or_a_pipe_given_as_the_output_is_written_to_and_not_removed(self):
+        import os
+        with TempDir() as tmp:
+            repo = tmp / "repo"
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text(
+                "on: push\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: make\n", encoding="utf-8")
+            if not hasattr(os, "mkfifo") or not os.path.exists(os.devnull) or os.devnull != "/dev/null":
+                self.skipTest("no /dev/null or named pipes here")
+            code, _, err = run_result(repo, "--output", os.devnull)
+            self.assertEqual(code, 0, err)
+            self.assertFalse(Path(os.devnull).is_file())
+            fifo = tmp / "fifo"
+            os.mkfifo(fifo)
+            import threading
+            got = []
+            reader = threading.Thread(target=lambda: got.append(fifo.read_bytes()))
+            reader.start()
+            code, _, err = run_result(repo, "--output", fifo)
+            reader.join(timeout=60)
+            self.assertEqual(code, 0, err)
+            self.assertTrue(fifo.is_fifo())
+            self.assertEqual(json.loads(got[0])["format"], "obaaf-result/v0.1")
+
+    def test_an_audit_rule_listed_many_times_gives_one_row(self):
+        with TempDir() as tmp:
+            audit = tmp / "audit.json"
+            run_cli("audit", ROOT, "--from-snapshot", ROOT / ".github" / "obaaf-settings.json",
+                    "--format", "json", "--output", audit)
+            doc = json.loads(audit.read_text(encoding="utf-8"))
+            first = dict(doc["rules"][0], findings=3)
+            doc["rules"] = doc["rules"] + [first] * 40 + [dict(first, id="OBAAF-SET-999")] * 40
+            data = result_mod.summarize_audit(doc, result_mod._rule_ids())
+            self.assertEqual(len(data["rules"]), 16)
+            row = next(r for r in data["rules"] if r["rule"] == first["id"])
+            self.assertEqual(row["findings"], doc["rules"][0]["findings"] + 120)
+            other = next(r for r in data["rules"] if r["rule"] == "other")
+            self.assertEqual(other["findings"], 120)
 
     def test_every_count_is_the_reports_counted_independently(self):
         with TempDir() as tmp:

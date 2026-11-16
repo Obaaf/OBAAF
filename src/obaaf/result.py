@@ -33,6 +33,7 @@ import argparse
 import json
 import platform as platform_mod
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -244,12 +245,21 @@ def summarize_audit(doc: dict, rule_ids: frozenset) -> dict:
     viewer = _dict(snapshot.get("viewer"))
     roles = _dict(viewer.get("repository_permissions"))
     repository = _dict(_dict(settings.get("repository")).get("value"))
-    rules = []
+    # One row for each rule id, so the number of rows is bounded by the vocabulary however long the
+    # report's list is (second review of slice 3.8). A rule listed twice is added up, and its status is
+    # `other` unless both say the same.
+    by_rule: dict = {}
     for r in _list(doc.get("rules")):
         r = _dict(r)
-        rules.append({"rule": _rule(r.get("id"), rule_ids), "status": _word(r.get("status"), AUDIT_RULE_STATUSES),
-                      "findings": _count(r.get("findings")), "cannotTell": _count(r.get("cannot_tell")),
-                      "failed": r.get("failed") is True})
+        rule, status = _rule(r.get("id"), rule_ids), _word(r.get("status"), AUDIT_RULE_STATUSES)
+        row = by_rule.setdefault(rule, {"rule": rule, "status": status, "findings": 0, "cannotTell": 0,
+                                        "failed": False})
+        if row["status"] != status:
+            row["status"] = OTHER
+        row["findings"] += _count(r.get("findings"))
+        row["cannotTell"] += _count(r.get("cannot_tell"))
+        row["failed"] = row["failed"] or r.get("failed") is True
+    rules = list(by_rule.values())
     results = Counter((_rule(_dict(r).get("rule"), rule_ids), _word(_dict(r).get("state"), AUDIT_STATES),
                        _word(_dict(r).get("severity"), SEVERITIES) if _dict(r).get("severity") is not None else None)
                       for r in _list(doc.get("results")))
@@ -354,11 +364,33 @@ def main(argv: list[str] | None = None) -> int:
     if output.is_dir():
         print(f"error: --output {args.output} is a directory; name a file", file=sys.stderr)
         return EXIT_USAGE
+    target = Path(args.path)
+    # Mistakes in what was typed are refused before anything is removed. A file already at --output is
+    # then left as it is, and the message says it is not this run's.
+    left = (f" {args.output} was left as it was: it is not this run's result, so do not send it."
+            if output.is_file() else "")
+    if not target.exists():
+        print(f"error: {args.path} not found, so no result file was written.{left}", file=sys.stderr)
+        return EXIT_USAGE
+    from obaaf.checker import parse_fail_on
+    try:
+        parse_fail_on(args.fail_on)
+    except ValueError as exc:
+        print(f"error: {exc}, so no result file was written.{left}", file=sys.stderr)
+        return EXIT_USAGE
+    # The result is written outside what is checked, so that writing it (or removing an earlier one)
+    # can never change a workflow, the configuration or a baseline the check reads (second review).
+    checked = (target if target.is_dir() else target.parent).resolve()
+    where = output.resolve().parent
+    if where == checked or checked in where.parents:
+        print(f"error: --output {args.output} is inside {args.path}, which is being checked; write the result "
+              f"outside it (the page uses ~/obaaf-try).{left}", file=sys.stderr)
+        return EXIT_USAGE
     for name in ("audit", "config", "baseline"):
         given = getattr(args, name)
         if given and output.exists() and Path(given).exists() and output.samefile(given):
-            print(f"error: --output names the file given with --{name}; write the result somewhere else",
-                  file=sys.stderr)
+            print(f"error: --output names the file given with --{name}; write the result somewhere else. "
+                  f"{args.output} was left as it was.", file=sys.stderr)
             return EXIT_USAGE
     if args.audit:
         try:
@@ -368,10 +400,14 @@ def main(argv: list[str] | None = None) -> int:
             reason = "nested too deeply to read" if isinstance(exc, RecursionError) else exc
             print(f"error: --audit {args.audit}: {reason}", file=sys.stderr)
             return EXIT_USAGE
-    # The file is replaced on success; on failure none is left, so a file from an earlier run cannot be
-    # read and sent as if it were this one's (review of slice 3.8).
+    # A regular file there is replaced on success; on failure none is left, so a file from an earlier
+    # run cannot be read and sent as if it were this one's (review of slice 3.8). Anything else (a
+    # device such as /dev/null, a pipe) is only written to, never removed (second review).
     try:
-        output.unlink(missing_ok=True)
+        if stat.S_ISREG(output.lstat().st_mode):
+            output.unlink()
+    except FileNotFoundError:
+        pass
     except OSError as exc:
         print(f"error: cannot replace {args.output}: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -398,7 +434,6 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
     check = summarize_check(doc, rule_ids)
 
-    target = Path(args.path)
     base = target.parent if target.is_file() else target
     if target.is_dir():
         from obaaf.checker import workflow as wf_mod
@@ -437,8 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         check_sendable(result)
     except NotSendable as exc:
-        print(f"error: {exc}, so the result file was not written. This is a fault in OBAAF; please say so in "
-              "your reply instead of sending the file.", file=sys.stderr)
+        print(f"error: {exc}, so the result file was not written. Reports OBAAF wrote and nobody changed never "
+              "cause this; if yours were not changed, it is a fault in OBAAF: please say so in your reply instead "
+              "of sending a file.", file=sys.stderr)
         return EXIT_USAGE
     text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
     try:
