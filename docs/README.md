@@ -2,6 +2,7 @@
 
 | Document | For | What it covers |
 | --- | --- | --- |
+| [Try OBAAF and send us the result](send-us-the-result.md) | People asked to try OBAAF | Install a pinned development version, check a repository of yours, and send back a file of counts with no file, job, secret or other text from the repository, with two short templates for the reply |
 | [Adoption guide](adoption-guide.md) | Studios | Tier by tier, what to do and which template or guide helps |
 | [Guides F1–F9](guides/) | Studios | How to fix each self-assessment item, by control family |
 | [From a report to a gate](from-report-to-gate.md) | Build engineers | Moving `obaaf check` from something you read to something that fails a build, step by step, with the exit status of each step |
@@ -22,7 +23,7 @@
 | [Glossary](glossary.md) | Everyone | Plain-language meanings of the terms used here |
 | [Landscape](landscape.md) | Everyone | Other tools that check GitHub Actions and repository settings, what each found on the same repositories, dated and sourced |
 | [Flagship plan](flagship.md) | Maintainers | The plan and progress of the work to make the core hold up in real use |
-| [Egress control: design](egress-control.md) | Maintainers, security engineers | The design of the action that limits an agent command's network access: what it wraps, what it adds, what it will not stop, and the escape tests it has to pass. Not built yet |
+| [Egress control](egress-control.md) | Maintainers, security engineers | The action that limits an agent command's network access (`actions/egress`): what it wraps, what it adds, what it will not stop, and the escape tests it is put through on GitHub-hosted runners |
 
 The specifications themselves are in [`spec/`](../spec/), generated from the data in [`src/obaaf/data/`](../src/obaaf/data/).
 

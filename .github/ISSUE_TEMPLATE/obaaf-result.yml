@@ -1,0 +1,46 @@
+name: OBAAF result
+description: The result file from trying OBAAF on a repository of yours (docs/send-us-the-result.md). This issue is public.
+title: "OBAAF result"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying OBAAF. This issue is public and shows your GitHub account. Paste the file `python -m obaaf.result` wrote (it holds counts only; read it first), and answer what you can. Please put no code, secret or name you would rather keep in any field.
+  - type: textarea
+    id: result
+    attributes:
+      label: The result file
+      description: The contents of obaaf-result.json.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: minutes
+    attributes:
+      label: How long did it take, from the first command to reading the report?
+      placeholder: About 10 minutes
+  - type: textarea
+    id: stuck
+    attributes:
+      label: Where did you get stuck, or what was unclear?
+  - type: textarea
+    id: wrong
+    attributes:
+      label: Which findings do you think are wrong, and why?
+      description: The rule id and a sentence for each. No code.
+  - type: input
+    id: agents
+    attributes:
+      label: How many of your jobs run an AI agent, as far as you know?
+  - type: dropdown
+    id: mention
+    attributes:
+      label: May we mention this result?
+      options:
+        - "No"
+        - Yes, without naming me or my organisation
+        - Yes, and you may name the organisation given below
+  - type: input
+    id: name
+    attributes:
+      label: The name we may use, if any

@@ -394,3 +394,100 @@ class WhatTheFileCountsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PAGE = ROOT / "docs" / "send-us-the-result.md"
+FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
+
+
+def page_blocks() -> list[str]:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("page_blocks", ROOT / "scripts" / "page_blocks.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.blocks(PAGE.read_text(encoding="utf-8"))
+
+
+class ThePageTest(unittest.TestCase):
+    def test_its_blocks_are_the_steps_ci_runs_in_order(self):
+        blocks = page_blocks()
+        # .github/workflows/ci.yml runs block 1, then 2 to 5, then 6, by number.
+        self.assertEqual(len(blocks), 6)
+        self.assertIn("pip install --quiet --require-hashes --only-binary=:all:", blocks[0])
+        self.assertIn("obaaf check .", blocks[1])
+        self.assertIn("obaaf audit . --format json --output", blocks[2])
+        self.assertTrue(blocks[3].startswith("python -m obaaf.result . --audit "))
+        self.assertTrue(blocks[4].startswith("cat "))
+        self.assertIn('rm -rf "$HOME/obaaf-try"', blocks[5])
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn('page_blocks.py "$PAGE" --count)" = 6', workflow)
+        self.assertIn("PAGE: docs/send-us-the-result.md", workflow)
+
+    def test_every_command_on_the_page_is_one_the_tools_accept(self):
+        from obaaf import cli
+        found = 0
+        for block in page_blocks():
+            for line in block.replace("\\\n", " ").splitlines():
+                line = line.strip()
+                if line.startswith("obaaf "):
+                    parser, words = cli.build_parser(), shlex.split(line)[1:]
+                elif line.startswith("python -m obaaf.result"):
+                    parser, words = result_mod.build_parser(), shlex.split(line)[3:]
+                else:
+                    continue
+                found += 1
+                with self.subTest(line=line):
+                    try:
+                        parser.parse_args(words)
+                    except SystemExit as exc:
+                        self.fail(f"`{line}` is not a command the tool accepts ({exc.code})")
+        self.assertEqual(found, 4)
+
+    def test_the_pinned_commit_holds_this_result_module(self):
+        import os
+        text = PAGE.read_text(encoding="utf-8")
+        pins = set(re.findall(r"\b[0-9a-f]{40}\b", text))
+        self.assertEqual(len(pins), 1, pins)
+        pin = pins.pop()
+        self.assertIn(f"checkout --quiet --detach {pin}", page_blocks()[0])
+        try:
+            done = subprocess.run(["git", "-C", str(ROOT), "show", f"{pin}:src/obaaf/result.py"],
+                                  capture_output=True, timeout=60)
+        except OSError as exc:
+            done = None
+            why = str(exc)
+        if done is None or done.returncode != 0:
+            why = why if done is None else done.stderr.decode(errors="replace").strip()
+            if os.environ.get("CI"):
+                self.fail(f"the commit the page pins is not in this clone ({why}); CI fetches the full history")
+            self.skipTest(f"the commit the page pins is not in this clone's history ({why})")
+        here = (ROOT / "src" / "obaaf" / "result.py").read_bytes()
+        self.assertEqual(done.stdout, here, "the page pins a commit whose result module differs from this one; "
+                                            "pin the commit that last changed src/obaaf/result.py")
+
+    def test_the_page_says_what_the_file_holds_as_the_code_does(self):
+        text = " ".join(PAGE.read_text(encoding="utf-8").split())
+        for words in ("Nothing leaves your machine unless you send it", "status 0 when the file is written and 2 "
+                      "when it is not", "counted as `other`", "tests/test_result_file.py", "development version",
+                      "not a release", "--no-token", "--repo OWNER/REPO"):
+            self.assertIn(words, text)
+        self.assertIn("docs/send-us-the-result.md", result_mod.ABOUT)
+
+    def test_the_issue_forms_are_forms_and_the_page_links_them(self):
+        import yaml
+        text = PAGE.read_text(encoding="utf-8")
+        for name in ("obaaf-result.yml", "finding-changed-what-we-shipped.yml"):
+            with self.subTest(form=name):
+                form = yaml.safe_load((FORMS / name).read_text(encoding="utf-8"))
+                self.assertTrue(form["name"] and form["description"])
+                self.assertIn("public", form["description"])
+                ids = [item["id"] for item in form["body"] if "id" in item]
+                self.assertEqual(len(ids), len(set(ids)))
+                for item in form["body"]:
+                    self.assertIn(item["type"], ("markdown", "textarea", "input", "dropdown", "checkboxes"))
+                    self.assertTrue(item["attributes"].get("label") or item["type"] == "markdown")
+                self.assertIn(f"issues/new?template={name}", text)
+
+    def test_the_docs_index_lists_the_page(self):
+        index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+        self.assertIn("(send-us-the-result.md)", index)

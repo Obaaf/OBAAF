@@ -182,3 +182,63 @@ jobs:
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -ignore 'cache-mode' .github/workflows/*.yml templates/github-actions/workflows/*.yml
+
+  send-us-the-result:
+    # docs/send-us-the-result.md is what people asked to try OBAAF run on their own machines. This runs
+    # its bash blocks as written, with the runner's own python3 as theirs would be, on a checkout of this
+    # repository: the install from the pinned commit (which needs github.com and PyPI), the check, the
+    # audit with no token, and the result file; then it checks the file holds counts only.
+    name: The send-us-the-result page, as written (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    # Advisory: it depends on github.com and PyPI, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    env:
+      PAGE: docs/send-us-the-result.md
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Step 1, install
+        run: |
+          test "$(python3 scripts/page_blocks.py "$PAGE" --count)" = 6
+          python3 --version
+          python3 scripts/page_blocks.py "$PAGE" 1 > "$RUNNER_TEMP/install.sh"
+          time bash "$RUNNER_TEMP/install.sh"
+
+      - name: Steps 2 to 5, with no token, in this checkout
+        run: |
+          for n in 2 3 4 5; do python3 scripts/page_blocks.py "$PAGE" "$n"; done > "$RUNNER_TEMP/run.sh"
+          cat "$RUNNER_TEMP/run.sh"
+          time bash "$RUNNER_TEMP/run.sh"
+
+      - name: The result file holds counts only
+        run: |
+          "$HOME/obaaf-try/venv/bin/python" - <<'PY'
+          import json, os
+          from obaaf.result import FORMAT, check_sendable
+          path = os.path.expanduser("~/obaaf-try/obaaf-result.json")
+          text = open(path, encoding="ascii").read()
+          data = json.loads(text)
+          check_sendable(data)
+          assert data["format"] == FORMAT, data["format"]
+          assert data["check"]["exit"] == 0, data["check"]["exit"]
+          assert data["check"]["files"]["checked"] >= 7, data["check"]["files"]
+          assert data["audit"] is not None and data["audit"]["token"]["used"] is False, data["audit"]
+          for word in ("Obaaf", "obaaf.yml", ".github", "@", "runner"):
+              assert word not in text, word
+          print(f"{path}: {len(text)} bytes, check {data['check']['seconds']} s, exit {data['check']['exit']}")
+          PY
+
+      - name: Step 8, clean up
+        run: |
+          python3 scripts/page_blocks.py "$PAGE" 6 > "$RUNNER_TEMP/clean.sh"
+          bash -c '. "$HOME/obaaf-try/venv/bin/activate" && . "$RUNNER_TEMP/clean.sh"'
+          test ! -e "$HOME/obaaf-try"
