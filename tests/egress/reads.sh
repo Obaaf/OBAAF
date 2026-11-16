@@ -48,6 +48,8 @@ done
 # The places the model-keys search covers. /proc and /sys are left out: the
 # command's own environment holds READ_MARK.
 places=(/home /tmp /run /var /etc)
+searched=$(timeout 120 find "${places[@]}" -path /proc -prune -o -path /sys -prune -o -type f -readable -print 2>/dev/null | wc -l)
+note "FILES_SEARCHED $searched"
 timeout 120 grep -rIlF --exclude-dir=proc --exclude-dir=sys -e "$READ_MARK" "${places[@]}" \
   > "${TMPDIR:-/tmp}/obaaf-read-hits.txt" 2>/dev/null
 note "GREP_STATUS $?"

@@ -415,7 +415,8 @@ class ActionSteps(unittest.TestCase):
         import yaml
 
         self.action = yaml.safe_load((ROOT / "actions" / "egress" / "action.yml").read_text())
-        self.steps = self.action["runs"]["steps"]
+        self.steps = self.action["runs"]["steps"][:3]
+        self.guard = self.action["runs"]["steps"][3:]
 
     def test_three_steps_each_only_running_egress_py(self):
         self.assertEqual(len(self.steps), len(self.STEPS))
@@ -445,11 +446,36 @@ class ActionSteps(unittest.TestCase):
 
     def test_the_loader_variables_are_the_ones_ubuntu_24_04s_loader_removes_for_setuid_programs(self):
         # Read from glibc 2.39's ld.so on 2026-11-16; the escape tests compare them with the runner's loader.
-        self.assertEqual(len(egress.LOADER_VARIABLES), 34)
-        self.assertEqual(len(set(egress.LOADER_VARIABLES)), 34)
+        both = set(egress.LOADER_VARIABLES) | set(egress.LOADER_PRESENCE_VARIABLES)
+        self.assertEqual(len(egress.LOADER_VARIABLES), 32)
+        self.assertEqual(len(both), 34)
         for name in ("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "GCONV_PATH", "LOCPATH", "TMPDIR"):
             self.assertIn(name, egress.LOADER_VARIABLES)
         self.assertEqual(list(egress.LOADER_VARIABLES), sorted(egress.LOADER_VARIABLES))
+
+    def test_variables_the_loader_obeys_when_present_are_not_emptied(self):
+        # An empty LD_SHOW_AUXV prints the auxiliary vector (the 2c.9 review saw it in every step).
+        for step in self.steps:
+            for name in egress.LOADER_PRESENCE_VARIABLES + ("LD_TRACE_LOADED_OBJECTS",):
+                self.assertNotIn(name, step["env"])
+        self.assertEqual(egress.inherited_hooks({"LD_SHOW_AUXV": "1", "LD_DYNAMIC_WEAK": "1"}), [])
+
+    def test_the_last_step_fails_without_starting_a_program_when_the_run_step_reported_nothing(self):
+        # LD_TRACE_LOADED_OBJECTS, present with any value, stops every program the loader starts and
+        # ends it with status 0, so the three steps above could all succeed without running. The guard's
+        # shell does not exist: the runner fails the step without starting anything.
+        self.assertEqual(len(self.guard), 1)
+        guard = self.guard[0]
+        self.assertEqual(guard["if"], "success() && steps.run.outputs.confined != 'true'")
+        shell = guard["shell"].split()[0]
+        self.assertTrue(shell.startswith("/obaaf-egress/"))
+        self.assertFalse(Path(shell).exists())
+        self.assertNotIn("env", guard)
+        self.assertEqual(self.steps[2]["id"], "run")
+        # egress.py sets confined=true only right before it ends with the command's own status.
+        source = (ROOT / "actions" / "egress" / "egress.py").read_text()
+        self.assertEqual(source.count('_set_output(environ, "confined", "true")'), 1)
+        self.assertIn('    _set_output(environ, "confined", "true")\n    return status\n', source)
 
     def test_a_loader_variable_with_a_value_is_reported(self):
         self.assertEqual(egress.inherited_hooks({"LD_PRELOAD": "", "TMPDIR": ""}), [])

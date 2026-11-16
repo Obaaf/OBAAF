@@ -102,7 +102,10 @@ runs:
   # site directories (-S), and it only runs egress.py. Each step's env empties
   # the variables that make the dynamic loader load other code (the list is
   # LOADER_VARIABLES in egress.py, which refuses to go on if one still has a
-  # value). Slice 2c.9, issues #139 and #145; see docs/egress-control.md.
+  # value). The last step fails the action if the run step ended 0 without
+  # reporting that the sandbox held, which is what a variable the loader obeys
+  # whatever its value (LD_TRACE_LOADED_OBJECTS) does to every step. Slice 2c.9,
+  # issues #139 and #145; see docs/egress-control.md.
   steps:
     - name: Check the inputs and the runner
       shell: /usr/bin/python3 -I -S {0}
@@ -120,13 +123,11 @@ runs:
         LD_BIND_NOW: ""
         LD_DEBUG: ""
         LD_DEBUG_OUTPUT: ""
-        LD_DYNAMIC_WEAK: ""
         LD_HWCAP_MASK: ""
         LD_LIBRARY_PATH: ""
         LD_ORIGIN_PATH: ""
         LD_PRELOAD: ""
         LD_PROFILE: ""
-        LD_SHOW_AUXV: ""
         LD_VERBOSE: ""
         LD_WARN: ""
         LOCALDOMAIN: ""
@@ -163,13 +164,11 @@ runs:
         LD_BIND_NOW: ""
         LD_DEBUG: ""
         LD_DEBUG_OUTPUT: ""
-        LD_DYNAMIC_WEAK: ""
         LD_HWCAP_MASK: ""
         LD_LIBRARY_PATH: ""
         LD_ORIGIN_PATH: ""
         LD_PRELOAD: ""
         LD_PROFILE: ""
-        LD_SHOW_AUXV: ""
         LD_VERBOSE: ""
         LD_WARN: ""
         LOCALDOMAIN: ""
@@ -211,13 +210,11 @@ runs:
         LD_BIND_NOW: ""
         LD_DEBUG: ""
         LD_DEBUG_OUTPUT: ""
-        LD_DYNAMIC_WEAK: ""
         LD_HWCAP_MASK: ""
         LD_LIBRARY_PATH: ""
         LD_ORIGIN_PATH: ""
         LD_PRELOAD: ""
         LD_PROFILE: ""
-        LD_SHOW_AUXV: ""
         LD_VERBOSE: ""
         LD_WARN: ""
         LOCALDOMAIN: ""
@@ -240,3 +237,14 @@ runs:
         import os, runpy, sys
         sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "run"]
         runpy.run_path(sys.argv[0], run_name="__main__")
+
+    # A step that fails without starting a program: its shell does not exist,
+    # so the runner fails it (a program the loader starts could be stopped
+    # before it runs and end 0, as every step above can). It runs only when
+    # the run step ended 0 without setting confined to true, which egress.py
+    # never does: it sets confined=true on the one path that ends with the
+    # command's own status, and every other path ends 2 or 3.
+    - name: Stop if the run step ended 0 without reporting that the sandbox held
+      if: success() && steps.run.outputs.confined != 'true'
+      shell: /obaaf-egress/the-run-step-ended-0-without-reporting-that-the-sandbox-held {0}
+      run: The run step ended 0 without setting confined to true, so egress.py did not finish; see docs/egress-control.md.

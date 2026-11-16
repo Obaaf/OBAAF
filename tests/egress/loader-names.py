@@ -5,7 +5,8 @@
 The loader keeps, as one run of NUL-separated names, the variables it removes
 from the environment of a setuid program (glibc's UNSECURE_ENVVARS). The
 action empties each of them in its steps' env. This prints the runner's list
-and exits 1 if it has a name the action does not empty, or if no such list is
+and exits 1 if it has a name the action neither empties nor names as one the
+loader obeys when present (LOADER_PRESENCE_VARIABLES), or if no such list is
 found.
 """
 import importlib.util
@@ -28,11 +29,13 @@ if found is None:
     print("loader-names: no list of unsecure variables found in the loader")
     sys.exit(1)
 print(f"loader-names: the runner's loader removes {len(found)} variables for setuid programs: {' '.join(found)}")
-missing = sorted(set(found) - set(egress.LOADER_VARIABLES))
-extra = sorted(set(egress.LOADER_VARIABLES) - set(found))
+placed = set(egress.LOADER_VARIABLES) | set(egress.LOADER_PRESENCE_VARIABLES)
+missing = sorted(set(found) - placed)
+extra = sorted(placed - set(found))
 if extra:
-    print(f"loader-names: the action also empties {' '.join(extra)}")
+    print(f"loader-names: the action also names {' '.join(extra)}")
 if missing:
-    print(f"loader-names: the action does not empty {' '.join(missing)}")
+    print(f"loader-names: the action neither empties nor names {' '.join(missing)}")
     sys.exit(1)
-print("loader-names: the action empties every one")
+print(f"loader-names: the action empties {len(egress.LOADER_VARIABLES)} of them and leaves "
+      f"{' and '.join(egress.LOADER_PRESENCE_VARIABLES)}, which the loader obeys when present whatever their value")
