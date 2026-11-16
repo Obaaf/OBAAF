@@ -176,8 +176,10 @@ def cmd_check(args) -> int:
               "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
-    # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h).
-    gate_files = [Path(p) for p in (args.baseline, args.config) if p]
+    # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
+    # baseline being written: the gate will read it with --baseline, and --write-baseline ends as that
+    # gate would (slice 3.2b).
+    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     # What a command the report suggests has to repeat to check the same thing.
@@ -228,12 +230,39 @@ def cmd_check(args) -> int:
         print(f"Baseline written to {args.write_baseline}: {len(fresh)} finding(s) newly accepted"
               + (f" by {made.owner} until {made.expires}" if fresh else "")
               + f", {len(kept)} kept with the owner, reason and expiry date they had.", file=sys.stderr)
+        # What the baseline could not take (slice 3.2b): a finding named by an ignore entry that does not
+        # count (the decision about it was made there, so it is renewed, completed or removed there), and
+        # a finding no entry can accept. A check with this baseline counts each of them, so the command
+        # ends as that check would: 1 when one is at or above --fail-on, as for any finding.
         written = {id(f) for f in findings}
-        waiting = [f for f in result.findings
-                   if not f.suppressed and id(f) not in written and baseline_mod.waiting_on_ignore(f)]
-        if waiting:
-            print(f"warning: {len(waiting)} finding(s) whose ignore entry has expired or does not count were "
-                  "not written to the baseline; renew, complete or remove those ignore entries.", file=sys.stderr)
+        left_out = [f for f in result.active() if id(f) not in written]
+        if left_out:
+            from obaaf.checker.workflow import one_line
+            failing = result.gating(args.fail_on, load(), left_out)
+            if failing:
+                print(f"error: {len(left_out)} finding(s) were not written to the baseline, {len(failing)} of them "
+                      f"at or above --fail-on {args.fail_on}, so a check with this baseline and the same --fail-on "
+                      "fails on them. The baseline was written without them.", file=sys.stderr)
+            else:
+                print(f"warning: {len(left_out)} finding(s) were not written to the baseline. None of them is one "
+                      f"--fail-on {args.fail_on} fails on, so a check with this baseline and the same --fail-on "
+                      "passes; with another --fail-on it may fail on them.", file=sys.stderr)
+            for f in left_out:
+                where = f" [{f.scope or 'job'} {f.job}]" if f.job else ""
+                problems = "; ".join(f.acceptance.problems) if f.acceptance is not None else ""
+                # A finding no entry can accept is on CODEOWNERS line 1, which does not say which files
+                # have no owner (the baseline being written may be one), so its message is printed too:
+                # with --format json --output, standard error is all the person sees (slice 3.2b's review).
+                why_out = (f"{f.message} No ignore or baseline entry can accept this finding: fix it "
+                           "(the report gives the fix)"
+                           if not acceptance_mod.acceptable(f) else
+                           "the ignore entry that names it does not count"
+                           + (f", because {problems}" if problems else "")
+                           + ": renew, complete or remove it in the configuration")
+                print(one_line(f"  not written: {f.severity} {f.rule} {f.path}:{f.line}{where} - {why_out}"),
+                      file=sys.stderr)
+            if failing:
+                return EXIT_FAIL
         return EXIT_OK
     if result.errors:
         return EXIT_FAIL
@@ -767,7 +796,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
-    x.add_argument("--no-fixes", action="store_true", help="omit fix text in text output")
+    x.add_argument("--no-fixes", action="store_true",
+                   help="omit each finding's why and fix lines in text output")
     x.add_argument("--baseline", metavar="FILE",
                    help="findings that a valid entry of this baseline accepts (owner, reason, expiry date not "
                         "passed) are reported but do not fail the check; any other finding does, and so does an "
@@ -777,8 +807,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write the baseline to FILE. Entries of FILE that are still valid keep their owner, "
                         "reason and expiry date; every other finding is newly accepted with --owner, --reason and "
                         "--expires, and without them nothing is written (exit 2). Findings ignored by "
-                        "configuration are left out, and a finding named by an ignore entry that has expired or "
-                        "does not count is not newly accepted")
+                        "configuration are left out. A finding named by an ignore entry that has expired or does "
+                        "not count, and one no entry can accept, are not written and are listed; the exit status "
+                        "is 1 when one of them is at or above --fail-on, as for the check that reads FILE")
     x.add_argument("--expiry-warning", metavar="DAYS", type=int, default=30,
                    help="list the acceptances that expire within DAYS days as expiring soon (default: 30; 0 turns "
                         "the list off). It never changes the exit status")

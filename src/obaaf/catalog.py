@@ -16,6 +16,17 @@ from typing import Any
 from obaaf import yamlutil
 
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
+# The longest a rule's `why` may be: one line of the text report (slice 3.2b).
+WHY_MAX = 160
+# Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then white space
+# and anything but a lower-case ASCII letter (a capital in any script, a digit, a backtick, a quote);
+# a question or exclamation mark straight before an ASCII letter; or a full stop straight before an
+# ASCII capital and a lower-case letter (One.Two). A full stop inside a name or number (Node.JS,
+# v7.0.1) is not an end, and neither is one followed by a lower-case word: an abbreviation such as
+# "e.g. this" passes, and so would a second sentence that begins in lower case, which the catalogue
+# tests catch by refusing ". " anywhere in a `why`. Not caught either: a full stop followed by a
+# closing quote or bracket before the next sentence (`it." Then`), and "One.Écrit".
+_SENTENCE_END = re.compile(r"[.!?](?=\s+[^a-z\s])|[!?](?=[A-Za-z])|\.(?=[A-Z][a-z])")
 
 
 def _read(name: str) -> Any:
@@ -197,9 +208,18 @@ class Catalog:
             for rid in rule.get("agent_controls", []):
                 if rid not in self.agent_requirements:
                     out.append(f"{rule_id}: unknown agent control {rid}")
-            for key in ("title", "description", "fix"):
+            for key in ("title", "why", "description", "fix"):
                 if not str(rule.get(key, "")).strip():
                     out.append(f"{rule_id}: missing {key}")
+            # The line the text report prints under each finding (slice 3.2b): one sentence a stranger
+            # reads on a first run, so it is short and says one thing.
+            why = " ".join(str(rule.get("why", "")).split())
+            if why and len(why) > WHY_MAX:
+                out.append(f"{rule_id}: why must be at most {WHY_MAX} characters, not {len(why)}")
+            if why and not why.endswith("."):
+                out.append(f"{rule_id}: why must end with a full stop")
+            if why and _SENTENCE_END.search(why[:-1]):
+                out.append(f"{rule_id}: why must be one sentence")
             if rule.get("category") not in ("authority", "hygiene"):
                 out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
             if rule.get("remediation") not in (None, "config", "architecture"):
