@@ -24,7 +24,7 @@ py="${OBAAF_PYTHON:-python3}"
 "$py" -c "import sys; v = sys.version_info[:2]; sys.exit(0 if (3, 10) <= v <= (3, 14) else 'This is Python %d.%d: use Python 3.10 to 3.14 (see step 1)' % v)"
 mkdir "$try_dir"
 git clone --quiet --no-checkout https://github.com/Obaaf/OBAAF.git "$try_dir/source"
-git -C "$try_dir/source" checkout --quiet --detach 1c37e37cb9bc0ff5b1b3992feaf9f0eb6683e87e
+git -C "$try_dir/source" checkout --quiet --detach f4ee9b6c18cf86a1f7a69e9d979d048fbbe3b02e
 "$py" -m venv "$try_dir/venv"
 "$try_dir/venv/bin/python" -m pip install --quiet --require-hashes --only-binary=:all: -r "$try_dir/source/actions/setup-obaaf/requirements.txt"
 "$try_dir/venv/bin/python" -m pip install --quiet --no-deps --no-build-isolation "$try_dir/source"
