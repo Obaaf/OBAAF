@@ -24,7 +24,7 @@ py="${OBAAF_PYTHON:-python3}"
 "$py" -c "import sys; v = sys.version_info[:2]; sys.exit(0 if (3, 10) <= v <= (3, 14) else 'This is Python %d.%d: use Python 3.10 to 3.14 (see step 1)' % v)"
 mkdir "$try_dir"
 git clone --quiet --no-checkout https://github.com/Obaaf/OBAAF.git "$try_dir/source"
-git -C "$try_dir/source" checkout --quiet --detach 6e9970a7b76a19745955f50642497c34af2c0b29
+git -C "$try_dir/source" checkout --quiet --detach 1c37e37cb9bc0ff5b1b3992feaf9f0eb6683e87e
 "$py" -m venv "$try_dir/venv"
 "$try_dir/venv/bin/python" -m pip install --quiet --require-hashes --only-binary=:all: -r "$try_dir/source/actions/setup-obaaf/requirements.txt"
 "$try_dir/venv/bin/python" -m pip install --quiet --no-deps --no-build-isolation "$try_dir/source"
@@ -66,7 +66,7 @@ The first line writes the report the result file counts; the second prints the s
 python -m obaaf.result . --audit "$HOME/obaaf-try/obaaf-audit.json" --output "$HOME/obaaf-try/obaaf-result.json"
 ```
 
-Leave out `--audit` and its file if you skipped step 3 or it wrote no file. If your CI gives `obaaf check` a `--config`, `--baseline` or `--fail-on`, add the same here. It runs the check again and writes the file; it ends with status 0 when the file is written and 2 when it is not.
+Leave out `--audit` and its file if you skipped step 3 or it wrote no file. If your CI gives `obaaf check` a `--config`, `--baseline` or `--fail-on`, add the same here. It runs the check again and writes the file, which must be outside the repository; it ends with status 0 when the file is written and 2 when it is not. When the check itself fails, a file left from an earlier run is removed, so that you cannot send it by mistake.
 
 ## 5. Read the file
 
@@ -84,7 +84,7 @@ It holds:
 - how much risk is accepted, and by how many owners (a number, not who);
 - with `--audit`: for each settings rule, its status and counts; for each setting OBAAF reads, whether it was read and, if not, a short reason code (`forbidden`, `no_token`); whether a token was used and which repository roles GitHub said it has; whether the repository is public, private or internal, and whether a person or an organisation owns it.
 
-It never holds a path, a file, job, step, environment, branch, secret or owner name, a message, a line of code, your repository's name, or a token. That is enforced, not hoped for: before writing, OBAAF checks every key and every piece of text in the file against its own words (its rule ids, severities, states, lane and setting names, reason codes) and writes nothing if anything else is there. A value it does not recognise is counted as `other`. The tests put a marker word in file and directory names, workflow, job and step names, scripts, `env` names and values, secret and environment names, actions, runner labels, the configuration and its ignore entries, a baseline's owner and reason, CODEOWNERS, an instruction file, a Jenkinsfile and a file that does not parse, and in every string of a settings report, and check that it is not in the file ([tests/test_result_file.py](../tests/test_result_file.py)). Still, read it: it is a few hundred lines, all of them names of OBAAF's and numbers.
+It never holds a path, a file, job, step, environment, branch, secret or owner name, a message, a line of code, your repository's name, or a token. That is enforced, not hoped for: before writing, OBAAF checks every key and every piece of text in the file against its own words (its rule ids, severities, states, lane and setting names, reason codes) and writes nothing if anything else is there. A value it does not recognise is counted as `other`. The numbers are counts of what the reports hold, so give it only reports OBAAF wrote: a report changed by hand could put anything into them. The tests put a marker word in file and directory names, workflow, job and step names, scripts, `env` names and values, secret and environment names, actions, runner labels, the configuration and its ignore entries, a baseline's owner and reason, CODEOWNERS, an instruction file, a Jenkinsfile and a file that does not parse, and in every string of a settings report, and check that it is not in the file ([tests/test_result_file.py](../tests/test_result_file.py)). Still, read it: it is a few hundred lines, all of them names of OBAAF's and numbers.
 
 **What the counts can still say.** To someone who knows who sent it, the file says something about the repository: whether it is private, how many agent jobs it has, and which kinds of weakness OBAAF found there and whether they are accepted (a high OBAAF-GHA-002, for example, is untrusted code checked out in a privileged workflow). If that matters, send it privately rather than in a public issue, or fix what it points at first.
 
