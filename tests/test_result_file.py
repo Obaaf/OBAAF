@@ -392,9 +392,6 @@ class WhatTheFileCountsTest(unittest.TestCase):
             self.assertEqual(json.loads(out.read_text(encoding="ascii"))["format"], "obaaf-result/v0.1")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 PAGE = ROOT / "docs" / "send-us-the-result.md"
 FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
@@ -491,3 +488,136 @@ class ThePageTest(unittest.TestCase):
     def test_the_docs_index_lists_the_page(self):
         index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
         self.assertIn("(send-us-the-result.md)", index)
+
+
+class WhatTheReviewFoundTest(unittest.TestCase):
+    """Faults the first review of slice 3.8 found, each shown before it was fixed."""
+
+    def test_digits_of_other_scripts_and_large_numbers_are_refused(self):
+        for bad in ({"tool": "obaaf \u0661.\u0662.\u0663"}, {"date": "\u0662\u0660\u0662\u0666-11-16"},
+                    {"python": "3.\u0669"}, {"check": {"exit": int.from_bytes(b"ghp_token")}},
+                    {"check": {"seconds": 1e12}}, {"check": {"notes": -10**7}}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(result_mod.NotSendable):
+                    result_mod.check_sendable(bad)
+        result_mod.check_sendable({"check": {"exit": 1, "seconds": 0.4, "notes": 999_999}})
+
+    def test_an_audit_report_with_a_huge_count_writes_no_file(self):
+        with TempDir() as tmp:
+            audit = tmp / "audit.json"
+            run_cli("audit", ROOT, "--from-snapshot", ROOT / ".github" / "obaaf-settings.json",
+                    "--format", "json", "--output", audit)
+            doc = json.loads(audit.read_text(encoding="utf-8"))
+            doc["summary"]["findings"] = int.from_bytes(TOKEN_LIKE.encode())
+            audit.write_text(json.dumps(doc), encoding="utf-8")
+            repo = marked_repository(tmp)
+            out = tmp / "result.json"
+            code, _, err = run_result(repo, "--audit", audit, "--output", out)
+            self.assertEqual(code, 2, err)
+            self.assertFalse(out.exists())
+
+    def test_a_deeply_nested_audit_file_ends_with_2_not_a_traceback(self):
+        with TempDir() as tmp:
+            deep = tmp / "deep.json"
+            deep.write_text("[" * 200_000, encoding="utf-8")
+            out = tmp / "result.json"
+            code, _, err = run_result(marked_repository(tmp), "--audit", deep, "--output", out)
+            self.assertEqual(code, 2, err)
+            self.assertIn("nested too deeply", err)
+            self.assertFalse(out.exists())
+
+    def test_a_workflow_job_named_like_a_stage_is_a_workflow_job(self):
+        with TempDir() as tmp:
+            repo = tmp / "repo"
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text(
+                "on: push\npermissions:\n  contents: read\njobs:\n  'stage deploy':\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: make\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n",
+                encoding="utf-8")
+            out = tmp / "result.json"
+            code, _, err = run_result(repo, "--fail-on", "never", "--output", out)
+            self.assertEqual(code, 0, err)
+            jobs = json.loads(out.read_text(encoding="ascii"))["check"]["jobs"]["withConfiguration"]
+            self.assertEqual(sum(jobs["workflowJobs"].values()), 2)
+            self.assertEqual(sum(jobs["jenkinsStages"].values()), 0)
+
+    def test_an_option_value_that_begins_with_a_hyphen_is_passed_as_a_value(self):
+        with TempDir() as tmp:
+            repo = tmp / "repo"
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text(
+                "on: push\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: make\n", encoding="utf-8")
+            (repo / "-cfg.yml").write_text("lanes: {}\n", encoding="utf-8")
+            out = tmp / "result.json"
+            import os
+            here = os.getcwd()
+            os.chdir(repo)
+            try:
+                code, _, err = run_result(".", "--config=-cfg.yml", "--output", out)
+            finally:
+                os.chdir(here)
+            self.assertEqual(code, 0, err)
+            self.assertTrue(json.loads(out.read_text(encoding="ascii"))["check"]["configuration"])
+
+    def test_a_failed_run_leaves_no_earlier_result_behind(self):
+        with TempDir() as tmp:
+            out = tmp / "result.json"
+            out.write_text('{"format": "obaaf-result/v0.1", "an": "earlier run"}', encoding="utf-8")
+            code, _, err = run_result(tmp / "missing", "--output", out)
+            self.assertEqual(code, 2, err)
+            self.assertFalse(out.exists())
+
+    def test_the_output_may_not_be_a_file_given_to_read(self):
+        with TempDir() as tmp:
+            repo = marked_repository(tmp)
+            config = repo / ".github" / "obaaf.yml"
+            before = config.read_bytes()
+            code, _, err = run_result(repo, "--config", config, "--output", config)
+            self.assertEqual(code, 2, err)
+            self.assertEqual(config.read_bytes(), before)
+
+    def test_every_count_is_the_reports_counted_independently(self):
+        with TempDir() as tmp:
+            repo = marked_repository(tmp)
+            (repo / ".github" / "workflows" / f"{MARK}-broken.yml").unlink()
+            report = tmp / "check.json"
+            run_cli("check", repo, "--format", "json", "--output", report)
+            doc = json.loads(report.read_text(encoding="utf-8"))
+            out = tmp / "result.json"
+            code, _, err = run_result(repo, "--output", out)
+            self.assertEqual(code, 0, err)
+            check = json.loads(out.read_text(encoding="ascii"))["check"]
+            from collections import Counter
+            self.assertEqual(check["files"], {"checked": len(doc["files"]),
+                                              "jenkinsfiles": len(doc.get("jenkins", {}).get("files", [])),
+                                              "notRead": len(doc["errors"])})
+            self.assertEqual(check["notes"], len(doc["notes"]))
+            findings = Counter((f["rule"], f["severity"], f["state"]) for f in doc["findings"])
+            self.assertEqual({(r["rule"], r["severity"], r["state"]): r["count"] for r in check["findings"]},
+                             dict(findings))
+            controls = Counter((f["rule"], c["id"], c["verdict"]) for f in doc["findings"]
+                               for c in f.get("controls", []))
+            self.assertTrue(controls)
+            self.assertEqual({(r["rule"], r["control"], r["verdict"]): r["count"] for r in check["controls"]},
+                             dict(controls))
+            risk = doc["acceptedRisk"]
+            self.assertEqual(check["acceptedRisk"], {
+                "total": risk["total"], "bySeverity": risk["bySeverity"], "bySource": risk["bySource"],
+                "owners": len(risk["owners"]), "daysToNearestExpiry": risk["daysToNearestExpiry"],
+                "expiringSoon": risk["expiringSoon"]["total"]})
+            self.assertGreater(check["acceptedRisk"]["total"], 0)
+            # The lanes, against what `obaaf check --lanes` prints for each job and stage.
+            _, listing, _ = run_cli("check", repo, "--lanes")
+            lanes = Counter()
+            for line in listing.splitlines():
+                # `FILE#JOB: LANE (REASON)`; the reason may hold ": " itself.
+                where, lane = re.match(r"(.*?#.*?): ([a-z]+) \(", line).groups()
+                lanes[("jenkinsStages" if "#stage " in where else "workflowJobs", lane)] += 1
+            counted = Counter({(kind, lane): n for kind in ("workflowJobs", "jenkinsStages")
+                               for lane, n in check["jobs"]["withConfiguration"][kind].items() if n})
+            self.assertEqual(counted, lanes)
+
+
+if __name__ == "__main__":
+    unittest.main()

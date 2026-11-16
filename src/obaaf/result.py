@@ -67,11 +67,14 @@ VISIBILITIES = ("public", "private", "internal")
 OWNER_TYPES = ("User", "Organization")
 
 # Strings that are not from a fixed list, each matched whole. None of them can hold a path or a name.
-VERSION_RE = re.compile(r"\Aobaaf \d{1,3}\.\d{1,3}\.\d{1,3}(?:(?:\.dev|a|b|rc)\d{1,3})?\Z")
-DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-PYTHON_RE = re.compile(r"\A3\.\d{1,2}\Z")
-BASELINE_FORMAT_RE = re.compile(r"\Aobaaf-baseline/v\d{1,2}\.\d{1,2}\Z")
-RULE_RE = re.compile(r"\AOBAAF-[A-Z]{2,4}-\d{3}\Z")
+# ASCII digits only: `\d` would also match the digits of every other script (review of slice 3.8).
+VERSION_RE = re.compile(r"\Aobaaf [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:(?:\.dev|a|b|rc)[0-9]{1,3})?\Z")
+DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+PYTHON_RE = re.compile(r"\A3\.[0-9]{1,2}\Z")
+BASELINE_FORMAT_RE = re.compile(r"\Aobaaf-baseline/v[0-9]{1,2}\.[0-9]{1,2}\Z")
+# Every number in the file is below this. A count from a report is a count; a number this large could
+# carry a token's bytes from a report someone altered (review of slice 3.8).
+LARGEST = 10**6
 
 # Every key the file can have. A key outside this set fails the check before writing.
 KEYS = frozenset({
@@ -128,10 +131,12 @@ def check_sendable(value, words: frozenset | None = None, where: str = "the file
     if value is None or isinstance(value, bool):
         return
     if isinstance(value, int):
+        if not -LARGEST < value < LARGEST:
+            raise NotSendable(f"{where} is a number of {LARGEST:,} or more, which no count in the file reaches")
         return
     if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            raise NotSendable(f"{where} is not a finite number")
+        if value != value or not -LARGEST < value < LARGEST:
+            raise NotSendable(f"{where} is not a finite number below {LARGEST:,}")
         return
     if isinstance(value, str):
         if not _allowed_string(value, words):
@@ -284,11 +289,16 @@ def _lane_counts(target: Path, base: Path, config_path: str | None, platform: st
     """How many jobs and Jenkins stages are in each lane, with the configuration and without it."""
     from obaaf import checker
 
+    def tally(config, which: str) -> Counter:
+        if platform not in ("auto", which):
+            return Counter()
+        # Workflows and Jenkinsfiles are listed in separate runs, so a job is never taken for a stage
+        # by its name (a workflow job may be called `stage deploy`; review of slice 3.8).
+        rows = checker.lanes(target, config, platform=which, notes=[], errors=[], seen=[])
+        return Counter(_word(lane, LANES) for _, _, lane, _ in rows)
+
     def counts(config) -> dict:
-        rows = checker.lanes(target, config, platform=platform, notes=[], errors=[], seen=[])
-        jobs, stages = Counter(), Counter()
-        for _, job, lane, _ in rows:
-            (stages if str(job).startswith("stage ") else jobs)[_word(lane, LANES)] += 1
+        jobs, stages = tally(config, "github"), tally(config, "jenkins")
         return {"workflowJobs": {lane: jobs.get(lane, 0) for lane in LANES if lane != "unknown"}
                 | ({OTHER: jobs[OTHER]} if jobs.get(OTHER) else {}),
                 "jenkinsStages": {lane: stages.get(lane, 0) for lane in LANES}
@@ -308,7 +318,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "you send it. See docs/send-us-the-result.md.")
     p.add_argument("path", nargs="?", default=".", help="the repository to check (default: .)")
     p.add_argument("--output", "-o", required=True, metavar="FILE",
-                   help="where to write the result file (it is replaced if it exists)")
+                   help="where to write the result file. A file there is replaced, and removed if the command "
+                        "fails, so it never holds an earlier run's result")
     p.add_argument("--audit", metavar="FILE",
                    help="also count what a report written by obaaf audit --format json found")
     p.add_argument("--config", help="the checker configuration your CI gives obaaf check, if it names one")
@@ -339,26 +350,52 @@ def main(argv: list[str] | None = None) -> int:
 
     audit = None
     rule_ids = _rule_ids()
+    output = Path(args.output)
+    if output.is_dir():
+        print(f"error: --output {args.output} is a directory; name a file", file=sys.stderr)
+        return EXIT_USAGE
+    for name in ("audit", "config", "baseline"):
+        given = getattr(args, name)
+        if given and output.exists() and Path(given).exists() and output.samefile(given):
+            print(f"error: --output names the file given with --{name}; write the result somewhere else",
+                  file=sys.stderr)
+            return EXIT_USAGE
     if args.audit:
         try:
             audit_doc = json.loads(Path(args.audit).read_text(encoding="utf-8"))
             audit = summarize_audit(audit_doc, rule_ids)
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            print(f"error: --audit {args.audit}: {exc}", file=sys.stderr)
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            reason = "nested too deeply to read" if isinstance(exc, RecursionError) else exc
+            print(f"error: --audit {args.audit}: {reason}", file=sys.stderr)
             return EXIT_USAGE
+    # The file is replaced on success; on failure none is left, so a file from an earlier run cannot be
+    # read and sent as if it were this one's (review of slice 3.8).
+    try:
+        output.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"error: cannot replace {args.output}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
 
-    command = ["check", args.path, "--format", "json", "--fail-on", args.fail_on, "--platform", args.platform]
-    command += (["--config", args.config] if args.config else []) + (["--baseline", args.baseline] if args.baseline else [])
+    # One word for each option and its value, as `obaaf` does, so a value that begins with a hyphen is
+    # still read as a value.
+    command = ["check", "--format=json", f"--fail-on={args.fail_on}", f"--platform={args.platform}"]
+    command += ([f"--config={args.config}"] if args.config else []) \
+        + ([f"--baseline={args.baseline}"] if args.baseline else [])
     with tempfile.TemporaryDirectory(prefix="obaaf-result-") as scratch:
         report_path = Path(scratch) / "check.json"
         started = time.monotonic()
-        status = cli.main(command + ["--output", str(report_path)])
+        status = cli.main(command + [f"--output={report_path}", "--", args.path])
         seconds = round(time.monotonic() - started, 1)
         if status not in (0, 1) or not report_path.is_file():
             print("error: obaaf check did not write a report (see its message above), so no result file was written",
                   file=sys.stderr)
             return EXIT_USAGE
-        doc = json.loads(report_path.read_text(encoding="utf-8"))
+        try:
+            doc = json.loads(report_path.read_text(encoding="utf-8"))
+        except RecursionError:
+            print("error: obaaf check's report is nested too deeply to read, so no result file was written",
+                  file=sys.stderr)
+            return EXIT_USAGE
     check = summarize_check(doc, rule_ids)
 
     target = Path(args.path)
@@ -405,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
     try:
-        Path(args.output).write_text(text, encoding="ascii")
+        output.write_text(text, encoding="ascii")
     except OSError as exc:
         print(f"error: cannot write {args.output}: {exc}", file=sys.stderr)
         return EXIT_USAGE
