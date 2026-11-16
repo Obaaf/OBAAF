@@ -1028,6 +1028,9 @@ def floor_problems(releases, floor):
         differs = lists_differ(sha)
         if differs:
             problems.append(f"{sha[:12]}: {differs}")
+        own = own_steps_differ(sha)      # what slice 2c.10b's decision rests on (D-070)
+        if own:
+            problems.append(f"{sha[:12]}: {own}")
     return problems
 
 
@@ -1186,14 +1189,16 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("REVIEW_KEY (secrets.REVIEW_KEY) is named under neither env nor model-keys", control.detail)
 
     def test_what_the_step_that_holds_the_key_could_load_is_cannot_tell(self):
-        """The action's own steps hold the key outside the sandbox. A BASH_ENV would be loaded by its
-        bash steps there (issue #139), and a process an earlier step leaves running runs as the same
-        user; the checker reads neither to the end."""
+        """The action's own steps hold the key outside the sandbox. An OPENSSL_ variable would make the
+        C library their Python loads run a module it names (slice 2c.10b), a write to GITHUB_ENV could
+        set one, and a process an earlier step leaves running runs as the same user; the checker reads
+        none of them to the end. (Until 2c.10b a BASH_ENV counted here too; since 2c.9 those steps are
+        not bash, and `KeyReasonsSinceOwnStepsTest` below has what no longer counts.)"""
         cases = {
-            "BASH_ENV in the job's env": dict(steps=keyed(), job_extra="    env: {BASH_ENV: ./setup.sh}"),
-            "bash_env in the step's env": dict(steps=keyed(step_env={
-                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "bash_env": "./x"})),
-            "BASH_ENV written by an earlier step": dict(
+            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./ssl.cnf}"),
+            "openssl_modules in the step's env": dict(steps=keyed(step_env={
+                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "openssl_modules": "./x"})),
+            "BASH_ENV written by an earlier step, through GITHUB_ENV": dict(
                 steps="      - run: echo \"BASH_ENV=$PWD/x\" >> \"$GITHUB_ENV\"\n" + keyed()),
             "the job's env computed": dict(steps=keyed(), job_extra="    env: ${{ fromJSON(vars.ENV) }}"),
             "a process left running": dict(steps="      - run: nohup ./server.sh\n" + keyed()),
@@ -1202,7 +1207,8 @@ class KeyOutOfReachTest(unittest.TestCase):
             control = self.key(**case)
             with self.subTest(name):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
-        self.assertIn("issue #139", self.key(**cases["BASH_ENV in the job's env"]).detail)
+        self.assertIn("slice 2c.10b", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
+        self.assertIn("OPENSSL_CONF", self.key(**cases["OPENSSL_CONF in the job's env"]).detail)
         self.assertIn("may leave a process running (nohup) as the same user",
                       self.key(**cases["a process left running"]).detail)
 
@@ -1252,9 +1258,10 @@ class KeyOutOfReachTest(unittest.TestCase):
 
 class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
     """What can run before or beside the step that holds the key (found by the first review of 2c.7).
-    That step's own bash steps run outside the sandbox with the key in their environment, so an agent
+    The action's own steps run outside the sandbox with the key in their environment, so an agent
     outside the sandbox before it, a process left running, a parallel step, a service container or a
-    write to GITHUB_ENV or GITHUB_PATH could reach the key there."""
+    write to GITHUB_ENV could reach the key there (until slice 2c.10b a write to GITHUB_PATH counted
+    too; those steps no longer look anything up through the PATH)."""
 
     def key(self, steps, **kw):
         return key_control(run_check(workflow(steps, **kw)))
@@ -1301,13 +1308,12 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
             "a step after one that runs in the background": (
                 keyed().replace("      - id: agent\n", "      - id: agent\n        background: true\n")
                 + "\n      - run: ./watch.sh"),
-            "GITHUB_PATH before it": "      - run: echo \"$HOME/bin\" >> \"$GITHUB_PATH\"\n" + keyed(),
-            "GITHUB_ENV before it": "      - run: echo \"LD_PRELOAD=$PWD/x.so\" >> \"$GITHUB_ENV\"\n" + keyed(),
+            "GITHUB_ENV before it": "      - run: echo \"OPENSSL_CONF=$PWD/x.cnf\" >> \"$GITHUB_ENV\"\n" + keyed(),
             "core.exportVariable before it": (f"      - uses: actions/github-script@{SHA}\n"
                                               "        with: {script: \"core.exportVariable('X', '1')\"}\n" + keyed()),
-            "LD_PRELOAD in the job's env": dict(steps=keyed(), job_extra="    env: {LD_PRELOAD: ./x.so}"),
-            "PATH in the step's env": keyed(step_env={"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
-                                                       "PATH": "./bin:/usr/bin"}),
+            "OPENSSL_CONF in the job's env": dict(steps=keyed(), job_extra="    env: {OPENSSL_CONF: ./x.cnf}"),
+            "OPENSSL_MODULES in the step's env": keyed(step_env={
+                "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "OPENSSL_MODULES": "./lib"}),
             "a service container with options": dict(
                 steps=keyed(), job_extra="    services:\n      helper:\n        image: someone/tool:latest\n"
                                          "        options: --privileged --pid=host"),
@@ -1327,8 +1333,8 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
         self.assertIn("cannot tell where the agent runs", control.detail)
 
     def test_unsecure_workflow_commands_are_cannot_tell(self):
-        """Found by the second review: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step prints
-        (`::set-env name=BASH_ENV::...`) sets a variable for the step that holds the key."""
+        """Found by the second review of 2c.7: with ACTIONS_ALLOW_UNSECURE_COMMANDS, a line an earlier step
+        prints (`::set-env name=OPENSSL_CONF::...`) sets a variable for the step that holds the key."""
         before = "      - run: gh issue view 1\n"
         for kw in ({"steps": before + keyed(), "job_extra": "    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"},
                    {"steps": before + "        env: {actions_allow_unsecure_commands: 'true'}\n" + keyed()}):
@@ -1340,6 +1346,493 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
         steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
                           "      - run: nohup ./later.sh &"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
+
+
+# What slice 2c.10b's decision (D-070) rests on, at a commit of the action, as far as the workflow
+# YAML and a static read of egress.py can show it: each of its steps but the last is Python by its
+# full path, isolated and without site, and empties the loader's variables; the last step is the one
+# that fails the action; and egress.py's `run` text and every program-starting call are the floor's,
+# each with an `env` of its own. The escape tests on the commit itself, which the maintainer requires
+# before listing, are what establish that those starts stay confined (D-070); this is the belt, not
+# the proof. The guard reads program starts through a fixed set of method names on any receiver, and
+# flags `getattr` on or an alias of subprocess/os/posix, so a one-line evasion (round 2's B1) is
+# caught, but any spelling it cannot read statically is left to the escape tests.
+OWN_STEP_SHELL = "/usr/bin/python3 -I -S {0}"
+# Method names that start a program, matched on any receiver (a module alias included). `which` is
+# read on its own because it is checked for `path=`, not `env=`.
+_START_METHODS = ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+                  "system", "popen")
+# os methods that start a program, by prefix (`execv`, `execl`, `spawnv`, `posix_spawn`, …).
+_START_PREFIXES = ("exec", "spawn", "posix_spawn")
+_PROGRAM_MODULES = ("subprocess", "os", "posix")
+
+
+def _floor_facts(root):
+    """The floor commit's action.yml steps and egress.py text and tree, to compare a listed commit
+    against. Read once; a commit is held to the floor's loader set, run text and program starts."""
+    import ast
+    import subprocess
+    import yaml
+    out = {}
+    for name in ("action.yml", "egress.py"):
+        shown = subprocess.run(["git", "-C", root, "show", f"{FLOOR}:actions/egress/{name}"], capture_output=True,
+                               timeout=30)
+        out[name] = shown.stdout.decode("utf-8")
+    steps = (yaml.safe_load(out["action.yml"]).get("runs") or {}).get("steps") or []
+    tree = ast.parse(out["egress.py"])
+    loader = next((node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and any(getattr(t, "id", None) == "LOADER_VARIABLES" for t in node.targets)), None)
+    return {"runs": [str(step.get("run", "")) for step in steps[:-1]],
+            "loader": set(ast.literal_eval(loader)) if loader is not None else set(),
+            "starts": _program_starts(tree)}
+
+
+def _clean_dict(node):
+    """A dict literal with no `**` spread (an `os.environ` spread, round 3's B2) and only constant
+    keys — so it holds nothing of the process's environment the reader cannot see."""
+    import ast
+    return (isinstance(node, ast.Dict) and all(key is not None for key in node.keys)
+            and all(isinstance(key, ast.Constant) for key in node.keys))
+
+
+def _function_dump(tree, func_name):
+    """The AST of function `func_name`, as a string, or None if it is not there. Used to pin a function
+    that builds a program's `env` to the floor's: AST-identical or flagged. Round 4's review showed
+    that vetting a mutable dict's contents piecemeal cannot be sound — a sibling dict merged in
+    (`child_env.update(model_keys)`; poison `model_keys`) or an alias (`e = child_env; e.update(...)`)
+    slips past any check that reads only statements naming the launch dict. So the whole function that
+    builds the launch env is pinned to the floor, the way `lists_differ` pins `parse_env_names`. A
+    listed commit whose env-building function differs from the floor's is reviewed before listing."""
+    import ast
+    func = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+    return ast.dump(func) if func is not None else None
+
+
+def _program_starts(tree):
+    """Every call in egress.py that starts a program, as a set of (callable, env_state, env_ref,
+    has_path) facts. A call of one of `_START_METHODS` on any receiver, an `os`/`posix` exec/spawn, or
+    a name imported from one of those modules (`from subprocess import run`): read on any receiver so a
+    module alias (`import subprocess as sp`) does not hide it (round 2's B1). `env_state` is "dict" for
+    a clean dict-literal `env=`, "name" for `env=<name>` (with `env_ref` the (enclosing-function, name)
+    pair, whose function `own_steps_differ` pins to the floor with `_function_dump`), "bad" for no
+    `env=` or a poisoned one (`env=dict(os.environ)`, `env={**os.environ}`), and "na" for a `which`
+    call. A bare name is a program start only when imported from one of those modules, so
+    egress.py's own `run()` function is not taken for one. `getattr` on subprocess/os/posix is reported
+    separately, by `own_steps_differ`."""
+    import ast
+    imported = {}      # local name -> "subprocess.run" etc., for names brought in by `from ... import`
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _PROGRAM_MODULES:
+            for alias in node.names:
+                if alias.name in _START_METHODS or alias.name.startswith(_START_PREFIXES):
+                    imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def env_of(call, func_name):
+        for kw in call.keywords:
+            if kw.arg == "env":
+                if _clean_dict(kw.value):
+                    return "dict", None
+                if isinstance(kw.value, ast.Name):
+                    return "name", (func_name, kw.value.id)
+                return "bad", None      # a poisoned value: dict(os.environ), {**os.environ}, os.environ
+        return "bad", None
+
+    def callable_of(call):
+        func = call.func
+        if isinstance(func, ast.Attribute) and (func.attr in _START_METHODS or func.attr.startswith(_START_PREFIXES)):
+            return f"{getattr(func.value, 'id', '?')}.{func.attr}"
+        if isinstance(func, ast.Name) and func.id in imported:
+            return imported[func.id]
+        return None
+
+    # The innermost enclosing FunctionDef for every node, so each start is attributed to one function.
+    enclosing = {}
+    for func in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for node in ast.walk(func):
+            enclosing[node] = func.name       # a later (inner) function overwrites an outer one
+
+    starts = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "which":
+            starts.add(("which", "na", None, any(k.arg == "path" for k in node.keywords)))
+            continue
+        call = callable_of(node)
+        if call:
+            state, ref = env_of(node, enclosing.get(node))
+            starts.add((call, state, ref, False))
+    return frozenset(starts)
+
+
+def _const_dump(tree, name):
+    """The AST of every module-level assignment `name = ...`, as a sorted list of strings. All of them,
+    not the first: Python uses the last binding at run time, so a commit that keeps the floor's line
+    and adds `name = "./bin:" + name` would change the value while the first line still matches (round
+    6's review). The floor has exactly one assignment, so a second one makes the list differ. Used to
+    pin a constant the launch env's values come from (`FIXED_PATH`) to the floor's."""
+    import ast
+    return sorted(ast.dump(node) for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == name for t in node.targets))
+
+
+def _getattr_on_program_module(tree):
+    """A `getattr(subprocess, ...)` / `getattr(os, ...)` / `getattr(posix, ...)`, which `_program_starts`
+    cannot read as a start (round 2's B1, A3). Returns the module name or ""."""
+    import ast
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in _PROGRAM_MODULES):
+            return node.args[0].id
+    return ""
+
+
+def own_steps_differ(sha, root=None):
+    """Why the action at `sha` does not keep its own steps as slice 2c.10b assumes, or "". Read from
+    `action.yml` and `egress.py` at that commit against the floor's; a commit the repository does not
+    have is a problem. Not a proof the steps are confined (the escape tests on the commit are that):
+    it reads program starts statically and fails closed on a changed shell, a shrunk loader list, a
+    changed `run` text, a start spelled a way the floor does not use, a `getattr` on subprocess/os/
+    posix, an `env=` that is not a clean dict literal or a name, and, where a program is given a named
+    dict (the command launch, `env=child_env` in run()), an enclosing function that differs from the
+    floor's at all, so those are reviewed before listing. It also pins the one constant the launch
+    env's values come from (`FIXED_PATH`) and the two functions that build what is merged into the
+    launch env and the command's env-file (`parse_env_names`, `parse_model_keys`), so it is
+    self-sufficient for the launch env rather than relying on `lists_differ` (which `floor_problems`
+    runs beside it). A start reached through an indirection it cannot read is left to the escape tests
+    on the listed commit, which are the proof."""
+    import ast
+    import subprocess
+    import yaml
+    if root is None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    texts = {}
+    for name in ("action.yml", "egress.py"):
+        shown = subprocess.run(["git", "-C", root, "show", f"{sha}:actions/egress/{name}"], capture_output=True,
+                               timeout=30)
+        if shown.returncode != 0:
+            return f"actions/egress/{name} is not readable at {sha[:12]}"
+        texts[name] = shown.stdout.decode("utf-8")
+    floor = _floor_facts(root)
+    steps = (yaml.safe_load(texts["action.yml"]).get("runs") or {}).get("steps") or []
+    if len(steps) < 2:
+        return "action.yml has fewer than two steps"
+    for step in steps[:-1]:
+        if step.get("shell") != OWN_STEP_SHELL:
+            return f"step {step.get('name')!r} has the shell {step.get('shell')!r}, not {OWN_STEP_SHELL!r}"
+        env = step.get("env") or {}
+        # Held to the floor's loader set, not the commit's own: the list cannot shrink and leave a name
+        # the step no longer empties.
+        missing = sorted(name for name in floor["loader"] if env.get(name) != "")
+        if missing:
+            return f"step {step.get('name')!r} does not empty {', '.join(missing[:3])}"
+    if [str(step.get("run", "")) for step in steps[:-1]] != floor["runs"]:
+        return "a step's run text is not the floor's; its program starts were not reviewed again"
+    last = steps[-1]
+    if not str(last.get("shell", "")).startswith("/obaaf-egress/") or "steps.run.outcome == 'success'" not in str(last.get("if")):
+        return "the last step is not the one that fails the action when the run step reports nothing"
+    tree = ast.parse(texts["egress.py"])
+    got = _getattr_on_program_module(tree)
+    if got:
+        return f"egress.py starts a program through getattr({got}, ...), which the guard cannot read; it needs a fresh review"
+    floor_tree = ast.parse(subprocess.run(["git", "-C", root, "show", f"{FLOOR}:actions/egress/egress.py"],
+                                          capture_output=True, timeout=30).stdout.decode("utf-8"))
+    starts = _program_starts(tree)
+    floor_callables = {call for call, *_ in floor["starts"]}
+    # First pass: the local defects, each with its own message.
+    for call, state, ref, has_path in starts:
+        if call not in floor_callables:
+            return f"egress.py starts a program in a way the floor does not ({call}); it needs a fresh review"
+        if call == "which" and not has_path:
+            return "egress.py calls which without path=FIXED_PATH, so a program is found through the job's PATH"
+        if call != "which" and state == "bad":
+            return f"egress.py calls {call} without a clean dict env= of its own, so a program may get the step's environment"
+    # Second pass: a program given a named dict (the command launch, `env=child_env` in run()). Its
+    # contents cannot be vetted piecemeal, so the whole function that builds it is pinned to the floor.
+    for call, state, ref, has_path in starts:
+        if state != "name":
+            continue
+        func_name, var = ref
+        if func_name is None:
+            return f"egress.py passes {var} as a program's env outside any function; the guard cannot pin its build"
+        if _function_dump(tree, func_name) != _function_dump(floor_tree, func_name):
+            return (f"egress.py's {func_name}(), which builds the env {var} a program is given, differs from "
+                    "the floor; a change to the launch env's build needs a fresh review")
+    # The launch env's inline values come from one module constant, FIXED_PATH, that neither this pin
+    # (it reads the Name) nor lists_differ covers; pin it too (round 5's review, NOTE 2). The functions
+    # that produce what is merged into the launch env and the command's env-file (parse_model_keys,
+    # parse_env_names) are pinned by lists_differ, which floor_problems runs beside this (round 5's
+    # NOTE 1); they are pinned here as well so this check does not rely on that ordering.
+    for const in ("FIXED_PATH",):
+        if _const_dump(tree, const) != _const_dump(floor_tree, const):
+            return f"egress.py's {const}, used in the launch env, differs from the floor"
+    for fn in ("parse_model_keys", "parse_env_names"):
+        if _function_dump(tree, fn) != _function_dump(floor_tree, fn):
+            return f"egress.py's {fn}(), which builds what the launch env or the command's env-file holds, differs from the floor"
+    return ""
+
+
+class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
+    """Which reasons `key-out-of-reach` gives for "cannot tell" still hold now that every commit of the
+    action that can be listed has slice 2c.9's fixes (flagship slice 2c.10b, decision D-070). Those
+    steps are Python by its full path, isolated and without site; every program they start is given an
+    env of its own with a fixed PATH and found through it; and their own env, which outranks the job's,
+    the step's and GITHUB_ENV (and, by GitHub's documented precedence, the workflow's), empties the
+    loader's variables. So bash's, Python's, the PATH's and the loader's variables no longer reach the
+    key, and nor does a step that changes the PATH. OpenSSL's still do: the action's Python imports
+    hashlib, and OPENSSL_CONF makes libcrypto load a module the job names into the process that holds
+    the key (run on Ubuntu 24.04 with Python 3.12 and libssl3 3.0.13 for this slice). A write to
+    GITHUB_ENV can set one, and so can any line a step prints under ACTIONS_ALLOW_UNSECURE_COMMANDS; a
+    process left running is read as before."""
+
+    def key(self, steps=None, **kw):
+        return key_control(run_check(workflow(steps if steps is not None else keyed(), **kw)))
+
+    DROPPED = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PATH", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH",
+               "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "BASH_FUNC_setup%%")
+
+    def where(self, name, value="./x"):
+        """The same variable in the workflow's, the job's and the step's env."""
+        # keyed() writes each key as it is given, so the key is given quoted, as YAML reads it.
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", json.dumps(name): value}
+        return {"the workflow's env": dict(top=f"env: {{{json.dumps(name)}: {json.dumps(value)}}}"),
+                "the job's env": dict(job_extra=f"    env: {{{json.dumps(name)}: {json.dumps(value)}}}"),
+                "the step's env": dict(steps=keyed(step_env=step_env))}
+
+    def test_baseline_is_verified(self):
+        self.assertEqual(self.key().verdict, VERIFIED)
+
+    def test_bash_python_path_and_loader_variables_no_longer_count(self):
+        for name in self.DROPPED:
+            for place, kw in self.where(name).items():
+                control = self.key(**kw)
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(control.verdict, VERIFIED, control.detail)
+
+    def test_a_step_that_changes_the_path_or_names_bash_env_no_longer_counts(self):
+        cases = {
+            "GITHUB_PATH": "      - run: echo \"$HOME/bin\" >> \"$GITHUB_PATH\"\n",
+            "core.addPath": (f"      - uses: actions/github-script@{SHA}\n"
+                             "        with: {script: \"core.addPath('/opt/tool/bin')\"}\n"),
+            "BASH_ENV for its own commands": "      - run: BASH_ENV=./profile.sh make setup\n",
+        }
+        for name, before in cases.items():
+            control = self.key(before + keyed())
+            with self.subTest(name):
+                self.assertEqual(control.verdict, VERIFIED, control.detail)
+
+    def test_openssl_variables_still_count_in_every_spelling(self):
+        names = ("OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_FORCE_FIPS_MODE", "OPENSSL_FIPS_MODE_SWITCH_PATH",
+                 "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "openssl_conf", " OPENSSL_CONF ", "${{ 'OPENSSL_CONF' }}")
+        for name in names:
+            for place, kw in self.where(name).items():
+                control = self.key(**kw)
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                    self.assertIn("an OPENSSL_ variable can make the C library their Python loads run a module",
+                                  control.detail)
+
+    def test_github_env_and_unsecure_commands_still_count(self):
+        cases = {
+            "GITHUB_ENV": dict(steps="      - run: echo \"FOO=1\" >> \"$GITHUB_ENV\"\n" + keyed()),
+            "github_env, any case": dict(steps="      - run: echo FOO=1 >> $github_env\n" + keyed()),
+            "core.exportVariable": dict(steps=(f"      - uses: actions/github-script@{SHA}\n"
+                                               "        with: {script: \"core.exportVariable('FOO', '1')\"}\n"
+                                               + keyed())),
+            "unsecure commands in the workflow's env": dict(top="env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"),
+            "unsecure commands in the job's env": dict(job_extra="    env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}"),
+            "unsecure commands in an earlier step's env": dict(
+                steps="      - run: gh issue view 1\n        env: {ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}\n"
+                      + keyed()),
+            "a process left running": dict(steps="      - run: ./server.sh &\n" + keyed()),
+        }
+        for name, kw in cases.items():
+            control = self.key(**kw)
+            with self.subTest(name):
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+        detail = self.key(**cases["GITHUB_ENV"]).detail
+        self.assertIn("writes to GITHUB_ENV, which can set a variable the action's own steps", detail)
+        self.assertNotIn("GITHUB_PATH", detail)
+
+    def test_a_verified_verdict_no_longer_says_github_path_was_read(self):
+        detail = self.key().detail
+        self.assertIn("a process left running and a write to GITHUB_ENV;", detail)
+        self.assertNotIn("GITHUB_PATH", detail)
+
+    def test_a_build_tools_openssl_name_is_not_counted(self):
+        """OpenSSL's build variables (Rust's openssl-sys crate, CMake) are not read by libcrypto or
+        libssl (checked against Ubuntu 24.04's libraries), and Rust workflows set them for the whole
+        job, so they are not "cannot tell"; another spelling still is."""
+        for name in ("OPENSSL_DIR", "OPENSSL_LIB_DIR", "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC",
+                     "OPENSSL_NO_VENDOR", "OPENSSL_ROOT_DIR", "OPENSSL_LIBS"):
+            for place, kw in self.where(name, value="/usr").items():
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(self.key(**kw).verdict, VERIFIED, self.key(**kw).detail)
+        # The exclusion is by the exact name: a case or space variant is still a configuration name.
+        self.assertEqual(self.key(**self.where("openssl_dir")["the job's env"]).verdict, CANNOT_TELL)
+
+    def test_github_env_words_in_a_steps_env_value_or_input_still_count(self):
+        """A write to GITHUB_ENV need not be in the script: `eval "$CMD"` with the write in an env
+        value, or the runner's own file written by its path (2c.10b's review, N2)."""
+        cases = {
+            "the write in an env value": dict(steps='      - run: eval "$CMD"\n'
+                                              '        env: {CMD: \'echo "OPENSSL_CONF=x" >> "$GITHUB_ENV"\'}\n' + keyed()),
+            "a github-script input other than script": dict(steps=(f"      - uses: actions/github-script@{SHA}\n"
+                                                             "        with: {script: run, foo: core.exportVariable}\n" + keyed())),
+            "the file written by its runner path": dict(steps='      - run: echo x > "$RUNNER_TEMP/_runner_file_commands/set_env_1"\n' + keyed()),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.key(**kw).verdict, CANNOT_TELL, self.key(**kw).detail)
+
+    @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
+    def test_the_floor_and_this_commit_keep_the_action_s_steps_as_the_decision_assumes(self):
+        self.assertEqual(own_steps_differ(FLOOR), "")
+        self.assertEqual(own_steps_differ("HEAD"), "")
+        # Before 2c.9 the steps were bash: the check must see that.
+        self.assertIn("has the shell", own_steps_differ(OLD_FLOOR))
+
+    @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
+    def test_the_guard_fails_closed_on_a_commit_that_breaks_a_premise(self):
+        """Mutant commits on a scratch clone at the floor, from both review rounds. Round 1: a shrunk
+        loader list, a program started without env=, which() without path=, a new call form, a changed
+        run text. Round 2 (B1): a module alias (`import subprocess as sp`), `import posix`, a `getattr`
+        on subprocess, and a poisoned env value (`env=dict(os.environ)`, or `child_env` built from it).
+        Each must be caught. The escape tests on a listed commit are the proof; this guard keeps a
+        change to how a program is started from being listed without a fresh review."""
+        import subprocess
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "clone", "-q", "--shared", root, tmp], check=True, timeout=120)
+            subprocess.run(["git", "-C", tmp, "checkout", "-q", FLOOR], check=True, timeout=60)
+            action = os.path.join(tmp, "actions", "egress")
+
+            def commit(message):
+                subprocess.run(["git", "-C", tmp, "commit", "-aqm", message], check=True, timeout=60,
+                               env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+                return subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"], capture_output=True, text=True,
+                                      timeout=30).stdout.strip()
+
+            def edit(name, old, new):
+                import pathlib
+                path = pathlib.Path(action) / name
+                text = path.read_text()
+                assert old in text, (name, old)
+                path.write_text(text.replace(old, new, 1))
+
+            def reset():
+                subprocess.run(["git", "-C", tmp, "reset", "-q", "--hard", FLOOR], check=True, timeout=60)
+
+            def own(sha):
+                return own_steps_differ(sha, root=tmp)
+
+            # A mutant that adds a line to run()'s body, so it is reached as a start; keep the floor's
+            # own command launch untouched unless the case replaces it.
+            def in_run(code):
+                edit("egress.py", "def run(environ: dict[str, str]) -> int:\n",
+                     f"def run(environ: dict[str, str]) -> int:\n    {code}\n")
+
+            self.assertEqual(own(FLOOR), "")
+            cases = []
+            # Round 1.
+            def shrink():
+                edit("egress.py", '    "RES_OPTIONS", "TMPDIR", "TZDIR",\n', '    "RES_OPTIONS", "TZDIR",\n')
+                edit("action.yml", "        TMPDIR: \"\"\n        TZDIR: \"\"", "        TZDIR: \"\"")
+            cases.append(("shrink loader list", shrink, "does not empty"))
+            cases.append(("drop env on run",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, cwd=str(copy)"),
+                          "without a clean dict env="))
+            cases.append(("which without path",
+                          lambda: edit("egress.py", 'shutil.which("docker", path=FIXED_PATH)',
+                                       'shutil.which("docker")'),
+                          "which without path"))
+            cases.append(("new start form os.posix_spawnp",
+                          lambda: (edit("egress.py", "import urllib.request\n", "import urllib.request\nimport posix\n"),
+                                   in_run("os.posix_spawnp('x', ['x'], {})")),
+                          "in a way the floor does not"))
+            cases.append(("changed run text",
+                          lambda: edit("action.yml", 'sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]',
+                                       'import subprocess as sp; sp.call("x", shell=True)\n'
+                                       '        sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]'),
+                          "run text is not the floor's"))
+            # Round 2 (B1).
+            cases.append(("module alias import subprocess as sp",
+                          lambda: (edit("egress.py", "import subprocess\n", "import subprocess\nimport subprocess as sp\n"),
+                                   in_run('sp.run(["/bin/sh", "-c", "env"])')),
+                          "in a way the floor does not"))
+            cases.append(("import posix; posix.system",
+                          lambda: (edit("egress.py", "import subprocess\n", "import subprocess\nimport posix\n"),
+                                   in_run('posix.system("env")')),
+                          "in a way the floor does not"))
+            cases.append(("getattr(subprocess, 'run')",
+                          lambda: in_run('getattr(subprocess, "run")(["/bin/sh", "-c", "env"])'),
+                          "getattr(subprocess, ...)"))
+            cases.append(("env=dict(os.environ)",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, env=dict(os.environ), cwd=str(copy)"),
+                          "without a clean dict env="))
+            cases.append(("child_env built from os.environ",
+                          lambda: edit("egress.py", "    child_env = {\n", "    child_env = dict(os.environ)\n    _unused = {\n"),
+                          "differs from"))
+            # Round 3 (B1/B2/B6) and round 4 (C1/C2/C4): the launch env's final contents, which no
+            # piecemeal check proves. The whole run() function is pinned to the floor.
+            cases.append(("child_env.update(os.environ) (B6)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    child_env.update(model_keys)\n    child_env.update(os.environ)\n"),
+                          "differs from"))
+            cases.append(("child_env rebound to dict(os.environ) (B1)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    child_env.update(model_keys)\n    child_env = dict(os.environ)\n"),
+                          "differs from"))
+            cases.append(("env={**os.environ} spread (B2)",
+                          lambda: edit("egress.py", "completed = subprocess.run(argv, env=child_env, cwd=str(copy)",
+                                       "completed = subprocess.run(argv, env={**os.environ}, cwd=str(copy)"),
+                          "without a clean dict env="))
+            cases.append(("model_keys.update(os.environ) merged into child_env (C2)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    model_keys.update(os.environ)\n    child_env.update(model_keys)\n"),
+                          "differs from"))
+            cases.append(("model_keys = dict(os.environ) before the merge (C4)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    model_keys = dict(os.environ)\n    child_env.update(model_keys)\n"),
+                          "differs from"))
+            cases.append(("alias e = child_env; e.update(os.environ) (C1)",
+                          lambda: edit("egress.py", "    child_env.update(model_keys)\n",
+                                       "    child_env.update(model_keys)\n    e = child_env; e.update(os.environ)\n"),
+                          "differs from"))
+            # Round 5 (NOTE 2): the one launch-env input neither own_steps_differ nor lists_differ read.
+            cases.append(("FIXED_PATH gains a job-writable dir",
+                          lambda: edit("egress.py", 'FIXED_PATH = "/usr/local/sbin:/usr/local/bin',
+                                       'FIXED_PATH = "./bin:/usr/local/sbin:/usr/local/bin'),
+                          "FIXED_PATH, used in the launch env, differs"))
+            # Round 6: a SECOND module-level FIXED_PATH assignment; Python uses the last binding, the
+            # first still matches the floor, and nothing else changes.
+            cases.append(("FIXED_PATH shadowed by a second assignment",
+                          lambda: edit("egress.py",
+                                       'FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n',
+                                       'FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+                                       'FIXED_PATH = "./bin:" + FIXED_PATH\n'),
+                          "FIXED_PATH, used in the launch env, differs"))
+            # Round 5 (NOTE 1): parse_env_names/parse_model_keys produce the command's env-file and what is
+            # merged into the launch env; own_steps_differ pins them too, so it does not rely on
+            # lists_differ's ordering. The first `return result` is parse_env_names'.
+            cases.append(("a parse_* function absorbs os.environ (D1)",
+                          lambda: edit("egress.py", "    return result\n",
+                                       "    result.update(os.environ)\n    return result\n"),
+                          "which builds what the launch env or the command's env-file holds"))
+
+            for name, mutate, expect in cases:
+                mutate()
+                try:
+                    result = own(commit(name))
+                finally:
+                    reset()      # always, so one failed case does not leave the clone dirty for the next
+                with self.subTest(name):
+                    self.assertIn(expect, result)
 
 
 if __name__ == "__main__":
