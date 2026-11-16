@@ -109,6 +109,8 @@ class Trigger:
     line: int
     change_requests: bool  # starts the pipeline for pull or merge requests
     token: str | None = None  # a literal webhook token written in the file
+    token_node: object = None  # the token's expression when it is not a plain literal (flagship slice 2d.2i)
+    token_key: str = "token"   # the argument that held it: token (Generic Webhook Trigger), secretToken (GitLab)
 
 
 @dataclass
@@ -127,6 +129,10 @@ class Pipeline:
     opaque: list = field(default_factory=list)          # (line, what)
     triggers: list = field(default_factory=list)        # Trigger: SCM and webhook triggers named in the file
     literals: dict = field(default_factory=dict)        # variable -> Str assigned to it (last assignment)
+    lists: dict = field(default_factory=dict)           # variable -> ListLit assigned to it (last assignment)
+    # variable -> the names its assigned values read, from every assignment, parameter and withEnv entry
+    # in the file (flagship slice 2d.2i): a secret copied into another variable is still a secret.
+    refs: dict = field(default_factory=dict)
     stages: list = field(default_factory=list)          # every stage with a block, as a tuple of names, steps or not
     # Lane declarations the checker does not read (flagship slice 2d.2f): (kind, name, value text or
     # None, line, stage). `jenkins-misnamed` is the variable under another spelling in an environment
@@ -314,8 +320,10 @@ def git_text(script: str) -> bool:
 _CHANGE_VARS = re.compile(r"\b(?:env\.)?(?:CHANGE_(?:ID|TARGET|BRANCH|TITLE|AUTHOR\w*|URL|FORK)|gitlabMergeRequest\w*|"
                           r"gitlabActionType|ghprb\w+)\b")
 _BRANCH_VAR = re.compile(r"\b(?:env\.)?(?:BRANCH_NAME|TAG_NAME|GIT_BRANCH)\b")
-# BRANCH_NAME of a change request in a multibranch job.
-_CR_BRANCH_SAMPLES = ("PR-1", "PR-42", "PR-9001")
+# BRANCH_NAME of a change request in a multibranch job: PR-<n> (GitHub, Bitbucket), PR-<n>-head and
+# PR-<n>-merge (GitHub, when both discovery strategies are on), MR-<n> (GitLab). Flagship slice 2d.2i
+# added the last three; the plugins' own pages were not read in the session.
+_CR_BRANCH_SAMPLES = ("PR-1", "PR-42", "PR-9001", "PR-7-head", "PR-7-merge", "MR-1", "MR-42")
 
 
 def _combine_all(values: list[str]) -> str:
@@ -348,6 +356,10 @@ def _combine_any(values: list[str]) -> str:
 def _all(parts: list) -> tuple:
     parts = [p for p in parts if p is not None]
     reach = _combine_all([r for r, _ in parts])
+    if reach == CR_NO:
+        # Keeps every change request out when one part does (flagship slice 2d.2i: the fullness of a
+        # `no` was dropped, so `not { not { changeRequest() } }` came out as only possible).
+        return reach, any(r == CR_NO and f for r, f in parts)
     full = reach == CR_YES and all(r == CR_YES and f for r, f in parts)
     return reach, full
 
@@ -355,6 +367,8 @@ def _all(parts: list) -> tuple:
 def _any(parts: list) -> tuple:
     parts = [p for p in parts if p is not None]
     reach = _combine_any([r for r, _ in parts])
+    if reach == CR_NO:
+        return reach, bool(parts) and all(r == CR_NO and f for r, f in parts)
     return reach, reach == CR_YES and any(r == CR_YES and f for r, f in parts)
 
 
@@ -364,6 +378,10 @@ def _inv(cond: tuple) -> tuple:
         return (CR_NO, True) if full else (CR_POSSIBLE, False)
     if reach == CR_UNKNOWN:
         return CR_UNKNOWN, False
+    if reach == CR_NO and full:
+        # not { not { changeRequest() } }: what kept every change request out lets every one in
+        # (flagship slice 2d.2i).
+        return CR_YES, True
     return CR_POSSIBLE, False
 
 
@@ -428,7 +446,7 @@ def when_eval(stmt, methods: dict | None = None, depth: int = 0) -> tuple | None
             if value is None:
                 return CR_UNKNOWN, False
             return _branch_match(value, literal(named_arg(expr, "comparator")) or "EQUALS") \
-                if var == "BRANCH_NAME" else (CR_NO, True)
+                if var in ("BRANCH_NAME", "GIT_BRANCH") else (CR_NO, True)
         return CR_POSSIBLE, False
     if name in ("not", "allOf", "anyOf") and expr.closure is not None:
         inner = [when_eval(s, methods, depth + 1) for s in expr.closure.stmts if not isinstance(s, Opaque)]
@@ -486,13 +504,14 @@ def if_eval(cond, methods: dict | None = None, depth: int = 0) -> tuple:
                 _BRANCH_NAME.fullmatch(path_of(cond.callee.target) or "") and len(cond.args) == 1:
             arg = literal(cond.args[0])
             var = path_of(cond.callee.target)
-            if arg is not None and "BRANCH_NAME" in var:
+            # GIT_BRANCH holds the branch head's name in a multibranch job too (flagship slice 2d.2i).
+            if arg is not None and ("BRANCH_NAME" in var or "GIT_BRANCH" in var):
                 if cond.callee.name == "matches":
                     return _branch_match(arg, "REGEXP")
                 pattern = arg + "*" if cond.callee.name == "startsWith" else "*" + arg
                 return _branch_match(pattern.replace("[", "[[]"), "GLOB")
             if arg is not None:
-                return CR_NO, True        # TAG_NAME and GIT_BRANCH are not PR-<n>
+                return CR_NO, True        # TAG_NAME is not PR-<n>
     if isinstance(cond, Binary) and cond.op in ("==", "!=", "==~"):
         sides = [cond.left, cond.right]
         var = next((path_of(x) for x in sides if path_of(x) and (
@@ -620,46 +639,104 @@ def _cred_ids(node) -> list[str]:
     return out
 
 
+# Variables a binding sets when the Jenkinsfile does not name them (flagship slice 2d.2i). The binding's
+# own argument, when given, replaces the default. AWS: plugins.jenkins.io/aws-credentials; Azure: the
+# credentials-binding steps page ("If empty, default value is AZURE_CLIENT_SECRET"); git: not verified.
+_DEFAULT_VARIABLES = {
+    "aws": {"accessKeyVariable": "AWS_ACCESS_KEY_ID", "secretKeyVariable": "AWS_SECRET_ACCESS_KEY"},
+    "AmazonWebServicesCredentialsBinding": {"accessKeyVariable": "AWS_ACCESS_KEY_ID",
+                                            "secretKeyVariable": "AWS_SECRET_ACCESS_KEY"},
+    "azureServicePrincipal": {"subscriptionIdVariable": "AZURE_SUBSCRIPTION_ID", "clientIdVariable": "AZURE_CLIENT_ID",
+                              "clientSecretVariable": "AZURE_CLIENT_SECRET", "tenantIdVariable": "AZURE_TENANT_ID"},
+    "gitUsernamePassword": {"usernameVariable": "GIT_USERNAME", "passwordVariable": "GIT_PASSWORD"},
+}
+# Binding kinds whose `variable` holds the path of a file with the secret, not the secret.
+_PATH_KINDS = {"file", "zip", "FileBinding", "ZipFileBinding"}
+_PATH_KEYS = {"keyFileVariable", "keystoreVariable"}
+
+
+COMPUTED_ENV = "<computed env>"
+
+
+def _computed_env(node) -> bool:
+    """The expression reads an environment variable whose name is computed: env[n], env."${n}",
+    env.getProperty(n), env.getAt(n), System.getenv(n) (flagship slice 2d.2i)."""
+    for n in find_nodes(node, lambda n: isinstance(n, (Index, Prop, Call)), limit=400):
+        if isinstance(n, Index) and path_of(n.target) == "env" and literal(n.index) is None:
+            return True
+        if isinstance(n, Prop) and path_of(n.target) == "env" and "${" in n.name:
+            return True
+        if isinstance(n, Call) and (chain_name(n.callee) or "") in (
+                "System.getenv", "env.getProperty", "env.getAt", "env.get", "getProperty", "binding.getVariable",
+                "getVariable", "binding.getProperty") and \
+                n.args and literal(n.args[0]) is None:
+            return True
+    return False
+
+
+def named_entries(call: Call) -> list:
+    """A call's named arguments, and the entries of a map given as an argument: Groovy passes
+    `string(credentialsId: 'x')` and `string([credentialsId: 'x'])` the same map (flagship slice 2d.2i)."""
+    out = list(call.named)
+    for arg in call.args:
+        if isinstance(arg, MapLit):
+            out += [(k, v) for k, v in arg.entries if isinstance(k, str)]
+    return out
+
+
 def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
     """Credential bindings created by a wrapper step such as withCredentials or sshagent."""
     out: list[Binding] = []
     name = chain_name(call.callee) or ""
 
+    def make(entries: list, kind: str, line: int, how_shown: str) -> Binding | None:
+        ids: list = []
+        variables: list = []
+        paths: list = []
+        given = {k for k, _ in entries}
+        for k, v in entries:
+            if k in _CRED_KEYS:
+                ids += _cred_ids(v)
+            elif isinstance(k, str) and k.lower().endswith("variable"):
+                value = literal(v)
+                if value:
+                    variables.append(value)
+                    if (kind in _PATH_KINDS and k == "variable") or k in _PATH_KEYS:
+                        paths.append(value)
+                elif v is not None:
+                    variables.append("?")
+        for key, default in _DEFAULT_VARIABLES.get(kind, {}).items():
+            if key not in given:
+                variables.append(default)
+        if ids or variables:
+            return Binding(tuple(ids or ["?"]), tuple(variables), how_shown, line, ctx_origin, tuple(paths))
+        return None
+
     def from_binding_call(b) -> Binding | None:
         if isinstance(b, Call):
-            ids = []
-            for key in _CRED_KEYS:
-                ids += _cred_ids(named_arg(b, key))
-            variables = [literal(v) for k, v in b.named if k.lower().endswith("variable") and literal(v)]
             kind = chain_name(b.callee) or ""
-            # file and zip bindings, and the key file of an SSH key or certificate, hold a path.
-            paths = [literal(v) for k, v in b.named if literal(v) and (
-                (kind in ("file", "zip") and k == "variable") or k in ("keyFileVariable", "keystoreVariable"))]
-            if ids or variables:
-                return Binding(tuple(ids or ["?"]), tuple(variables), f"{how}:{kind}", b.line, ctx_origin,
-                               tuple(paths))
+            return make(named_entries(b), kind, b.line, f"{how}:{kind}")
         if isinstance(b, MapLit):
-            ids, variables = [], []
-            for k, v in b.entries:
-                if k in _CRED_KEYS:
-                    ids += _cred_ids(v)
-                elif isinstance(k, str) and k.lower().endswith("variable") and literal(v):
-                    variables.append(literal(v))
-            if ids:
-                return Binding(tuple(ids), tuple(variables), how, b.line, ctx_origin)
+            entries = [(k, v) for k, v in b.entries if isinstance(k, str)]
+            kind = (next((literal(v) for k, v in entries if k == "$class"), "") or "").rsplit(".", 1)[-1]
+            return make(entries, kind, b.line, f"{how}:{kind}" if kind else how)
         return None
 
     if name == "withCredentials":
         items = []
         for arg in call.args:
-            items += arg.items if isinstance(arg, ListLit) else [arg]
+            items += _list_parts(arg)
         for key, value in call.named:
-            if key == "bindings" and isinstance(value, ListLit):
-                items += value.items
+            if key == "bindings":
+                items += _list_parts(value)
         for item in items:
             b = from_binding_call(item)
             if b:
                 out.append(b)
+            else:
+                # A binding the checker cannot read (a variable it could not follow, a computed list, a
+                # method that returns one): unknown credentials in unknown variables (flagship slice 2d.2i).
+                out.append(Binding(("?",), ("?",), how, call.line, ctx_origin))
         if not out and items:
             out.append(Binding(("?",), (), how, call.line, ctx_origin))
         return out
@@ -668,7 +745,8 @@ def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
         for arg in call.args:
             ids += _cred_ids(arg)
         ids += _cred_ids(named_arg(call, "credentials"))
-        return [Binding(tuple(ids or ["?"]), ("SSH_AUTH_SOCK",), how, call.line, ctx_origin)]
+        # SSH_AUTH_SOCK is the path of the agent's socket, not the key (flagship slice 2d.2i).
+        return [Binding(tuple(ids or ["?"]), ("SSH_AUTH_SOCK",), how, call.line, ctx_origin, ("SSH_AUTH_SOCK",))]
     if name in ("withSonarQubeEnv",):
         ident = literal(first_arg(call)) or "?"
         return [Binding((f"sonar:{ident}",), ("SONAR_AUTH_TOKEN",), how, call.line, ctx_origin)]
@@ -693,12 +771,13 @@ def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
     # withKubeConfig([credentialsId: 'x']), withVault(configuration: [vaultCredentialId: 'x'], ...),
     # wrap([$class: 'VaultBuildWrapper', ...]).
     ids = _nested_credential_ids(call)
+    variables = _nested_variables(call) + list(_WRAPPER_VARIABLES.get(name, ()))
     if ids:
-        return [Binding(tuple(ids), (), how, call.line, ctx_origin)]
+        return [Binding(tuple(ids), tuple(variables), how, call.line, ctx_origin)]
     if name in CREDENTIAL_WRAPPERS:
         # These steps supply credentials by design (withAWS(role: ...) assumes a role, withVault reads
         # secrets), even when no credential ID is written in the file.
-        return [Binding(("?",), (), how, call.line, ctx_origin)]
+        return [Binding(("?",), tuple(variables), how, call.line, ctx_origin)]
     if name == "wrap":
         cls = next((literal(v) for arg in call.args if isinstance(arg, MapLit) for k, v in arg.entries
                     if k == "$class"), None) or ""
@@ -707,10 +786,47 @@ def bindings_of(call: Call, how: str, ctx_origin: str) -> list[Binding]:
     return out
 
 
+def _list_parts(node) -> list:
+    """The items of a list literal, of `a + b` of lists, or the node itself (a binding or something the
+    checker cannot read, which becomes a binding of unknown credentials)."""
+    if isinstance(node, ListLit):
+        return list(node.items)
+    if isinstance(node, Binary) and node.op == "+":
+        return _list_parts(node.left) + _list_parts(node.right)
+    return [node]
+
+
 # Wrapper steps that make credentials available to the steps inside them.
 CREDENTIAL_WRAPPERS = {"withAWS", "withVault", "withKubeConfig", "withKubeCredentials", "withDockerRegistry",
                        "withDockerServer", "withAzureCLI", "withAzureVault", "withGCP", "withNPM",
                        "withSonarQubeEnv", "withGitHubToken", "withAnsible", "kubeconfig", "azureCLI"}
+
+
+# Variables a wrapper sets in the environment of the steps inside it (not verified against each plugin's
+# page): withAWS sets the AWS keys, withSonarQubeEnv the server's token.
+_WRAPPER_VARIABLES = {"withAWS": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"),
+                      "withSonarQubeEnv": ("SONAR_AUTH_TOKEN",)}
+
+
+def _nested_variables(call: Call, limit: int = 200) -> list[str]:
+    """Literal values of `...Variable` and `envVar` keys at any depth of a wrapper's arguments:
+    withVault(vaultSecrets: [[secretValues: [[envVar: 'TOKEN', vaultKey: 'x']]]]) (flagship slice 2d.2i)."""
+    out: list[str] = []
+    stack = [(k, v) for k, v in call.named] + [("", a) for a in call.args]
+    seen = 0
+    while stack and seen < limit:
+        key, node = stack.pop()
+        seen += 1
+        if isinstance(key, str) and (key.lower().endswith("variable") or key == "envVar") and literal(node):
+            out.append(literal(node))
+            continue
+        if isinstance(node, MapLit):
+            stack += [(k, v) for k, v in node.entries]
+        elif isinstance(node, ListLit):
+            stack += [("", item) for item in node.items]
+        elif isinstance(node, Call):
+            stack += [(k, v) for k, v in node.named] + [("", a) for a in node.args]
+    return out
 
 
 def _nested_credential_ids(call: Call, limit: int = 200) -> list[str]:
@@ -926,6 +1042,16 @@ class Builder:
         self.called: set[str] = set()
         self.stack: list[str] = []
         self.budget = self.INLINE_BUDGET
+        # For each method being expanded, its closure parameter -> (the caller's closure, walked yet).
+        self.closure_args: list[dict] = []
+        # Closures and method pointers assigned to variables of this file (flagship slice 2d.2i):
+        # name -> Block of the closure; name -> method name (def f = this.&build); name -> {key: Block}.
+        self.closure_vars: dict[str, Block] = {}
+        self.method_refs: dict[str, str] = {}
+        self.closure_maps: dict[str, dict] = {}
+        # Variables the file changes other than by assigning them (`b << x`, `b.add(x)`, `b += x`): a list
+        # held in one is not taken for the list first assigned (the review of slice 2d.2i).
+        self.changed_lists: set[str] = set()
 
     def build(self, tree: Block) -> Pipeline:
         # Methods may be defined below their first use; collect the top-level ones first. A method the
@@ -938,6 +1064,30 @@ class Builder:
                     self.methods[target.name] = target.body
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
+        # A list is followed into withCredentials only when its name is used nowhere else: passed to a method or
+        # copied to another name, it can be changed there (the second review of slice 2d.2i).
+        uses: dict[str, int] = {}
+        for n in find_nodes(tree, lambda n: isinstance(n, Name)):
+            uses[n.name] = uses.get(n.name, 0) + 1
+        in_bindings: dict[str, int] = {}
+        for c in find_nodes(tree, lambda n: isinstance(n, Call) and (chain_name(n.callee) or "").removeprefix(
+                "steps.") == "withCredentials"):
+            for a in list(c.args) + [v for k, v in c.named if k == "bindings"]:
+                for part in _list_parts(a):
+                    if isinstance(part, Name):
+                        in_bindings[part.name] = in_bindings.get(part.name, 0) + 1
+        self.changed_lists.update(name for name, count in uses.items() if count > in_bindings.get(name, 0))
+        for n in find_nodes(tree, lambda n: isinstance(n, (Binary, Call, Assign))):
+            if isinstance(n, Binary) and n.op == "<<" and path_of(n.left):
+                self.changed_lists.add(path_of(n.left))
+            elif isinstance(n, Call) and isinstance(n.callee, Prop) and path_of(n.callee.target) and \
+                    n.callee.name in ("add", "addAll", "push", "leftShift", "plus", "putAt", "set", "remove", "clear",
+                                      "removeAll", "retainAll", "putAll", "put"):
+                self.changed_lists.add(path_of(n.callee.target))
+            elif isinstance(n, Assign) and n.op != "=" and path_of(n.target):
+                self.changed_lists.add(path_of(n.target))
+            elif isinstance(n, Assign) and path_of(n.target) is None and path_of(getattr(n.target, "target", None)):
+                self.changed_lists.add(path_of(n.target.target))
         declarative = any(isinstance(s, ExprStmt) and isinstance(s.expr, Call) and callee_name(s.expr) == "pipeline"
                           for s in tree.stmts)
         self.p.kind = "declarative" if declarative else "scripted"
@@ -951,12 +1101,18 @@ class Builder:
 
     def trigger(self, node) -> None:
         def arg(key):
-            return named_arg(node, key) if isinstance(node, Call) else _entry(node, key)
+            if isinstance(node, Call):
+                # GenericTrigger([token: 'x']) passes the same map as GenericTrigger(token: 'x').
+                return next((v for k, v in named_entries(node) if k == key), None)
+            return _entry(node, key)
         if isinstance(node, Call):
             name = callee_name(node) or ""
         else:
             name = (next((literal(v) for k, v in node.entries if k == "$class"), "") or "").rsplit(".", 1)[-1]
-        token = literal(arg("token"))
+        # GitLab's webhook secret is `secretToken` (plugins.jenkins.io/gitlab-plugin); flagship slice 2d.2i.
+        token_key = "secretToken" if name in ("gitlab", "GitLabPushTrigger") else "token"
+        token_node = arg(token_key)
+        token = literal(token_node)
         change_requests = False
         if name == "GenericTrigger":
             text = " ".join(filter(None, (literal(arg("regexpFilterExpression")), literal(arg("regexpFilterText")),
@@ -979,7 +1135,8 @@ class Builder:
         elif name in ("gitlab", "GitLabPushTrigger"):
             flag = arg("triggerOnMergeRequest")
             change_requests = flag is None or path_of(flag) != "false"
-        self.p.triggers.append(Trigger(name, node.line, change_requests, token))
+        self.p.triggers.append(Trigger(name, node.line, change_requests, token,
+                                       token_node if token is None else None, token_key))
 
     # -- generic statements ------------------------------------------------------------
     def block(self, block: Block | None, ctx: Ctx, top: bool = False) -> None:
@@ -1014,11 +1171,23 @@ class Builder:
                                             " > ".join(ctx.stage)))
             if target:
                 self.p.local_names.add(target.split(".")[0])
+                if path_of(stmt.target) and "." in target and not target.startswith("env.") and \
+                        isinstance(stmt.value, Closure):
+                    base, _, attr = target.partition(".")
+                    if "." not in attr:
+                        self.closure_maps.setdefault(base, {})[attr] = stmt.value.body
                 if path_of(stmt.target):
                     self.track_value(target.removeprefix("env."), stmt.value)
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
+                    # tasks['a'] = { ... }: a map of closures, for `parallel tasks` (flagship slice 2d.2i).
+                    index = getattr(stmt.target, "index", None)
+                    if isinstance(stmt.value, Closure) and path_of(stmt.target) is None and \
+                            path_of(getattr(stmt.target, "target", None)) == target:
+                        key = literal(index) if index is not None else None
+                        self.closure_maps.setdefault(target, {})[key if key is not None else
+                                                             f"computed {stmt.line}"] = stmt.value.body
             self.expr(stmt.value, ctx)
         elif isinstance(stmt, If):
             cond = if_eval(stmt.cond, self.methods)
@@ -1091,6 +1260,35 @@ class Builder:
             self.p.literals[name] = value
         elif not merge:
             self.p.literals.pop(name, None)
+        if isinstance(value, ListLit) and not merge:
+            self.p.lists[name] = value
+        elif not merge:
+            self.p.lists.pop(name, None)
+        if not merge:
+            self.closure_vars.pop(name, None)
+            self.method_refs.pop(name, None)
+            self.closure_maps.pop(name, None)
+            if isinstance(value, Closure):
+                self.closure_vars[name] = value.body
+            elif isinstance(value, Prop) and isinstance(value.target, Name) and value.target.name == "this" and \
+                    value.name in self.defs:
+                self.method_refs[name] = value.name        # this.&build (the parser reads `.&` as `.`)
+            elif isinstance(value, Name) and value.name in self.defs:
+                pass
+            elif isinstance(value, MapLit) and any(isinstance(v, Closure) for _, v in value.entries):
+                self.closure_maps[name] = {str(k): v.body for k, v in value.entries if isinstance(v, Closure)}
+        self.p.refs.setdefault(name, set()).update(
+            w for t in source_texts(value) for w in re.findall(r"[A-Za-z_]\w*", t or ""))
+        if _computed_env(value):
+            # def v = env."${n}": the value of an environment variable whose name is computed.
+            self.p.refs[name].add(COMPUTED_ENV)
+        if isinstance(value, Closure):
+            # def get = { TOKEN }: what the closure returns can be what it reads (the review of slice 2d.2i).
+            for n in find_nodes(value.body, lambda n: isinstance(n, (Name, Str)), limit=2000):
+                if isinstance(n, Name):
+                    self.p.refs[name].add(n.name)
+                else:
+                    self.p.refs[name].update(w for e in n.exprs for w in re.findall(r"[A-Za-z_]\w*", e))
         cname = chain_name(value) if isinstance(value, Call) else None
         if cname and (cname.startswith("docker.build") or cname.startswith("docker.image")):
             self.p.docker_vars.add(name)
@@ -1139,6 +1337,108 @@ class Builder:
     # -- calls ---------------------------------------------------------------------------
     def call(self, call: Call, ctx: Ctx) -> None:
         name = chain_name(call.callee) or ""
+        # steps.sh, this.sh, this.build(): the same step or method as sh and build() (flagship slice 2d.2i).
+        for prefix in ("steps.", "this."):
+            if name.startswith(prefix) and "." not in name[len(prefix):]:
+                name = name[len(prefix):]
+                break
+        if name.startswith("this.") and name.endswith(".call") and name[5:-5] in self.defs:
+            name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
+        # A closure held in a variable, given as the last argument, is the step's body like a literal one;
+        # so is a method pointer (this.&build, or a variable holding one), as a call of the method.
+        if call.closure is None and call.args and name != "parallel":
+            last = call.args[-1]
+            lp = path_of(last)
+            pointer = None
+            if lp in self.closure_vars:
+                call = replace(call, args=call.args[:-1], closure=self.closure_vars[lp])
+            elif lp in self.method_refs:
+                pointer = self.method_refs[lp]
+            elif isinstance(last, Prop) and isinstance(last.target, Name) and last.target.name == "this" and \
+                    last.name in self.defs:
+                pointer = last.name
+            if pointer is not None:
+                body = Block([ExprStmt(Call(Name(pointer, line=call.line), line=call.line), line=call.line)],
+                             line=call.line)
+                call = replace(call, args=call.args[:-1], closure=body)
+        # `f(a, { ... })` is `f(a) { ... }` in Groovy: the closure is the step's body, and the bindings of
+        # withCredentials([...], { ... }) reach it (flagship slice 2d.2i). Not for parallel, whose closure
+        # arguments are branches.
+        if call.closure is None and call.args and isinstance(call.args[-1], Closure) and name != "parallel":
+            self.p.local_names.update(p for p in call.args[-1].params if isinstance(p, str))
+            call = replace(call, args=call.args[:-1], closure=call.args[-1].body)
+        # A closure passed to a method of this file runs where the method calls it: `body()` inside
+        # withCredentials in the method gets the method's bindings (flagship slice 2d.2i).
+        target = name[:-len(".call")] if name.endswith(".call") else name
+        for idx in range(len(self.closure_args) - 1, -1, -1):
+            frame = self.closure_args[idx]
+            if target in frame and "." not in target:
+                body, walked, depth = frame[target]
+                frame[target] = (body, True, depth)
+                if self.budget <= 0:
+                    self.p.opaque.append((call.line, f"call to {target}() not expanded (too many calls)"))
+                    return
+                self.budget -= 1
+                # The closure runs with the frames and methods of the place it was written: a `body()`
+                # inside it is the caller's, not this method's (the review of slice 2d.2i found two helpers
+                # that both name their closure `body` recursing without end).
+                saved_frames, saved_stack = self.closure_args, self.stack
+                self.closure_args, self.stack = saved_frames[:idx], saved_stack[:depth]
+                try:
+                    self.block(body, ctx)
+                finally:
+                    self.closure_args, self.stack = saved_frames, saved_stack
+                return
+        # A closure, a method pointer or a map of closures assigned in this file, called here: walked here,
+        # with the bindings and conditions of this place (flagship slice 2d.2i). The closure was also walked
+        # where it was written.
+        if "." not in target and target in self.closure_vars and target not in self.defs:
+            if self.budget > 0 and target not in self.stack:
+                self.budget -= 1
+                self.stack.append(target)
+                try:
+                    self.block(self.closure_vars[target], ctx)
+                finally:
+                    self.stack.pop()
+            else:
+                self.p.opaque.append((call.line, f"call to {target}() not expanded (recursion or too many calls)"))
+            return
+        if "." not in target and target in self.method_refs:
+            self.inline(self.method_refs[target], call, ctx)
+            return
+        if name.endswith(".put") and "." not in name[:-4] and call.args and literal(call.args[0]) is not None:
+            # tasks.put('a', { ... }), whose closure the line above may have made the call's body.
+            body = call.closure if len(call.args) == 1 and call.closure is not None else (
+                call.args[1].body if len(call.args) == 2 and isinstance(call.args[1], Closure) else None)
+            if body is not None:
+                self.closure_maps.setdefault(name[:-4], {})[literal(call.args[0])] = body
+        if isinstance(call.callee, Index) and path_of(call.callee.target) in self.closure_maps:
+            key = literal(call.callee.index)
+            bodies = self.closure_maps[path_of(call.callee.target)]
+            chosen = [bodies[key]] if key in bodies else list(bodies.values())
+            if self.budget > 0 and target not in self.stack:
+                self.budget -= 1
+                self.stack.append(target or "index call")
+                try:
+                    for body in chosen:
+                        self.block(body, ctx)
+                finally:
+                    self.stack.pop()
+            return
+        head, _, key = target.partition(".")
+        if key and "." not in key and head in self.closure_maps and key in self.closure_maps[head]:
+            if self.budget > 0 and target not in self.stack:
+                self.budget -= 1
+                self.stack.append(target)
+                try:
+                    self.block(self.closure_maps[head][key], ctx)
+                finally:
+                    self.stack.pop()
+            return
+        if name == "withCredentials":
+            # withCredentials(bindings) with a list assigned in this file, also under `bindings:` and in `a + b`.
+            call = replace(call, args=[self._lists_in(a) for a in call.args],
+                           named=[(k, self._lists_in(v) if k == "bindings" else v) for k, v in call.named])
         # Receivers in a chain are calls too: docker.image('x') in docker.image('x').inside { },
         # sh(script: 'x', returnStdout: true) in sh(...).trim().
         if isinstance(call.callee, Prop) and isinstance(call.callee.target, Call):
@@ -1191,6 +1491,24 @@ class Builder:
                 if found:
                     continue
                 p = path_of(arg)
+                if p and p in self.closure_maps:
+                    # A map of closures assigned in this file: each branch runs here (flagship slice 2d.2i),
+                    # once per walk, under the budget, and not inside itself.
+                    marker = f"parallel {p}"
+                    if marker in self.stack or self.budget <= 0:
+                        self.p.opaque.append((call.line, f"parallel {p} not expanded (recursion or too many calls)"))
+                        continue
+                    self.stack.append(marker)
+                    try:
+                        for key, body in self.closure_maps[p].items():
+                            self.budget -= 1
+                            if self.budget <= 0:
+                                self.p.opaque.append((call.line, f"parallel {p} not expanded (too many calls)"))
+                                break
+                            self.block(body, branch(key))
+                    finally:
+                        self.stack.pop()
+                    continue
                 if p:
                     # Branches assigned in this file (branches[name] = { ... }) were walked where they were
                     # assigned; a map from anywhere else is code the checker never saw.
@@ -1226,6 +1544,9 @@ class Builder:
                 for s in all_strings(arg):
                     var, eq, _ = s.text().partition("=")
                     if eq:
+                        # withEnv(["T2=${TOKEN}"]): T2 holds what TOKEN holds (flagship slice 2d.2i).
+                        self.p.refs.setdefault(var.strip(), set()).update(
+                            w for e in s.exprs for w in re.findall(r"[A-Za-z_]\w*", e))
                         source = untrusted_source(s.exprs, self.p)
                         if source:
                             self.p.tainted[var.strip()] = source
@@ -1256,6 +1577,16 @@ class Builder:
                                                         " > ".join(ctx.stage)))
             self.block(call.closure, inner)
 
+    def _lists_in(self, node, depth: int = 0):
+        if depth > 50:
+            return node
+        p = path_of(node)
+        if p and p in self.p.lists and p not in self.changed_lists:
+            return self.p.lists[p]
+        if isinstance(node, Binary) and node.op == "+":
+            return replace(node, left=self._lists_in(node.left, depth + 1), right=self._lists_in(node.right, depth + 1))
+        return node
+
     def inline(self, name: str, call: Call, ctx: Ctx) -> None:
         """Walk a method of this file where it is called, so its steps get the caller's stage,
         credentials, post condition and conditions. Arguments flow into the parameters."""
@@ -1275,13 +1606,25 @@ class Builder:
         values = list(call.args) + ([Closure([], call.closure, line=call.line)] if call.closure is not None else [])
         for param, value in zip(mdef.params, values):
             self.track_value(param, value)
+        frame: dict = {}
+        depth = len(self.stack)
+        for param, value in zip(mdef.params, values):
+            # Each closure given to the method, in any position, runs where the method calls it.
+            if isinstance(param, str) and isinstance(value, Closure):
+                frame[param] = (value.body, False, depth)
+            elif isinstance(param, str) and path_of(value) in self.closure_vars:
+                frame[param] = (self.closure_vars[path_of(value)], False, depth)
         self.stack.append(name)
+        self.closure_args.append(frame)
         try:
             self.block(mdef.body, replace(ctx, in_function=name))
         finally:
             self.stack.pop()
-        # A trailing closure passed to the method runs inside it (withRetry { ... }).
-        if call.closure is not None:
+            self.closure_args.pop()
+        # A trailing closure passed to the method runs inside it (withRetry { ... }); where the method
+        # calls it by its parameter, it was walked there, with the method's bindings and conditions.
+        # (A closure given as another argument was walked at the call, before the method, by `expr`.)
+        if call.closure is not None and not any(walked for body, walked, _ in frame.values() if body is call.closure):
             self.block(call.closure, ctx)
 
     def record_step(self, name: str, call: Call, ctx: Ctx) -> None:
@@ -1359,6 +1702,16 @@ class Builder:
             if w.closure is not None:
                 ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line,
                                     "when " + _source_hint(w.closure))
+        # A wrapper step in `options { }` wraps every step of the pipeline or stage: options { withAWS(...) }
+        # binds its credentials for them (flagship slice 2d.2i).
+        for opt in secs.get("options", []):
+            for stmt in (opt.closure.stmts if opt.closure is not None else []):
+                e = stmt.expr if isinstance(stmt, ExprStmt) else None
+                if isinstance(e, Call):
+                    oname = chain_name(e.callee) or ""
+                    new = bindings_of(e, oname, ctx_origin=f"{origin} options")
+                    if new:
+                        ctx = replace(ctx, creds=ctx.creds + tuple(new))
         for inp in secs.get("input", []):
             sub = None
             if inp.closure is not None:

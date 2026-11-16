@@ -159,7 +159,9 @@ node {
 }
 boolean isRelease() { return env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'release' }
 """
-        self.assertEqual(self.cr_of(text), {"release": "no", "other": "possible", "pr": "yes", "deploy": "no",
+        # `other` runs for every change request: isRelease() is false for each of them (flagship slice 2d.2i;
+        # it was "possible" while the fullness of a "no" was dropped by `||`).
+        self.assertEqual(self.cr_of(text), {"release": "no", "other": "yes", "pr": "yes", "deploy": "no",
                                             "pr2": "yes"})
 
     def test_pull_request_triggers_make_every_stage_reachable(self):

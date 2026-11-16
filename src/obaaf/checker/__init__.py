@@ -484,12 +484,14 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
     jenkins_sought = is_repo and platform != "github" and target == root
+    errors: list[str] = []
+    jenkins_notes: list[str] = []
     if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
-                                             list(config.jenkins.get("exclude") or []))
+                                             list(config.jenkins.get("exclude") or []),
+                                             notes=jenkins_notes, errors=errors)
     script_cmds = _script_commands(catalog, config)
     findings: list[Finding] = []
-    errors: list[str] = []
     rels: list[str] = []
     # The CI definitions as a pull request changes them: a workflow that is a link by its own path,
     # and the target too when it is in the repository (slice 2d.2h).
@@ -551,10 +553,14 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     jenkins_results = []
     jenkins_rels: list[str] = []
     for path in jenkins_paths:
+        # A Jenkinsfile that is a link is reported by its own path (flagship slice 2d.2i).
         try:
-            rel = path.resolve().relative_to(root).as_posix()
+            rel = path.relative_to(root).as_posix()
         except ValueError:
-            rel = path.name
+            try:
+                rel = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                rel = path.name
         rels.append(rel)
         jenkins_rels.append(rel)
         owned_paths.extend(_as_found(path, root))
@@ -586,7 +592,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     today = today or date.today()
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
-    notes = repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+    notes = jenkins_notes + repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -901,7 +907,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                                  jenkins_sought=jenkins_sought)
     if jenkins_sought:
         jenkins_paths = jenkins_mod.discover(root, list(config.jenkins.get("files") or []),
-                                             list(config.jenkins.get("exclude") or []))
+                                             list(config.jenkins.get("exclude") or []), notes=notes, errors=errors)
     catalog = load()
     script_cmds = _script_commands(catalog, config)
     out = []

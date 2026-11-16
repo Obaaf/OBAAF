@@ -351,7 +351,10 @@ class Lexer:
                     continue
                 nxt = self._peek(1)
                 self._advance(2)
-                buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
+                # A backslash before a line end removes both: Groovy's line continuation in a string
+                # (flagship slice 2d.2i; it was kept as a line end, which split `gpg \\n--import`).
+                if nxt != "\n":
+                    buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
                 continue
             if interpolate and ch == "$" and self._interpolation_starts():
                 if buf:

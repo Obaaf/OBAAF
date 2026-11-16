@@ -250,16 +250,38 @@ signing_secret_patterns:
   - 'KEY_?STORE'
   - '(^|_)CSC_(LINK|KEY_PASSWORD)($|_)'
   - '(^|_)(MACOS|APPLE|WINDOWS|WIN|MAC)_?(CODESIGN_?)?CERT(IFICATE)?($|_)'
+  # Flagship slice 2d.2i (names a Jenkins attack got past; `-` and `.` are read as `_` in Jenkins):
+  # release.jks, secring.gpg, signing.asc, a credential named GPG, signingInMemoryKey (Gradle),
+  # ios-dist-cert, artifact-signer-key. Not `signer` alone: OBAAF's own Jenkins
+  # template names `obaaf-release-signer` a credential that can only ask a KMS to sign.
+  # Not `ASC` alone (App Store Connect's ASC_KEY_ID), a `GPG_` prefix (GPG_FINGERPRINT) or an upload key
+  # (SENTRY_UPLOAD_KEY): the review of slice 2d.2i found them on ordinary workflows.
+  - '(^|_)(GPG|PGP)$'
+  - '(^|_)(JKS|SECRING)($|_)'
+  - '(^|_)(SIGN(ING)?|PRIVATE|SECRET|KEY)_?ASC($|_)'
+  - 'SIGNING_?IN_?MEMORY'
+  - 'DIST(RIBUTION)?_?CERT'
+  - 'SIGNER_?KEY'
 # Commands that load a key file into the build environment. A command continued on the next line
 # with a backslash is joined before these are matched.
 signing_commands:
-  - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key\s+(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
-  - 'signtool(\.exe)?\s+sign\b.*\s/f\s'
+  # `--key=awskms://...` is a key in a KMS too (flagship slice 2d.2i).
+  - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key(\s+|=)(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
+  - '(?i)signtool(\.exe)?\s+sign\b.*\s/f\s'
   - '(^|[\s;&|(/`])gpg2?(\.exe)?([ \t]+--?\w[\w-]*(=\S+|[ \t]+("[^"\n]*"|''[^''\n]*''|(?!["''-])[^\s;&|]+))?)*[ \t]+--import(?![\w-])'
-  - '(^|[\s;&|(])security\s+import\b.*\.(?i:p12|pfx)\b'
+  # Any `security import` but of a public certificate or a provisioning profile (flagship slice 2d.2i:
+  # `security import "$P12"`).
+  - '(^|[\s;&|(])security\s+import\s+(?!\S*\.(?i:cer|crt|der|mobileprovision|provisionprofile)["'']?(\s|$))'
   - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
-  - '(^|[\s;&|(])apksigner\s+sign\b.*--ks\b'
+  - '(^|[\s;&|(])apksigner\s+sign\b.*--(ks|key)\b'
   - '(?i:\bImport-PfxCertificate\b)'
+  # Flagship slice 2d.2i: commands a Jenkins attack got past.
+  - '(?i)(^|[\s;&|(])certutil(\.exe)?\b.*\s-importpfx\b'
+  - 'cosign\s+import-key-pair\b'
+  - 'docker\s+trust\s+key\s+load\b'
+  - '(^|[\s;&|(])osslsigncode\s+sign\b.*\s-(pkcs12|key)\b'
+  - '(^|[\s;&|(])openssl\s+(dgst|pkeyutl)\b.*\s-sign\b'
+  - '(^|[\s;&|(])ssh-keygen\b.*\s-Y\s+sign\b'
 # Actions that load a signing key or certificate into the runner. Matched as a prefix of the
 # `uses:` value, before the `@`.
 signing_actions:
