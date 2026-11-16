@@ -10,6 +10,7 @@ it. A finding describes what the file shows; an unknown says what the file canno
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -158,6 +159,10 @@ def _skip_braces(expr: str, k: int, depth: int = 0) -> int:
     return k
 
 
+_DOLLAR_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+@functools.lru_cache(maxsize=4096)
 def _unquoted(expr: str, depth: int = 0) -> str:
     """The expression with each quoted text replaced by what it interpolates (`"a-${v}"` and `"a-$v"` by `v`,
     each read the same way again), and text that interpolates nothing by a placeholder; quotes and `${...}` are
@@ -187,9 +192,9 @@ def _unquoted(expr: str, depth: int = 0) -> str:
                     parts.append(_unquoted(body, depth + 1))
                     j = k
                 elif expr[j] == "$" and j + 1 < n and (expr[j + 1].isalpha() or expr[j + 1] == "_"):
-                    m = re.match(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", expr[j + 1:])
+                    m = _DOLLAR_NAME.match(expr, j + 1)      # in place: no copy of the rest of the text
                     parts.append(m.group(0))
-                    j += 1 + m.end()
+                    j = m.end()
                 else:
                     j += 1
             i = min(j + len(q), n)
