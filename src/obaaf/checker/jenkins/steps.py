@@ -84,7 +84,10 @@ GROOVY = {"println", "print", "printf", "sprintf", "assert", "tokenize", "each",
           "any", "every", "with", "sleep", "toString", "equals", "hashCode", "getClass", "use", "isCase",
           "call", "super", "this", "Integer.parseInt", "String.format", "Math.max", "Math.min"}
 
-KNOWN_STEPS = CORE | DECLARATIVE | CREDENTIALS | REPORTING | PUBLISHING | TRIGGERS | GROOVY
+# Read by OBAAF-JEN-004 (flagship slice 2d.2k): Job DSL, and the retrievers of the `library` step.
+LIBRARIES_AND_CODE = {"jobDsl", "modernSCM", "legacySCM"}
+
+KNOWN_STEPS = CORE | DECLARATIVE | CREDENTIALS | REPORTING | PUBLISHING | TRIGGERS | GROOVY | LIBRARIES_AND_CODE
 
 # Objects whose methods are understood: `env.X`, `currentBuild.result`, `docker.image(...)`.
 KNOWN_OBJECTS = {"env", "params", "currentBuild", "scm", "docker", "manager", "Jenkins", "jenkins", "System",
