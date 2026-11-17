@@ -1905,31 +1905,41 @@ def _check_rules(run: _Run, kind: str) -> None:
                 item = f"{subject}: required check {_q(context)}"
                 # A route through a file GitHub may not run never stands for the check (the second review of slice
                 # 2b.7), and neither does a job that may report it under names that could not be written out, or in
-                # a file GitHub may read otherwise (the third review). A rival route that ranks better than the one
-                # that decides makes the answer "cannot tell", unless it too gives a finding (a paths filter,
-                # activity types, or no run on a pull request's commit where nothing else can report it): then the
-                # check fails to report on some pull requests whichever route holds.
+                # a file GitHub may read otherwise (the third review). Where the route that decides gives a finding
+                # (a paths filter, activity types, or no run on a pull request's commit where nothing else can
+                # report it), the answer is "cannot tell" if any other job may report the check on a route that
+                # gives no finding, or two filtered routes may cover every pull request between them (the fourth
+                # review): ranks do not say which pull requests a route covers. A job that never runs on a pull
+                # request's commit, where no token may write checks, changes nothing. Jobs whose names could not
+                # be written out are read at their widest: a plain job skipped by `if:` still reports, and one in a
+                # file GitHub may read otherwise runs on every pull request.
                 sure = [r for r in runs if r[1]["path"] not in maybe]
                 how, file, job = sure[0] if sure else runs[0]
-                failing = {"paths", "types"} | ({"never"} if _api_reporters(run) == "no" else set())
-                rivals = [r for r in runs if r[1]["path"] in maybe] if sure else []
-                for f, j in reporting:
-                    if _reports(j, context) is None:
-                        rivals.append(("always" if j.get("doubt") else _report_run(
-                            f, j, branch, skipped=j["check"]["kind"] == "static", blocked=blocked.get(f["path"], ())),
-                            f, j))
-                rival = next((r for r in sorted(rivals, key=lambda r: ORDER.index(r[0]))
-                              if ORDER.index(r[0]) < ORDER.index(how) and r[0] not in failing), None)
-                if rival is not None and how != "always":
-                    _, other, other_job = rival
-                    why = (f"in a workflow GitHub may not run ({maybe[other['path']]})" if other["path"] in maybe else
-                           "under names that could not be written out, or in a file GitHub may read otherwise than "
-                           "the audit does")
-                    run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. {_job_label(file, job)} "
-                                          f"reports it, and {_job_label(other, other_job)}, which may report it "
-                                          f"{why}, would on a wider set of pull requests, so whether it reports on "
-                                          "every pull request is not known.")
-                    continue
+                writers = _api_reporters(run)
+                failing = {"paths", "types"} | ({"never"} if writers == "no" else set())
+                if how in failing:
+                    unknown = []
+                    for f, j in reporting:
+                        if _reports(j, context) is None:
+                            widest = j["check"]["kind"] in ("static", "computed")
+                            unknown.append(("always" if j.get("doubt") else _report_run(
+                                f, j, branch, skipped=widest, blocked=blocked.get(f["path"], ())), f, j))
+                    # Two filtered routes may cover every pull request between them (paths and paths-ignore).
+                    filtered = [r for r in runs if r[0] in ("paths", "types")]
+                    rival = next((r for r in runs if r[0] not in failing), None) or next(
+                        (r for r in unknown if not (r[0] == "never" and writers == "no")), None) or (
+                        filtered[1] if len(filtered) > 1 else None)
+                    if rival is not None:
+                        _, other, other_job = rival
+                        why = (f", in a workflow GitHub may not run ({maybe[other['path']]})," if other["path"] in maybe
+                               else ", under names that could not be written out or in a file GitHub may read "
+                               "otherwise than the audit does," if _reports(other_job, context) is None else "")
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
+                                              f"{_job_label(file, job)} reports it on only some pull requests, and "
+                                              f"{_job_label(other, other_job)}{why} may also report it, so whether "
+                                              "it reports on every pull request is not known.")
+                        continue
+                    how, file, job = runs[0]    # the one route that reports it on some pull requests, if any
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
                     continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject

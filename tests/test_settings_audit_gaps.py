@@ -270,7 +270,7 @@ class SelectedActionsTest(unittest.TestCase):
                  "b.yml": wf(PR, job("lint", steps=steps(f"someone/tool@{SHA}")))}
         found = assess(requiring("lint", entries=local_only), files)
         self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
-        self.assertIn("b.yml#lint, which may report it in a workflow GitHub may not run", of(found, "OBAAF-SET-007")[0]["message"])
+        self.assertIn("b.yml#lint, in a workflow GitHub may not run", of(found, "OBAAF-SET-007")[0]["message"])
         # Without the other file, the finding stands.
         alone = assess(requiring("lint", entries=local_only), {"a.yml": files["a.yml"]})
         self.assertEqual(answered(alone, "OBAAF-SET-007"), "finding medium")
@@ -287,9 +287,10 @@ class SelectedActionsTest(unittest.TestCase):
                       {"a.yml": paths, "c.yml": computed}):
             found = assess(requiring("lint", entries=local_only), files)
             self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell", sorted(files))
-            self.assertIn("would on a wider set of pull requests", of(found, "OBAAF-SET-007")[0]["message"])
+            self.assertIn("may also report it, so whether it reports on every", of(found, "OBAAF-SET-007")[0]["message"])
 
     def test_a_rival_that_also_fails_to_report_leaves_the_finding(self):
+        # Holds before and after (before, the second file was not weighed at all).
         # The third review of 2b.7: a sure schedule-only job and a paths-filtered one in a file GitHub may not run
         # both leave the check unreported on some pull requests, so the finding holds whichever runs.
         local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
@@ -297,6 +298,25 @@ class SelectedActionsTest(unittest.TestCase):
                  "b.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("lint", steps=steps(f"someone/t@{SHA}")))}
         self.assertEqual(answered(assess(requiring("lint", entries=local_only), files), "OBAAF-SET-007"),
                          "finding medium")
+
+    def test_any_route_that_gives_no_finding_makes_a_finding_cannot_tell(self):
+        # The fourth review of 2b.7: ranks do not say which pull requests a route covers. A dispatch route, a
+        # computed name skipped by `if:` (it still reports), or a second filtered route may cover what a paths
+        # filter leaves out.
+        paths = wf("  pull_request:\n    paths: ['src/**']\n", job("lint"))
+        dispatch = wf("  workflow_dispatch:\n", job("x", "    name: ${{ 'lint' }}\n"))
+        skipped = wf(PR, job("y", "    name: ${{ 'lint' }}\n    if: github.event_name == 'push'\n"))
+        ignore = wf("  pull_request:\n    paths-ignore: ['src/**']\n", job("lint"))
+        sure_dispatch = wf("  workflow_dispatch:\n", job("lint"))
+        for other in (dispatch, skipped, ignore, sure_dispatch):
+            found = assess(requiring("lint"), {"a.yml": paths, "b.yml": other})
+            self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell", other)
+
+    def test_a_route_that_never_runs_on_a_pull_request_changes_nothing(self):
+        # Holds before and after: a schedule-only job cannot cover what a paths filter leaves out.
+        files = {"a.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("lint")),
+                 "b.yml": wf("  schedule:\n    - cron: '0 3 * * *'\n", job("lint"))}
+        self.assertEqual(answered(assess(requiring("lint"), files), "OBAAF-SET-007"), "finding medium")
 
     def test_more_than_two_references_are_counted_once(self):
         snap, _ = take(selected(), token=TOKEN)
@@ -311,11 +331,12 @@ class SelectedActionsTest(unittest.TestCase):
         _, maybe, _, _ = rules._stops(rules._Run(rules.RULES[0], snap, usage))
         self.assertIn("holds a !, which may block, so nothing is matched", maybe[W + "ci.yml"])
 
-    def test_an_image_in_another_letter_case_is_an_image(self):
-        # The third review of 2b.7: `Docker://` was taken for an unpinned action under the pinning requirement.
+    def test_images_under_the_pinning_requirement_read_as_before(self):
+        # Holds before and after. The fourth review of 2b.7: taking `Docker://` for an image made a file GitHub may
+        # refuse one that runs, so for pinning only `docker://` in lower case is left out, as before (#209).
         pinning = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "all",
                                                       "sha_pinning_required": True})
-        self.assertEqual(self.check(pinning, "Docker://alpine:3.20"), "no-finding")
+        self.assertEqual(self.check(pinning, "Docker://alpine:3.20"), "finding medium")
         self.assertEqual(self.check(pinning, "docker://alpine:3.20"), "no-finding")
 
     def test_a_job_whose_uses_is_empty(self):

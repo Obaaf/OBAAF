@@ -191,7 +191,10 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str], list[str]]:
             other.append(uses)
         elif "uses" in step.raw and not uses:
             other.append("''")      # an empty `uses`, which names nothing the setting can be matched against
-        if not uses or local_or_image:
+        # For pinning, only `docker://` in lower case is left out, as before slice 2b.7: whether GitHub reads
+        # `Docker://` as an image, and whether its pinning requirement covers images, were not read (the fourth
+        # review of 2b.7: leaving `Docker://` out made a file GitHub may refuse one that runs).
+        if not uses or wf_mod.is_local_reference(uses) or uses.startswith("docker://"):
             continue
         used += 1
         remote.append(uses)
