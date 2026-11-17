@@ -67,8 +67,16 @@ Your answers never leave your machine. Then follow [the adoption guide](docs/ado
 
 ```bash
 obaaf check path/to/your/repository
-obaaf templates install --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
+git clone https://github.com/Obaaf/OBAAF.git obaaf-src
+git -C obaaf-src checkout <commit>
+obaaf templates install --source obaaf-src/templates/github-actions \
+  --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
 ```
+
+The package from PyPI does not include the templates, so they are copied from a clone of OBAAF checked out at
+`<commit>`, the full commit SHA the installed workflows will pin. Running `obaaf` inside the clone does not
+change that; `--source` does. With OBAAF installed from the clone (`pip install -e obaaf-src`), `--source` can
+be left out.
 
 If a pipeline uses AI agents, run `obaaf check path/to/your/repository --lanes`
 and confirm that their jobs are classified as `agent`. Wrapper detection is
