@@ -142,13 +142,16 @@ class GuideTest(unittest.TestCase):
         listed = [line for line in section.splitlines() if line.startswith("- `OBAAF-SET-")]
         self.assertEqual(listed, [f"- `{rule.id}`: {rule.why}" for rule in rules.RULES])
 
-    def test_the_guides_example_prints_the_rules_own_sentences(self):
-        guide = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8")
-        sentences = {rule.why for rule in rules.RULES}
-        shown = re.findall(r"^    Why: (.*)$", guide, re.M)
+    def test_the_guides_example_prints_each_rules_own_sentence_under_it(self):
+        lines = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8").splitlines()
+        shown = [i for i, line in enumerate(lines) if RULE_WHY.match(line)]
         self.assertTrue(shown)
-        for sentence in shown:
-            self.assertIn(sentence, sentences)
+        by_id = {rule.id: rule for rule in rules.RULES}
+        for at in shown:
+            heading = next(line for line in reversed(lines[:at]) if re.match(r"^  OBAAF-SET-\d{3}  ", line))
+            rule = by_id[heading.split()[0]]
+            self.assertEqual(lines[at], f"    Why: {rule.why}", heading)
+            self.assertEqual(lines[at + 1], f"    Fix: {rule.fix}", heading)
 
 
 if __name__ == "__main__":
