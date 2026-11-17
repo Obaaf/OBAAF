@@ -1910,7 +1910,7 @@ def _check_rules(run: _Run, kind: str) -> None:
                 # report it), the answer is "cannot tell" if any other job may report the check on a route that
                 # gives no finding, or two filtered routes may cover every pull request between them (the fourth
                 # review): ranks do not say which pull requests a route covers. A job that never runs on a pull
-                # request's commit, where no token may write checks, changes nothing. Jobs whose names could not
+                # request's commit changes nothing (whatever its token: the fifth review). Jobs whose names could not
                 # be written out are read at their widest: a plain job skipped by `if:` still reports, and one in a
                 # file GitHub may read otherwise runs on every pull request.
                 sure = [r for r in runs if r[1]["path"] not in maybe]
@@ -1924,22 +1924,36 @@ def _check_rules(run: _Run, kind: str) -> None:
                             widest = j["check"]["kind"] in ("static", "computed")
                             unknown.append(("always" if j.get("doubt") else _report_run(
                                 f, j, branch, skipped=widest, blocked=blocked.get(f["path"], ())), f, j))
-                    # Two filtered routes may cover every pull request between them (paths and paths-ignore).
-                    filtered = [r for r in runs if r[0] in ("paths", "types")]
-                    rival = next((r for r in runs if r[0] not in failing), None) or next(
-                        (r for r in unknown if not (r[0] == "never" and writers == "no")), None) or (
-                        filtered[1] if len(filtered) > 1 else None)
+                    # Two filtered routes in different files may cover every pull request between them (paths and
+                    # paths-ignore); jobs of one file share its filters (the fifth review of 2b.7).
+                    filtered = list({r[1]["path"]: r for r in runs if r[0] in ("paths", "types")}.values())
+                    rival = next((r for r in runs if r[0] not in failing and r[0] != "never"), None) or next(
+                        (r for r in unknown if r[0] != "never"), None) or (filtered[1] if len(filtered) > 1 else None)
                     if rival is not None:
                         _, other, other_job = rival
                         why = (f", in a workflow GitHub may not run ({maybe[other['path']]})," if other["path"] in maybe
                                else ", under names that could not be written out or in a file GitHub may read "
                                "otherwise than the audit does," if _reports(other_job, context) is None else "")
+                        where = "on no pull request's commit" if how == "never" else "on only some pull requests"
                         run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
-                                              f"{_job_label(file, job)} reports it on only some pull requests, and "
+                                              f"{_job_label(file, job)} reports it {where}, and "
                                               f"{_job_label(other, other_job)}{why} may also report it, so whether "
                                               "it reports on every pull request is not known.")
                         continue
                     how, file, job = runs[0]    # the one route that reports it on some pull requests, if any
+                elif how == "always" and not sure:
+                    # Every known route is in a file GitHub may not run (the fifth review of 2b.7): if that file does
+                    # not run, any other job that may report the check decides, so the answer is "cannot tell".
+                    others = [r for r in runs[1:] if r[0] != "always"] + [
+                        (None, f, j) for f, j in reporting if _reports(j, context) is None]
+                    if others:
+                        _, other, other_job = others[0]
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. {_job_label(file, job)} "
+                                              f"reports it on every pull request, in a workflow GitHub may not run "
+                                              f"({maybe[file['path']]}), and {_job_label(other, other_job)} may also "
+                                              "report it, on a route of its own, so whether it reports on every pull "
+                                              "request is not known.")
+                        continue
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
                     continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject

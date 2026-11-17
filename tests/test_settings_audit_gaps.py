@@ -318,6 +318,38 @@ class SelectedActionsTest(unittest.TestCase):
                  "b.yml": wf("  schedule:\n    - cron: '0 3 * * *'\n", job("lint"))}
         self.assertEqual(answered(assess(requiring("lint"), files), "OBAAF-SET-007"), "finding medium")
 
+    def test_a_file_that_may_not_run_and_reports_on_every_pull_request(self):
+        # The fifth review of 2b.7: when every known reporter is in a file GitHub may not run, another job that may
+        # report the check decides if that file does not run; the answer was silence.
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        files = {"a.yml": wf(PR, job("lint", steps=steps(f"someone/tool@{SHA}"))),
+                 "c.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("x", "    name: ${{ 'lint' }}\n"))}
+        found = assess(requiring("lint", entries=local_only), files)
+        self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
+        alone = assess(requiring("lint", entries=local_only), {"a.yml": files["a.yml"]})
+        self.assertEqual(of(alone, "OBAAF-SET-007"), [])      # whether it runs at all is OBAAF-SET-006's
+
+    def test_a_job_that_never_runs_on_a_pull_request_is_no_rival_whatever_its_token(self):
+        # The fifth review of 2b.7: the answer depended on the never-running job's name.
+        paths = wf("  pull_request:\n    paths: ['src/**']\n", job("lint"))
+        for name in ("lint", "other"):
+            nightly = wf("  schedule:\n    - cron: '0 3 * * *'\n", job(name), permissions="permissions:\n  checks: write\n")
+            found = assess(requiring("lint"), {"a.yml": paths, "b.yml": nightly})
+            self.assertEqual(answered(found, "OBAAF-SET-007"), "finding medium", name)
+
+    def test_two_filtered_jobs_of_one_file_share_its_filters(self):
+        # The fifth review of 2b.7: they cannot cover each other's gaps.
+        both = wf("  pull_request:\n    paths: ['src/**']\n", job("lint") + job("lint2", "    name: lint\n"))
+        self.assertEqual(answered(assess(requiring("lint"), {"a.yml": both}), "OBAAF-SET-007"), "finding medium")
+
+    def test_a_deciding_job_that_never_runs_on_a_pull_request_is_described_so(self):
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        files = {"a.yml": wf("  schedule:\n    - cron: '0 3 * * *'\n", job("lint")),
+                 "b.yml": wf(PR, job("lint", steps=steps(f"someone/tool@{SHA}")))}
+        found = assess(requiring("lint", entries=local_only), files)
+        self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
+        self.assertIn("a.yml#lint reports it on no pull request's commit", of(found, "OBAAF-SET-007")[0]["message"])
+
     def test_more_than_two_references_are_counted_once(self):
         snap, _ = take(selected(), token=TOKEN)
         tools = [f"someone/t{k}@{SHA}" for k in range(5)]

@@ -177,9 +177,9 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str], list[str]]:
     """How many of the job's steps use an action from another repository, which of those are not pinned to
     a full commit, every such reference as written (for the list of selected actions, issue #182), and the
     local actions and container images its steps use, as written (slice 2b.7: their own steps, and whether
-    the list covers an image, are not read). Local actions, container images and the reusable workflow a job
-    calls are left out of the first two; what GitHub's own pinning requirement makes of those was not
-    established."""
+    the list covers an image, are not read). Local actions, images written `docker://` in lower case and the
+    reusable workflow a job calls are left out of the first two (`Docker://` is not, as before slice 2b.7:
+    issue #209); what GitHub's own pinning requirement makes of those was not established."""
     used, loose, remote, other = 0, [], [], []
     for step in job.steps:
         uses = step.uses
