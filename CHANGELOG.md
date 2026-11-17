@@ -11,8 +11,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 Slice 2d.10 (issue #216, found by the review of slice 4.7); decision D-080, which amends D-064.
 
 - **`runs-on: [ubuntu-latest, ubuntu-latest]`, or one hosted label in two letter cases, is GitHub-hosted** to `Job.runner_kind`, so OBAAF-GHA-013 no longer reports it at medium as labels it could not name. OBAAF-GHA-020's firewall reading already read `ubuntu-24.04-firewall` written twice as one label (slice 2d.2f).
-- **The other readers of the runner kind follow:** `obaaf verify` accepts an agent run on such labels, which it refused; a build job on them is Tier A without `OBAAF_TIER`, and `OBAAF_TIER: B` is refused; in a repository whose firewall policy enforces, OBAAF-GHA-020 for an agent job on such labels is "not met" where it was "cannot tell".
-- **Not changed:** two labels that differ in anything but letter case, a space included, are still not read as GitHub-hosted. The egress action's and the AWF API proxy's own tests still ask for the one label `ubuntu-24.04`.
+- **The other readers of the runner kind follow:** `obaaf verify` accepts an agent run on such labels, which it refused; a build job on them is Tier A without `OBAAF_TIER`, and `OBAAF_TIER: B` is refused; in a repository whose firewall policy enforces, OBAAF-GHA-020 for an agent job on such labels takes the case of the job's own control ("not met" when it has none) where it was the firewall's "cannot tell"; and a Harden-Runner step in a container on such labels is "not met" where it was "cannot tell".
+- **Not changed:** two labels that differ in anything but letter case, a space included, are still not read as GitHub-hosted. The egress action's and the AWF API proxy's own tests still ask for exactly one label, `ubuntu-24.04` (any letter case, spaces round it trimmed).
 
 ### Installing the templates: the pages say where they come from
 
