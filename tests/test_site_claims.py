@@ -136,6 +136,13 @@ class TheTwoExampleFiles(unittest.TestCase):
             self.assertGreater(where(start), last_count, start)
         self.assertEqual(lines[-1], f"Checked by obaaf {__version__}.")
         self.assertIn(f"numbered {__version__}", text("index.html"), "the banner names another development version")
+        self.assertIn(f"checked with obaaf {__version__} on", text("index.html"))
+        for name in ("index.html", "quickstart.html"):
+            words = text(name)
+            for where in ("a count of other findings at the top",
+                          "a \"Why:\" line under the finding, saying why it matters",
+                          "and, at the end, what a check with no configuration file leaves out"):
+                self.assertIn(where, words, f"{name} no longer says where the added lines are")
 
 
 class TheEgressAction(unittest.TestCase):
@@ -203,7 +210,9 @@ class TheFirewallConditions(unittest.TestCase):
 
     def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):
         """The page's "the job calls no reusable workflow": a job declared an agent job that only calls
-        another workflow is not cleared by the firewall."""
+        another workflow is not cleared by the firewall. Such a job has no `runs-on`, so the runner
+        condition already rules it out; this keeps the page's sentence tied to a run, and would not
+        notice the separate check for a reusable call being removed."""
         with TempDir() as tmp:
             (tmp / ".github" / "workflows").mkdir(parents=True)
             (tmp / ".github" / "workflows" / "agent.yml").write_text(
