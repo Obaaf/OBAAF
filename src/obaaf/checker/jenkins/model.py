@@ -293,6 +293,9 @@ def code_loading(name: str, shells=()) -> str | None:
         return "evaluate"
     if last in ("parse", "run") and len(parts) >= 2 and _shell_receiver(parts, shells):
         return "evaluate"
+    if last == "eval" and any(x in ("getEngineByName", "getEngineByExtension") or "ScriptEngine" in x
+                              for x in parts[:-1]):
+        return "evaluate"       # JSR-223: new ScriptEngineManager().getEngineByName('groovy').eval(...)
     return None
 
 
@@ -302,6 +305,7 @@ def _shell_receiver(parts: list, shells) -> bool:
 
 
 _SCRIPT_RECEIVERS = {"this", "steps", "script", "pipeline", "delegate", "owner"}
+_CODE_CLASSES = {"Eval", "GroovyShell", "GroovyClassLoader", "GroovyScriptEngine"}
 
 
 def code_receiver(name: str, shells, script_vars) -> bool:
@@ -312,7 +316,7 @@ def code_receiver(name: str, shells, script_vars) -> bool:
     parts = name.split(".")
     if len(parts) == 1 or parts[0] in _SCRIPT_RECEIVERS or parts[0] == "Eval" or parts[-1] == "parseClass":
         return True
-    if _shell_receiver(parts, shells):
+    if _shell_receiver(parts, shells) or code_loading(name) == "evaluate" and parts[-1] == "eval":
         return True
     return len(parts) == 2 and parts[0] in script_vars
 
@@ -1282,6 +1286,11 @@ class Builder:
     def block(self, block: Block | None, ctx: Ctx, top: bool = False) -> None:
         if block is None:
             return
+        params = [x for x in getattr(block, "params", ()) if isinstance(x, str)]
+        if params:
+            # A trailing closure's parameters take values from whoever calls it (the second review of 2d.2k).
+            self.p.local_names.update(params)
+            self.p.nonliteral_names.update(params)
         for stmt in block.stmts:
             self.stmt(stmt, ctx)
 
@@ -1325,6 +1334,9 @@ class Builder:
                         self.closure_maps.setdefault(base, {})[attr] = stmt.value.body
                 if path_of(stmt.target):
                     self.track_value(target.removeprefix("env."), stmt.value)
+                    for prefix in ("this.", "binding."):
+                        if target.startswith(prefix) and "." not in target[len(prefix):]:
+                            self.p.nonliteral_names.add(target[len(prefix):])
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
@@ -1347,10 +1359,13 @@ class Builder:
             for h in stmt.header:
                 if isinstance(h, Decl):
                     self.p.local_names.add(h.name)
+                    self.p.nonliteral_names.add(h.name)
                 elif isinstance(h, Name):
                     self.p.local_names.add(h.name)
+                    self.p.nonliteral_names.add(h.name)
                 elif isinstance(h, Binary) and h.op == "in" and isinstance(h.left, Name):
                     self.p.local_names.add(h.left.name)
+                    self.p.nonliteral_names.add(h.left.name)
                 self.expr(h, ctx)
             # A loop body may run zero times: it is conditional.
             self.block(stmt.body, replace(ctx, guards=ctx.guards + (f"loop {stmt.line}",)))
@@ -1380,6 +1395,7 @@ class Builder:
             if stmt.name in self.called and any(stmt is d for d in self.defs.get(stmt.name, [])):
                 return    # walked at each call, in the caller's context
             self.p.method_params.update(p for p in stmt.params if isinstance(p, str))
+            self.p.nonliteral_names.update(p for p in stmt.params if isinstance(p, str))
             # A method nothing in this file calls (a shared-library step, `call()` in vars/) can be
             # called from any stage, so whether change requests reach it is unknown.
             self.block(stmt.body, replace(ctx, in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line,
@@ -1411,6 +1427,10 @@ class Builder:
             self.p.nonliteral_names.add(name)
         if isinstance(value, Name) and value.name in ("this", "steps"):
             self.p.script_vars.add(name)
+        if isinstance(value, Name) and value.name in _CODE_CLASSES:
+            self.p.import_aliases[name] = value.name     # def E = Eval (the second review of 2d.2k)
+        if isinstance(value, Name) and value.name in self.p.groovy_shells:
+            self.p.groovy_shells.add(name)               # def alias = shell
         if isinstance(value, Prop) and isinstance(value.target, Name) and value.target.name in ("this", "steps") \
                 and value.name in ("load", "evaluate"):
             self.p.code_aliases[name] = value.name      # def l = this.&load (the parser reads `.&` as `.`)
@@ -1418,7 +1438,7 @@ class Builder:
                            limit=2000), None) is not None:
             self.p.workspace_vars.add(name)
         if isinstance(value, Call) and callee_name(value) == "legacySCM" and any(
-                path_of(a) == "scm" for a in list(value.args) + [v for _, v in value.named]):
+                path_of(a) in ("scm", "this.scm") for a in list(value.args) + [v for _, v in value.named]):
             self.p.self_scm_vars.add(name)
         if isinstance(value, ListLit) and not merge:
             self.p.lists[name] = value
@@ -1452,8 +1472,13 @@ class Builder:
         cname = chain_name(value) if isinstance(value, Call) else None
         if cname and (cname.startswith("docker.build") or cname.startswith("docker.image")):
             self.p.docker_vars.add(name)
-        if cname and cname.startswith(("new GroovyShell", "new GroovyClassLoader", "new GroovyScriptEngine")):
-            self.p.groovy_shells.add(name)
+        if cname:
+            first = cname.split(".")[0]
+            bare = first[4:] if first.startswith("new ") else first
+            cls = self.p.import_aliases.get(bare, bare)
+            if cls in ("GroovyShell", "GroovyClassLoader", "GroovyScriptEngine") and (
+                    first.startswith("new ") or cname.endswith(".newInstance")):
+                self.p.groovy_shells.add(name)
         # def msg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim(): the output is text
         # the commit's author wrote.
         base = value
@@ -1480,6 +1505,7 @@ class Builder:
                 self.call(n, ctx)
             elif isinstance(n, Closure):
                 self.p.local_names.update(p for p in n.params if isinstance(p, str))
+                self.p.nonliteral_names.update(p for p in n.params if isinstance(p, str))
                 self.block(n.body, ctx)
             elif isinstance(n, ListLit):
                 stack += reversed(n.items)
@@ -1508,14 +1534,20 @@ class Builder:
             name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
         # Groovy the file does not hold, run through any receiver (flagship slice 2d.2k). Recorded here,
         # before any branch below can return, so no spelling of the call is lost.
-        code_name = self.p.code_aliases.get(name, name)
+        code_name = name[:-5] if name.endswith(".call") else name      # l.call(...), this.&load.call(...)
+        code_name = self.p.code_aliases.get(code_name, code_name)
+        if code_name in ("this.load", "this.evaluate", "steps.load", "steps.evaluate"):
+            code_name = code_name.split(".", 1)[1]
         head = code_name.split(".")[0]
-        if head in self.p.import_aliases and head not in self.p.local_names:
-            code_name = self.p.import_aliases[head] + code_name[len(head):]
+        bare = head[4:] if head.startswith("new ") else head
+        if bare in self.p.import_aliases:
+            code_name = ("new " if head.startswith("new ") else "") + self.p.import_aliases[bare] + code_name[len(head):]
         code_call = call
-        if name == "step" and call.args and isinstance(call.args[0], MapLit):
-            # step([$class: 'ExecuteDslScripts', targets: ...]): Job DSL in its older spelling.
-            entries = [(_key(k), v) for k, v in call.args[0].entries]
+        if name == "step" and (call.named or (call.args and isinstance(call.args[0], MapLit))):
+            # step([$class: 'ExecuteDslScripts', targets: ...]) and step $class: ..., targets: ...: Job DSL
+            # in its older spelling.
+            entries = [(_key(k), v) for k, v in call.args[0].entries] if call.args and isinstance(
+                call.args[0], MapLit) else list(call.named)
             if any(k == "$class" and (literal(v) or "").split(".")[-1] == "ExecuteDslScripts" for k, v in entries):
                 code_name = "jobDsl"
                 code_call = Call(Name("jobDsl", line=call.line), named=[(k, v) for k, v in entries if k != "$class"],
@@ -1550,6 +1582,7 @@ class Builder:
         # arguments are branches.
         if call.closure is None and call.args and isinstance(call.args[-1], Closure) and name != "parallel":
             self.p.local_names.update(p for p in call.args[-1].params if isinstance(p, str))
+            self.p.nonliteral_names.update(p for p in call.args[-1].params if isinstance(p, str))
             call = replace(call, args=call.args[:-1], closure=call.args[-1].body)
         # A closure passed to a method of this file runs where the method calls it: `body()` inside
         # withCredentials in the method gets the method's bindings (flagship slice 2d.2i).
@@ -1636,7 +1669,7 @@ class Builder:
             if isinstance(root, Call):
                 self.call(root, ctx)
         if name == "dir" and call.closure is not None:
-            folder = literal(first_arg(call))
+            folder = literal(first_arg(call) if call.args else named_arg(call, "path"))
             here = "?" if folder is None or ctx.dir == "?" else "/".join(
                 x for x in (ctx.dir, folder.strip("/")) if x and x != ".")
             self.record_step(name, call, ctx)
@@ -1741,6 +1774,7 @@ class Builder:
                 for s in all_strings(arg):
                     var, eq, _ = s.text().partition("=")
                     if eq:
+                        self.p.nonliteral_names.add(var.strip())   # a value for part of the run only (2d.2k)
                         # withEnv(["T2=${TOKEN}"]): T2 holds what TOKEN holds (flagship slice 2d.2i).
                         self.p.refs.setdefault(var.strip(), set()).update(
                             w for e in s.exprs for w in re.findall(r"[A-Za-z_]\w*", e))
@@ -1850,7 +1884,7 @@ class Builder:
         # which for a change request is the change; a retriever whose remote or settings are values the
         # file does not fix lets whoever sets them choose the library's code.
         if (isinstance(retriever, Call) and callee_name(retriever) == "legacySCM" and any(
-                path_of(a) == "scm" for a in list(retriever.args) + [v for _, v in retriever.named])) or \
+                path_of(a) in ("scm", "this.scm") for a in list(retriever.args) + [v for _, v in retriever.named])) or \
                 path_of(retriever) in self.p.self_scm_vars:
             lib.retriever = "self"
             return

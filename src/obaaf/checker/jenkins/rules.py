@@ -91,7 +91,12 @@ EXACT_PIP = re.compile(r"^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A
 _REF = re.compile(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$env\.([A-Za-z_]\w*)|\$([A-Za-z_]\w*)")
 # Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
 _SEGMENTS = re.compile(r"&&|\|\||;")
-_SHELL_ASSIGN = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=(?:'([^']*)'|\"([^\"$`]*)\"|([^\s'\"$`;&|]*))[ \t]*$")
+# A shell assignment at the start of a command (after `then`, `do`, `else`, `{`): its literal value, single
+# quoted (never expanded), double quoted or bare; any other value makes the variable unknown.
+_ASSIGN_START = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+                           r"([A-Za-z_]\w*)=")
+_SHELL_ASSIGN = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+                           r"([A-Za-z_]\w*)=(?:'([^']*)'|\"([^\"$`\\]*)\"|([^\s'\"$`;&|\\]*))[ \t]*$")
 # Subcommands of npm, pnpm, yarn, bun, pip, pipx and uv, by what they do with a package named after them.
 _SUBCOMMAND = re.compile(r"(?:(?<=\s)|^)([a-z]+)(?=\s|$)")
 _INSTALL_WORDS = {"install", "i", "add", "a", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
@@ -102,17 +107,25 @@ _OTHER_WORDS = {"uninstall", "remove", "rm", "r", "un", "unlink", "ls", "list", 
                 "check", "prune", "dedupe", "pack", "publish", "root", "prefix", "bin", "docs", "home", "repo",
                 "fund", "wheel", "hash", "inspect", "uninject"}
 _RUNNERS = {"npx", "bunx", "uvx", "pnpx"}
-_AGENT_SELF_UPDATE = re.compile(r"(?:^|[\s;&|(])(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
-_GLOBAL_UPDATE = re.compile(r"(?<![\w-])(?:npm|pnpm|bun)[ \t]+(?:(?:-g|--global)[ \t]+)?(?:update|upgrade|up)"
-                            r"(?:[ \t]+(?:-g|--global))?[ \t]*$")
+_INSTALLER_NAMES = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
+_AGENT_SELF_UPDATE = re.compile(r"^(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
+_GLOBAL_UPDATE = re.compile(r"^(?:\S*/)?(?:npm|pnpm|bun)(?:[ \t]+-\S+)*[ \t]+(?:update|upgrade|up)"
+                            r"(?:[ \t]+-\S+)*[ \t]*(?:$|[|>&2])")
+# What may stand before a command in the same segment: keywords, assignments, and wrappers that run the
+# rest (sudo, env, timeout, nohup, exec, time, nice, xargs, bash -c "..."), each with its options.
+_COMMAND_PREFIX = re.compile(
+    r"^[ \t]*(?:(?:then|do|else|elif|if|while|until|!|\{|\()(?=[ \t])|[A-Za-z_]\w*=(?:'[^']*'|\"[^\"]*\"|\S*)|"
+    r"sudo(?:[ \t]+(?:-[ugCDhprtUT][ \t]+\S+|--[\w-]+=\S+|-[A-Za-z]+|--[\w-]+))*|env(?:[ \t]+(?:-\S+|[A-Za-z_]\w*=\S*))*|"
+    r"timeout(?:[ \t]+-\S+)*[ \t]+\S+|nohup|exec|time|nice(?:[ \t]+-n[ \t]*\S+)?|stdbuf(?:[ \t]+-\S+)*|"
+    r"(?:\S*/)?(?:ba|z|da)?sh[ \t]+-c[ \t]+[\"']?|[\"'])")
 # docker, podman and nerdctl run, create and pull, where a command starts: the start of a line, after a
 # separator, `$(`, a quote (bash -c "..."), sudo, exec, time or nohup; global options before the subcommand.
 _CONTAINER_CMD = re.compile(
-    r"(?:^|(?<=[;&|(`\n])|(?<=\$\()|(?<=[\"'])|(?<=\bsudo )|(?<=\bexec )|(?<=\btime )|(?<=\bnohup ))[ \t]*"
-    r"(?:[\w./-]*/)?(docker|podman|nerdctl)"
+    r"^(?:[\w./-]*/)?(docker|podman|nerdctl)"
     r"((?:[ \t]+--?[A-Za-z][\w-]*(?:=\S*|[ \t]+(?!(?:run|create|pull|container|image)\b)[^\s-]\S*)?)*)"
-    r"[ \t]+(?:(?:container|image)[ \t]+)?(run|create|pull)(?=[ \t])", re.I | re.M)
-_SEGMENT_END = re.compile(r"(?<!\\)[;&|\n]")
+    r"[ \t]+(?:(?:container|image)[ \t]+)?(run|create|pull)(?=[ \t]|$)", re.I)
+# Where a command ends and another starts in a script.
+_COMMAND_SPLIT = re.compile(r"&&|\|\||[;&|\n(`]|\$\(")
 _DOCKER_BOOL = {"--rm", "-d", "--detach", "-i", "--interactive", "-t", "--tty", "--privileged", "--init",
                 "--read-only", "-P", "--publish-all", "-q", "--quiet", "--no-healthcheck", "--oom-kill-disable",
                 "--sig-proxy", "--disable-content-trust", "--all-tags", "--help", "--use-api-socket"}
@@ -137,15 +150,25 @@ _BUILD_VALUE = {"-t", "--tag", "--build-arg", "--target", "--label", "--platform
                 "--cgroup-parent", "--builder"}
 _BUILD_BOOL = {"-q", "--quiet", "--no-cache", "--pull", "--rm", "--force-rm", "--squash", "--compress", "--load",
                "--push", "--disable-content-trust", "--check"}
-_PIP_INSTALL = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip|python3?[ \t]+-m[ \t]+pip)[ \t]+install\b")
-_REQUIREMENT_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
+_PIP_INSTALL = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip|python3?[ \t]+-m[ \t]+pip)(?:[ \t]+-\S+)*[ \t]+install\b")
+_REQUIREMENT_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)?(['\"]?)([^\s'\";&|]+)\1")
+_CD = re.compile(r"^[ \t]*(?:cd|pushd)[ \t]+(['\"]?)([^\s'\";&|]+)\1[ \t]*$")
+_NPM_PREFIX = re.compile(r"(?:--prefix|-C|--cwd|--dir)(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
+# Options of npm, pip and uv before the subcommand that take a value (`npm --loglevel info install`).
+_INSTALLER_VALUE_OPTIONS = {"--loglevel", "--registry", "--prefix", "--cache", "--userconfig", "--globalconfig",
+                            "--workspace", "-w", "--tag", "--cache-dir", "--index-url", "-i", "--extra-index-url",
+                            "--find-links", "-f", "--target", "-t", "--python", "-p", "--proxy", "--cert",
+                            "--client-cert", "--log", "--src", "--root", "--upgrade-strategy", "--trusted-host",
+                            "--timeout", "--retries", "--platform", "--python-version", "--implementation", "--abi",
+                            "--directory", "--project", "--config-file", "--cwd", "-C", "--dir", "--filter",
+                            "--default-index", "--index", "--color", "--progress-bar"}
 _NPM_INSTALL = re.compile(r"(?<![\w-])(?:npm[ \t]+(?:install|i|ci|add)|pnpm[ \t]+(?:install|i|add)|"
                           r"yarn(?:[ \t]+install)?|bun[ \t]+(?:install|i))(?=$|[ \t;&|])", re.M)
 LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
 _DOWNLOAD = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|Invoke-WebRequest|Invoke-RestMethod)(?![\w-])", re.I)
 _TO_SHELL = re.compile(r"\|[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:\S*/)?(?:ba|z|da|k)?sh\b|\|[ \t]*iex\b|"
                        r"(?:ba|z)?sh[ \t]+<\(|(?:ba|z)?sh[ \t]+-c[ \t]+[\"']?\$\(", re.I)
-_HEREDOC = re.compile(r"<<(-?)[\"']?([A-Za-z_]\w*)[\"']?")
+_HEREDOC = re.compile(r"(?:^|(?<=\s))<<(-?)[\"']?([A-Za-z_]\w*)[\"']?")
 
 
 def _shown(text: str, limit: int = 120) -> str:
@@ -460,6 +483,7 @@ class JenkinsRules:
         self.agent_package_names = set(self.detection.get("agent_packages", []))
         self.install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
         self._line = 1                 # the step whose script OBAAF-JEN-008 is reading, for its unknowns
+        self._agent_installed = False  # an earlier step installed an agent CLI (for `npm update -g`)
         self._pod_cache: dict = {}
         self._dockerfile_cache: dict = {}
         self._script_cache: dict = {}
@@ -905,7 +929,7 @@ class JenkinsRules:
     def pipeline_code(self) -> None:
         self.applicable.add("OBAAF-JEN-004")
         for lib in self.p.libraries:
-            shown = lib.name + (f"@{lib.version}" if lib.version else "")
+            shown = _shown(lib.name + (f"@{lib.version}" if lib.version else ""))
             if lib.retriever == "self":
                 self.add("OBAAF-JEN-004", lib.line,
                          f"Library '{shown}' is loaded with legacySCM(scm), from the build's own checkout. For a "
@@ -1087,40 +1111,68 @@ class JenkinsRules:
                      f"the agent's network (for example a Kubernetes NetworkPolicy).{note}", stage)
 
     # ------------------------------------------------------------------ JEN-008
-    def _resolve(self, text: str, shell_vars: dict | None = None) -> str:
+    def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False) -> str:
         """`${NAME}`, `$NAME` and `${env.NAME}` replaced by what the file fixes: a variable the script itself
-        set earlier (`shell_vars`), then a literal environment value, which the shell sees; and for `${NAME}`
-        a literal variable of the file, which Groovy puts into a double-quoted script (flagship slice 2d.2k).
-        What is left with a `$` is computed. Bounded: three passes, at most 100,000 characters."""
+        set earlier to one literal value (`shell_vars`; None there means the script sets it otherwise), then
+        an environment value the file sets once to a literal, which the shell sees; and for `${NAME}`, when
+        Groovy interpolates the script (`groovy`), a variable of the file only ever assigned a literal
+        (flagship slice 2d.2k). What is left with a `$` is computed. Bounded: three passes, and no pass adds
+        more than 100,000 characters."""
         shell_vars = shell_vars or {}
 
         def value(name: str, braced: bool):
             if name in shell_vars:
                 return shell_vars[name]
+            if name in self.p.nonliteral_names:
+                return None
             node = self.p.env_values.get(name)
-            if node is None and braced and name not in self.p.nonliteral_names:
+            if node is None and braced and groovy:
                 node = self.p.literals.get(name)
             return node.text() if isinstance(node, Str) and not node.interpolated else None
 
-        def sub(m):
-            got = value(m.group(1), True) if m.group(1) else value(m.group(2) or m.group(3), bool(m.group(2)))
-            return got if got is not None else m.group(0)
-
         for _ in range(3):
+            budget = [100_000]
+
+            def sub(m):
+                got = value(m.group(1), True) if m.group(1) else value(m.group(2) or m.group(3), bool(m.group(2)))
+                if got is None or len(got) > budget[0]:
+                    return m.group(0)
+                budget[0] -= len(got)
+                return got
+
             changed = _REF.sub(sub, text)
-            if changed == text or len(changed) > 100_000:
+            if changed == text:
                 break
             text = changed
         return text
 
-    def _image(self, ref, line: int, stage: tuple | None, where: str, severity: str) -> None:
-        """One image reference: pinned to a digest, computed (unknown), or a finding."""
+    @staticmethod
+    def _prepared(text: str, shell: str = "sh") -> str:
+        """A script as its shell reads it: full-line comments dropped first (a comment's last character does
+        not continue it, the second review of 2d.2k), then lines continued with the shell's own character
+        joined: a backslash for sh, `^` for bat, a backtick for PowerShell."""
+        comment = "rem" if shell == "bat" else "#"
+        lines = [x for x in text.splitlines()
+                 if not (x.lstrip().lower().startswith(comment) or (shell == "bat" and x.lstrip().startswith("::")))]
+        joiner = {"bat": "^", "powershell": "`", "pwsh": "`"}.get(shell, "\\")
+        return re.sub(re.escape(joiner) + r"\r?\n[ \t]*", " ", "\n".join(lines))
+
+    def _pin_script(self, info: Info) -> str:
+        """The step's script for OBAAF-JEN-008: as the shell reads it, with what the file fixes put in.
+        Groovy's own variables go in only when Groovy interpolates the script (a double-quoted string)."""
+        node = shell_script(info.use.call)
+        interpolated = isinstance(node, Str) and node.interpolated
+        return self._resolve(self._prepared(info.script, info.use.name), groovy=interpolated)
+
+    def _image(self, ref, line: int, stage: tuple | None, where: str, severity: str, groovy: bool = True) -> None:
+        """One image reference: pinned to a digest, computed (unknown), or a finding. `groovy` is False for
+        an image a shell command names, where the file's Groovy variables are not seen."""
         self.applicable.add("OBAAF-JEN-008")
         if ref is None:
             self.unknown("OBAAF-JEN-008", line, f"an image {where} is not written as text")
             return
         if "$" in ref:
-            ref = self._resolve(ref)
+            ref = self._resolve(ref, groovy=groovy)
         if "$" in ref or not ref.strip() or ref == "?":
             self.unknown("OBAAF-JEN-008", line, f"image reference '{_shown(ref)}' {where} is computed at run time")
         elif not PINNED_IMAGE.match(ref.strip()):
@@ -1136,7 +1188,7 @@ class JenkinsRules:
             return self._pod_cache[text]
         self._pod_cache[text] = None
         try:
-            docs = list(yaml.safe_load_all(text))
+            docs = list(yaml.load_all(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)))
         except Exception:      # any parse failure is "cannot read", never "no images"
             return None
         out: list = []
@@ -1178,10 +1230,15 @@ class JenkinsRules:
                                                        if rel != "?" else "is named at run time")))
             return out
         build_args = build_args or {}
-        lines = re.sub(r"\\\r?\n", " ", text).splitlines()
+        # Comment lines go before continuations are joined, as BuildKit does; `# escape=` sets the character.
+        directive = re.match(r"[ \t]*#[ \t]*escape[ \t]*=[ \t]*(\S)", text)
+        escape = directive.group(1) if directive else "\\"
+        kept = [x for x in text.splitlines() if not x.lstrip().startswith("#")]
+        lines = re.sub(re.escape(escape) + r"[ \t]*\r?\n", " ", "\n".join(kept)).splitlines()
         aliases: set = set()
         global_args: dict = {}
         stage_vars: dict = {}
+        env_names: set = set()
         seen_from = False
         i = 0
         while i < len(lines):
@@ -1192,7 +1249,7 @@ class JenkinsRules:
                 continue
             word, rest = m.group(1).upper(), m.group(2).strip()
             body = []
-            for doc in _HEREDOC.finditer(rest):
+            for doc in (_HEREDOC.finditer(rest) if word in ("RUN", "COPY", "ADD") else ()):
                 strip_tabs, end_word = doc.group(1) == "-", doc.group(2)
                 while i < len(lines):
                     got = lines[i]
@@ -1206,17 +1263,22 @@ class JenkinsRules:
                 value = build_args.get(name, default.strip().strip("'\"") if eq else None)
                 if not seen_from:
                     global_args[name] = value
-                else:
+                elif name not in env_names:          # an ENV of the same name wins over an ARG
                     stage_vars[name] = value if value is not None else global_args.get(name)
                 continue
             if word == "ENV":
-                for em in re.finditer(r"([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|\S*)", rest):
-                    stage_vars[em.group(1)] = em.group(2).strip("'\"")
+                pairs = [(em.group(1), em.group(2).strip("'\"")) for em in
+                         re.finditer(r"([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|\S*)", rest)]
                 if "=" not in rest and len(rest.split(None, 1)) == 2:
-                    name, value = rest.split(None, 1)
-                    stage_vars[name] = value.strip()
+                    pairs = [tuple(x.strip() for x in rest.split(None, 1))]
+                for name, value in pairs:
+                    stage_vars[name] = value
+                    env_names.add(name)
                 continue
             if word == "RUN":
+                for mount in re.finditer(r"--mount=\S*?\bfrom=([^,\s]+)", rest):
+                    if mount.group(1).lower() not in aliases and not mount.group(1).isdigit():
+                        out.append(("image", mount.group(1)))
                 known = {k: v for k, v in stage_vars.items() if v is not None and "$" not in v}
                 for message in self._install_problems(rest + "\n" + "\n".join(body), shell_vars=known):
                     out.append(("install", f"{message} (in {_shown(rel)})"))
@@ -1231,6 +1293,7 @@ class JenkinsRules:
                 continue
             seen_from = True
             stage_vars = {}
+            env_names = set()
             tokens = [t for t in rest.split() if not t.startswith("--")]
             if not tokens:
                 continue
@@ -1264,39 +1327,75 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", line, f"{what} '{_shown(value)}' in '{_shown(rel)}' is not pinned to a "
                          "sha256 digest.", stage, severity=severity)
 
+    @staticmethod
+    def _commands(text: str):
+        """Each command of a script, with what may stand before it (keywords, assignments, sudo, env,
+        timeout, `bash -c "`) taken off: (command, the segment it came from). Linear in the text."""
+        for segment in _COMMAND_SPLIT.split(text):
+            command = segment
+            for _ in range(8):
+                m = _COMMAND_PREFIX.match(command)
+                if not m or not m.group(0).strip():
+                    break
+                command = command[m.end():]
+            yield command.strip(), segment
+
+    def _assignments(self, text: str, variables: dict) -> None:
+        """Record the variables a script line sets: one literal value, or None when the script sets it to
+        anything else or to two different values."""
+        for segment in _COMMAND_SPLIT.split(text):
+            start = _ASSIGN_START.match(segment)
+            if not start:
+                continue
+            full = _SHELL_ASSIGN.match(segment)
+            name = start.group(1)
+            if full is None:
+                variables[name] = None
+                continue
+            single, double, bare = full.group(2), full.group(3), full.group(4)
+            value = single if single is not None else self._resolve(double if double is not None else bare or "",
+                                                                    variables)
+            if "$" in value and single is None or len(value) > 10_000:
+                value = None
+            if name in variables and variables[name] != value:
+                value = None
+            variables[name] = value
+
     def _substituted(self, text: str) -> str:
         """The script with each variable it sets put into the commands after it (`IMAGE=node:20; docker run
         $IMAGE`), as _install_problems reads it, for the container commands."""
         if "$" not in text or len(text) > 400_000:
             return text
         variables: dict = {}
-        lines = []
-        for line in text.splitlines():
-            parts = re.split(r"(&&|\|\||;)", line)
-            for k in range(0, len(parts), 2):
-                assigned = _SHELL_ASSIGN.match(parts[k])
-                if assigned:
-                    value = next((g for g in assigned.groups()[1:] if g is not None), "")
-                    variables[assigned.group(1)] = self._resolve(value, variables)
-                elif "$" in parts[k] and variables:
-                    parts[k] = self._resolve(parts[k], variables)
-            lines.append("".join(parts))
-        return "\n".join(lines)
+        return "\n".join(self._resolve_line(line, variables) for line in text.splitlines())
+
+    def _resolve_line(self, line: str, variables: dict) -> str:
+        """One script line with each command's variables put in from the assignments before it, on this line
+        or earlier ones, and the assignments it makes recorded."""
+        parts = re.split(r"(&&|\|\||;)", line)
+        for k in range(0, len(parts), 2):
+            original = parts[k]
+            if "$" in original and variables:
+                parts[k] = self._resolve(original, variables)
+            self._assignments(original, variables)
+        return "".join(parts)
 
     def _shell_images(self, text: str) -> list:
-        """(image or None, command) for each `docker`/`podman`/`nerdctl` run, create or pull where a command
-        starts in a script. None when an option the checker does not know stands before the image, so it
-        cannot tell which word is the image (flagship slice 2d.2k: images in shell steps were never
-        checked). Full-line comments are skipped; at most 200 commands are read, and the rest is unknown."""
-        text = "\n".join(x for x in text.splitlines() if not x.lstrip().startswith("#"))
+        """(image or None, command) for each `docker`/`podman`/`nerdctl` run, create or pull that a script
+        runs as a command (after keywords, assignments, sudo, env, timeout or `bash -c`; not inside echo or a
+        comment). None when an option the checker does not know stands before the image, so it cannot tell
+        which word is the image (flagship slice 2d.2k: images in shell steps were never checked). At most 200
+        are read; ("cut", ...) says the rest were not."""
         out = []
-        for count, m in enumerate(_CONTAINER_CMD.finditer(text)):
-            if count >= 200:
-                out.append((None, "more than 200 container commands"))
+        for command, _ in self._commands(text):
+            m = _CONTAINER_CMD.match(command)
+            if not m:
+                continue
+            if len(out) >= 200:
+                out.append(("cut", "more than 200 container commands"))
                 break
-            command = m.group(3).lower()
-            end = _SEGMENT_END.search(text, m.end())
-            rest = text[m.end(): min(end.start() if end else len(text), m.end() + 4000)]
+            sub = m.group(3).lower()
+            rest = command[m.end(): m.end() + 4000]
             try:
                 words = shlex.split(rest)
             except ValueError:
@@ -1312,7 +1411,7 @@ class JenkinsRules:
                     break
                 flag = w.split("=", 1)[0]
                 if flag in ("-a", "--attach"):
-                    i += 1 if command == "pull" or "=" in w else 2
+                    i += 1 if sub == "pull" or "=" in w else 2
                 elif "=" in w or flag in _DOCKER_BOOL:
                     i += 1
                 elif flag in _DOCKER_VALUE:
@@ -1322,90 +1421,94 @@ class JenkinsRules:
                 else:
                     image = "?"
                     break
-            out.append((None if image in (None, "?") else image, command))
+            out.append((None if image in (None, "?") else image, sub))
         return out
 
     def _install_problems(self, text: str, where: str = "", shell_vars: dict | None = None) -> list:
         """What in a script installs an agent CLI at a version that can move (flagship slice 2d.2k): a
         downloaded install script, a package without an exact version (a range, a tag, a version set at run
-        time), a package named at run time, or an update. Read command by command: a line is cut at `&&`,
-        `||` and `;`, a variable the script sets is put into the commands after it, and the subcommand
-        after the installer decides whether a package is installed. Marks the rule applicable when an
-        agent CLI is installed at all, pinned or not."""
+        time), a package named at run time, or an update. `text` is the script as its shell reads it (see
+        _prepared). Read command by command; a variable the script sets is put into the commands after it,
+        and the subcommand after the installer decides whether a package is installed. Marks the rule
+        applicable when an agent CLI is installed at all, pinned or not."""
         out: list = []
-        text = re.sub(r"[\\^`]\r?\n[ \t]*", " ", text)
         if len(text) > 400_000:
             return ["An agent CLI may be installed in a script too long to read" + where] \
                 if self._agent_words.search(text) else []
         variables = dict(shell_vars or {})
-        installs_agent = False
         for line in text.splitlines():
             if line.lstrip().startswith("#"):
                 continue
-            for segment in _SEGMENTS.split(line):
-                assigned = _SHELL_ASSIGN.match(segment)
-                if assigned:
-                    value = next((g for g in assigned.groups()[1:] if g is not None), "")
-                    variables[assigned.group(1)] = self._resolve(value, variables)
-                    continue
-                seg = self._resolve(segment, variables) if "$" in segment else segment
-                agent = self._agent_words.search(seg)
-                if _DOWNLOAD.search(seg):
-                    if agent and _TO_SHELL.search(seg):
-                        self.applicable.add("OBAAF-JEN-008")
-                        out.append("An agent CLI is installed by piping a downloaded script into a shell, which "
-                                   "installs whatever version the script fetches" + where)
-                    elif any(rx.search(seg) for rx in self.install_urls):
-                        self.applicable.add("OBAAF-JEN-008")
-                        out.append("An agent CLI is installed by a downloaded install script, which installs "
-                                   "whatever version the script chooses" + where)
-                for command in seg.split("|"):
+            seg_line = self._resolve_line(line, variables)
+            for segment in _SEGMENTS.split(seg_line):
+                agent = self._agent_words.search(segment)
+                if _DOWNLOAD.search(segment) and agent and _TO_SHELL.search(segment):
+                    self.applicable.add("OBAAF-JEN-008")
+                    out.append("An agent CLI is installed by piping a downloaded script into a shell, which "
+                               "installs whatever version the script fetches" + where)
+                elif any(rx.search(segment) for rx in self.install_urls):
+                    self.applicable.add("OBAAF-JEN-008")
+                    out.append("An agent CLI is installed by a downloaded install script, which installs "
+                               "whatever version the script chooses" + where)
+                for command in segment.split("|"):
                     found = self._package_problems(command, where)
                     if found is not None:
-                        installs_agent = True
+                        self._agent_installed = True
                         out += found
-                if _AGENT_SELF_UPDATE.search(seg):
-                    self.applicable.add("OBAAF-JEN-008")
-                    out.append("An agent CLI updates itself to the newest version (claude update)" + where)
-                if _GLOBAL_UPDATE.search(seg) and installs_agent:
-                    out.append("Agent CLIs installed globally are updated to the newest version (an update of "
-                               "every global package)" + where)
+                for command, _ in self._commands(segment):
+                    if _AGENT_SELF_UPDATE.match(command):
+                        self.applicable.add("OBAAF-JEN-008")
+                        out.append("An agent CLI updates itself to the newest version (claude update)" + where)
+                    elif _GLOBAL_UPDATE.match(command) and self._agent_installed:
+                        out.append("Agent CLIs installed globally are updated to the newest version (an update "
+                                   "of every global package)" + where)
         return out
+
+    def _installer_action(self, words: list, k: int) -> str:
+        """What the installer at words[k] does with the packages after it: install (or run), update or
+        other, from its first word that is not an option (options that take a value skip it). A runner
+        (npx) runs; a word the checker does not know is taken for install."""
+        base = words[k].rsplit("/", 1)[-1]
+        if base in _RUNNERS:
+            return "install"
+        j = k + 1
+        while j < len(words):
+            w = words[j]
+            if w.startswith("-"):
+                j += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+                continue
+            if w in ("tool", "pip", "global", "-m"):      # uv tool install, uv pip install, yarn global add
+                j += 1
+                continue
+            if w in _UPDATE_WORDS:
+                return "update"
+            if w in _OTHER_WORDS:
+                return "other"
+            return "install"
+        return "other"
 
     def _package_problems(self, command: str, where: str) -> list | None:
         """Problems of one command that installs or runs an agent CLI from a registry; None when it names
-        none. The last installer before a package, and the first subcommand word after that installer,
-        decide what the command does with it."""
-        installers = [m for m in INSTALLER.finditer(command)]
-        if not installers:
+        none. The last installer before a package decides, by its subcommand, what the command does."""
+        if not INSTALLER.search(command):
             return None
+        tokens = [(m.start(), m.group(0)) for m in re.finditer(r"\S+", command)]
+        words = [w.strip("'\"") for _, w in tokens]
+        installer_at = [i for i, w in enumerate(words) if w.rsplit("/", 1)[-1] in _INSTALLER_NAMES]
+        if not installer_at:
+            return None
+        actions = {k: self._installer_action(words, k) for k in installer_at}
+        starts = [tokens[k][0] for k in installer_at]
         lowered = command.lower()
-        hits = []
+        out: list | None = None
         for pkg, rx in self.packages:
             if pkg.split("/")[-1].split("-")[0].lower() not in lowered:
                 continue
-            hits += [(m, pkg) for m in rx.finditer(command)]
-        out: list | None = None
-        if hits:
-            ends = [m.end() for m in installers]
-            words = list(_SUBCOMMAND.finditer(command))
-            starts = [w.start() for w in words]
-            for m, pkg in hits:
-                k = bisect.bisect_right(ends, m.start()) - 1
-                if k < 0:
+            for m in rx.finditer(command):
+                n = bisect.bisect_right(starts, m.start()) - 1
+                if n < 0 or tokens[installer_at[n]][0] == m.start():
                     continue
-                installer = installers[k]
-                j = bisect.bisect_left(starts, installer.end())
-                action = "install" if installer.group(1) in _RUNNERS else None
-                while action is None and j < len(words) and words[j].start() < m.start():
-                    word = words[j].group(1)
-                    if word in _INSTALL_WORDS:
-                        action = "install"
-                    elif word in _UPDATE_WORDS:
-                        action = "update"
-                    elif word in _OTHER_WORDS:
-                        action = "other"
-                    j += 1
+                action = actions[installer_at[n]]
                 if action == "other":
                     continue
                 self.applicable.add("OBAAF-JEN-008")
@@ -1417,22 +1520,39 @@ class JenkinsRules:
                     shown = f" ({_shown(ver)})" if ver else ""
                     reason = " at a version set at run time" if "$" in ver else " without a fixed version"
                     out.append(f"Agent CLI {pkg} is installed{reason}{shown}" + where)
-        # A package named at run time, given to an installer that installs it: one pass over the words.
-        installer_words = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
-        mode = None
-        for word in command.split():
-            base = word.rsplit("/", 1)[-1]
-            if base in installer_words:
-                mode = "install" if base in _RUNNERS else "installer"
-            elif mode == "installer" and word in _INSTALL_WORDS:
-                mode = "install"
-            elif mode == "installer" and (word in _UPDATE_WORDS or word in _OTHER_WORDS):
-                mode = None
-            elif mode == "install" and word.startswith("$"):
+        # A package named at run time, given to an installer that installs it.
+        for k in installer_at:
+            if actions[k] != "install":
+                continue
+            following = installer_at[installer_at.index(k) + 1] if installer_at.index(k) + 1 < len(installer_at) \
+                else len(words)
+            if any(("$" in w or "`" in w) and not w.startswith("-") for w in words[k + 1: following]):
                 self.applicable.add("OBAAF-JEN-008")
-                self.unknown("OBAAF-JEN-008", self._line, f"a package is named at run time in `{_shown(command.strip(), 80)}`, "
-                             "so whether it is an agent CLI at a fixed version is not checked")
+                self.unknown("OBAAF-JEN-008", self._line, f"a package is named at run time in "
+                             f"`{_shown(command.strip(), 80)}`, so whether it is an agent CLI at a fixed version "
+                             "is not checked")
                 break
+        return out
+
+    def _manifests(self, text: str, folder: str) -> list:
+        """Agent CLIs that pip requirements files and package.json ask for, where a script installs from
+        them: `pip install -r FILE` (every -r and -c, `-rFILE` too) and `npm install` with no lockfile beside
+        package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir())."""
+        out: list = []
+        for command, _ in self._commands(text):
+            moved = _CD.match(command)
+            if moved:
+                target = moved.group(2)
+                folder = "?" if "$" in target or folder == "?" or target.startswith("/") or ".." in target else \
+                    _join(folder, target.strip("/"))
+                continue
+            if _PIP_INSTALL.search(command):
+                for m in _REQUIREMENT_FLAG.finditer(command):
+                    out += self._requirements(_join(folder, m.group(2)), "given to pip")
+            if _NPM_INSTALL.search(command):
+                prefix = _NPM_PREFIX.search(command)
+                where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
+                out += self._package_json_problems(where)
         return out
 
     def _requirements(self, rel: str, where_from: str, depth: int = 0) -> list:
@@ -1449,7 +1569,7 @@ class JenkinsRules:
         folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
         for req in body.splitlines():
             req = req.split("#", 1)[0].strip()
-            nested = re.match(r"(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)(\S+)", req)
+            nested = re.match(r"(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)?(\S+)", req)
             if nested:
                 if depth < 3:
                     out += self._requirements(_join(folder, nested.group(1)), f"named in '{_shown(rel)}'", depth + 1)
@@ -1528,9 +1648,9 @@ class JenkinsRules:
                 text = None
                 if lib.name == "?" and lib.ref:
                     base = lib.ref[4:] if lib.ref.startswith("env.") else lib.ref
-                    text = self._resolve("${" + base + "}")
+                    text = self._resolve("${" + base + "}", groovy=True)
                 elif lib.dynamic:
-                    text = self._resolve(lib.name + (f"@{lib.version}" if lib.version else ""))
+                    text = self._resolve(lib.name + (f"@{lib.version}" if lib.version else ""), groovy=True)
                 if text is None or "$" in text:
                     self.applicable.add("OBAAF-JEN-008")
                     self.unknown("OBAAF-JEN-008", lib.line, f"{lib.how} names a library or version computed at run "
@@ -1543,11 +1663,11 @@ class JenkinsRules:
             severity = "high" if any(i.ai or i.publish for i in self.infos) else "medium"
             if version is None:
                 self.add("OBAAF-JEN-008", lib.line,
-                         f"Library '{name}' is loaded at its default version, which an administrator can change "
+                         f"Library '{_shown(name)}' is loaded at its default version, which an administrator can change "
                          "and which may follow a branch.", None, severity=severity)
             elif not FULL_SHA.match(version):
                 self.add("OBAAF-JEN-008", lib.line,
-                         f"Library '{name}' is loaded at '{version}', a branch or tag that can move.", None,
+                         f"Library '{_shown(name)}' is loaded at '{_shown(version)}', a branch or tag that can move.", None,
                          severity=severity)
         scanned: set = set()
         for info in self.infos:
@@ -1558,34 +1678,34 @@ class JenkinsRules:
             scanned.add(id(info.use.call))
             self._line = info.line
             folder = info.ctx.dir
-            text = self._resolve(self.script_text(info))
+            text = self._pin_script(info)
             problems = self._install_problems(text)
+            problems += self._manifests(text, folder)
+            images = self._shell_images(self._substituted(text))
             for rel in self._scripts(info.script):
                 rel = _join(folder, rel)
                 if rel not in self._script_cache:
                     body = self._read(rel) if rel != "?" else None
-                    self._script_cache[rel] = (self._install_problems(body, f" (in the script {_shown(rel)})")
-                                               if body else [], self._shell_images(self._substituted(body))
-                                               if body else [])
+                    body = self._prepared(body) if body else None
+                    self._script_cache[rel] = (
+                        (self._install_problems(body, f" (in the script {_shown(rel)})")
+                         + self._manifests(body, folder)) if body else [],
+                        self._shell_images(self._substituted(body)) if body else [])
                 problems += self._script_cache[rel][0]
-            for segment in _SEGMENTS.split(text):
-                if _PIP_INSTALL.search(segment):
-                    for m in _REQUIREMENT_FLAG.finditer(segment):
-                        problems += self._requirements(_join(folder, m.group(2)), "given to pip")
-            if _NPM_INSTALL.search(text):
-                problems += self._package_json_problems(folder)
-            images = self._shell_images(self._substituted(text))
-            for rel in self._scripts(info.script):
-                images += self._script_cache.get(_join(folder, rel), ([], []))[1]
+                images += self._script_cache[rel][1]
             for image, command in images:
                 where = f"in a `{command}` command in stage '{stage_label(info.ctx.stage)}'"
-                if image is None:
+                if image == "cut":
+                    self.applicable.add("OBAAF-JEN-008")
+                    self.unknown("OBAAF-JEN-008", info.line, f"stage '{stage_label(info.ctx.stage)}' runs more than "
+                                 "200 container commands in one script; the images after the 200th are not checked")
+                elif image is None:
                     self.applicable.add("OBAAF-JEN-008")
                     self.unknown("OBAAF-JEN-008", info.line, f"a `{command}` command in stage "
                                  f"'{stage_label(info.ctx.stage)}' names its image in a way the checker cannot read")
                 else:
                     self._image(image, info.line, info.ctx.stage, where,
-                                severity_for(self.by_stage.get(info.ctx.stage, [])))
+                                severity_for(self.by_stage.get(info.ctx.stage, [])), groovy=False)
             for message in dict.fromkeys(problems):
                 self.applicable.add("OBAAF-JEN-008")
                 self.add("OBAAF-JEN-008", info.line, message + ".", info.ctx.stage, severity="high")
@@ -1605,7 +1725,7 @@ class JenkinsRules:
             return out
         try:
             data = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             if self._agent_words.search(text):
                 out.append("An agent CLI may be installed from a package.json the checker cannot read")
             return out
