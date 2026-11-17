@@ -1032,6 +1032,72 @@ CASES = {
  'V6-028': {
   'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Review\') {\n      steps {\n        sh \'\'\'\n          pip install \'aider-chat\'"==0.86"\n          npm i -g @anthropic-ai/claude-code@\'^1.0.17\'\n        \'\'\'\n      }\n    }\n  }\n}\n',
  },
+ 'V7-017': {
+  'Dockerfile': 'FROM node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n',
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Images\') { steps { sh \'\'\'\n(\n  cd web\n  echo "web image at $(git rev-parse --short HEAD)"\n  docker build -t web:ci .\n)\ndocker build -t app:ci .\n\'\'\' } }\n  }\n}\n',
+  'web/Dockerfile': 'FROM node:20\n',
+ },
+ 'V7-007': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\n(cd web && export BUILD_DATE=$(date +%F) && npm install --no-audit)\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+  'web/package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V7-001': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\nTOOLS=$(cd tools && pwd)\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'tools/package.json': '{"name":"t","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-012': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\nTOOLS=`cd tools; pwd`\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'tools/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-011': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh './ci/build.sh' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'ci/build.sh': '#!/bin/bash\nset -euo pipefail\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\necho "running from $SCRIPT_DIR"\nnpm install\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V7-006': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') { steps { sh \'\'\'\n(\n  echo "Building web at $(date)"\n  cd web\n  npm install --no-audit\n)\nnpm install\n\'\'\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-003': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\ncd web && npm install\ncd $WORKSPACE\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-004': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { dir('web') { sh 'npm install && cd $WORKSPACE && npm install' } } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-009': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\ncp -r . $WORKSPACE_TMP/build\ncd $WORKSPACE_TMP/build\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V7-018': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\ncp package.json ${WORKSPACE}@tmp/\ncd ${WORKSPACE}@tmp\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V7-019': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') { steps { sh \'\'\'\ncd "$WORKSPACE/web"\nnpm install\n\'\'\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
+  'web/package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V7-008': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\n(cd web && npm install)\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-016': {
+  'Jenkinsfile': "def deps() {\n  sh 'npm install'\n}\nnode {\n  checkout scm\n  stage('Deps') {\n    dir('web') { deps() }\n    dir('tools') { deps() }\n  }\n  stage('Review') { sh 'claude -p review' }\n}\n",
+  'tools/package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V7-020': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh '''\ncp package.json ~/tools/ && cd ~/tools\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
 }
 
 # (case, rule, outcome, severity): outcome is finding, or the rule's coverage status when there is none
@@ -1308,6 +1374,20 @@ EXPECT = [
     ('V6-025', 'OBAAF-JEN-008', 'finding', 'high'),  # sixth review, X025
     ('V6-027', 'OBAAF-JEN-008', 'pass', None),  # sixth review, X027
     ('V6-028', 'OBAAF-JEN-008', 'finding', 'high'),  # sixth review, X028
+    ('V7-017', 'OBAAF-JEN-008', 'finding', 'low'),  # seventh review, Y017
+    ('V7-007', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y007
+    ('V7-001', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y001
+    ('V7-012', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y012
+    ('V7-011', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y011
+    ('V7-006', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y006
+    ('V7-003', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y003
+    ('V7-004', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y004
+    ('V7-009', 'OBAAF-JEN-008', 'unknown', None),  # seventh review, Y009
+    ('V7-018', 'OBAAF-JEN-008', 'unknown', None),  # seventh review, Y018
+    ('V7-019', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y019
+    ('V7-008', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y008
+    ('V7-016', 'OBAAF-JEN-008', 'finding', 'high'),  # seventh review, Y016
+    ('V7-020', 'OBAAF-JEN-008', 'unknown', None),  # seventh review, Y020
 ]
 
 CATALOG = load()

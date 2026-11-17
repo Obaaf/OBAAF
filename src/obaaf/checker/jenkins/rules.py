@@ -167,6 +167,8 @@ _BUILD_BOOL = {"-q", "--quiet", "--no-cache", "--pull", "--rm", "--force-rm", "-
                "--push", "--disable-content-trust", "--check"}
 _PIP_INSTALL = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip|python3?[ \t]+-m[ \t]+pip)(?:[ \t]+-\S+)*[ \t]+install\b")
 _REQUIREMENT_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)?(['\"]?)([^\s'\";&|]+)\1")
+_CD_WORKSPACE = re.compile(r"^(?:cd|pushd)[ \t]+[\"']?\$(?:\{(?:env\.)?WORKSPACE\}|WORKSPACE(?![\w]))"
+                           r"(?:/([^\s\"']*))?[\"']?$")
 _CD = re.compile(r"^[ \t]*(?:cd|pushd)[ \t]+(['\"]?)([^\s'\";&|]+)\1[ \t]*$")
 _NPM_PREFIX = re.compile(r"(?:--prefix|-C|--cwd|--dir)(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
 # Options of npm, pip and uv before the subcommand that take a value (`npm --loglevel info install`).
@@ -1418,7 +1420,7 @@ class JenkinsRules:
                     target = (rest.split() or [""])[0].strip("'\"")
                     if "<(" not in rest and (re.match(r"(/|~|\$\{?(HOME|NVM_DIR)\b)", target) or re.search(
                             r"(^|/)bin/activate$", target)):
-                        continue          # a virtual environment's activate script sets no tool version
+                        continue          # outside the checkout, or a virtual environment's activate script
                     for key in list(variables):
                         variables[key] = None
                     variables["*"] = None
@@ -1660,22 +1662,38 @@ class JenkinsRules:
         out: list = []
         parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
         stack: list = []
-        subshells: list = []
+        # One stack for `(`, `$(` and backticks: a cd inside a subshell or a command substitution ends with it,
+        # and each `)` closes the innermost opener (the sixth and seventh reviews of 2d.2k).
+        openers: list = []
         previous = folder
         for k in range(0, len(parts), 2):
-            if k > 0 and parts[k - 1] == "(":
-                subshells.append(folder)          # a subshell's cd ends with it (the sixth review of 2d.2k)
+            if k > 0 and parts[k - 1] in ("(", "$("):
+                openers.append((parts[k - 1], folder))
+            elif k > 0 and parts[k - 1] == "`":
+                if openers and openers[-1][0] == "`":
+                    folder = openers.pop()[1]
+                else:
+                    openers.append(("`", folder))
             closes = parts[k].count(")") - parts[k].count("(")
             command = next(self._commands(parts[k]), ("", ""))[0]
             command = re.split(r"[ \t]\d*(?:[<>]|&>)", " " + command)[0].strip()    # `pushd x > /dev/null`
-            command = re.sub(r"^(cd|pushd)([ \t]+)[\"']?\$\{?(?:env\.)?WORKSPACE\}?/?", r"\1\2./", command)
+            command = re.sub(r"\)+[ \t]*$", "", command)                            # `npm install)`
             words = [w.strip("\"'") for w in command.split()]
-            if closes > 0 and subshells:
-                restore = subshells[-closes] if closes <= len(subshells) else subshells[0]
-                del subshells[-closes:]
-            else:
-                restore = None
+            restore = None
+            for _ in range(max(closes, 0)):
+                while openers and openers[-1][0] == "`":
+                    openers.pop()
+                if openers:
+                    restore = openers.pop()[1]
             try:
+                at_root = _CD_WORKSPACE.match(command)
+                if at_root:
+                    # cd $WORKSPACE/x: the checkout's own folder x, wherever the script was.
+                    if command.startswith("pushd"):
+                        stack.append(folder)
+                    joined = posixpath.normpath(at_root.group(1) or ".")
+                    previous, folder = folder, ("?" if joined.startswith("..") else ("" if joined == "." else joined))
+                    continue
                 built = _BUILD_CMD.match(command)
                 if built and builds is not None:
                     rel, args = _build_options(command[built.end():])
@@ -1699,7 +1717,7 @@ class JenkinsRules:
                     if words[0] == "pushd":
                         stack.append(folder)
                     previous = folder
-                    if "$" in target or folder == "?" or target.startswith("/"):
+                    if "$" in target or folder == "?" or target.startswith(("/", "~")):
                         folder = "?"
                     else:
                         joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
@@ -1844,9 +1862,9 @@ class JenkinsRules:
         for info in self.infos:
             # A method of the file expanded at many calls records its steps once per call; each step's
             # script is scanned once, as the signing scan is (flagship slice 2d.2i, B097).
-            if not info.shell or id(info.use.call) in scanned:
+            if not info.shell or (id(info.use.call), info.ctx.dir) in scanned:
                 continue
-            scanned.add(id(info.use.call))
+            scanned.add((id(info.use.call), info.ctx.dir))
             self._line = info.line
             folder = info.ctx.dir
             text = self._pin_script(info)
