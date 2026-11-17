@@ -776,6 +776,97 @@ CASES = {
   'Jenkinsfile': "def withCi(Closure body) {\n  def ctx = this\n  body.call(ctx)\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          withCi { s -> s.evaluate(readFile('ci/steps.groovy')) }\n        }\n      }\n    }\n  }\n}\n",
   'ci/steps.groovy': 'withCredentials([string(credentialsId: \'tok\', variable: \'T\')]) { sh "curl -H \'X: ${T}\' https://x" }\n',
  },
+ 'V4-001': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  environment { IMAGE = 'myapp:1.0' }\n  stages {\n    stage('Build') { steps { sh 'docker build -t $IMAGE .' } }\n    stage('Test') { steps { sh 'docker run --rm $IMAGE make test' } }\n  }\n}\n",
+ },
+ 'V4-005': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\n          IMAGE=myapp:1.0\n          docker build -t $IMAGE .\n          docker run --rm $IMAGE make test\n        '''\n      }\n    }\n  }\n}\n",
+ },
+ 'V4-007': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': 'def image = \'registry.example.com/team/app\'\nnode {\n  checkout scm\n  stage(\'Build\') {\n    sh "docker build -t ${image}:ci ."\n    sh "docker run --rm ${image}:ci npm test"\n  }\n}\n',
+ },
+ 'V4-008': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { IMAGE = \'myapp:1.0\' }\n  stages {\n    stage(\'Build\') { steps { sh \'docker build -t "$IMAGE" .\' } }\n    stage(\'Test\') { steps { sh \'docker run --rm "$IMAGE" make test\' } }\n  }\n}\n',
+ },
+ 'V4-100': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh './scripts/build-image.sh' } }\n    stage('Test') { steps { sh 'docker run --rm myapp:ci npm test' } }\n  }\n}\n",
+  'scripts/build-image.sh': '#!/bin/sh\nset -e\ndocker build -t myapp:ci .\n',
+ },
+ 'V4-002': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\n          docker pull myorg/app:latest || true\n          docker build --cache-from myorg/app:latest -t myorg/app:latest .\n        '''\n      }\n    }\n  }\n}\n",
+ },
+ 'V4-002c': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\n          docker pull myorg/app:latest || true\n        '''\n      }\n    }\n  }\n}\n",
+ },
+ 'V4-060': {
+  'Jenkinsfile': "node {\n  checkout scm\n  stage('Load') {\n    def loader = this.&load\n    ['ci/a.groovy'].each(loader)\n  }\n}\n",
+  'ci/a.groovy': 'println "hi"\n',
+ },
+ 'V4-066': {
+  'Jenkinsfile': "node {\n  checkout scm\n  stage('Eval') {\n    def ev = Eval.&me\n    [readFile('ci/a.groovy')].each(ev)\n  }\n}\n",
+  'ci/a.groovy': 'println "hi"\n',
+ },
+ 'V4-064': {
+  'Jenkinsfile': "node {\n  checkout scm\n  stage('Load') {\n    ['ci/a.groovy'].each(this.&load)\n  }\n}\n",
+  'ci/a.groovy': 'println "hi"\n',
+ },
+ 'V4-110': {
+  'Jenkinsfile': "node {\n  checkout scm\n  stage('Gen') {\n    def shell = new groovy.lang.GroovyShell()\n    def script = shell.parse(readFile('ci/x.groovy'))\n    script.run()\n  }\n}\n",
+  'ci/x.groovy': 'println "hi"\n',
+ },
+ 'V4-111': {
+  'Jenkinsfile': "node {\n  checkout scm\n  stage('Gen') {\n    def shell = new groovy.lang.GroovyShell(binding)\n    shell.run(readFile('ci/x.groovy'), 'x.groovy', [])\n  }\n}\n",
+  'ci/x.groovy': 'println "hi"\n',
+ },
+ 'V4-112': {
+  'Jenkinsfile': "import groovy.lang.GroovyShell\nnode {\n  checkout scm\n  stage('Gen') {\n    def shell = new GroovyShell(binding)\n    def script = shell.parse(readFile('ci/x.groovy'))\n    script.run()\n  }\n}\n",
+  'ci/x.groovy': 'println "hi"\n',
+ },
+ 'V4-152': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { CLAUDE_VERSION = \'1.0.17\' }\n  stages {\n    stage(\'Review\') {\n      steps {\n        sh \'\'\'\n          [ -f ci/versions.env ] && . ci/versions.env\n          npm install -g @anthropic-ai/claude-code@$CLAUDE_VERSION\n          claude -p "review this change"\n        \'\'\'\n      }\n    }\n  }\n}\n',
+  'ci/versions.env': 'CLAUDE_VERSION=latest\n',
+ },
+ 'V4-153': {
+  '.claude-version': 'latest\n',
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { CLAUDE_VERSION = \'1.0.17\' }\n  stages {\n    stage(\'Review\') {\n      steps {\n        sh \'\'\'\n          if [ -f .claude-version ]; then CLAUDE_VERSION=$(cat .claude-version); fi\n          npm install -g @anthropic-ai/claude-code@$CLAUDE_VERSION\n          claude -p "review this change"\n        \'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'V4-154': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Review') {\n      steps {\n        sh '''\n          CLAUDE_VERSION=1.0.17\n          if [ -f .claude-version ]; then CLAUDE_VERSION=$(cat .claude-version); fi\n          npm install -g @anthropic-ai/claude-code@$CLAUDE_VERSION\n        '''\n      }\n    }\n  }\n}\n",
+ },
+ 'V4-160': {
+  '.claude-version': 'latest\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Review') {\n      steps {\n        sh '''\n          VER=1.0.17\n          IFS= read -r VER < .claude-version || true\n          npm install -g @anthropic-ai/claude-code@$VER\n        '''\n      }\n    }\n  }\n}\n",
+ },
+ 'V4-070': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Review\') {\n      steps {\n        sh \'npm install -g @anthropic-ai/claude-code@1.0.17\'\n        sh \'npm update -g > /dev/null 2>&1\'\n        sh \'claude -p "review this change"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'V4-090': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Review\') {\n      steps {\n        sh \'npm install -g @anthropic-ai/claude-code@1.0.17\'\n        sh \'timeout -k 5 10m npm update -g\'\n        sh \'env -u NPM_TOKEN npm update -g\'\n        sh \'sudo -E npm update --global\'\n        sh \'npm --loglevel warn update -g\'\n        sh \'npm update -g --no-fund 2>/dev/null || true\'\n        sh \'npm update -g | tee update.log\'\n        sh \'claude -p "review this change"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'V4-040': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\n          cd web\n          npm ci\n          cd ..\n          npm test\n        '''\n      }\n    }\n  }\n}\n",
+  'package-lock.json': '{}\n',
+  'package.json': '{"name":"a","devDependencies":{"jest":"^29.0.0"}}\n',
+  'web/package-lock.json': '{}\n',
+  'web/package.json': '{"name":"a","devDependencies":{"jest":"^29.0.0"}}\n',
+ },
+ 'V4-041': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\n          pushd frontend\n          npm ci\n          npm run build\n          popd\n          npm run package\n        '''\n      }\n    }\n  }\n}\n",
+  'frontend/package-lock.json': '{}\n',
+  'frontend/package.json': '{"name":"a","devDependencies":{"webpack":"^5.0.0"}}\n',
+  'package-lock.json': '{}\n',
+  'package.json': '{"name":"a","devDependencies":{"webpack":"^5.0.0"}}\n',
+ },
+ 'V4-003': {
+  'Dockerfile': 'FROM node:20@sha256:0000000000000000000000000000000000000000000000000000000000000000\nRUN npm ci\n',
+  'Jenkinsfile': "node {\n  checkout scm\n  docker.build('myapp')\n  docker.image('myapp').inside {\n    sh 'make test'\n  }\n}\n",
+ },
 }
 
 # (case, rule, outcome, severity): outcome is finding, or the rule's coverage status when there is none
@@ -981,8 +1072,8 @@ EXPECT = [
     ('V3-024b', 'OBAAF-JEN-013', 'unknown', None),  # third review, T024b
     ('V3-025', 'OBAAF-JEN-001', 'finding', 'medium'),  # third review, T025
     ('V3-032', 'OBAAF-JEN-008', 'unknown', None),  # third review, T032
-    ('V3-033', 'OBAAF-JEN-008', 'unknown', None),  # third review, T033
-    ('V3-034', 'OBAAF-JEN-008', 'unknown', None),  # third review, T034
+    ('V3-033', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T033
+    ('V3-034', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T034
     ('V3-035', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T035
     ('V3-036', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T036
     ('V3-037', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T037
@@ -992,11 +1083,33 @@ EXPECT = [
     ('V3-040e', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T040e
     ('V3-041', 'OBAAF-JEN-008', 'unknown', None),  # third review, T041
     ('V3-042', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T042
-    ('V3-046', 'OBAAF-JEN-008', 'not applicable', None),  # third review, T046
+    ('V3-046', 'OBAAF-JEN-008', 'pass', None),  # third review, T046
     ('V3-046c', 'OBAAF-JEN-008', 'pass', None),  # third review, T046c
     ('V3-049', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T049
     ('V3-051', 'OBAAF-JEN-004', 'unknown', None),  # third review, T051
     ('V3-061', 'OBAAF-JEN-001', 'unknown', None),  # third review, T061
+    ('V4-001', 'OBAAF-JEN-008', 'pass', None),  # fourth review, U001
+    ('V4-005', 'OBAAF-JEN-008', 'pass', None),  # fourth review, U005
+    ('V4-007', 'OBAAF-JEN-008', 'pass', None),  # fourth review, U007
+    ('V4-008', 'OBAAF-JEN-008', 'pass', None),  # fourth review, U008
+    ('V4-100', 'OBAAF-JEN-008', 'not applicable', None),  # fourth review, U100
+    ('V4-002', 'OBAAF-JEN-008', 'finding', 'low'),  # fourth review, U002
+    ('V4-002c', 'OBAAF-JEN-008', 'finding', 'low'),  # fourth review, U002c
+    ('V4-060', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U060
+    ('V4-066', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U066
+    ('V4-064', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U064
+    ('V4-110', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U110
+    ('V4-111', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U111
+    ('V4-112', 'OBAAF-JEN-004', 'finding', 'medium'),  # fourth review, U112
+    ('V4-152', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U152
+    ('V4-153', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U153
+    ('V4-154', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U154
+    ('V4-160', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U160
+    ('V4-070', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U070
+    ('V4-090', 'OBAAF-JEN-008', 'finding', 'high'),  # fourth review, U090
+    ('V4-040', 'OBAAF-JEN-008', 'not applicable', None),  # fourth review, U040
+    ('V4-041', 'OBAAF-JEN-008', 'not applicable', None),  # fourth review, U041
+    ('V4-003', 'OBAAF-JEN-008', 'pass', None),  # fourth review, U003
 ]
 
 CATALOG = load()

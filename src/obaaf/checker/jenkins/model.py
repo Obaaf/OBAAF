@@ -1488,8 +1488,9 @@ class Builder:
             self.p.docker_vars.add(name)
         if cname:
             first = cname.split(".")[0]
-            bare = first[4:] if first.startswith("new ") else first
-            cls = self.p.import_aliases.get(bare, bare)
+            # The class is the last capitalised part: new groovy.lang.GroovyShell(), GroovyShell.newInstance().
+            named = next((x for x in reversed(cname.removeprefix("new ").split(".")) if x[:1].isupper()), "")
+            cls = self.p.import_aliases.get(named, named)
             if cls in ("GroovyShell", "GroovyClassLoader", "GroovyScriptEngine") and (
                     first.startswith("new ") or cname.endswith(".newInstance")):
                 self.p.groovy_shells.add(name)
@@ -1556,6 +1557,9 @@ class Builder:
         # A pointer to load or evaluate given as an argument (`list.each(this.&load)`) runs where it is called.
         for arg in call.args:
             pointed = self._pointer(arg)
+            if pointed is None and isinstance(arg, Name) and arg.name in self.p.code_aliases:
+                held = self.p.code_aliases[arg.name]       # def loader = this.&load; list.each(loader)
+                pointed = "load" if held == "load" else "evaluate"
             if pointed is not None:
                 self.p.code_loads.append((pointed, f"{path_of(arg)} (a pointer)", Call(Name(pointed, line=call.line),
                                           line=call.line), ctx, True))

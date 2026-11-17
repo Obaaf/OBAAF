@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import posixpath
 import json
 import re
 import shlex
@@ -88,7 +89,8 @@ POD_HOST_SETTINGS = [
 PINNED_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 EXACT_NPM = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 EXACT_PIP = re.compile(r"^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A-Za-z.]+)?$")
-_REF = re.compile(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$env\.([A-Za-z_]\w*)|\$([A-Za-z_]\w*)")
+# ${env.NAME} (Groovy reading the environment), ${NAME}, $NAME.
+_REF = re.compile(r"\$\{env\.([A-Za-z_]\w*)\}|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
 # Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
 _SEGMENTS = re.compile(r"&&|\|\||;")
 # Commands that set variables other than by NAME=value (read, for, declare, printf -v, mapfile, unset), and
@@ -112,6 +114,9 @@ _OTHER_WORDS = {"uninstall", "remove", "rm", "r", "un", "unlink", "ls", "list", 
                 "check", "prune", "dedupe", "pack", "publish", "root", "prefix", "bin", "docs", "home", "repo",
                 "fund", "wheel", "hash", "inspect", "uninject"}
 _RUNNERS = {"npx", "bunx", "uvx", "pnpx"}
+# Subcommands of npm, pnpm, yarn and bun that install what a package.json asks for.
+_MANIFEST_INSTALLS = {"install", "i", "ci", "add", "in", "ins", "inst", "insta", "instal", "isnt", "isnta",
+                      "isntal", "isntall", "clean-install", "install-clean", "it", "install-test", "cit"}
 _INSTALLER_NAMES = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
 _AGENT_SELF_UPDATE = re.compile(r"^(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
 # What may stand before a command in the same segment: keywords, assignments, and wrappers that run the
@@ -197,7 +202,7 @@ def _shown(text: str, limit: int = 120) -> str:
 
 def _global_update(command: str) -> bool:
     """`npm update -g` (pnpm, bun), with any options, and no package named: every global package moves."""
-    words = command.split()
+    words = re.split(r"[ \t]\d*(?:[<>]|&>)", " " + command)[0].split()     # `> /dev/null 2>&1` is not a word
     if not words or words[0].rsplit("/", 1)[-1] not in ("npm", "pnpm", "bun"):
         return False
     rest, i, verb = [], 1, None
@@ -1141,30 +1146,37 @@ class JenkinsRules:
                      f"the agent's network (for example a Kubernetes NetworkPolicy).{note}", stage)
 
     # ------------------------------------------------------------------ JEN-008
-    def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False) -> str:
-        """`${NAME}`, `$NAME` and `${env.NAME}` replaced by what the file fixes (flagship slice 2d.2k): a
-        variable the script itself set earlier to one literal value (`shell_vars`; None there means the script
-        sets it otherwise, and a "*" entry that it ran `source` or `eval`); else, for `${NAME}` when Groovy
-        interpolates the script (`groovy`), a variable of the file; else an environment value. A name the
-        file assigns anything but one literal, anywhere (two different literals included), is not put in.
-        What is left with a `$` is computed. Bounded: three passes, no pass adds more than 100,000 characters."""
+    def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False, env: bool = True) -> str:
+        """`${env.NAME}`, `${NAME}` and `$NAME` replaced by what the file fixes (flagship slice 2d.2k): a
+        variable the script set earlier to one literal (`shell_vars`; None there means the script sets it
+        otherwise, and a "*" entry that it ran `source` or `eval`); else, for `${NAME}` when Groovy
+        interpolates the text (`groovy`), a variable of the file; else, when `env`, an environment value.
+        `${env.NAME}` is always the environment value. A name the file assigns anything but one literal,
+        anywhere (two different literals included), is not put in. What is left with a `$` is computed.
+        Bounded: three passes, and no pass adds more than 100,000 characters."""
         shell_vars = shell_vars or {}
 
-        def value(name: str, braced: bool):
+        def from_node(node):
+            return node.text() if isinstance(node, Str) and not node.interpolated else None
+
+        def value(m):
+            if m.group(1):
+                name = m.group(1)
+                return None if name in self.p.nonliteral_names else from_node(self.p.env_values.get(name))
+            name, braced = m.group(2) or m.group(3), bool(m.group(2))
             if name in shell_vars:
                 return shell_vars[name]
             if "*" in shell_vars or name in self.p.nonliteral_names:
                 return None       # after `source` or `eval`, or a name given more than one value
-            node = self.p.literals.get(name) if braced and groovy else None
-            if node is None:
-                node = self.p.env_values.get(name)
-            return node.text() if isinstance(node, Str) and not node.interpolated else None
+            if braced and groovy and name in self.p.literals:
+                return from_node(self.p.literals[name])
+            return from_node(self.p.env_values.get(name)) if env else None
 
         for _ in range(3):
             budget = [100_000]
 
             def sub(m):
-                got = value(m.group(1), True) if m.group(1) else value(m.group(2) or m.group(3), bool(m.group(2)))
+                got = value(m)
                 if got is None or len(got) > budget[0]:
                     return m.group(0)
                 budget[0] -= len(got)
@@ -1175,6 +1187,12 @@ class JenkinsRules:
                 break
             text = changed
         return text
+
+    def _env_vars(self) -> dict:
+        """The environment values the file sets once to a literal, as a script's starting variables: a
+        command of the script that sets one again, or sources a file, overrides them in order."""
+        return {name: node.text() for name, node in self.p.env_values.items()
+                if isinstance(node, Str) and not node.interpolated and name not in self.p.nonliteral_names}
 
     @staticmethod
     def _prepared(text: str, shell: str = "sh") -> str:
@@ -1194,7 +1212,7 @@ class JenkinsRules:
         Groovy's own variables go in only when Groovy interpolates the script (a double-quoted string)."""
         node = shell_script(info.use.call)
         interpolated = isinstance(node, Str) and node.interpolated
-        return self._resolve(self._prepared(info.script, info.use.name), groovy=interpolated)
+        return self._resolve(self._prepared(info.script, info.use.name), groovy=interpolated, env=False)
 
     def _image(self, ref, line: int, stage: tuple | None, where: str, severity: str, groovy: bool = True) -> None:
         """One image reference: pinned to a digest, computed (unknown), or a finding. `groovy` is False for
@@ -1386,7 +1404,8 @@ class JenkinsRules:
         """Record the variables a script line sets: one literal value, or None when the script sets it to
         anything else or to two different values."""
         for segment in _COMMAND_SPLIT.split(text):
-            other = _OTHER_ASSIGN.match(segment)
+            # `IFS= read -r VER`, `if read VER`: the verb after keywords, assignments and wrappers.
+            other = _OTHER_ASSIGN.match(segment) or _OTHER_ASSIGN.match(next(self._commands(segment), ("", ""))[0])
             if other:
                 verb, rest = other.group(1), other.group(2)
                 if verb in ("source", ".", "eval"):
@@ -1412,19 +1431,19 @@ class JenkinsRules:
                 continue
             single, double, bare = full.group(2), full.group(3), full.group(4)
             value = single if single is not None else self._resolve(double if double is not None else bare or "",
-                                                                    variables)
+                                                                    variables, env=False)
             if "$" in value and single is None or len(value) > 10_000:
                 value = None
             if name in variables and variables[name] != value:
                 value = None
             variables[name] = value
 
-    def _substituted(self, text: str) -> str:
+    def _substituted(self, text: str, start: dict | None = None) -> str:
         """The script with each variable it sets put into the commands after it (`IMAGE=node:20; docker run
         $IMAGE`), as _install_problems reads it, for the container commands."""
         if "$" not in text or len(text) > 400_000:
             return text
-        variables: dict = {}
+        variables: dict = dict(start or {})
         return "\n".join(self._resolve_line(line, variables) for line in text.splitlines())
 
     def _resolve_line(self, line: str, variables: dict) -> str:
@@ -1434,7 +1453,7 @@ class JenkinsRules:
         for k in range(0, len(parts), 2):
             original = parts[k]
             if "$" in original and variables:
-                parts[k] = self._resolve(original, variables)
+                parts[k] = self._resolve(original, variables, env=False)
             self._assignments(original, variables)
         return "".join(parts)
 
@@ -1522,6 +1541,20 @@ class JenkinsRules:
                                    "of every global package)" + where)
         return out
 
+    @staticmethod
+    def _non_options(words: list):
+        """The words that are not options, skipping the values of options that take one."""
+        j = 0
+        while j < len(words):
+            w = words[j]
+            if w.startswith("-"):
+                j += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+                continue
+            if re.match(r"\d*(?:[<>]|&>)", w):
+                break
+            yield w
+            j += 1
+
     def _installer_action(self, words: list, k: int) -> str:
         """What the installer at words[k] does with the packages after it: install (or run), update or
         other, from its first word that is not an option (options that take a value skip it). A runner
@@ -1608,26 +1641,40 @@ class JenkinsRules:
         package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir())."""
         out: list = []
         parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
+        stack: list = []
+        previous = folder
         for k in range(0, len(parts), 2):
             opened = k > 0 and parts[k - 1] in ("(", "$(", "`")
             command = next(self._commands(parts[k]), ("", ""))[0]
             words = command.split()
-            if words and words[0] in ("popd",) or command in ("cd -", "cd") or (opened and _CD.match(command)):
-                folder = "?"         # a folder the checker does not follow (a subshell's cd, popd, cd -)
+            if words and words[0] == "popd":
+                previous, folder = folder, (stack.pop() if stack else "?")
+                continue
+            if command == "cd -":
+                previous, folder = folder, previous
+                continue
+            if command == "cd" or (opened and _CD.match(command)):
+                previous, folder = folder, "?"     # home, or a subshell's cd the checker does not follow
                 continue
             moved = _CD.match(command)
             if moved:
                 target = moved.group(2)
-                folder = "?" if "$" in target or folder == "?" or target.startswith("/") or ".." in target else \
-                    _join(folder, target.strip("/"))
+                if words[0] == "pushd":
+                    stack.append(folder)
+                previous = folder
+                if "$" in target or folder == "?" or target.startswith("/"):
+                    folder = "?"
+                else:
+                    joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
+                    folder = "?" if joined.startswith("..") else ("" if joined == "." else joined)
                 continue
             if _PIP_INSTALL.search(command):
                 for m in _REQUIREMENT_FLAG.finditer(command):
                     out += self._requirements(_join(folder, m.group(2)), "given to pip")
             base = words[0].rsplit("/", 1)[-1] if words else ""
-            if base in ("npm", "pnpm", "yarn", "bun") and (
-                    self._installer_action(words, 0) == "install" or (base in ("yarn", "bun") and all(
-                        w.startswith("-") for w in words[1:]))) or _NPM_INSTALL.search(command):
+            sub = next((w for w in self._non_options(words[1:])), None) if words else None
+            if base in ("npm", "pnpm", "yarn", "bun") and (sub in _MANIFEST_INSTALLS or (
+                    sub is None and base in ("yarn", "bun"))):
                 prefix = _NPM_PREFIX.search(command)
                 where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
                 out += self._package_json_problems(where)
@@ -1665,6 +1712,8 @@ class JenkinsRules:
                 return "medium"
             return "low"
 
+        env_vars = self._env_vars()
+        self._collect_local_images(env_vars)
         for agent, ctx in self.p.agents:
             under = self.under(agent)
             severity = severity_for(under)
@@ -1704,6 +1753,8 @@ class JenkinsRules:
                 if ref is None:
                     ref = node.text() if isinstance(node, Str) else (
                         "${" + path_of(node) + "}" if path_of(node) else "${computed}")
+                if self._resolve(ref, groovy=True) in self._local_images:
+                    continue           # docker.build('app') then docker.image('app'): the job's own image
                 self._image(ref, info.line, info.ctx.stage, where, severity_for(users))
             elif name == "docker.build":
                 call = info.use.call
@@ -1747,21 +1798,6 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", lib.line,
                          f"Library '{_shown(name)}' is loaded at '{_shown(version)}', a branch or tag that can move.", None,
                          severity=severity)
-        # Images the job builds and tags itself are not pulled from a registry (the third review of 2d.2k).
-        self._local_images = set()
-        for info in self.infos:
-            if info.use.name == "docker.build":
-                tag = literal(first_arg(info.use.call))
-                if tag:
-                    self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
-            elif info.shell:
-                for command, _ in self._commands(self._prepared(info.script, info.use.name)):
-                    if _BUILD_CMD.match(command):
-                        for m in _TAG_OPTION.finditer(command):
-                            self._local_images.update({m.group(2), m.group(2) + ":latest"})
-                    tagged = _TAG_CMD.match(command)
-                    if tagged:
-                        self._local_images.update({tagged.group(2), tagged.group(2) + ":latest"})
         scanned: set = set()
         for info in self.infos:
             # A method of the file expanded at many calls records its steps once per call; each step's
@@ -1772,20 +1808,16 @@ class JenkinsRules:
             self._line = info.line
             folder = info.ctx.dir
             text = self._pin_script(info)
-            problems = self._install_problems(text)
+            problems = self._install_problems(text, shell_vars=env_vars)
             problems += self._manifests(text, folder)
-            images = self._shell_images(self._substituted(text))
+            images = self._shell_images(self._substituted(text, env_vars))
             for rel in self._scripts(info.script):
-                rel = _join(folder, rel)
-                if rel not in self._script_cache:
-                    body = self._read(rel) if rel != "?" else None
-                    body = self._prepared(body) if body else None
-                    self._script_cache[rel] = (
-                        (self._install_problems(body, f" (in the script {_shown(rel)})")
-                         + self._manifests(body, folder)) if body else [],
-                        self._shell_images(self._substituted(body)) if body else [])
-                problems += self._script_cache[rel][0]
-                images += self._script_cache[rel][1]
+                body_problems, body_images = self._script_scan(_join(folder, rel), folder, env_vars)
+                problems += body_problems
+                images += body_images
+            for dockerfile, build_args in self._shell_builds(text, folder, env_vars):
+                self._dockerfile(dockerfile, info.line, info.ctx.stage,
+                                 severity_for(self.by_stage.get(info.ctx.stage, [])), build_args)
             for image, command in images:
                 where = f"in a `{command}` command in stage '{stage_label(info.ctx.stage)}'"
                 if image == "cut":
@@ -1796,12 +1828,67 @@ class JenkinsRules:
                     self.applicable.add("OBAAF-JEN-008")
                     self.unknown("OBAAF-JEN-008", info.line, f"a `{command}` command in stage "
                                  f"'{stage_label(info.ctx.stage)}' names its image in a way the checker cannot read")
-                elif image not in self._local_images:
+                elif command == "pull" or image not in self._local_images:
                     self._image(image, info.line, info.ctx.stage, where,
                                 severity_for(self.by_stage.get(info.ctx.stage, [])), groovy=False)
             for message in dict.fromkeys(problems):
                 self.applicable.add("OBAAF-JEN-008")
                 self.add("OBAAF-JEN-008", info.line, message + ".", info.ctx.stage, severity="high")
+
+    def _script_scan(self, rel: str, folder: str, env_vars: dict) -> tuple:
+        """(install problems, container images) of a repository script a step runs, read once."""
+        if rel not in self._script_cache:
+            body = self._read(rel) if rel != "?" else None
+            body = self._prepared(body) if body else None
+            self._script_cache[rel] = (
+                (self._install_problems(body, f" (in the script {_shown(rel)})", shell_vars=env_vars)
+                 + self._manifests(body, folder)) if body else [],
+                self._shell_images(self._substituted(body, env_vars)) if body else [])
+        return self._script_cache[rel]
+
+    def _shell_builds(self, text: str, folder: str, env_vars: dict) -> list:
+        """(Dockerfile, build arguments) for each `docker build` (podman, nerdctl, buildx) a script runs."""
+        out = []
+        for command, _ in self._commands(self._substituted(text, env_vars)):
+            m = _BUILD_CMD.match(command)
+            if m:
+                rel, args = _build_options(command[m.end():])
+                if any("$" in v for v in args.values()):
+                    args = "?"
+                out.append((_join(folder, rel) if rel != "?" else "?", args))
+        return out
+
+    def _collect_local_images(self, env_vars: dict) -> None:
+        """Images the job builds or tags itself (`docker build -t`, `docker tag`, docker.build), after
+        variables are put in, in steps and in the repository scripts they run: a `run` of one is not a pull
+        from a registry (the third and fourth reviews of 2d.2k). A `pull` is always checked."""
+        self._local_images = set()
+
+        def add(tag: str) -> None:
+            if "$" not in tag:
+                self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
+
+        for info in self.infos:
+            if info.use.name == "docker.build":
+                tag = self._resolve(literal(first_arg(info.use.call)) or (
+                    first_arg(info.use.call).text() if isinstance(first_arg(info.use.call), Str) else "$"),
+                    groovy=True)
+                add(tag)
+            elif info.shell:
+                text = self._substituted(self._pin_script(info), env_vars)
+                bodies = [text]
+                for rel in self._scripts(info.script):
+                    body = self._read(_join(info.ctx.dir, rel)) if info.ctx.dir != "?" else None
+                    if body:
+                        bodies.append(self._substituted(self._prepared(body), env_vars))
+                for body in bodies:
+                    for command, _ in self._commands(body):
+                        if _BUILD_CMD.match(command):
+                            for m in _TAG_OPTION.finditer(command):
+                                add(m.group(2))
+                        tagged = _TAG_CMD.match(command)
+                        if tagged:
+                            add(tagged.group(2))
 
     def _package_json_problems(self, folder: str) -> list:
         """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
