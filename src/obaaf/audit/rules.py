@@ -25,13 +25,15 @@ checked here, value by value, before they are used.
 from __future__ import annotations
 
 import fnmatch
+import heapq
 import json
+import re
 from dataclasses import dataclass
 
 from obaaf.audit.github import plain, quoted
 from obaaf.audit.settings import BY_KEY, CLASSIC_TOP
 from obaaf.audit.workflows import HEAD_COMMIT_EVENTS, PULL_REQUEST_EVENTS
-from obaaf.audit.workflows import called_path
+from obaaf.audit.workflows import called_path, self_repository_call
 from obaaf.checker.workflow import PRIVILEGED_UNTRUSTED_TRIGGERS
 
 FORMAT = "obaaf-settings-findings/v0.1"
@@ -840,7 +842,10 @@ def _stops(run: _Run):
             path = file["path"]
             loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
             # An action from another repository, or a reusable workflow from one (the third review of 2d.2g).
-            remote = any(job["actions"] or (job["calls"] and not called_path(job)) for job in file["jobs"])
+            # A call written `./` or `$/` is this repository's (issue #182).
+            actions = sorted({a for job in file["jobs"] for a in job["remote_actions"]})
+            workflows = sorted({job["calls"] for job in file["jobs"] if job["calls"] and called_path(job) is None})
+            remote = actions + workflows
             if value.get("enabled") is False:
                 stopped[path] = "GitHub Actions is turned off for the repository"
             elif value.get("sha_pinning_required") is True and loose and not run.usage.get("actions_lock"):
@@ -855,6 +860,24 @@ def _stops(run: _Run):
                 # and reusable workflows": which owner's actions that lets through is not matched here.
                 maybe[path] = ("the repository allows only some owners' actions and reusable workflows "
                                "(allowed_actions: local_only), which is not matched against those it uses")
+            elif value.get("allowed_actions") == "selected" and remote:
+                # Issue #182: an empty list of selected actions was read as letting everything run.
+                unsure = _not_selected(actions, workflows, value.get("selected_actions"))
+                if unsure:
+                    maybe[path] = _selection_doubt(unsure, value.get("selected_actions"))
+            if path not in stopped and path not in maybe and value.get("allowed_actions") not in (
+                    None, "all", "local_only", "selected"):
+                # A value of its own (the second review of slice 2b.7: it counted every file as running).
+                maybe[path] = (f"the repository's setting for which actions may run is {_q(value['allowed_actions'], 40)}, "
+                               "a value the audit does not know")
+            if path not in stopped and path not in maybe and value.get("allowed_actions") in ("local_only", "selected"):
+                # A local action's own steps, and whether the setting covers a container image, are not read
+                # (the review of slice 2b.7): a local composite action can use an action the setting blocks.
+                unread_here = sorted({a for job in file["jobs"] for a in job["unread_actions"]})
+                if unread_here:
+                    maybe[path] = (f"the repository allows only some actions and reusable workflows (allowed_actions: "
+                                   f"{value['allowed_actions']}), and it uses {_names([_q(a, 100) for a in unread_here], 2)}, "
+                                   "whose own steps, or whether the setting covers it, the audit does not read")
     policies, whole = run.got("actions_policies")
     if policies is None or not whole:
         unread.append(run.why("actions_policies"))
@@ -872,25 +895,195 @@ def _stops(run: _Run):
                 continue            # whatever it applies to, it allows every event the file uses
             maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
                                            "understand, may block its events")
-    # A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
-    # slice 2d.2g): the whole calling file is taken as one GitHub may not run, until nothing changes.
-    # A called file that is missing, or was not read (one GitHub refuses among them), counts the same.
-    read = {file["path"] for file in run.files()}
-    changed = True
-    while changed:
-        changed = False
-        for file in run.files():
-            if file["path"] in stopped or file["path"] in maybe:
-                continue
-            for job in file["jobs"]:
-                target = called_path(job)
-                if target and (target in stopped or target in maybe or target not in read):
-                    maybe[file["path"]] = (f"it calls {plain(target, 120)}, which GitHub "
-                                           + ("does not run" if target in stopped else "may not run" if target in maybe
-                                              else "may not run: it is not among the workflow files that were read"))
-                    changed = True
-                    break
+    for file in run.files():
+        if file["path"] in stopped or file["path"] in maybe:
+            continue
+        # A call written with `$/`: whether GitHub takes `$/` in a job's `uses:` was not established (issue #182).
+        odd = next((job for job in file["jobs"] if self_repository_call(job)), None)
+        if odd is not None:
+            maybe[file["path"]] = (f"it calls {_q(odd['calls'], 120)}, written with $/, and whether GitHub "
+                                   "accepts $/ in a job's uses was not established")
+        elif file.get("may_refuse"):
+            maybe[file["path"]] = file["may_refuse"][0]     # a job id GitHub may refuse (slice 2b.7)
+    _spread_to_callers(run, stopped, maybe)
     return stopped, maybe, blocked, unread
+
+
+def _spread_to_callers(run: _Run, stopped: dict, maybe: dict) -> None:
+    """A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
+    slice 2d.2g): the whole calling file is taken as one GitHub may not run, and so are its own callers. A
+    called file that is missing, or was not read (one GitHub refuses among them), counts the same, and so does
+    `uses: ./` alone (issue #182: it was skipped). Each file is looked at once from each file it calls, so a
+    chain of calls costs its length (it cost the square of it), and the reason a file is given is its first
+    call, in the order the jobs are written, to a file found not to run, or not to be sure to run, one step
+    nearer the cause (so a cycle of calls never gives a file its own caller as the reason)."""
+    files = run.files()
+    read = {file["path"] for file in files}
+    calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    for path, why in _call_graph_doubts(calls, read).items():
+        if path not in stopped and path not in maybe:
+            maybe[path] = why
+    callers: dict = {}
+    for path, targets in calls.items():
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    bad = set(stopped) | set(maybe) | {t for targets in calls.values() for t in targets if t not in read}
+    frontier = set(bad)
+    reasons: dict = {}
+    while frontier:
+        reached = {path for target in frontier for path in callers.get(target, ()) if path not in bad}
+        for path in reached:
+            reasons[path] = next(t for t in calls[path] if t in bad)
+        bad |= reached
+        frontier = reached
+    for file in files:
+        target = reasons.get(file["path"])
+        if target is not None:
+            maybe[file["path"]] = (f"it calls {plain(target, 120) if target else _q('./')}, which GitHub "
+                                   + ("does not run" if target in stopped else "may not run" if target in read
+                                      else "may not run: it is not among the workflow files that were read"))
+
+
+# How deep calls may nest before GitHub refuses the run, at the least: its reference allowed "four levels of
+# workflows", the caller and three levels of reusable workflows, as the author knew it; a later limit may be higher
+# (not read in the session that wrote this, so a deeper chain is a doubt, the review of slice 2b.7).
+MAX_CALL_DEPTH = 3
+
+
+def _call_graph_doubts(calls: dict, read: set) -> dict:
+    """The files GitHub may not run because of how they call one another (the review of slice 2b.7): one in a
+    cycle of calls, which cannot be expanded (a file that calls itself included), and one that starts a chain of
+    more nested calls than MAX_CALL_DEPTH. Iterative, so a long chain does not exhaust the stack."""
+    graph = {path: list(dict.fromkeys(t for t in targets if t in read)) for path, targets in calls.items()}
+    # Tarjan's strongly connected components, without recursion.
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    component: dict = {}
+    counter = 0
+    for root in graph:
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            node, i = work.pop()
+            if i == 0:
+                index[node] = low[node] = counter
+                counter += 1
+                stack.append(node)
+                on_stack.add(node)
+            targets = graph.get(node, [])
+            if i < len(targets):
+                work.append((node, i + 1))
+                target = targets[i]
+                if target not in index:
+                    work.append((target, 0))
+                elif target in on_stack:
+                    low[node] = min(low[node], index[target])
+                continue
+            for target in targets:
+                if target in on_stack:
+                    low[node] = min(low[node], low[target])
+            if low[node] == index[node]:
+                members = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    members.append(member)
+                    if member == node:
+                        break
+                for member in members:
+                    component[member] = members
+    doubts: dict = {}
+    cyclic = set()
+    first: dict = {}     # each component's first three members, found once (the second review of 2b.7)
+    for path, targets in graph.items():
+        members = component[path]
+        if len(members) > 1 or path in targets:
+            cyclic.add(path)
+            key = id(members)
+            if key not in first:
+                first[key] = heapq.nsmallest(3, members)
+            others = [m for m in first[key] if m != path][:2]
+            more = len(members) - 1 - len(others)
+            named = ", ".join(plain(m, 120) for m in others) + (f" and {more} more" if more else "")
+            doubts[path] = ("it calls itself, a cycle GitHub cannot expand" if len(members) == 1 else
+                            f"it is in a cycle of calls with {named}, which GitHub cannot expand")
+    # The longest chain of calls below each file outside a cycle, in calls: one past MAX_CALL_DEPTH is a doubt.
+    # Callers of a file in a cycle are not measured through it: they become files GitHub may not run anyway.
+    depth: dict = {}
+    for root in graph:
+        if root in cyclic or root in depth:
+            continue
+        work = [(root, False)]
+        while work:
+            node, done = work.pop()
+            below = [t for t in graph[node] if t not in cyclic]
+            if done:
+                depth[node] = 1 + max((depth[t] for t in below), default=-1)
+                continue
+            if node in depth:
+                continue
+            work.append((node, True))
+            work.extend((t, False) for t in below if t not in depth)
+    for path, n in depth.items():
+        if n > MAX_CALL_DEPTH and path not in doubts:
+            doubts[path] = (f"it starts a chain of {n} nested calls, and GitHub allowed the caller and "
+                            f"{MAX_CALL_DEPTH} levels of reusable workflows (as its reference was known when this was "
+                            "written; a later limit was not read)")
+    return doubts
+
+
+# A reference to another repository's action or reusable workflow, `owner/repo[/path]@ref`, as plainly as it can be
+# written (issue #182): each part letters, digits, `.`, `_` and `-`, no part `.` or `..`, a ref of the same with `/`
+# and no `..` (which no git ref holds), no space, no wildcard. Only such a reference is matched against the list.
+_PART = r"(?!\.\.?[/@])[A-Za-z0-9._-]+"
+PLAIN_REFERENCE_RE = re.compile(rf"(?P<owner>{_PART})/{_PART}(?:/{_PART})*@(?!.*\.\.)[A-Za-z0-9._/-]+")
+
+
+def _not_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
+    """The references, of actions or reusable workflows in another repository, that the list of selected
+    actions (`allowed_actions: selected`), as written, does not allow (issue #182). What an allowed reference
+    uses in turn (a remote composite action's steps, a remote reusable workflow's jobs) is not read. GitHub's matching of the list
+    was not read from its pages in the session that wrote this, so only two things count: a step's action of
+    the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
+    and an entry that is the reference itself, character for character. Either only for a reference written
+    plainly (PLAIN_REFERENCE_RE), and neither while any entry holds a `!`, which may block. Another
+    repository's reusable workflow is never allowed as written, an equal entry included, because its jobs are
+    not read; actions of the repository's own owner and of verified creators are not matched. A list that was
+    not read lets nothing through."""
+    if not isinstance(selected, dict):
+        return actions + workflows
+    patterns = [p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)]
+    if any("!" in p for p in patterns):
+        return actions + workflows
+
+    def allowed(uses: str) -> bool:
+        plain_ref = PLAIN_REFERENCE_RE.fullmatch(uses)
+        if plain_ref is None:
+            return False        # a wildcard, a space or an odd part: never matched, even by an equal entry
+        owned = selected.get("github_owned_allowed") is True and plain_ref["owner"] in ("actions", "github")
+        return owned or uses in patterns
+
+    # Another repository's reusable workflow is never taken as allowed: its jobs, and what they use, are not read
+    # (the third review of 2b.7), as a local action's steps are not.
+    return [uses for uses in actions if not allowed(uses)] + list(workflows)
+
+
+def _selection_doubt(unsure: list[str], selected) -> str:
+    """Why a file GitHub may refuse under `allowed_actions: selected` may not run."""
+    names = ", ".join(_q(a, 100) for a in unsure[:2]) + (f" and {len(unsure) - 2} more" if len(unsure) > 2 else "")
+    if not isinstance(selected, dict):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), "
+                f"the list was not read, and it uses {names}")
+    if any("!" in p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), an "
+                f"entry of the list holds a !, which may block, so nothing is matched, and it uses {names}")
+    return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), and "
+            f"it uses {names}, which the list as written does not allow: only a step's action of GitHub's own, "
+            "where allowed, or one an entry names exactly is matched, and another repository's reusable workflow, "
+            "whose jobs are not read, never is")
 
 
 def _api_reporters(run: _Run) -> str:
@@ -1693,7 +1886,10 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
-                matches = [(f, j) for f, j in reporting if reports(f, j, context) is True]
+                # A job in a file GitHub may not run counts here (the review of slice 2b.7): whether its paths filter,
+                # its activity types or its triggers keep the check from reporting holds whether or not the file
+                # runs, since a file that does not run reports nothing. One GitHub may read otherwise does not.
+                matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
                 if not _held_by_actions(need["apps"][context]):
@@ -1706,11 +1902,61 @@ def _check_rules(run: _Run, kind: str) -> None:
                 runs = sorted(((_report_run(f, j, branch, skipped=j["check"]["kind"] == "static",
                                             blocked=blocked.get(f["path"], ())), f, j)
                                for f, j in matches), key=lambda item: ORDER.index(item[0]))
-                how, file, job = runs[0]
                 item = f"{subject}: required check {_q(context)}"
+                # A route through a file GitHub may not run never stands for the check (the second review of slice
+                # 2b.7), and neither does a job that may report it under names that could not be written out, or in
+                # a file GitHub may read otherwise (the third review). Where the route that decides gives a finding
+                # (a paths filter, activity types, or no run on a pull request's commit where nothing else can
+                # report it), the answer is "cannot tell" if any other job may report the check on a route that
+                # gives no finding, or two filtered routes may cover every pull request between them (the fourth
+                # review): ranks do not say which pull requests a route covers. A job that never runs on a pull
+                # request's commit changes nothing (whatever its token: the fifth review). Jobs whose names could not
+                # be written out are read at their widest: a plain job skipped by `if:` still reports, and one in a
+                # file GitHub may read otherwise runs on every pull request.
+                sure = [r for r in runs if r[1]["path"] not in maybe]
+                how, file, job = sure[0] if sure else runs[0]
+                writers = _api_reporters(run)
+                failing = {"paths", "types"} | ({"never"} if writers == "no" else set())
+                if how in failing:
+                    unknown = []
+                    for f, j in reporting:
+                        if _reports(j, context) is None:
+                            widest = j["check"]["kind"] in ("static", "computed")
+                            unknown.append(("always" if j.get("doubt") else _report_run(
+                                f, j, branch, skipped=widest, blocked=blocked.get(f["path"], ())), f, j))
+                    # Two filtered routes in different files may cover every pull request between them (paths and
+                    # paths-ignore); jobs of one file share its filters (the fifth review of 2b.7).
+                    filtered = list({r[1]["path"]: r for r in runs if r[0] in ("paths", "types")}.values())
+                    rival = next((r for r in runs if r[0] not in failing and r[0] != "never"), None) or next(
+                        (r for r in unknown if r[0] != "never"), None) or (filtered[1] if len(filtered) > 1 else None)
+                    if rival is not None:
+                        _, other, other_job = rival
+                        why = (f", in a workflow GitHub may not run ({maybe[other['path']]})," if other["path"] in maybe
+                               else ", under names that could not be written out or in a file GitHub may read "
+                               "otherwise than the audit does," if _reports(other_job, context) is None else "")
+                        where = "on no pull request's commit" if how == "never" else "on only some pull requests"
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
+                                              f"{_job_label(file, job)} reports it {where}, and "
+                                              f"{_job_label(other, other_job)}{why} may also report it, so whether "
+                                              "it reports on every pull request is not known.")
+                        continue
+                    how, file, job = runs[0]    # the one route that reports it on some pull requests, if any
+                elif how == "always" and not sure:
+                    # Every known route is in a file GitHub may not run (the fifth review of 2b.7): if that file does
+                    # not run, any other job that may report the check decides, so the answer is "cannot tell".
+                    others = [r for r in runs[1:] if r[0] != "always"] + [
+                        (None, f, j) for f, j in reporting if _reports(j, context) is None]
+                    if others:
+                        _, other, other_job = others[0]
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. {_job_label(file, job)} "
+                                              f"reports it on every pull request, in a workflow GitHub may not run "
+                                              f"({maybe[file['path']]}), and {_job_label(other, other_job)} may also "
+                                              "report it, on a route of its own, so whether it reports on every pull "
+                                              "request is not known.")
+                        continue
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
-                    continue
+                    continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject
                 if how == "maybe":
                     run.cannot_tell(item, f"{lead}. Whether that workflow runs for pull requests into {_q(branch)} "
                                           "rests on a branch pattern, which is not evaluated.")
@@ -2055,7 +2301,9 @@ def _token_from_elsewhere(run: _Run, file: dict, job: dict) -> bool:
     if _stands_alone(file):
         return False
     callers = [j for _, j in run.jobs() if called_path(j) == file["path"]]
-    return bool(callers) and all(j["permissions"]["declared"] for j in callers)
+    # A call written with `$/` may not be one GitHub makes (issue #182): it never counts as the caller that
+    # covers the file, and an undeclared one still uncovers it.
+    return any(not self_repository_call(j) for j in callers) and all(j["permissions"]["declared"] for j in callers)
 
 
 def rule_012(run: _Run) -> None:

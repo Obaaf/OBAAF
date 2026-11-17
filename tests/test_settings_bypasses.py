@@ -596,7 +596,9 @@ class SettingsThatStopEveryRunTest(unittest.TestCase):
             body["rules"] = [{"type": "restrict_action_events", "parameters": {"allowed_events": ["push"]}}]
         found = assess(changed(ADMIN, POLICY_7, change), self.CI)
         self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell")
-        self.assertEqual(status(found, "OBAAF-SET-007"), "not-applicable")
+        # Since slice 2b.7 OBAAF-SET-007 weighs a job in a file GitHub may not run (its triggers keep a check from
+        # reporting either way); this one has no filter, so it compares and finds nothing. It was not-applicable.
+        self.assertEqual(status(found, "OBAAF-SET-007"), "no-finding")
 
     def test_only_some_owners_actions_allowed(self):
         # GitHub calls the value "Allow OWNER actions and reusable workflows"; which owners is not matched.
