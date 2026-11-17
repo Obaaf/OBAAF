@@ -1,4 +1,4 @@
-"""Slice 3.2c (from #202): each finding of the settings audit says in one line why it matters.
+"""Slice 3.2c (from #202): each rule of the settings audit says in one line why its findings matter.
 
 Every rule of `obaaf audit`, OBAAF-SET-001 to 015, has a `why`: one sentence of at most `WHY_MAX`
 characters, held to the same form as the `why` of the rules of `obaaf check` (slice 3.2b). The text report
@@ -12,10 +12,15 @@ import unittest
 from dataclasses import fields
 
 from helpers import ROOT
+from test_settings_audit import recording
 from test_settings_rules import ADMIN, INCIDENT_REPO, assess, audit_command, of
 
 from obaaf.audit import report, rules
 from obaaf.catalog import WHY_MAX, _SENTENCE_END
+
+# A rule's line is indented by four spaces. The list of what was not read has its own `Why:` lines, about why
+# a setting was not read, indented by six (the review of slice 3.2c): they are not this slice's.
+RULE_WHY = re.compile(r"^    Why: ", re.M)
 
 
 def _form_problems(why: str) -> list[str]:
@@ -71,7 +76,7 @@ class ReportTest(unittest.TestCase):
         with_findings = [rule for rule in rules.RULES if of(found, rule.id, "finding")]
         self.assertGreaterEqual(len(with_findings), 5)
         lines = out.splitlines()
-        whys = [line for line in lines if line.startswith("    Why: ")]
+        whys = [line for line in lines if RULE_WHY.match(line)]
         self.assertEqual(len(whys), len(with_findings))
         for rule in with_findings:
             with self.subTest(rule=rule.id):
@@ -92,8 +97,20 @@ class ReportTest(unittest.TestCase):
 
     def test_no_fixes_leaves_out_the_why_with_the_fix(self):
         _, out, _ = audit_command(ADMIN, INCIDENT_REPO, "--no-fixes", token=True)
-        self.assertNotIn("    Why: ", out)
+        self.assertIsNone(RULE_WHY.search(out))
         self.assertNotIn("    Fix: ", out)
+
+    def test_the_lines_about_settings_not_read_are_left_alone(self):
+        # A workflow's token cannot read every setting, so the report lists some as not read, each with a
+        # `Why:` line of its own; --no-fixes keeps those and drops the rules' lines.
+        entries = recording("workflow-token")
+        _, out, _ = audit_command(entries, INCIDENT_REPO, token=True)
+        _, short, _ = audit_command(entries, INCIDENT_REPO, "--no-fixes", token=True)
+        unread = re.findall(r"^      Why: .*$", out, re.M)
+        self.assertTrue(unread)
+        self.assertEqual(re.findall(r"^      Why: .*$", short, re.M), unread)
+        self.assertTrue(RULE_WHY.search(out))
+        self.assertIsNone(RULE_WHY.search(short))
 
     def test_the_json_report_carries_each_rules_why_and_fix(self):
         code, out, _ = audit_command(ADMIN, INCIDENT_REPO, "--format", "json", token=True)
@@ -119,10 +136,19 @@ class ReportTest(unittest.TestCase):
 
 
 class GuideTest(unittest.TestCase):
-    def test_the_guide_lists_every_rules_why(self):
+    def test_the_guide_lists_every_rules_why_and_nothing_else(self):
         guide = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8")
-        for rule in rules.RULES:
-            self.assertIn(f"- `{rule.id}`: {rule.why}\n", guide, rule.id)
+        section = guide.split("### Why each finding matters\n", 1)[1].split("\n### ", 1)[0]
+        listed = [line for line in section.splitlines() if line.startswith("- `OBAAF-SET-")]
+        self.assertEqual(listed, [f"- `{rule.id}`: {rule.why}" for rule in rules.RULES])
+
+    def test_the_guides_example_prints_the_rules_own_sentences(self):
+        guide = (ROOT / "docs" / "settings-audit.md").read_text(encoding="utf-8")
+        sentences = {rule.why for rule in rules.RULES}
+        shown = re.findall(r"^    Why: (.*)$", guide, re.M)
+        self.assertTrue(shown)
+        for sentence in shown:
+            self.assertIn(sentence, sentences)
 
 
 if __name__ == "__main__":

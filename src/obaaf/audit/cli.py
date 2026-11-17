@@ -54,7 +54,7 @@ def add_parser(sub) -> None:
                    help="exit 1 if any rule answered \"cannot tell\"")
     x.add_argument("--fail-on-unread", action="store_true",
                    help="exit 1 if any setting that applies was not read in full")
-    x.add_argument("--no-fixes", action="store_true", help="leave the fix out of each finding in the text report")
+    x.add_argument("--no-fixes", action="store_true", help="leave out the lines that say why each rule's findings matter and how to fix them, in the text report")
     x.add_argument("--expected", metavar="FILE",
                    help="a committed snapshot of the settings as they should be (written by --snapshot-out). "
                         "Every difference from it is a finding. The command exits 1 if there is one, if something "
