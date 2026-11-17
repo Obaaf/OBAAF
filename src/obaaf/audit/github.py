@@ -225,8 +225,8 @@ QUOTE_LOOKALIKES = frozenset(map(chr, (0x201C, 0x201D, 0x201E, 0x201F, 0x2033, 0
                                        0xFF02, 0x02BA, 0x02DD, 0x02EE, 0x05F4, 0x3003, 0x02F5, 0x02F6, 0x1CD3,
                                        0x2E42, 0x275D, 0x275E, 0x2760, 0x1F676, 0x1F677, 0x1F678)))
 # Characters that read as a backslash: before a closing quote one would make the quote look escaped (the
-# review of flagship slice 2b.8): the full-width and small reverse solidus, the reverse solidus operators and
-# the set minus.
+# review of flagship slice 2b.8): the full-width and small reverse solidus, the reverse solidus operators, the
+# set minus, the OCR double backslash, the box-drawing diagonal and the falling diagonal.
 BACKSLASH_LOOKALIKES = frozenset(map(chr, (0xFF3C, 0xFE68, 0x29F5, 0x29F9, 0x2216, 0x244A, 0x2572, 0x27CD)))
 
 
