@@ -163,11 +163,18 @@ class JobIdsTest(unittest.TestCase):
             usage = CallsThatWereNotComparedTest()._usage({"ci.yml": self.ci_with(job_id)})
             file, = usage["files"]
             self.assertIsNone(file["error"])
-            self.assertTrue(any(words in d for d in file["doubt"]), (job_id, file["doubt"]))
+            # GitHub may refuse the file, and reads it as the audit does otherwise: not a doubt about its reading.
+            self.assertTrue(any(words in d for d in file["may_refuse"]), (job_id, file["may_refuse"]))
+            self.assertEqual(file["doubt"], [])
             found = assess(requiring("test (3.13)"), {"ci.yml": self.ci_with(job_id)})
             self.assertEqual(answered(found, "OBAAF-SET-006"), "cannot-tell", job_id)
+            # The second review of 2b.7: its paths filter keeps the check from reporting either way.
+            paths = wf("  pull_request:\n    paths: ['src/**']\n", job("test", MATRIX_313)) + f"  {job_id}:\n" + (
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n")
+            found = assess(requiring("test (3.13)"), {"ci.yml": paths})
+            self.assertEqual(answered(found, "OBAAF-SET-007"), "finding medium", job_id)
         usage = CallsThatWereNotComparedTest()._usage({"ci.yml": self.ci_with("x" * 99)})
-        self.assertEqual(usage["files"][0]["doubt"], [])
+        self.assertEqual(usage["files"][0]["may_refuse"], [])
 
     def test_a_job_id_cannot_forge_a_problem_the_audit_lets_through(self):
         # The checker quotes the id in its problems; an id that ends like the harmless problem about an input's
@@ -254,6 +261,30 @@ class SelectedActionsTest(unittest.TestCase):
         free = {"ci.yml": wf(PR, job("lint") + job("test", steps=steps(tool)))}
         self.assertEqual(answered(assess(entries, free), "OBAAF-SET-008", "ci.yml#test"), "cannot-tell")
 
+    def test_a_file_that_may_not_run_never_stands_for_the_check(self):
+        # The second review of 2b.7: a job that reports the check on every pull request, in a file GitHub may not
+        # run, hid the paths finding of the only file sure to run.
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        files = {"a.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("lint")),
+                 "b.yml": wf(PR, job("lint", steps=steps(f"someone/tool@{SHA}")))}
+        found = assess(requiring("lint", entries=local_only), files)
+        self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
+        self.assertIn("b.yml#lint reports it on more pull requests", of(found, "OBAAF-SET-007")[0]["message"])
+        # Without the other file, the finding stands.
+        alone = assess(requiring("lint", entries=local_only), {"a.yml": files["a.yml"]})
+        self.assertEqual(answered(alone, "OBAAF-SET-007"), "finding medium")
+
+    def test_a_blocking_entry_is_named_as_the_reason(self):
+        snap, _ = take(selected(["!evil/*"], github_owned=True), token=TOKEN)
+        usage = CallsThatWereNotComparedTest()._usage({"ci.yml": wf(PR, job("test", MATRIX_313, steps=steps(PIN)))})
+        _, maybe, _, _ = rules._stops(rules._Run(rules.RULES[0], snap, usage))
+        self.assertIn("holds a !, which may block, so nothing is matched", maybe[W + "ci.yml"])
+
+    def test_a_value_the_audit_does_not_know_and_an_empty_uses(self):
+        unknown = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "owner_only_new"})
+        self.assertEqual(self.check(unknown, PIN), "cannot-tell")
+        self.assertEqual(self.check(selected(github_owned=True), "''"), "cannot-tell")
+
     def test_the_hand_written_recording_reads_as_before(self):
         # Holds before and after: the admin-token recording allows GitHub's own actions, and the tests built on
         # it use actions/checkout pinned to a commit.
@@ -304,6 +335,17 @@ class ChainOfCallsTest(unittest.TestCase):
         _, maybe, _, _ = CallsThatWereNotComparedTest()._stops(itself)
         self.assertEqual(maybe[W + "ci.yml"], "it calls itself, a cycle GitHub cannot expand")
         self.assertEqual(answered(assess(requiring("lint"), itself), "OBAAF-SET-006"), "cannot-tell")
+
+    def test_a_large_cycle_costs_its_size(self):
+        # The second review of 2b.7: naming every other member of a cycle cost the square of its size.
+        n = 20000
+        calls = {f"w{k}.yml": [f"w{(k + 1) % n}.yml"] for k in range(n)}
+        start = time.monotonic()
+        doubts = rules._call_graph_doubts(calls, set(calls))
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertEqual(len(doubts), n)
+        self.assertEqual(doubts["w5.yml"], f"it is in a cycle of calls with w0.yml, w1.yml and {n - 3} more, which "
+                                           "GitHub cannot expand")
 
     def test_how_deep_calls_nest(self):
         def chain(length):

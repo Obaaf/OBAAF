@@ -185,8 +185,10 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str], list[str]]:
         uses = step.uses
         # `./path` and `$/path` are actions in this repository (flagship slice 2d.2g: `$/` was taken for a
         # remote action that is not pinned).
-        if uses and (wf_mod.is_local_reference(uses) or uses.startswith("docker://")):
+        if uses and (wf_mod.is_local_reference(uses) or uses.lower().startswith("docker://")):
             other.append(uses)
+        elif "uses" in step.raw and not uses:
+            other.append("''")      # an empty `uses`, which names nothing the setting can be matched against
         if not uses or wf_mod.is_local_reference(uses) or uses.startswith("docker://"):
             continue
         used += 1
@@ -261,8 +263,11 @@ def _file(path: str, text: str) -> dict:
     # Every problem but those about the names of a step's inputs makes the file one GitHub may read otherwise or
     # refuse (the second review of slice 2d.2g: a step that is text, or has neither run nor uses, a job whose
     # uses is not text, are refused by GitHub, and a list of words to include missed them).
-    doubt = [p for p in problems if not HARMLESS_PROBLEM_RE.match(p)] + _odd_job_ids(workflow)
+    doubt = [p for p in problems if not HARMLESS_PROBLEM_RE.match(p)]
     return {"path": path, "error": None, "problems": problems, "doubt": doubt,
+            # Why GitHub may refuse the file, which it otherwise reads as the audit does (slice 2b.7): its jobs
+            # are never counted as reporting a check, but what their triggers say still counts.
+            "may_refuse": _odd_job_ids(workflow),
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
 

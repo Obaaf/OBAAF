@@ -25,6 +25,7 @@ checked here, value by value, before they are used.
 from __future__ import annotations
 
 import fnmatch
+import heapq
 import json
 import re
 from dataclasses import dataclass
@@ -861,9 +862,14 @@ def _stops(run: _Run):
                                "(allowed_actions: local_only), which is not matched against those it uses")
             elif value.get("allowed_actions") == "selected" and remote:
                 # Issue #182: an empty list of selected actions was read as letting everything run.
-                unsure = _not_surely_selected(actions, workflows, value.get("selected_actions"))
+                unsure = _not_selected(actions, workflows, value.get("selected_actions"))
                 if unsure:
                     maybe[path] = _selection_doubt(unsure, value.get("selected_actions"))
+            if path not in stopped and path not in maybe and value.get("allowed_actions") not in (
+                    None, "all", "local_only", "selected"):
+                # A value of its own (the second review of slice 2b.7: it counted every file as running).
+                maybe[path] = (f"the repository's setting for which actions may run is {_q(value['allowed_actions'], 40)}, "
+                               "a value the audit does not know")
             if path not in stopped and path not in maybe and value.get("allowed_actions") in ("local_only", "selected"):
                 # A local action's own steps, and whether the setting covers a container image, are not read
                 # (the review of slice 2b.7): a local composite action can use an action the setting blocks.
@@ -889,13 +895,16 @@ def _stops(run: _Run):
                 continue            # whatever it applies to, it allows every event the file uses
             maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
                                            "understand, may block its events")
-    # A call written with `$/`: whether GitHub takes `$/` in a job's `uses:` was not established (issue #182).
     for file in run.files():
-        if file["path"] not in stopped and file["path"] not in maybe:
-            odd = next((job for job in file["jobs"] if self_repository_call(job)), None)
-            if odd is not None:
-                maybe[file["path"]] = (f"it calls {_q(odd['calls'], 120)}, written with $/, and whether GitHub "
-                                       "accepts $/ in a job's uses was not established")
+        if file["path"] in stopped or file["path"] in maybe:
+            continue
+        # A call written with `$/`: whether GitHub takes `$/` in a job's `uses:` was not established (issue #182).
+        odd = next((job for job in file["jobs"] if self_repository_call(job)), None)
+        if odd is not None:
+            maybe[file["path"]] = (f"it calls {_q(odd['calls'], 120)}, written with $/, and whether GitHub "
+                                   "accepts $/ in a job's uses was not established")
+        elif file.get("may_refuse"):
+            maybe[file["path"]] = file["may_refuse"][0]     # a job id GitHub may refuse (slice 2b.7)
     _spread_to_callers(run, stopped, maybe)
     return stopped, maybe, blocked, unread
 
@@ -988,15 +997,21 @@ def _call_graph_doubts(calls: dict, read: set) -> dict:
                     component[member] = members
     doubts: dict = {}
     cyclic = set()
+    first: dict = {}     # each component's first three members, found once (the second review of 2b.7)
     for path, targets in graph.items():
         members = component[path]
         if len(members) > 1 or path in targets:
             cyclic.add(path)
-            others = sorted(m for m in members if m != path)
-            doubts[path] = ("it calls itself, a cycle GitHub cannot expand" if not others else
-                            f"it is in a cycle of calls with {_names([plain(m, 120) for m in others], 2)}, which GitHub "
-                            "cannot expand")
+            key = id(members)
+            if key not in first:
+                first[key] = heapq.nsmallest(3, members)
+            others = [m for m in first[key] if m != path][:2]
+            more = len(members) - 1 - len(others)
+            named = ", ".join(plain(m, 120) for m in others) + (f" and {more} more" if more else "")
+            doubts[path] = ("it calls itself, a cycle GitHub cannot expand" if len(members) == 1 else
+                            f"it is in a cycle of calls with {named}, which GitHub cannot expand")
     # The longest chain of calls below each file outside a cycle, in calls: one past MAX_CALL_DEPTH is a doubt.
+    # Callers of a file in a cycle are not measured through it: they become files GitHub may not run anyway.
     depth: dict = {}
     for root in graph:
         if root in cyclic or root in depth:
@@ -1027,9 +1042,10 @@ _PART = r"(?!\.\.?[/@])[A-Za-z0-9._-]+"
 PLAIN_REFERENCE_RE = re.compile(rf"(?P<owner>{_PART})/{_PART}(?:/{_PART})*@(?!.*\.\.)[A-Za-z0-9._/-]+")
 
 
-def _not_surely_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
+def _not_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
     """The references, of actions or reusable workflows in another repository, that the list of selected
-    actions (`allowed_actions: selected`) is not sure to let run (issue #182). GitHub's matching of the list
+    actions (`allowed_actions: selected`), as written, does not allow (issue #182). What an allowed reference
+    uses in turn (a remote composite action's steps, a remote reusable workflow's jobs) is not read. GitHub's matching of the list
     was not read from its pages in the session that wrote this, so only two things count: a step's action of
     the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
     and an entry that is the reference itself, character for character. Either only for a reference written
@@ -1055,13 +1071,16 @@ def _not_surely_selected(actions: list[str], workflows: list[str], selected) -> 
 
 def _selection_doubt(unsure: list[str], selected) -> str:
     """Why a file GitHub may refuse under `allowed_actions: selected` may not run."""
-    names = _names([_q(a, 100) for a in unsure], 2)
+    names = _names([_q(a, 100) for a in unsure[:3]], 2) + (f" and {len(unsure) - 3} more" if len(unsure) > 3 else "")
     if not isinstance(selected, dict):
         return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), "
                 f"the list was not read, and it uses {names}")
+    if any("!" in p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), an "
+                f"entry of the list holds a !, which may block, so nothing is matched, and it uses {names}")
     return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), and "
-            f"it uses {names}, which the list does not surely allow: only GitHub's own actions, where allowed, and "
-            "an entry that names the reference exactly are matched")
+            f"it uses {names}, which the list as written does not allow: only GitHub's own actions, where allowed, "
+            "and an entry that names the reference exactly are matched")
 
 
 def _api_reporters(run: _Run) -> str:
@@ -1880,11 +1899,27 @@ def _check_rules(run: _Run, kind: str) -> None:
                 runs = sorted(((_report_run(f, j, branch, skipped=j["check"]["kind"] == "static",
                                             blocked=blocked.get(f["path"], ())), f, j)
                                for f, j in matches), key=lambda item: ORDER.index(item[0]))
-                how, file, job = runs[0]
                 item = f"{subject}: required check {_q(context)}"
+                # A route through a file GitHub may not run never stands for the check (the second review of slice
+                # 2b.7): it may add a finding, and where it would report more often than every sure route, whether
+                # the check reports is not known.
+                sure = [r for r in runs if r[1]["path"] not in maybe]
+                if sure:
+                    how, file, job = sure[0]
+                    better = [r for r in runs if r[1]["path"] in maybe and ORDER.index(r[0]) < ORDER.index(how)]
+                    if better:
+                        _, other, other_job = better[0]
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
+                                              f"{_job_label(other, other_job)} reports it on more pull requests than "
+                                              f"{_job_label(file, job)} does, in a workflow GitHub may not run "
+                                              f"({maybe[other['path']]}), so whether it reports on every pull request "
+                                              "is not known.")
+                        continue
+                else:
+                    how, file, job = runs[0]
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
-                    continue
+                    continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject
                 if how == "maybe":
                     run.cannot_tell(item, f"{lead}. Whether that workflow runs for pull requests into {_q(branch)} "
                                           "rests on a branch pattern, which is not evaluated.")
