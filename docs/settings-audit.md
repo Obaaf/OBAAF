@@ -17,7 +17,7 @@ obaaf audit DIR --repo OWNER/REPO    # or name the clone and the repository
 
 With no token this reads what GitHub shows anyone about a public repository: the repository itself, its rulesets and their rules, the rules in force on the default branch, whether GitHub calls that branch protected, and its environments with the branches that may deploy to each. That is enough for the open environment (`OBAAF-SET-001`) and, unless the branch has a classic protection rule whose checks GitHub does not show as enforced, for the three rules about required checks (`OBAAF-SET-006` to `OBAAF-SET-008`). `OBAAF-SET-002` can answer for a job that reads a secret. The other rules read a setting GitHub does not show without a token: where a workflow depends on it they say "cannot tell", naming the setting, and where none does they say "does not apply". On this repository that was 6 rules of 15 saying "cannot tell".
 
-The report begins with the findings, each rule's ending with why they matter and the fix, then what the rules could not tell, then one line for every rule, then everything that was read and not read. This is the report for this repository, made on 2026-11-13 with no network from GitHub's answers of 2026-11-12 06:32 UTC to a caller with no token (they are kept as a test recording) and the workflow files as they were on 2026-11-13. It is shortened where `...` stands, its second line, which says where the settings came from, is left out, and the `Why:` line, which the audit prints since slice 3.2c, is added as it would print it (the report was made before):
+The report begins with the findings, each rule's ending with why they matter and the fix, then what the rules could not tell, then one line for every rule, then everything that was read and not read. In that last part every name from GitHub or from a snapshot file (a ruleset, a branch, a required check, a reviewer, a secret, an event, a path) is in double quotes when it is in a list, and a single value (a ruleset's enforcement, the default branch, a setting's word) is printed bare only when it is one plain word, so that no name can pass for the text around it (slice 2b.8). This is the report for this repository, made on 2026-11-13 with no network from GitHub's answers of 2026-11-12 06:32 UTC to a caller with no token (they are kept as a test recording) and the workflow files as they were on 2026-11-13. It is shortened where `...` stands, its second line, which says where the settings came from, is left out, the `Why:` line, which the audit prints since slice 3.2c, is added, and the names in the "What was read" lines are in double quotes, as the audit prints them since slice 2b.8 (the report was made before both):
 
 ```text
 Settings audit of Obaaf/OBAAF
@@ -61,10 +61,10 @@ READ: 5 of 15
   Rules in force on each audited branch
       "main": no active rule
   Each audited branch, as anyone may see it
-      "main": GitHub calls it protected; required checks: Build resource site, actionlint, package, setup-action (macos-latest), setup-action (ubuntu-latest), setup-action (windows-latest), test (3.10), test (3.13) (enforcement: everyone)
+      "main": GitHub calls it protected; required checks: "Build resource site", "actionlint", "package", "setup-action (macos-latest)", "setup-action (ubuntu-latest)", "setup-action (windows-latest)", "test (3.10)", "test (3.13)" (enforcement: everyone)
   Environments: reviewers and which branches may deploy
-      "github-pages": may deploy: branch main; no required reviewers
-      "pypi": may deploy: tag v*; reviewers: FehintolaObafemi, Ofonna-N, seanudeke (self-review prevented); administrators may bypass these rules: no
+      "github-pages": may deploy: branch "main"; no required reviewers
+      "pypi": may deploy: tag "v*"; reviewers: "FehintolaObafemi", "Ofonna-N", "seanudeke" (self-review prevented); administrators may bypass these rules: no
 
 DOES NOT APPLY: 1 of 15
   Who may bypass each ruleset
