@@ -10,6 +10,7 @@ it. A finding describes what the file shows; an unknown says what the file canno
 
 from __future__ import annotations
 
+import bisect
 import functools
 import json
 import re
@@ -88,16 +89,33 @@ PINNED_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 EXACT_NPM = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 EXACT_PIP = re.compile(r"^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A-Za-z.]+)?$")
 _REF = re.compile(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$env\.([A-Za-z_]\w*)|\$([A-Za-z_]\w*)")
-# Words between an installer and the package that make the command something other than an install.
-_NOT_INSTALL = re.compile(r"(?<![\w-])(uninstall|remove|rm|un|unlink|ls|list|view|info|show|outdated|why|explain|"
-                          r"search|audit|cache|config|help|download)(?![\w-])", re.I)
-_UPDATE = re.compile(r"(?<![\w-])(update|upgrade|up)(?![\w-])", re.I)
-_AGENT_SELF_UPDATE = re.compile(r"(?:^|[\s;&|(])claude[ \t]+(?:update|upgrade)\b")
-_CONTAINER_CMD = re.compile(r"(?:^|[\s;&|(`])(docker|podman|nerdctl)[ \t]+(?:(?:container|image)[ \t]+)?"
-                            r"(run|create|pull)(?=[ \t])", re.I)
+# Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
+_SEGMENTS = re.compile(r"&&|\|\||;")
+_SHELL_ASSIGN = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=(?:'([^']*)'|\"([^\"$`]*)\"|([^\s'\"$`;&|]*))[ \t]*$")
+# Subcommands of npm, pnpm, yarn, bun, pip, pipx and uv, by what they do with a package named after them.
+_SUBCOMMAND = re.compile(r"(?:(?<=\s)|^)([a-z]+)(?=\s|$)")
+_INSTALL_WORDS = {"install", "i", "add", "a", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
+                  "isntall", "dlx", "x", "exec", "run", "inject", "global", "tool"}
+_UPDATE_WORDS = {"update", "upgrade", "up"}
+_OTHER_WORDS = {"uninstall", "remove", "rm", "r", "un", "unlink", "ls", "list", "la", "ll", "view", "info", "show",
+                "outdated", "why", "explain", "search", "audit", "cache", "config", "help", "download", "freeze",
+                "check", "prune", "dedupe", "pack", "publish", "root", "prefix", "bin", "docs", "home", "repo",
+                "fund", "wheel", "hash", "inspect", "uninject"}
+_RUNNERS = {"npx", "bunx", "uvx", "pnpx"}
+_AGENT_SELF_UPDATE = re.compile(r"(?:^|[\s;&|(])(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
+_GLOBAL_UPDATE = re.compile(r"(?<![\w-])(?:npm|pnpm|bun)[ \t]+(?:(?:-g|--global)[ \t]+)?(?:update|upgrade|up)"
+                            r"(?:[ \t]+(?:-g|--global))?[ \t]*$")
+# docker, podman and nerdctl run, create and pull, where a command starts: the start of a line, after a
+# separator, `$(`, a quote (bash -c "..."), sudo, exec, time or nohup; global options before the subcommand.
+_CONTAINER_CMD = re.compile(
+    r"(?:^|(?<=[;&|(`\n])|(?<=\$\()|(?<=[\"'])|(?<=\bsudo )|(?<=\bexec )|(?<=\btime )|(?<=\bnohup ))[ \t]*"
+    r"(?:[\w./-]*/)?(docker|podman|nerdctl)"
+    r"((?:[ \t]+--?[A-Za-z][\w-]*(?:=\S*|[ \t]+(?!(?:run|create|pull|container|image)\b)[^\s-]\S*)?)*)"
+    r"[ \t]+(?:(?:container|image)[ \t]+)?(run|create|pull)(?=[ \t])", re.I | re.M)
+_SEGMENT_END = re.compile(r"(?<!\\)[;&|\n]")
 _DOCKER_BOOL = {"--rm", "-d", "--detach", "-i", "--interactive", "-t", "--tty", "--privileged", "--init",
                 "--read-only", "-P", "--publish-all", "-q", "--quiet", "--no-healthcheck", "--oom-kill-disable",
-                "--sig-proxy", "--disable-content-trust", "-a", "--all-tags", "--help"}
+                "--sig-proxy", "--disable-content-trust", "--all-tags", "--help", "--use-api-socket"}
 _DOCKER_VALUE = {"--add-host", "--annotation", "--attach", "--blkio-weight", "--cap-add", "--cap-drop",
                  "--cgroup-parent", "--cgroupns", "--cidfile", "--cpu-period", "--cpu-quota", "--cpu-shares", "-c",
                  "--cpus", "--cpuset-cpus", "--cpuset-mems", "--device", "--device-cgroup-rule", "--dns",
@@ -111,61 +129,103 @@ _DOCKER_VALUE = {"--add-host", "--annotation", "--attach", "--blkio-weight", "--
                  "--security-opt", "--shm-size", "--stop-signal", "--stop-timeout", "--storage-opt", "--sysctl",
                  "--tmpfs", "--ulimit", "-u", "--user", "--userns", "--uts", "-v", "--volume", "--volume-driver",
                  "--volumes-from", "-w", "--workdir", "--detach-keys"}
-_PIP_REQUIREMENTS = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip)[ \t]+install\b[^\n;&|]*?(?:-r|--requirement)"
-                               r"(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
+# docker build options: those that take a value, and those that do not; any other makes the Dockerfile unknown.
+_BUILD_VALUE = {"-t", "--tag", "--build-arg", "--target", "--label", "--platform", "--network", "--cache-from",
+                "--cache-to", "--secret", "--ssh", "--add-host", "--iidfile", "--progress", "--shm-size", "--ulimit",
+                "--cpuset-cpus", "--cpu-shares", "-m", "--memory", "--memory-swap", "--isolation", "--output", "-o",
+                "--build-context", "--metadata-file", "--provenance", "--sbom", "--allow", "--annotation",
+                "--cgroup-parent", "--builder"}
+_BUILD_BOOL = {"-q", "--quiet", "--no-cache", "--pull", "--rm", "--force-rm", "--squash", "--compress", "--load",
+               "--push", "--disable-content-trust", "--check"}
+_PIP_INSTALL = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip|python3?[ \t]+-m[ \t]+pip)[ \t]+install\b")
+_REQUIREMENT_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
 _NPM_INSTALL = re.compile(r"(?<![\w-])(?:npm[ \t]+(?:install|i|ci|add)|pnpm[ \t]+(?:install|i|add)|"
                           r"yarn(?:[ \t]+install)?|bun[ \t]+(?:install|i))(?=$|[ \t;&|])", re.M)
 LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
 _DOWNLOAD = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|Invoke-WebRequest|Invoke-RestMethod)(?![\w-])", re.I)
 _TO_SHELL = re.compile(r"\|[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:\S*/)?(?:ba|z|da|k)?sh\b|\|[ \t]*iex\b|"
                        r"(?:ba|z)?sh[ \t]+<\(|(?:ba|z)?sh[ \t]+-c[ \t]+[\"']?\$\(", re.I)
+_HEREDOC = re.compile(r"<<(-?)[\"']?([A-Za-z_]\w*)[\"']?")
 
 
-def _piped_install(line: str, agent_words) -> bool:
-    """A download piped into a shell (or run by one) on a line that names an agent: linear checks, not one
-    backtracking pattern (flagship slice 2d.2k: 8,000 words on one line took 7.5 seconds)."""
-    return bool(_DOWNLOAD.search(line) and _TO_SHELL.search(line) and agent_words.search(line))
+def _shown(text: str, limit: int = 120) -> str:
+    """Text from a file, as a finding shows it: quotes, backslashes and control characters escaped, so it
+    cannot end the quoted part of a message or start a new line (the review of 2d.2k), and cut short."""
+    out = []
+    for c in str(text):
+        if c in "'\\":
+            out.append("\\" + c)
+        elif not c.isprintable():
+            out.append(f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}")
+        else:
+            out.append(c)
+    shown = "".join(out)
+    return shown if len(shown) <= limit else shown[:limit] + "..."
 
 
 def _exact_version(ver: str) -> bool:
-    """An exact version after a package name: `@1.2.3` (npm) or `==1.2.3`/`===x` (pip); not a range, a tag,
-    a wildcard or a value set at run time."""
+    """An exact version after a package name: `@1.2.3` (npm) or `==1.2.3`/`===x` (pip, spaces allowed);
+    not a range, a tag, a wildcard or a value set at run time."""
+    ver = ver.strip()
     if "$" in ver:
         return False
     if ver.startswith("@"):
         return bool(EXACT_NPM.match(ver[1:]))
     if ver.startswith("==="):
-        return len(ver) > 3
+        return len(ver[3:].strip()) > 0
     if ver.startswith("=="):
-        return bool(EXACT_PIP.match(ver[2:]))
+        return bool(EXACT_PIP.match(ver[2:].strip()))
     return False
 
 
-def _build_dockerfile(options: str) -> str:
-    """The Dockerfile docker.build reads: `-f`/`--file`, else Dockerfile in the build context."""
+def _build_options(options: str) -> tuple:
+    """(Dockerfile, build args) for docker.build's options: `-f`/`--file`, else Dockerfile in the build
+    context; `--build-arg NAME=VALUE`. The Dockerfile is "?" when it cannot be told (an option the checker
+    does not know, a value set at run time)."""
     try:
         words = shlex.split(options)
     except ValueError:
-        return "?"
-    file, context, i = None, ".", 0
+        return "?", {}
+    file, context, args, i = None, ".", {}, 0
     while i < len(words):
         w = words[i]
-        if w in ("-f", "--file") and i + 1 < len(words):
-            file, i = words[i + 1], i + 2
+        flag, eq, value = w.partition("=")
+        if flag in ("-f", "--file"):
+            file = value if eq else (words[i + 1] if i + 1 < len(words) else None)
+            i += 1 if eq else 2
             continue
-        if w.startswith("--file="):
-            file = w.split("=", 1)[1]
-        elif w.startswith("-") and "=" not in w and w not in ("-q", "--quiet", "--no-cache", "--pull", "--rm"):
-            i += 2
+        if flag == "--build-arg":
+            value = value if eq else (words[i + 1] if i + 1 < len(words) else "")
+            name, _, val = value.partition("=")
+            args[name] = val
+            i += 1 if eq else 2
             continue
-        elif not w.startswith("-"):
-            context = w
+        if w.startswith("-"):
+            if flag in _BUILD_BOOL or (eq and flag in _BUILD_VALUE):
+                i += 1
+            elif flag in _BUILD_VALUE:
+                i += 2
+            else:
+                return "?", args
+            continue
+        context = w
         i += 1
     if file is None:
         file = context.rstrip("/") + "/Dockerfile" if context not in (".", "./") else "Dockerfile"
-    if "$" in file:
+    if "$" in file or "$" in context:
+        return "?", args
+    return (file[2:] if file.startswith("./") else file), args
+
+
+def _build_dockerfile(options: str) -> str:
+    return _build_options(options)[0]
+
+
+def _join(folder: str, rel: str) -> str:
+    """`rel` inside the folder dir() moved into; "?" when that folder is computed."""
+    if folder == "?":
         return "?"
-    return file[2:] if file.startswith("./") else file
+    return "/".join(x for x in (folder, rel) if x and x != ".") if folder else rel
 
 
 @dataclass
@@ -387,13 +447,24 @@ class JenkinsRules:
         self.verify_cmds = [re.compile(x, re.M) for x in self.detection.get("verify_commands", [])]
         self.release_verify = [re.compile(x) for x in self.detection.get("release_verify_commands", [])]
         # A package name, its extras (`aider-chat[playwright]`) and any version after it, in npm's form
-        # (`@1.2.3`, `@^1`, `@latest`) or PEP 440's (`==`, `~=`, `>=`, ...): flagship slice 2d.2k.
-        self.packages = [(pkg, re.compile(r"(?<![\w@/.-])" + re.escape(pkg) + r"(?:\[[^\]\s'\"]*\])?"
-                                          r"(?P<ver>(?:@|===|==|~=|!=|>=|<=|>|<)[^\s;&|'\"]*)?"
+        # (`@1.2.3`, `@^1`, `@latest`) or PEP 440's (`==`, `~=`, `>=`, ..., spaces allowed). A name without a
+        # scope matches as pip compares names, ignoring case and runs of `-`, `_` and `.` (flagship slice 2d.2k).
+        def name_pattern(pkg: str) -> str:
+            if pkg.startswith("@"):
+                return re.escape(pkg)
+            return "(?i:" + r"[-_.]+".join(re.escape(x) for x in re.split(r"[-_.]+", pkg)) + ")"
+        self.packages = [(pkg, re.compile(r"(?<![\w@/.-])" + name_pattern(pkg) + r"(?:\[[^\]\s'\"]*\])?"
+                                          r"(?P<ver>@[^\s;&|'\"]*|[ \t]*(?:===|==|~=|!=|>=|<=|>|<)[ \t]*[^\s;&|'\"]*)?"
                                           r"(?=[\s;&|'\",)]|$)"))
                          for pkg in self.detection.get("agent_packages", [])]
         self.agent_package_names = set(self.detection.get("agent_packages", []))
         self.install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
+        self._line = 1                 # the step whose script OBAAF-JEN-008 is reading, for its unknowns
+        self._pod_cache: dict = {}
+        self._dockerfile_cache: dict = {}
+        self._script_cache: dict = {}
+        self._req_cache: dict = {}
+        self._package_cache: dict = {}
         self._agent_words = re.compile(r"(?<![\w-])(claude|gemini|codex|opencode|aider|copilot|qodo)(?![\w])", re.I)
         self.lane_overrides = lane_overrides or {}
         self.findings: list[Finding] = []
@@ -745,7 +816,7 @@ class JenkinsRules:
         if isinstance(node, Str):
             return not node.interpolated
         if isinstance(node, Name) and node.name in self.p.literals:
-            return not self.p.literals[node.name].interpolated
+            return not self.p.literals[node.name].interpolated and node.name not in self.p.nonliteral_names
         if isinstance(node, Call):
             name = chain_name(node.callee) or ""
             return name.split(".")[-1] in ("readTrusted", "libraryResource") and \
@@ -854,7 +925,8 @@ class JenkinsRules:
             if lib.dynamic:
                 what = "a name" if "${" in lib.name else "a version"
                 source = untrusted_source(list(lib.exprs), self.p)
-                if source is None and any(WORKSPACE_READ.search(x) for x in lib.exprs):
+                if source is None and any(WORKSPACE_READ.search(x) or set(re.findall(r"[A-Za-z_]\w*", x)) &
+                                          self.p.workspace_vars for x in lib.exprs):
                     # A file in the workspace is the change's own for a change request (flagship slice 2d.2k).
                     source = ("a file in the workspace", "high")
                 if source:
@@ -867,7 +939,12 @@ class JenkinsRules:
                              f"Library '{shown}' is loaded with {what} computed at run time, so the reviewed "
                              "Jenkinsfile does not fix which code runs.", None, severity="medium")
         # Every call that runs Groovy the file does not hold, on any receiver (flagship slice 2d.2k).
-        for kind, name, call, ctx in self.p.code_loads:
+        for kind, name, call, ctx, certain in self.p.code_loads:
+            if not certain:
+                # props.load(...), xpath.evaluate(...): a receiver that may not be the script or a Groovy shell.
+                self.unknown("OBAAF-JEN-004", call.line, f"{name}() at line {call.line} may run Groovy text or a "
+                             "file from the workspace; the checker cannot tell what its receiver is")
+                continue
             arg = code_text_arg(kind, name, call)
             if kind == "jobDsl":
                 if named_arg(call, "targets") is None and arg is not None and self._reviewed_text(arg):
@@ -889,7 +966,7 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-004", call.line,
                          f"Stage '{stage_label(ctx.stage)}' runs Groovy built from {source[0]} ({name}), so whoever "
                          "sets that value writes pipeline code.", ctx.stage,
-                         severity="high" if source[1] == "high" else "medium")
+                         severity="high" if source[1] == "high" or kind == "jobDsl" else "medium")
                 continue
             if cr in (CR_YES, CR_POSSIBLE):
                 privileged = bool(ctx.creds) or self.stage_publishes(ctx.stage) or kind == "jobDsl"
@@ -1010,18 +1087,23 @@ class JenkinsRules:
                      f"the agent's network (for example a Kubernetes NetworkPolicy).{note}", stage)
 
     # ------------------------------------------------------------------ JEN-008
-    def _resolve(self, text: str) -> str:
-        """`${NAME}`, `${env.NAME}`, `$env.NAME` and `$NAME` (as a shell reads it) replaced by this file's
-        literal variables and literal environment values (flagship slice 2d.2k). What is left with a `$` is
-        computed. Bounded: three passes, and no text longer than 100,000 characters."""
-        def value(name: str):
-            node = self.p.literals.get(name)
-            if node is None:
-                node = self.p.env_values.get(name)
-            return node.text() if isinstance(node, Str) else None
+    def _resolve(self, text: str, shell_vars: dict | None = None) -> str:
+        """`${NAME}`, `$NAME` and `${env.NAME}` replaced by what the file fixes: a variable the script itself
+        set earlier (`shell_vars`), then a literal environment value, which the shell sees; and for `${NAME}`
+        a literal variable of the file, which Groovy puts into a double-quoted script (flagship slice 2d.2k).
+        What is left with a `$` is computed. Bounded: three passes, at most 100,000 characters."""
+        shell_vars = shell_vars or {}
+
+        def value(name: str, braced: bool):
+            if name in shell_vars:
+                return shell_vars[name]
+            node = self.p.env_values.get(name)
+            if node is None and braced and name not in self.p.nonliteral_names:
+                node = self.p.literals.get(name)
+            return node.text() if isinstance(node, Str) and not node.interpolated else None
 
         def sub(m):
-            got = value(m.group(1) or m.group(2) or m.group(3))
+            got = value(m.group(1), True) if m.group(1) else value(m.group(2) or m.group(3), bool(m.group(2)))
             return got if got is not None else m.group(0)
 
         for _ in range(3):
@@ -1031,22 +1113,28 @@ class JenkinsRules:
             text = changed
         return text
 
-    def _image(self, ref: str, line: int, stage: tuple | None, where: str, severity: str) -> None:
+    def _image(self, ref, line: int, stage: tuple | None, where: str, severity: str) -> None:
         """One image reference: pinned to a digest, computed (unknown), or a finding."""
         self.applicable.add("OBAAF-JEN-008")
+        if ref is None:
+            self.unknown("OBAAF-JEN-008", line, f"an image {where} is not written as text")
+            return
         if "$" in ref:
             ref = self._resolve(ref)
         if "$" in ref or not ref.strip() or ref == "?":
-            self.unknown("OBAAF-JEN-008", line, f"image reference {ref or '(empty)'} {where} is computed at run time"
-                         .replace("  ", " "))
+            self.unknown("OBAAF-JEN-008", line, f"image reference '{_shown(ref)}' {where} is computed at run time")
         elif not PINNED_IMAGE.match(ref.strip()):
-            self.add("OBAAF-JEN-008", line, f"Image '{ref}' {where} is not pinned to a sha256 digest.", stage,
+            self.add("OBAAF-JEN-008", line, f"Image '{_shown(ref)}' {where} is not pinned to a sha256 digest.", stage,
                      severity=severity)
 
     def _pod_images(self, text: str) -> list | None:
         """Every `image` a pod spec names, read as YAML (flagship slice 2d.2k: a line pattern missed flow
         mappings, JSON, quoted keys and `image :`, and took a block scalar's `>-` for the image). None when
-        the text is not YAML the checker can read; an image that is not text is None in the list."""
+        the text is not YAML the checker can read; an image that is not text is None in the list. Read once
+        per text."""
+        if text in self._pod_cache:
+            return self._pod_cache[text]
+        self._pod_cache[text] = None
         try:
             docs = list(yaml.safe_load_all(text))
         except Exception:      # any parse failure is "cannot read", never "no images"
@@ -1070,61 +1158,149 @@ class JenkinsRules:
                         stack.append(item)
             elif isinstance(node, list):
                 stack.extend(node)
+        self._pod_cache[text] = out
         return out
 
-    def _dockerfile(self, rel: str, line: int, stage: tuple | None, severity: str) -> None:
-        """The FROM lines and agent CLI installs of a Dockerfile in the repository (flagship slice 2d.2k:
-        `dockerfile true` and docker.build were never read)."""
-        self.applicable.add("OBAAF-JEN-008")
+    def _dockerfile_refs(self, rel: str, build_args: dict | None) -> list:
+        """What a Dockerfile in the repository pulls in (flagship slice 2d.2k: `dockerfile true` and
+        docker.build were never read): ("image", ref), ("unknown", why) and ("install", message) entries,
+        read once per file and build arguments. ARGs before the first FROM, with build arguments over their
+        defaults, feed FROM lines; a stage's ARG and ENV values feed its RUN lines; heredoc bodies belong to
+        their instruction; a stage name is not an image."""
+        key = (rel, tuple(sorted((build_args or {}).items())))
+        if key in self._dockerfile_cache:
+            return self._dockerfile_cache[key]
+        out: list = []
+        self._dockerfile_cache[key] = out
         text = self._read(rel) if rel != "?" else None
         if text is None:
-            self.unknown("OBAAF-JEN-008", line, "the Dockerfile " + (f"{rel} is not in the repository checkout"
-                                                                    if rel != "?" else "is named at run time"))
-            return
-        joined = re.sub(r"\\\r?\n", " ", text)
+            out.append(("unknown", "the Dockerfile " + (f"'{_shown(rel)}' is not in the repository checkout"
+                                                       if rel != "?" else "is named at run time")))
+            return out
+        build_args = build_args or {}
+        lines = re.sub(r"\\\r?\n", " ", text).splitlines()
         aliases: set = set()
-        args: dict = {}
-        for raw in joined.splitlines():
-            m = re.match(r"[ \t]*(FROM|RUN|ARG)[ \t]+(.*)", raw, re.I)
-            if not m:
+        global_args: dict = {}
+        stage_vars: dict = {}
+        seen_from = False
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            i += 1
+            m = re.match(r"[ \t]*([A-Za-z]+)[ \t]+(.*)", raw)
+            if not m or raw.lstrip().startswith("#"):
                 continue
             word, rest = m.group(1).upper(), m.group(2).strip()
+            body = []
+            for doc in _HEREDOC.finditer(rest):
+                strip_tabs, end_word = doc.group(1) == "-", doc.group(2)
+                while i < len(lines):
+                    got = lines[i]
+                    i += 1
+                    if (got.lstrip("\t") if strip_tabs else got) == end_word:
+                        break
+                    body.append(got)
             if word == "ARG":
                 name, eq, default = rest.partition("=")
-                if eq:
-                    args[name.strip()] = default.strip().strip("'\"")
+                name = name.strip()
+                value = build_args.get(name, default.strip().strip("'\"") if eq else None)
+                if not seen_from:
+                    global_args[name] = value
+                else:
+                    stage_vars[name] = value if value is not None else global_args.get(name)
+                continue
+            if word == "ENV":
+                for em in re.finditer(r"([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|\S*)", rest):
+                    stage_vars[em.group(1)] = em.group(2).strip("'\"")
+                if "=" not in rest and len(rest.split(None, 1)) == 2:
+                    name, value = rest.split(None, 1)
+                    stage_vars[name] = value.strip()
                 continue
             if word == "RUN":
-                for message in self._install_problems(rest):
-                    self.add("OBAAF-JEN-008", line, f"{message} (in {rel}).", stage, severity="high")
+                known = {k: v for k, v in stage_vars.items() if v is not None and "$" not in v}
+                for message in self._install_problems(rest + "\n" + "\n".join(body), shell_vars=known):
+                    out.append(("install", f"{message} (in {_shown(rel)})"))
                 continue
+            if word in ("COPY", "ADD"):
+                for fm in re.finditer(r"--from=(\S+)", rest):
+                    ref = fm.group(1)
+                    if ref.lower() not in aliases and not ref.isdigit():
+                        out.append(("image", ref))
+                continue
+            if word != "FROM":
+                continue
+            seen_from = True
+            stage_vars = {}
             tokens = [t for t in rest.split() if not t.startswith("--")]
             if not tokens:
                 continue
-            image = re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda a: args.get(a.group(1), a.group(0)), tokens[0])
+
+            def arg(a):
+                got = global_args.get(a.group(1))
+                return got if got is not None else a.group(0)
+            image = re.sub(r"\$\{?([A-Za-z_]\w*)\}?", arg, tokens[0])
+            if "$" in image or any("$" in (build_args.get(n) or "") for n in re.findall(r"\$\{?(\w+)", tokens[0])):
+                out.append(("unknown", f"the base image '{_shown(tokens[0])}' in '{_shown(rel)}' is set at build "
+                                       "time"))
+            elif image.lower() != "scratch" and image.lower() not in aliases:
+                out.append(("base", image))
             if len(tokens) >= 3 and tokens[1].lower() == "as":
                 aliases.add(tokens[2].lower())
-            if image.lower() == "scratch" or image.lower() in aliases:
-                continue
-            if "$" in image:
-                self.unknown("OBAAF-JEN-008", line, f"the base image {image} in {rel} is computed at build time")
-            elif not PINNED_IMAGE.match(image):
-                self.add("OBAAF-JEN-008", line, f"Base image '{image}' in {rel} is not pinned to a sha256 digest.",
-                         stage, severity=severity)
+        return out
+
+    def _dockerfile(self, rel: str, line: int, stage: tuple | None, severity: str, build_args=None) -> None:
+        self.applicable.add("OBAAF-JEN-008")
+        self._line = line
+        if build_args == "?":
+            self.unknown("OBAAF-JEN-008", line, "the build arguments of the Dockerfile are computed at run time")
+            build_args = {}
+        for kind, value in self._dockerfile_refs(rel, build_args):
+            if kind == "unknown":
+                self.unknown("OBAAF-JEN-008", line, value)
+            elif kind == "install":
+                self.add("OBAAF-JEN-008", line, value + ".", stage, severity="high")
+            elif not PINNED_IMAGE.match(value):
+                what = "Base image" if kind == "base" else "Image copied from"
+                self.add("OBAAF-JEN-008", line, f"{what} '{_shown(value)}' in '{_shown(rel)}' is not pinned to a "
+                         "sha256 digest.", stage, severity=severity)
+
+    def _substituted(self, text: str) -> str:
+        """The script with each variable it sets put into the commands after it (`IMAGE=node:20; docker run
+        $IMAGE`), as _install_problems reads it, for the container commands."""
+        if "$" not in text or len(text) > 400_000:
+            return text
+        variables: dict = {}
+        lines = []
+        for line in text.splitlines():
+            parts = re.split(r"(&&|\|\||;)", line)
+            for k in range(0, len(parts), 2):
+                assigned = _SHELL_ASSIGN.match(parts[k])
+                if assigned:
+                    value = next((g for g in assigned.groups()[1:] if g is not None), "")
+                    variables[assigned.group(1)] = self._resolve(value, variables)
+                elif "$" in parts[k] and variables:
+                    parts[k] = self._resolve(parts[k], variables)
+            lines.append("".join(parts))
+        return "\n".join(lines)
 
     def _shell_images(self, text: str) -> list:
-        """(image or None, command) for each `docker`/`podman`/`nerdctl` run, create or pull in a script.
-        None when an option the checker does not know stands before the image, so it cannot tell which
-        word is the image (flagship slice 2d.2k: images in shell steps were never checked)."""
+        """(image or None, command) for each `docker`/`podman`/`nerdctl` run, create or pull where a command
+        starts in a script. None when an option the checker does not know stands before the image, so it
+        cannot tell which word is the image (flagship slice 2d.2k: images in shell steps were never
+        checked). Full-line comments are skipped; at most 200 commands are read, and the rest is unknown."""
+        text = "\n".join(x for x in text.splitlines() if not x.lstrip().startswith("#"))
         out = []
-        for m in _CONTAINER_CMD.finditer(text):
-            command = m.group(2).lower()
-            rest = re.split(r"(?<!\\)[;&|\n]", text[m.end():], maxsplit=1)[0]
+        for count, m in enumerate(_CONTAINER_CMD.finditer(text)):
+            if count >= 200:
+                out.append((None, "more than 200 container commands"))
+                break
+            command = m.group(3).lower()
+            end = _SEGMENT_END.search(text, m.end())
+            rest = text[m.end(): min(end.start() if end else len(text), m.end() + 4000)]
             try:
                 words = shlex.split(rest)
             except ValueError:
-                out.append((None, command))
-                continue
+                words = [w.strip("\"'") for w in rest.split()]
             image, i = None, 0
             while i < len(words):
                 w = words[i]
@@ -1135,7 +1311,9 @@ class JenkinsRules:
                     image = w
                     break
                 flag = w.split("=", 1)[0]
-                if "=" in w or flag in _DOCKER_BOOL:
+                if flag in ("-a", "--attach"):
+                    i += 1 if command == "pull" or "=" in w else 2
+                elif "=" in w or flag in _DOCKER_BOOL:
                     i += 1
                 elif flag in _DOCKER_VALUE:
                     i += 2
@@ -1147,45 +1325,138 @@ class JenkinsRules:
             out.append((None if image in (None, "?") else image, command))
         return out
 
-    def _install_problems(self, text: str, where: str = "") -> list:
-        """What in a script installs an agent CLI at a version that can move: a downloaded install script,
-        a package without an exact version (a range, a tag, a version set at run time), or an update
-        command (flagship slice 2d.2k)."""
+    def _install_problems(self, text: str, where: str = "", shell_vars: dict | None = None) -> list:
+        """What in a script installs an agent CLI at a version that can move (flagship slice 2d.2k): a
+        downloaded install script, a package without an exact version (a range, a tag, a version set at run
+        time), a package named at run time, or an update. Read command by command: a line is cut at `&&`,
+        `||` and `;`, a variable the script sets is put into the commands after it, and the subcommand
+        after the installer decides whether a package is installed. Marks the rule applicable when an
+        agent CLI is installed at all, pinned or not."""
         out: list = []
         text = re.sub(r"[\\^`]\r?\n[ \t]*", " ", text)
         if len(text) > 400_000:
-            return ["An agent CLI may be installed in a script too long to read"] if self._agent_words.search(
-                text) else []
-        for line_text in text.splitlines():
-            if not self._agent_words.search(line_text) and "install" not in line_text.lower():
+            return ["An agent CLI may be installed in a script too long to read" + where] \
+                if self._agent_words.search(text) else []
+        variables = dict(shell_vars or {})
+        installs_agent = False
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
                 continue
-            if _piped_install(line_text, self._agent_words):
-                out.append("An agent CLI is installed by piping a downloaded script into a shell, which installs "
-                           "whatever version the script fetches" + where)
-            elif any(rx.search(line_text) for rx in self.install_urls):
-                out.append("An agent CLI is installed by a downloaded install script, which installs whatever "
-                           "version the script chooses" + where)
-            for pkg, rx in self.packages:
-                if pkg not in line_text:
+            for segment in _SEGMENTS.split(line):
+                assigned = _SHELL_ASSIGN.match(segment)
+                if assigned:
+                    value = next((g for g in assigned.groups()[1:] if g is not None), "")
+                    variables[assigned.group(1)] = self._resolve(value, variables)
                     continue
-                for m in rx.finditer(line_text):
-                    before = line_text[: m.start()]
-                    installers = list(INSTALLER.finditer(before))
-                    if not installers:
-                        continue
-                    between = before[installers[-1].end():]
-                    if _NOT_INSTALL.search(between):
-                        continue
-                    ver = m.group("ver") or ""
-                    if _UPDATE.search(between):
-                        out.append(f"Agent CLI {pkg} is updated to the newest version" + where)
-                        continue
-                    if not _exact_version(ver):
-                        shown = f" ({ver})" if ver else ""
-                        reason = " at a version set at run time" if "$" in ver else " without a fixed version"
-                        out.append(f"Agent CLI {pkg} is installed{reason}{shown}" + where)
-            if _AGENT_SELF_UPDATE.search(line_text):
-                out.append("An agent CLI updates itself to the newest version (claude update)" + where)
+                seg = self._resolve(segment, variables) if "$" in segment else segment
+                agent = self._agent_words.search(seg)
+                if _DOWNLOAD.search(seg):
+                    if agent and _TO_SHELL.search(seg):
+                        self.applicable.add("OBAAF-JEN-008")
+                        out.append("An agent CLI is installed by piping a downloaded script into a shell, which "
+                                   "installs whatever version the script fetches" + where)
+                    elif any(rx.search(seg) for rx in self.install_urls):
+                        self.applicable.add("OBAAF-JEN-008")
+                        out.append("An agent CLI is installed by a downloaded install script, which installs "
+                                   "whatever version the script chooses" + where)
+                for command in seg.split("|"):
+                    found = self._package_problems(command, where)
+                    if found is not None:
+                        installs_agent = True
+                        out += found
+                if _AGENT_SELF_UPDATE.search(seg):
+                    self.applicable.add("OBAAF-JEN-008")
+                    out.append("An agent CLI updates itself to the newest version (claude update)" + where)
+                if _GLOBAL_UPDATE.search(seg) and installs_agent:
+                    out.append("Agent CLIs installed globally are updated to the newest version (an update of "
+                               "every global package)" + where)
+        return out
+
+    def _package_problems(self, command: str, where: str) -> list | None:
+        """Problems of one command that installs or runs an agent CLI from a registry; None when it names
+        none. The last installer before a package, and the first subcommand word after that installer,
+        decide what the command does with it."""
+        installers = [m for m in INSTALLER.finditer(command)]
+        if not installers:
+            return None
+        lowered = command.lower()
+        hits = []
+        for pkg, rx in self.packages:
+            if pkg.split("/")[-1].split("-")[0].lower() not in lowered:
+                continue
+            hits += [(m, pkg) for m in rx.finditer(command)]
+        out: list | None = None
+        if hits:
+            ends = [m.end() for m in installers]
+            words = list(_SUBCOMMAND.finditer(command))
+            starts = [w.start() for w in words]
+            for m, pkg in hits:
+                k = bisect.bisect_right(ends, m.start()) - 1
+                if k < 0:
+                    continue
+                installer = installers[k]
+                j = bisect.bisect_left(starts, installer.end())
+                action = "install" if installer.group(1) in _RUNNERS else None
+                while action is None and j < len(words) and words[j].start() < m.start():
+                    word = words[j].group(1)
+                    if word in _INSTALL_WORDS:
+                        action = "install"
+                    elif word in _UPDATE_WORDS:
+                        action = "update"
+                    elif word in _OTHER_WORDS:
+                        action = "other"
+                    j += 1
+                if action == "other":
+                    continue
+                self.applicable.add("OBAAF-JEN-008")
+                out = out if out is not None else []
+                ver = (m.group("ver") or "").strip()
+                if action == "update":
+                    out.append(f"Agent CLI {pkg} is updated to the newest version" + where)
+                elif not _exact_version(ver):
+                    shown = f" ({_shown(ver)})" if ver else ""
+                    reason = " at a version set at run time" if "$" in ver else " without a fixed version"
+                    out.append(f"Agent CLI {pkg} is installed{reason}{shown}" + where)
+        # A package named at run time, given to an installer that installs it: one pass over the words.
+        installer_words = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
+        mode = None
+        for word in command.split():
+            base = word.rsplit("/", 1)[-1]
+            if base in installer_words:
+                mode = "install" if base in _RUNNERS else "installer"
+            elif mode == "installer" and word in _INSTALL_WORDS:
+                mode = "install"
+            elif mode == "installer" and (word in _UPDATE_WORDS or word in _OTHER_WORDS):
+                mode = None
+            elif mode == "install" and word.startswith("$"):
+                self.applicable.add("OBAAF-JEN-008")
+                self.unknown("OBAAF-JEN-008", self._line, f"a package is named at run time in `{_shown(command.strip(), 80)}`, "
+                             "so whether it is an agent CLI at a fixed version is not checked")
+                break
+        return out
+
+    def _requirements(self, rel: str, where_from: str, depth: int = 0) -> list:
+        """Agent CLIs a pip requirements file installs at a version that can move, nested -r and -c included
+        (three levels; nested paths are relative to the file that names them)."""
+        if rel in self._req_cache:
+            return self._req_cache[rel]
+        self._req_cache[rel] = []
+        body = self._read(rel) if "$" not in rel and rel != "?" else None
+        if body is None:
+            self.unknown("OBAAF-JEN-008", self._line, f"the requirements file '{_shown(rel)}' {where_from} is not read")
+            return []
+        out = []
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        for req in body.splitlines():
+            req = req.split("#", 1)[0].strip()
+            nested = re.match(r"(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)(\S+)", req)
+            if nested:
+                if depth < 3:
+                    out += self._requirements(_join(folder, nested.group(1)), f"named in '{_shown(rel)}'", depth + 1)
+                continue
+            if req:
+                out += self._package_problems("pip install " + req, f" (in the requirements file {_shown(rel)})") or []
+        self._req_cache[rel] = out
         return out
 
     def mutable_references(self) -> None:
@@ -1209,7 +1480,9 @@ class JenkinsRules:
                 self.unknown("OBAAF-JEN-008", agent.line, "a pod template's containers are a list the checker "
                              "cannot read, so their images are not checked")
             if agent.kind == "dockerfile":
-                self._dockerfile(agent.dockerfile or "Dockerfile", agent.line, ctx.stage, severity)
+                args = agent.build_args
+                build_args = "?" if args and "${" in args else (_build_options(args)[1] if args else {})
+                self._dockerfile(agent.dockerfile or "Dockerfile", agent.line, ctx.stage, severity, build_args)
             pod = self.pod_spec(agent, "OBAAF-JEN-008") if agent.kind == "kubernetes" else None
             if pod:
                 images = self._pod_images(pod)
@@ -1219,7 +1492,7 @@ class JenkinsRules:
                                  "images are not checked")
                 else:
                     for img in images:
-                        self._image(img if img is not None else "?", agent.line, ctx.stage, where, severity)
+                        self._image(img, agent.line, ctx.stage, f"in the pod spec {where}", severity)
         for info in self.infos:
             name = info.use.name
             users = self.by_stage.get(info.ctx.stage, [])
@@ -1243,7 +1516,11 @@ class JenkinsRules:
                     self.unknown("OBAAF-JEN-008", info.line, "docker.build's options are computed at run time, so "
                                  "the Dockerfile it builds is not checked")
                     continue
-                self._dockerfile(_build_dockerfile(text), info.line, info.ctx.stage, severity_for(users))
+                rel, build_args = _build_options(text)
+                if any("$" in v for v in build_args.values()):
+                    build_args = "?"
+                self._dockerfile(_join(info.ctx.dir, rel) if rel != "?" else "?", info.line, info.ctx.stage,
+                                 severity_for(users), build_args)
         for lib in self.p.libraries:
             name, version = lib.name, lib.version
             if lib.name == "?" or lib.dynamic:
@@ -1272,7 +1549,6 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", lib.line,
                          f"Library '{name}' is loaded at '{version}', a branch or tag that can move.", None,
                          severity=severity)
-        lockfiles = None
         scanned: set = set()
         for info in self.infos:
             # A method of the file expanded at many calls records its steps once per call; each step's
@@ -1280,28 +1556,28 @@ class JenkinsRules:
             if not info.shell or id(info.use.call) in scanned:
                 continue
             scanned.add(id(info.use.call))
+            self._line = info.line
+            folder = info.ctx.dir
             text = self._resolve(self.script_text(info))
             problems = self._install_problems(text)
             for rel in self._scripts(info.script):
-                body = self._read(rel)
-                if body:
-                    problems += self._install_problems(body, f" (in the script {rel})")
-            for m in _PIP_REQUIREMENTS.finditer(text):
-                rel = m.group(2)
-                body = self._read(rel) if "$" not in rel else None
-                if body is None:
-                    if self._agent_words.search(rel) or "$" in rel:
-                        self.unknown("OBAAF-JEN-008", info.line, f"the requirements file {rel} is not read")
-                    continue
-                for req in body.splitlines():
-                    problems += self._install_problems("pip install " + req.split("#", 1)[0],
-                                                       f" (in the requirements file {rel})")
+                rel = _join(folder, rel)
+                if rel not in self._script_cache:
+                    body = self._read(rel) if rel != "?" else None
+                    self._script_cache[rel] = (self._install_problems(body, f" (in the script {_shown(rel)})")
+                                               if body else [], self._shell_images(self._substituted(body))
+                                               if body else [])
+                problems += self._script_cache[rel][0]
+            for segment in _SEGMENTS.split(text):
+                if _PIP_INSTALL.search(segment):
+                    for m in _REQUIREMENT_FLAG.finditer(segment):
+                        problems += self._requirements(_join(folder, m.group(2)), "given to pip")
             if _NPM_INSTALL.search(text):
-                if lockfiles is None:
-                    lockfiles = any(self._read(x) is not None for x in LOCKFILES)
-                if not lockfiles:
-                    problems += self._package_json_problems()
-            for image, command in self._shell_images(text):
+                problems += self._package_json_problems(folder)
+            images = self._shell_images(self._substituted(text))
+            for rel in self._scripts(info.script):
+                images += self._script_cache.get(_join(folder, rel), ([], []))[1]
+            for image, command in images:
                 where = f"in a `{command}` command in stage '{stage_label(info.ctx.stage)}'"
                 if image is None:
                     self.applicable.add("OBAAF-JEN-008")
@@ -1314,25 +1590,39 @@ class JenkinsRules:
                 self.applicable.add("OBAAF-JEN-008")
                 self.add("OBAAF-JEN-008", info.line, message + ".", info.ctx.stage, severity="high")
 
-    def _package_json_problems(self) -> list:
-        """Agent CLIs that package.json asks for at a version that can move, when no lockfile fixes them."""
-        text = self._read("package.json")
-        if text is None:
+    def _package_json_problems(self, folder: str) -> list:
+        """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
+        fixes them: dependencies of every kind, npm aliases (`npm:@scope/name@range`) included."""
+        if folder == "?":
+            self.unknown("OBAAF-JEN-008", 1, "npm installs in a folder computed at run time, so its package.json "
+                         "is not read")
             return []
+        if folder in self._package_cache:
+            return self._package_cache[folder]
+        self._package_cache[folder] = out = []
+        text = self._read(_join(folder, "package.json"))
+        if text is None or any(self._read(_join(folder, x)) is not None for x in LOCKFILES):
+            return out
         try:
             data = json.loads(text)
         except ValueError:
-            return ["An agent CLI may be installed from a package.json the checker cannot read"] \
-                if self._agent_words.search(text) else []
-        out = []
-        for key in ("dependencies", "devDependencies", "optionalDependencies"):
+            if self._agent_words.search(text):
+                out.append("An agent CLI may be installed from a package.json the checker cannot read")
+            return out
+        for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
             deps = data.get(key) if isinstance(data, dict) else None
             if not isinstance(deps, dict):
                 continue
             for pkg, ver in deps.items():
-                if pkg in self.agent_package_names and not (isinstance(ver, str) and EXACT_NPM.match(ver)):
-                    out.append(f"Agent CLI {pkg} is installed from package.json at {ver!r}, a version that can move, "
-                               "with no lockfile")
+                target = pkg
+                if isinstance(ver, str) and ver.startswith("npm:"):
+                    target, _, ver = ver[4:].rpartition("@") if ver[4:].count("@") > (1 if ver[4:].startswith("@")
+                                                                                     else 0) else (ver[4:], "", "")
+                if target in self.agent_package_names:
+                    self.applicable.add("OBAAF-JEN-008")
+                    if not (isinstance(ver, str) and EXACT_NPM.match(ver)):
+                        out.append(f"Agent CLI {target} is installed from {_shown(_join(folder, 'package.json'))} "
+                                   f"at '{_shown(str(ver))}', a version that can move, with no lockfile")
         return out
 
     # ------------------------------------------------------------------ JEN-009

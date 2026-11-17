@@ -543,7 +543,7 @@ class Parser:
             parts = []
             while not (self.tok.kind in ("nl", "eof") or self.at_op(";", "}")):
                 parts.append(self.advance().value)
-            return Import("".join(parts), line=t.line, col=t.col)
+            return Import(" ".join(parts), line=t.line, col=t.col)
         if kw == "if":
             self.expect_op("(")
             self.skip_nl()
