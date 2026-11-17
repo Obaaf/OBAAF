@@ -173,16 +173,20 @@ def _permissions(job: wf_mod.Job) -> dict:
             "writes_checks": "write" in (found.level("checks"), found.level("statuses"))}
 
 
-def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str]]:
+def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str], list[str]]:
     """How many of the job's steps use an action from another repository, which of those are not pinned to
-    a full commit, and every such reference as written (for the list of selected actions, issue #182).
-    Local actions, container images and the reusable workflow a job calls are left out; what GitHub's own
-    pinning requirement makes of those was not established."""
-    used, loose, remote = 0, [], []
+    a full commit, every such reference as written (for the list of selected actions, issue #182), and the
+    local actions and container images its steps use, as written (slice 2b.7: their own steps, and whether
+    the list covers an image, are not read). Local actions, container images and the reusable workflow a job
+    calls are left out of the first two; what GitHub's own pinning requirement makes of those was not
+    established."""
+    used, loose, remote, other = 0, [], [], []
     for step in job.steps:
         uses = step.uses
         # `./path` and `$/path` are actions in this repository (flagship slice 2d.2g: `$/` was taken for a
         # remote action that is not pinned).
+        if uses and (wf_mod.is_local_reference(uses) or uses.startswith("docker://")):
+            other.append(uses)
         if not uses or wf_mod.is_local_reference(uses) or uses.startswith("docker://"):
             continue
         used += 1
@@ -192,7 +196,7 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str]]:
         # 64-digit ref can only be a tag or a branch, and the old pattern's `$` took a trailing line break.
         if not wf_mod.COMMIT_SHA_RE.fullmatch(ref):
             loose.append(uses)
-    return used, sorted(set(loose)), sorted(set(remote))
+    return used, sorted(set(loose)), sorted(set(remote)), sorted(set(other))
 
 
 def _runner(job: wf_mod.Job) -> str:
@@ -209,7 +213,7 @@ def _job(job: wf_mod.Job) -> dict:
     passed = job.raw.get("secrets") if job.reusable else None
     # A caller can also hand a secret over as an input, under `with:`.
     handed = (wf_mod.secret_names(passed) | wf_mod.secret_names(job.raw.get("with"))) if job.reusable else set()
-    used, loose, remote = _actions(job)
+    used, loose, remote, unread_actions = _actions(job)
     return {
         "id": job.id, "line": job.line, "check": _check_name(job),
         "environment": _environment(job),
@@ -234,6 +238,8 @@ def _job(job: wf_mod.Job) -> dict:
         "actions": used,
         "unpinned": loose,
         "remote_actions": remote,
+        # Local actions and container images, whose steps or coverage by a list of allowed actions are not read.
+        "unread_actions": unread_actions,
     }
 
 

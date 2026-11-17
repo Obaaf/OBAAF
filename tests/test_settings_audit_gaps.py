@@ -203,10 +203,15 @@ class SelectedActionsTest(unittest.TestCase):
         self.assertEqual(self.check(selected([f"someone/tool@{SHA}"]), f"someone/tool@{SHA}"), "no-finding")
         for pattern in ("someone/*", "someone/tool@*", "someone/tool", f"Someone/tool@{SHA}"):
             self.assertEqual(self.check(selected([pattern]), f"someone/tool@{SHA}"), "cannot-tell", pattern)
+        # The review of 2b.7: a reference that repeats a wildcard or odd entry is not matched by it either.
+        for odd in ("someone/*", "someone/tool@*", "'someone/tool@v1 '", "someone/tool@v1..x", "./x@v1"):
+            self.assertEqual(self.check(selected([odd.strip("'")]), odd), "cannot-tell", odd)
 
     def test_an_entry_that_may_block_means_nothing_is_matched(self):
         entries = selected([f"someone/tool@{SHA}", "!evil/*"], github_owned=True)
         self.assertEqual(self.check(entries, PIN), "cannot-tell")
+        self.assertEqual(self.check(entries, f"someone/tool@{SHA}"), "cannot-tell")
+        entries = selected([f"someone/tool@{SHA}", "x/y@v1, !someone/*"])
         self.assertEqual(self.check(entries, f"someone/tool@{SHA}"), "cannot-tell")
 
     def test_verified_creators_are_not_matched(self):
@@ -228,9 +233,26 @@ class SelectedActionsTest(unittest.TestCase):
         _, maybe, _, _ = rules._stops(rules._Run(rules.RULES[0], snap, usage))
         self.assertIn("the list was not read", maybe[W + "ci.yml"])
 
-    def test_local_actions_need_no_list(self):
-        # Holds before and after: `./` and `$/` actions are this repository's.
-        self.assertEqual(self.check(selected(), "./.github/actions/build", "$/.github/actions/build"), "no-finding")
+    def test_a_local_action_or_an_image_is_not_read(self):
+        # The review of 2b.7: a local composite action's own steps are not read, and may use an action the
+        # setting blocks; whether the setting covers a container image is not read either.
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        for entries in (selected(github_owned=True), local_only):
+            for uses in ("./.github/actions/build", "$/.github/actions/build", "docker://alpine:3.20"):
+                self.assertEqual(self.check(entries, uses), "cannot-tell", uses)
+        every = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "all"})
+        self.assertEqual(self.check(every, "./.github/actions/build", "docker://alpine:3.20"), "no-finding")
+
+    def test_a_file_that_may_not_run_keeps_its_paths_finding(self):
+        # The review of 2b.7: the paths filter keeps the check from reporting whether or not the file runs, so
+        # OBAAF-SET-007's finding stands; whether an unrequired check exists at all does not (OBAAF-SET-008).
+        tool = f"someone/tool@{SHA}"
+        entries = requiring("lint", entries=selected(["someone/*"]))
+        paths = {"ci.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("lint", steps=steps(tool)))}
+        self.assertEqual(answered(assess(entries, paths), "OBAAF-SET-007"), "finding medium")
+        self.assertEqual(answered(assess(entries, paths), "OBAAF-SET-006"), "cannot-tell")
+        free = {"ci.yml": wf(PR, job("lint") + job("test", steps=steps(tool)))}
+        self.assertEqual(answered(assess(entries, free), "OBAAF-SET-008", "ci.yml#test"), "cannot-tell")
 
     def test_the_hand_written_recording_reads_as_before(self):
         # Holds before and after: the admin-token recording allows GitHub's own actions, and the tests built on
@@ -246,7 +268,7 @@ class ChainOfCallsTest(unittest.TestCase):
         n = 4000
         files = [{"path": f"w{k}.yml", "error": None, "problems": [], "doubt": [], "triggers": {},
                   "jobs": [{"id": "c", "calls": f"./w{k + 1}.yml", "remote_actions": [], "unpinned": [],
-                            "actions": 0}]} for k in range(n)]
+                            "unread_actions": [], "actions": 0}]} for k in range(n)]
         usage = {"files": files, "actions_lock": False}
         run = rules._Run(rules.RULES[0], snap, usage)
         start = time.monotonic()
@@ -254,7 +276,10 @@ class ChainOfCallsTest(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 1.0)
         self.assertEqual(len(maybe), n)
         self.assertIn(f"it calls w{n}.yml, which GitHub may not run: it is not among", maybe[f"w{n - 1}.yml"])
-        self.assertEqual(maybe["w0.yml"], "it calls w1.yml, which GitHub may not run")
+        # Three nested calls below a file are allowed; a fourth is a doubt of its own (the review of 2b.7).
+        self.assertEqual(maybe[f"w{n - 4}.yml"], f"it calls w{n - 3}.yml, which GitHub may not run")
+        self.assertIn("it starts a chain of 4 nested calls", maybe[f"w{n - 5}.yml"])
+        self.assertIn(f"it starts a chain of {n - 1} nested calls", maybe["w0.yml"])
 
     def test_the_reason_is_the_first_bad_call_in_the_order_the_jobs_are_written(self):
         # Holds before and after: the new loop keeps the old loop's reasons.
@@ -267,14 +292,28 @@ class ChainOfCallsTest(unittest.TestCase):
         self.assertIn("gone.yml", maybe[W + "ci.yml"])
         self.assertNotIn("refused.yml", maybe[W + "ci.yml"])
 
-    def test_a_cycle_of_calls_to_a_missing_file(self):
-        # Holds before and after: a cycle never gives a file its own caller as the reason.
-        files = {"a.yml": wf(PR, "  x:\n    uses: ./.github/workflows/b.yml\n"),
-                 "b.yml": wf("  workflow_call:\n", "  y:\n    uses: ./.github/workflows/a.yml\n"
-                                                   "  z:\n    uses: ./.github/workflows/gone.yml\n")}
+    def test_a_cycle_of_calls(self):
+        # The review of 2b.7: a file in a cycle of calls, or that calls itself, counted as running.
+        files = {"a.yml": wf(PR + "  workflow_call:\n", job("lint") + "  x:\n    uses: ./.github/workflows/b.yml\n"),
+                 "b.yml": wf("  workflow_call:\n", "  y:\n    uses: ./.github/workflows/a.yml\n")}
         _, maybe, _, _ = CallsThatWereNotComparedTest()._stops(files)
-        self.assertIn("gone.yml", maybe[W + "b.yml"])
-        self.assertIn("b.yml, which GitHub may not run", maybe[W + "a.yml"])
+        self.assertIn("in a cycle of calls with .github/workflows/b.yml", maybe[W + "a.yml"])
+        self.assertIn("in a cycle of calls with .github/workflows/a.yml", maybe[W + "b.yml"])
+        self.assertEqual(answered(assess(requiring("lint"), files), "OBAAF-SET-006"), "cannot-tell")
+        itself = {"ci.yml": wf(PR + "  workflow_call:\n", job("lint") + "  again:\n    uses: ./.github/workflows/ci.yml\n")}
+        _, maybe, _, _ = CallsThatWereNotComparedTest()._stops(itself)
+        self.assertEqual(maybe[W + "ci.yml"], "it calls itself, a cycle GitHub cannot expand")
+        self.assertEqual(answered(assess(requiring("lint"), itself), "OBAAF-SET-006"), "cannot-tell")
+
+    def test_how_deep_calls_nest(self):
+        def chain(length):
+            files = {"ci.yml": wf(PR, job("lint") + "  c:\n    uses: ./.github/workflows/r1.yml\n")}
+            for k in range(1, length):
+                files[f"r{k}.yml"] = wf("  workflow_call:\n", f"  c:\n    uses: ./.github/workflows/r{k + 1}.yml\n")
+            files[f"r{length}.yml"] = wf("  workflow_call:\n", job("t"))
+            return files
+        self.assertEqual(answered(assess(requiring("lint"), chain(3)), "OBAAF-SET-006"), "no-finding")
+        self.assertEqual(answered(assess(requiring("lint"), chain(4)), "OBAAF-SET-006"), "cannot-tell")
 
 
 if __name__ == "__main__":

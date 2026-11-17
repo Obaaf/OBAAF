@@ -864,6 +864,14 @@ def _stops(run: _Run):
                 unsure = _not_surely_selected(actions, workflows, value.get("selected_actions"))
                 if unsure:
                     maybe[path] = _selection_doubt(unsure, value.get("selected_actions"))
+            if path not in stopped and path not in maybe and value.get("allowed_actions") in ("local_only", "selected"):
+                # A local action's own steps, and whether the setting covers a container image, are not read
+                # (the review of slice 2b.7): a local composite action can use an action the setting blocks.
+                unread_here = sorted({a for job in file["jobs"] for a in job["unread_actions"]})
+                if unread_here:
+                    maybe[path] = (f"the repository allows only some actions and reusable workflows (allowed_actions: "
+                                   f"{value['allowed_actions']}), and it uses {_names([_q(a, 100) for a in unread_here], 2)}, "
+                                   "whose own steps, or whether the setting covers it, the audit does not read")
     policies, whole = run.got("actions_policies")
     if policies is None or not whole:
         unread.append(run.why("actions_policies"))
@@ -903,6 +911,9 @@ def _spread_to_callers(run: _Run, stopped: dict, maybe: dict) -> None:
     files = run.files()
     read = {file["path"] for file in files}
     calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    for path, why in _call_graph_doubts(calls, read).items():
+        if path not in stopped and path not in maybe:
+            maybe[path] = why
     callers: dict = {}
     for path, targets in calls.items():
         for target in dict.fromkeys(targets):
@@ -924,9 +935,96 @@ def _spread_to_callers(run: _Run, stopped: dict, maybe: dict) -> None:
                                       else "may not run: it is not among the workflow files that were read"))
 
 
-# An action of GitHub's own organisations, `actions/NAME[/path]@ref`, as plainly as it can be written: a repository
-# name of letters, digits, `.`, `_` and `-` that is not `.` or `..`, no `..` in its path, no space (issue #182).
-GITHUB_OWNED_RE = re.compile(r"(?:actions|github)/(?!\.\.?[/@])[A-Za-z0-9._-]+(?:/(?!\.\.?[/@])[A-Za-z0-9._-]+)*@[A-Za-z0-9._/-]+")
+# How deep calls may nest before GitHub refuses the run, at the least: its reference allowed "four levels of
+# workflows", the caller and three levels of reusable workflows, as the author knew it; a later limit may be higher
+# (not read in the session that wrote this, so a deeper chain is a doubt, the review of slice 2b.7).
+MAX_CALL_DEPTH = 3
+
+
+def _call_graph_doubts(calls: dict, read: set) -> dict:
+    """The files GitHub may not run because of how they call one another (the review of slice 2b.7): one in a
+    cycle of calls, which cannot be expanded (a file that calls itself included), and one that starts a chain of
+    more nested calls than MAX_CALL_DEPTH. Iterative, so a long chain does not exhaust the stack."""
+    graph = {path: list(dict.fromkeys(t for t in targets if t in read)) for path, targets in calls.items()}
+    # Tarjan's strongly connected components, without recursion.
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    component: dict = {}
+    counter = 0
+    for root in graph:
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            node, i = work.pop()
+            if i == 0:
+                index[node] = low[node] = counter
+                counter += 1
+                stack.append(node)
+                on_stack.add(node)
+            targets = graph.get(node, [])
+            if i < len(targets):
+                work.append((node, i + 1))
+                target = targets[i]
+                if target not in index:
+                    work.append((target, 0))
+                elif target in on_stack:
+                    low[node] = min(low[node], index[target])
+                continue
+            for target in targets:
+                if target in on_stack:
+                    low[node] = min(low[node], low[target])
+            if low[node] == index[node]:
+                members = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    members.append(member)
+                    if member == node:
+                        break
+                for member in members:
+                    component[member] = members
+    doubts: dict = {}
+    cyclic = set()
+    for path, targets in graph.items():
+        members = component[path]
+        if len(members) > 1 or path in targets:
+            cyclic.add(path)
+            others = sorted(m for m in members if m != path)
+            doubts[path] = ("it calls itself, a cycle GitHub cannot expand" if not others else
+                            f"it is in a cycle of calls with {_names([plain(m, 120) for m in others], 2)}, which GitHub "
+                            "cannot expand")
+    # The longest chain of calls below each file outside a cycle, in calls: one past MAX_CALL_DEPTH is a doubt.
+    depth: dict = {}
+    for root in graph:
+        if root in cyclic or root in depth:
+            continue
+        work = [(root, False)]
+        while work:
+            node, done = work.pop()
+            below = [t for t in graph[node] if t not in cyclic]
+            if done:
+                depth[node] = 1 + max((depth[t] for t in below), default=-1)
+                continue
+            if node in depth:
+                continue
+            work.append((node, True))
+            work.extend((t, False) for t in below if t not in depth)
+    for path, n in depth.items():
+        if n > MAX_CALL_DEPTH and path not in doubts:
+            doubts[path] = (f"it starts a chain of {n} nested calls, and GitHub allowed the caller and "
+                            f"{MAX_CALL_DEPTH} levels of reusable workflows (as its reference was known when this was "
+                            "written; a later limit was not read)")
+    return doubts
+
+
+# A reference to another repository's action or reusable workflow, `owner/repo[/path]@ref`, as plainly as it can be
+# written (issue #182): each part letters, digits, `.`, `_` and `-`, no part `.` or `..`, a ref of the same with `/`
+# and no `..` (which no git ref holds), no space, no wildcard. Only such a reference is matched against the list.
+_PART = r"(?!\.\.?[/@])[A-Za-z0-9._-]+"
+PLAIN_REFERENCE_RE = re.compile(rf"(?P<owner>{_PART})/{_PART}(?:/{_PART})*@(?!.*\.\.)[A-Za-z0-9._/-]+")
 
 
 def _not_surely_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
@@ -934,17 +1032,25 @@ def _not_surely_selected(actions: list[str], workflows: list[str], selected) -> 
     actions (`allowed_actions: selected`) is not sure to let run (issue #182). GitHub's matching of the list
     was not read from its pages in the session that wrote this, so only two things count: a step's action of
     the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
-    and an entry that is the reference itself, character for character. Neither counts while any entry begins
-    with `!`, which may block. A reusable workflow of GitHub's organisations, actions of the repository's own
-    owner and of verified creators are not matched. A list that was not read lets nothing through."""
+    and an entry that is the reference itself, character for character. Either only for a reference written
+    plainly (PLAIN_REFERENCE_RE), and neither while any entry holds a `!`, which may block. A reusable
+    workflow of GitHub's organisations, actions of the repository's own owner and of verified creators are
+    not matched. A list that was not read lets nothing through."""
     if not isinstance(selected, dict):
         return actions + workflows
     patterns = [p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)]
-    if any(p.strip().startswith("!") for p in patterns):
+    if any("!" in p for p in patterns):
         return actions + workflows
-    own = selected.get("github_owned_allowed") is True
-    return ([uses for uses in actions if not (uses in patterns or (own and GITHUB_OWNED_RE.fullmatch(uses)))]
-            + [uses for uses in workflows if uses not in patterns])
+
+    def allowed(uses: str, action: bool) -> bool:
+        plain_ref = PLAIN_REFERENCE_RE.fullmatch(uses)
+        if plain_ref is None:
+            return False        # a wildcard, a space or an odd part: never matched, even by an equal entry
+        owned = action and selected.get("github_owned_allowed") is True and plain_ref["owner"] in ("actions", "github")
+        return owned or uses in patterns
+
+    return ([uses for uses in actions if not allowed(uses, True)]
+            + [uses for uses in workflows if not allowed(uses, False)])
 
 
 def _selection_doubt(unsure: list[str], selected) -> str:
@@ -1758,7 +1864,10 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
-                matches = [(f, j) for f, j in reporting if reports(f, j, context) is True]
+                # A job in a file GitHub may not run counts here (the review of slice 2b.7): whether its paths filter,
+                # its activity types or its triggers keep the check from reporting holds whether or not the file
+                # runs, since a file that does not run reports nothing. One GitHub may read otherwise does not.
+                matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
                 if not _held_by_actions(need["apps"][context]):
