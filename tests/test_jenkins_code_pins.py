@@ -1170,6 +1170,43 @@ CASES = {
   'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Images\') { steps { sh \'cd "$WORKSPACE/$SERVICE" && docker build -t app:ci .\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
   'api/Dockerfile': 'FROM node:20\n',
  },
+ 'V9-001': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage("Build") { steps { sh \'\'\'\npushd "$WORKSPACE/$APP_DIR"\nmake\npopd\nnpm install\n\'\'\' } }\n    stage("Review") { steps { sh "claude -p review" } }\n  }\n}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V9-002': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage("Build") { steps { sh \'\'\'\npushd web\npushd "$WORKSPACE/$TOOLS_DIR"\n./setup.sh\npopd\nnpm install\npopd\n\'\'\' } }\n    stage("Review") { steps { sh "claude -p review" } }\n  }\n}\n',
+  'package-lock.json': '{}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V9-003': {
+  '.appdir': 'web\n',
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage("Build") { steps { sh \'\'\'\npushd ./$(cat .appdir) > /dev/null\nmake\npopd > /dev/null\nnpm install\n\'\'\' } }\n    stage("Review") { steps { sh "claude -p review" } }\n  }\n}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V9-005': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'A\') { steps { sh \'cd web\\nnpm install\' } }\n    stage(\'B\') { steps { sh \'cd ./web && npm install\' } }\n    stage(\'C\') { steps { sh \'cd "$WORKSPACE/web"; npm install\' } }\n    stage(\'D\') { steps { sh \'pushd web > /dev/null\\nnpm install\\npopd > /dev/null\' } }\n    stage(\'E\') { steps { sh \'cd web && npm install\' } }\n    stage(\'F\') { steps { sh \'(cd web && npm ci)\' } }\n    stage(\'G\') { steps { sh \'cd ${WORKSPACE}/web && npm install\' } }\n    stage(\'H\') { steps { sh \'cd web && NODE=$(node -v) && echo `date` && npm install\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
+  'package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+  'web/package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+ },
+ 'V9-006': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('A') { steps { sh '''\nWEBDIR=`cd web && pwd`\nHERE=$(cd web; pwd)\nnpm install\n''' } }\n    stage('Review') { steps { sh 'claude -p review' } }\n  }\n}\n",
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V9-007': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'A\') { steps { sh \'\'\'\npushd "$TOOLS"\n./setup.sh\npopd\npushd web*\npopd\nnpm install\n\'\'\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
+ 'V9-009': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') { steps { sh \'\'\'\npushd web\npushd "$WORKSPACE/$TOOLS_DIR"\npopd\nnpm install\n\'\'\' } }\n    stage(\'Review\') { steps { sh \'claude -p review\' } }\n  }\n}\n',
+  'package.json': '{"name":"a","devDependencies":{"@anthropic-ai/claude-code":"^1.0.0"}}\n',
+  'web/package.json': '{"name":"w","dependencies":{"express":"4.18.2"}}\n',
+ },
 }
 
 # (case, rule, outcome, severity): outcome is finding, or the rule's coverage status when there is none
@@ -1474,6 +1511,13 @@ EXPECT = [
     ('V8-013', 'OBAAF-JEN-008', 'unknown', None),  # eighth review, Z013
     ('V8-016', 'OBAAF-JEN-008', 'unknown', None),  # eighth review, Z016
     ('V8-017', 'OBAAF-JEN-008', 'unknown', None),  # eighth review, Z017
+    ('V9-001', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q001
+    ('V9-002', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q002
+    ('V9-003', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q003
+    ('V9-005', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q005
+    ('V9-006', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q006
+    ('V9-007', 'OBAAF-JEN-008', 'finding', 'high'),  # ninth review, Q007
+    ('V9-009', 'OBAAF-JEN-008', 'not applicable', None),  # ninth review, Q009
 ]
 
 CATALOG = load()

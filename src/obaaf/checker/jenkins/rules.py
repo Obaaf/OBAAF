@@ -1687,6 +1687,8 @@ class JenkinsRules:
                 if openers:
                     restore = openers.pop()[1]
             try:
+                if words and words[0] == "pushd":
+                    stack.append(folder)               # every pushd pushes, whatever its folder (ninth review)
                 if words and words[0] in ("cd", "pushd") and k + 1 < len(parts) and parts[k + 1] in ("$(", "`"):
                     previous, folder = folder, "?"     # cd ./$(cat .appdir): a folder computed at run time
                     continue
@@ -1696,8 +1698,6 @@ class JenkinsRules:
                     continue
                 if at_root:
                     # cd $WORKSPACE/x: the checkout's own folder x, wherever the script was.
-                    if command.startswith("pushd"):
-                        stack.append(folder)
                     joined = posixpath.normpath(at_root.group(1) or ".")
                     previous, folder = folder, ("?" if joined.startswith("..") else ("" if joined == "." else joined))
                     continue
@@ -1721,8 +1721,6 @@ class JenkinsRules:
                     continue
                 if moved:
                     target = moved.group(2)
-                    if words[0] == "pushd":
-                        stack.append(folder)
                     previous = folder
                     if re.search(r"[$*?\[]", target) or folder == "?" or target.startswith(("/", "~")):
                         folder = "?"
