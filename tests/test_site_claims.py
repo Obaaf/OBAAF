@@ -139,10 +139,10 @@ class TheTwoExampleFiles(unittest.TestCase):
         self.assertIn(f"checked with obaaf {__version__} on", text("index.html"))
         for name in ("index.html", "quickstart.html"):
             words = text(name)
-            for where in ("a count of other findings at the top",
-                          "a \"Why:\" line under the finding, saying why it matters",
-                          "and, at the end, what a check with no configuration file leaves out"):
-                self.assertIn(where, words, f"{name} no longer says where the added lines are")
+            for placed in ("a count of other findings at the top",
+                           "a \"Why:\" line under the finding, saying why it matters",
+                           "and, at the end, what a check with no configuration file leaves out"):
+                self.assertIn(placed, words, f"{name} no longer says where the added lines are")
 
 
 class TheEgressAction(unittest.TestCase):
