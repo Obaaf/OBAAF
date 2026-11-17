@@ -1400,7 +1400,7 @@ class JenkinsRules:
                 command = command[m.end():]
             yield command.strip(), segment
 
-    def _assignments(self, text: str, variables: dict) -> None:
+    def _assignments(self, text: str, variables: dict, depth: int = 0) -> None:
         """Record the variables a script line sets: one literal value, or None when the script sets it to
         anything else or to two different values."""
         for segment in _COMMAND_SPLIT.split(text):
@@ -1408,7 +1408,17 @@ class JenkinsRules:
             other = _OTHER_ASSIGN.match(segment) or _OTHER_ASSIGN.match(next(self._commands(segment), ("", ""))[0])
             if other:
                 verb, rest = other.group(1), other.group(2)
-                if verb in ("source", ".", "eval"):
+                if verb in ("source", "."):
+                    # A file in the checkout is read for what it sets (a change request can change it); a
+                    # file outside it (~/.nvm/nvm.sh, a venv's activate) is not the change's, so the
+                    # variables keep their values (the fifth review of 2d.2k).
+                    target = (rest.split() or [""])[0].strip("'\"")
+                    body = None if "$" in target or target.startswith(("/", "~")) or depth > 2 else \
+                        self._read(target.removeprefix("./"))
+                    if body is not None:
+                        for line in self._prepared(body).splitlines():
+                            self._assignments(line, variables, depth + 1)
+                elif verb == "eval":
                     for key in list(variables):
                         variables[key] = None
                     variables["*"] = None
@@ -1583,6 +1593,8 @@ class JenkinsRules:
         none. The last installer before a package decides, by its subcommand, what the command does."""
         if not INSTALLER.search(command):
             return None
+        # Shell quotes are not part of a word: @anthropic-ai/claude-code@"1.0.17" is @1.0.17 (fifth review).
+        command = re.sub(r"[\"']", "", command)
         tokens = [(m.start(), m.group(0)) for m in re.finditer(r"\S+", command)]
         words = [w.strip("'\"") for _, w in tokens]
         installer_at = [i for i, w in enumerate(words) if w.rsplit("/", 1)[-1] in _INSTALLER_NAMES]
@@ -1635,10 +1647,12 @@ class JenkinsRules:
                 break
         return out
 
-    def _manifests(self, text: str, folder: str) -> list:
+    def _manifests(self, text: str, folder: str, builds: list | None = None, builds_only: bool = False) -> list:
         """Agent CLIs that pip requirements files and package.json ask for, where a script installs from
         them: `pip install -r FILE` (every -r and -c, `-rFILE` too) and `npm install` with no lockfile beside
-        package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir())."""
+        package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir()). With `builds`, each
+        `docker build` (podman, nerdctl, buildah, buildx) is added to it as (Dockerfile, build arguments,
+        tags), in that folder."""
         out: list = []
         parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
         stack: list = []
@@ -1646,7 +1660,15 @@ class JenkinsRules:
         for k in range(0, len(parts), 2):
             opened = k > 0 and parts[k - 1] in ("(", "$(", "`")
             command = next(self._commands(parts[k]), ("", ""))[0]
-            words = command.split()
+            words = [w.strip("\"'") for w in command.split()]
+            built = _BUILD_CMD.match(command)
+            if built and builds is not None:
+                rel, args = _build_options(command[built.end():])
+                if any("$" in v for v in args.values()):
+                    args = "?"
+                tags = [m.group(2) for m in _TAG_OPTION.finditer(command)]
+                builds.append((_join(folder, rel) if rel != "?" else "?", args, tags))
+                continue
             if words and words[0] == "popd":
                 previous, folder = folder, (stack.pop() if stack else "?")
                 continue
@@ -1667,6 +1689,8 @@ class JenkinsRules:
                 else:
                     joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
                     folder = "?" if joined.startswith("..") else ("" if joined == "." else joined)
+                continue
+            if builds_only:
                 continue
             if _PIP_INSTALL.search(command):
                 for m in _REQUIREMENT_FLAG.finditer(command):
@@ -1809,13 +1833,15 @@ class JenkinsRules:
             folder = info.ctx.dir
             text = self._pin_script(info)
             problems = self._install_problems(text, shell_vars=env_vars)
-            problems += self._manifests(text, folder)
+            builds: list = []
+            problems += self._manifests(self._substituted(text, env_vars), folder, builds)
             images = self._shell_images(self._substituted(text, env_vars))
             for rel in self._scripts(info.script):
-                body_problems, body_images = self._script_scan(_join(folder, rel), folder, env_vars)
+                body_problems, body_images, body_builds = self._script_scan(_join(folder, rel), folder, env_vars)
                 problems += body_problems
                 images += body_images
-            for dockerfile, build_args in self._shell_builds(text, folder, env_vars):
+                builds += body_builds
+            for dockerfile, build_args, _ in builds:
                 self._dockerfile(dockerfile, info.line, info.ctx.stage,
                                  severity_for(self.by_stage.get(info.ctx.stage, [])), build_args)
             for image, command in images:
@@ -1836,27 +1862,21 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", info.line, message + ".", info.ctx.stage, severity="high")
 
     def _script_scan(self, rel: str, folder: str, env_vars: dict) -> tuple:
-        """(install problems, container images) of a repository script a step runs, read once."""
-        if rel not in self._script_cache:
+        """(install problems, container images, docker builds) of a repository script a step runs, read
+        once per path and folder."""
+        key = (rel, folder)
+        if key not in self._script_cache:
             body = self._read(rel) if rel != "?" else None
             body = self._prepared(body) if body else None
-            self._script_cache[rel] = (
-                (self._install_problems(body, f" (in the script {_shown(rel)})", shell_vars=env_vars)
-                 + self._manifests(body, folder)) if body else [],
-                self._shell_images(self._substituted(body, env_vars)) if body else [])
-        return self._script_cache[rel]
-
-    def _shell_builds(self, text: str, folder: str, env_vars: dict) -> list:
-        """(Dockerfile, build arguments) for each `docker build` (podman, nerdctl, buildx) a script runs."""
-        out = []
-        for command, _ in self._commands(self._substituted(text, env_vars)):
-            m = _BUILD_CMD.match(command)
-            if m:
-                rel, args = _build_options(command[m.end():])
-                if any("$" in v for v in args.values()):
-                    args = "?"
-                out.append((_join(folder, rel) if rel != "?" else "?", args))
-        return out
+            builds: list = []
+            if body:
+                resolved = self._substituted(body, env_vars)
+                self._script_cache[key] = (
+                    self._install_problems(body, f" (in the script {_shown(rel)})", shell_vars=env_vars)
+                    + self._manifests(resolved, folder, builds), self._shell_images(resolved), builds)
+            else:
+                self._script_cache[key] = ([], [], [])
+        return self._script_cache[key]
 
     def _collect_local_images(self, env_vars: dict) -> None:
         """Images the job builds or tags itself (`docker build -t`, `docker tag`, docker.build), after
@@ -1868,27 +1888,32 @@ class JenkinsRules:
             if "$" not in tag:
                 self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
 
+        seen: set = set()
         for info in self.infos:
+            if id(info.use.call) in seen:
+                continue
+            seen.add(id(info.use.call))
             if info.use.name == "docker.build":
                 tag = self._resolve(literal(first_arg(info.use.call)) or (
                     first_arg(info.use.call).text() if isinstance(first_arg(info.use.call), Str) else "$"),
                     groovy=True)
                 add(tag)
             elif info.shell:
-                text = self._substituted(self._pin_script(info), env_vars)
-                bodies = [text]
-                for rel in self._scripts(info.script):
-                    body = self._read(_join(info.ctx.dir, rel)) if info.ctx.dir != "?" else None
-                    if body:
-                        bodies.append(self._substituted(self._prepared(body), env_vars))
-                for body in bodies:
-                    for command, _ in self._commands(body):
-                        if _BUILD_CMD.match(command):
-                            for m in _TAG_OPTION.finditer(command):
-                                add(m.group(2))
+                # The builds a step and its scripts run; their Dockerfiles are checked in the main loop.
+                text = self._pin_script(info)
+                builds: list = []
+                if re.search(r"\b(build|bud|tag)\b", text):
+                    resolved = self._substituted(text, env_vars)
+                    self._manifests(resolved, info.ctx.dir, builds, builds_only=True)
+                    for command, _ in self._commands(resolved):
                         tagged = _TAG_CMD.match(command)
                         if tagged:
                             add(tagged.group(2))
+                for rel in self._scripts(info.script):
+                    builds += self._script_scan(_join(info.ctx.dir, rel), info.ctx.dir, env_vars)[2]
+                for _, _, tags in builds:
+                    for tag in tags:
+                        add(tag)
 
     def _package_json_problems(self, folder: str) -> list:
         """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
