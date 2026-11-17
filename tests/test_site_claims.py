@@ -17,6 +17,8 @@ import yaml
 
 from helpers import ROOT, TempDir, run_cli
 
+from obaaf import __version__
+
 SITE = ROOT / "site"
 PRE_RE = re.compile(r"<pre><code>(.*?)</code></pre>", re.S)
 
@@ -58,7 +60,9 @@ class TheTwoExampleFiles(unittest.TestCase):
     which lines the development version's report adds. The development version must print the 0.3.0
     report's lines and the added kinds, and nothing else."""
 
-    # The kinds of line the pages say the development report adds, by how each begins.
+    # The kinds of line the pages say the development report adds, by how each begins. These are
+    # tripwires: a change to how the checker words or indents one of these lines fails here even where
+    # the pages, which describe the lines without quoting them, are still true. Then update this map.
     ADDED = {
         "Accepted risk: ": "\"Accepted risk: none\"",
         "Other findings: ": "a count of other findings",
@@ -110,6 +114,29 @@ class TheTwoExampleFiles(unittest.TestCase):
             expected = set(self.ADDED) if name == "unpinned" else set(self.ADDED) - {"        Why: "}
             self.assertEqual(seen, expected, f"the development report of {name}.yml lacks a kind the pages name")
 
+    def test_the_added_lines_are_where_the_pages_say(self):
+        """At the top "Accepted risk: none" and the count; the "Why:" line under the finding, before its
+        requirement; at the end the three closing lines, the last naming the version the banner names."""
+        lines = self._development_reports()["unpinned"][1].splitlines()
+
+        def where(start: str) -> int:
+            found = [i for i, line in enumerate(lines) if line.startswith(start)]
+            self.assertEqual(len(found), 1, f"{start!r} in {lines}")
+            return found[0]
+
+        first_file = where("unpinned.yml")
+        self.assertTrue(lines[where("Accepted risk: ")].startswith("Accepted risk: none."))
+        self.assertLess(where("Accepted risk: "), first_file)
+        self.assertLess(where("Other findings: "), first_file)
+        finding = where("     9  LOW    OBAAF-GHA-008")
+        self.assertLess(finding, where("        Why: "))
+        self.assertLess(where("        Why: "), where("        Requirement: "))
+        last_count = where("Hygiene findings: ")
+        for start in ("No configuration file was read", "Other tools find workflow mistakes", "Checked by obaaf "):
+            self.assertGreater(where(start), last_count, start)
+        self.assertEqual(lines[-1], f"Checked by obaaf {__version__}.")
+        self.assertIn(f"numbered {__version__}", text("index.html"), "the banner names another development version")
+
 
 class TheEgressAction(unittest.TestCase):
     def test_no_released_commit_is_listed(self):
@@ -141,7 +168,8 @@ POLICY = "mode: enforce\nallow:\n  - api.anthropic.com\n"
 
 class TheFirewallConditions(unittest.TestCase):
     """The rules page lists when the development checker clears OBAAF-GHA-020 for GitHub's native
-    egress firewall. The case that meets every condition is cleared, and breaking any one is not."""
+    egress firewall. The case that meets every condition is cleared, and breaking any one of the
+    conditions below (or, in the next test, calling a reusable workflow) is not."""
 
     def _gha020(self, workflow: dict | None = None, policy: str | None = POLICY, policy_name="egress-firewall.yaml",
                 single_file=False) -> str:
@@ -166,10 +194,34 @@ class TheFirewallConditions(unittest.TestCase):
         words = text("rules.html")
         for condition in ("run on the repository, not on a single file", "matrix runs included",
                           "as its only runner label", "named exactly .github/egress-firewall.yaml",
-                          "no key but mode, allow and no-default-urls", "sets mode: enforce",
+                          "is YAML the checker can read", "no key but mode, allow and no-default-urls",
+                          "sets mode: enforce",
                           "allows only plain host names, none of which is a public suffix or has one under it",
-                          "the job's token has contents permission", "no other workflow can call this one"):
+                          "the job's token has contents permission", "the job calls no reusable workflow",
+                          "no other workflow can call this one"):
             self.assertIn(condition, words)
+
+    def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):
+        """The page's "the job calls no reusable workflow": a job declared an agent job that only calls
+        another workflow is not cleared by the firewall."""
+        with TempDir() as tmp:
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / ".github" / "workflows" / "agent.yml").write_text(
+                AGENT_JOB.format(on="[issues, workflow_call]", permissions="contents: read",
+                                 runs_on="ubuntu-24.04-firewall", strategy=""), encoding="utf-8")
+            (tmp / ".github" / "workflows" / "caller.yml").write_text(
+                "name: caller\non: issues\npermissions:\n  contents: read\njobs:\n  call:\n"
+                "    uses: ./.github/workflows/agent.yml\n", encoding="utf-8")
+            (tmp / ".github" / "obaaf.yml").write_text("lanes:\n  .github/workflows/caller.yml#call: agent\n",
+                                                       encoding="utf-8")
+            (tmp / ".github" / "egress-firewall.yaml").write_text(POLICY, encoding="utf-8")
+            code, out, err = run_cli("check", tmp, "--format", "json")
+        self.assertIn(code, (0, 1), err)
+        report = json.loads(out)
+        called = [f for f in report["findings"] + report.get("fixed", []) if f["rule"] == "OBAAF-GHA-020"
+                  and f.get("job") == "call"]
+        self.assertEqual(len(called), 1, out)
+        self.assertNotIn(called[0], report.get("fixed", []))
 
     def test_every_condition_met_clears_it(self):
         self.assertEqual(self._gha020(), "fixed")
@@ -184,6 +236,7 @@ class TheFirewallConditions(unittest.TestCase):
             "no policy file": dict(policy=None),
             "the policy under another name": dict(policy_name="egress-firewall.yml"),
             "a key the README does not describe": dict(policy=POLICY + "extra: true\n"),
+            "YAML the checker cannot read": dict(policy="mode: enforce\nallow: [api.anthropic.com\n"),
             "mode: log": dict(policy=POLICY.replace("enforce", "log")),
             "a wildcard": dict(policy="mode: enforce\nallow:\n  - '*.anthropic.com'\n"),
             "a public suffix": dict(policy="mode: enforce\nallow:\n  - github.io\n"),

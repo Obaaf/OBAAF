@@ -4,8 +4,7 @@ The public website says what OBAAF's latest release does and what is only in the
 version, and how to try it. It has a home page (`index.html`) and five pages: a quickstart, where
 to read the rule catalogue, a dated reading of the landscape comparison, the Expectrail case
 study, and the papers. The six pages link to each other in the same navigation. The site also
-carries the browser self-assessment and the
-pages that describe OBAAF's attestation formats.
+carries the browser self-assessment and the pages that describe OBAAF's attestation formats.
 It uses no external fonts, analytics, or client-side package dependencies. The home page, the
 five pages and the format pages read without JavaScript; the self-assessment needs it, because
 its questions are written into the page by a script, and without it the page says so and points
