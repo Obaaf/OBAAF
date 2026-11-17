@@ -1662,8 +1662,9 @@ class JenkinsRules:
         out: list = []
         parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
         stack: list = []
-        # One stack for `(`, `$(` and backticks: a cd inside a subshell or a command substitution ends with it,
-        # and each `)` closes the innermost opener (the sixth and seventh reviews of 2d.2k).
+        # One stack for `(`, `$(` and backticks: a cd inside a subshell or a command substitution ends with it.
+        # A `)` drops any open backticks above it, then closes the innermost `(` or `$(` (the sixth and seventh
+        # reviews of 2d.2k); an unmatched `)`, such as a case pattern's, closes one too early.
         openers: list = []
         previous = folder
         for k in range(0, len(parts), 2):
@@ -1686,7 +1687,13 @@ class JenkinsRules:
                 if openers:
                     restore = openers.pop()[1]
             try:
+                if words and words[0] in ("cd", "pushd") and k + 1 < len(parts) and parts[k + 1] in ("$(", "`"):
+                    previous, folder = folder, "?"     # cd ./$(cat .appdir): a folder computed at run time
+                    continue
                 at_root = _CD_WORKSPACE.match(command)
+                if at_root and re.search(r"[$*?\[]", at_root.group(1) or ""):
+                    previous, folder = folder, "?"     # cd "$WORKSPACE/$APP_DIR" (the eighth review of 2d.2k)
+                    continue
                 if at_root:
                     # cd $WORKSPACE/x: the checkout's own folder x, wherever the script was.
                     if command.startswith("pushd"):
@@ -1717,7 +1724,7 @@ class JenkinsRules:
                     if words[0] == "pushd":
                         stack.append(folder)
                     previous = folder
-                    if "$" in target or folder == "?" or target.startswith(("/", "~")):
+                    if re.search(r"[$*?\[]", target) or folder == "?" or target.startswith(("/", "~")):
                         folder = "?"
                     else:
                         joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
@@ -1861,7 +1868,7 @@ class JenkinsRules:
         scanned: set = set()
         for info in self.infos:
             # A method of the file expanded at many calls records its steps once per call; each step's
-            # script is scanned once, as the signing scan is (flagship slice 2d.2i, B097).
+            # script is scanned once per call and folder (flagship slices 2d.2i, B097, and 2d.2k).
             if not info.shell or (id(info.use.call), info.ctx.dir) in scanned:
                 continue
             scanned.add((id(info.use.call), info.ctx.dir))
