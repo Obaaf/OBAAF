@@ -10,6 +10,7 @@ this one. The page says how to make that part of the report again from the snaps
 """
 
 import json
+import re
 import unittest
 from datetime import datetime, timezone
 
@@ -77,45 +78,25 @@ class WhatThePageSaysTest(unittest.TestCase):
     def page_block(self) -> str:
         return self.page.split("```text\nREAD: 5 of 15\n")[1].split("```")[0]
 
-    def test_the_read_block_names_what_the_snapshot_holds(self):
+    def test_the_read_block_is_the_reports_own_but_for_the_quotes_added_since(self):
         # The block is the report as the development version printed it on 2026-11-13, and the page keeps it
         # so: a record of a dated run is not rewritten when a later version words the report otherwise (issue
-        # #125; since flagship slice 2b.8 the report quotes each name in a list). So this compares what the block
-        # names with the snapshot, not the block with what the code prints today.
-        block = self.page_block()
-        settings = self.snap["settings"]
-        lines = block.splitlines()
-        # The five settings that were read, under the titles the report gives them, in the report's order.
-        titles = [s.title for s in audit.SETTINGS if settings[s.key]["status"] == "read"]
-        self.assertEqual([line.strip() for line in lines if line.startswith("  ") and not line.startswith("   ")],
-                         titles)
-        repo = settings["repository"]["value"]
-        self.assertIn(f"{repo['visibility']} repository, default branch {repo['default_branch']}, owned by the "
-                      f"organisation {repo['owner']}", block)
-        for ruleset in settings["rulesets"]["value"]:
-            line = next(l for l in lines if l.strip().startswith(f'"{ruleset["name"]}" ('))
-            self.assertIn(f"({ruleset['enforcement']}, {ruleset['target']}, from {ruleset['source_type']} "
-                          f"{ruleset['source']})", line)
-            self.assertEqual([t for t in ("deletion", "non_fast_forward", "pull_request", "required_status_checks")
-                              if t in line], [r["type"] for r in ruleset["rules"]])
-            self._checks_in_order(ruleset["rules"], line)
-        for branch, rules_in_force in settings["branch_rules"]["value"].items():
-            line = next(l for l in lines if l.strip().startswith(f'"{branch}": deletion'))
-            self._checks_in_order(rules_in_force, line)
-        for env in settings["environments"]["value"]:
-            line = next(l for l in lines if l.strip().startswith(f'"{env["name"]}": '))
-            for policy in env.get("branch_policies") or []:
-                self.assertIn(f"{policy['type']} {policy['name']}", line)
-            for reviewer in env["reviewers"]:
-                self.assertIn(reviewer["name"], line)
-            self.assertEqual("no required reviewers" in line, not env["reviewers"])
-            self.assertEqual("any branch or tag may deploy" in line, env["deployment_branches"] == "any")
+        # #125). Since flagship slice 2b.8 the report quotes each name in a list, so this takes today's report
+        # and undoes that one change: on each line, every quoted name after the first (the name the line begins
+        # with, which was quoted then too) loses its quotes. What is left must be the record to the character.
+        # A later change of wording adds its own step here; the record is not edited.
+        quoted_name = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
-    def _checks_in_order(self, rules_list, line: str) -> None:
-        names = [c["context"] for r in rules_list if r["type"] == "required_status_checks"
-                 for c in r["parameters"]["required_status_checks"]]
-        shown = line.split("required_status_checks (", 1)[1].rsplit(")", 1)[0].split(", ")
-        self.assertEqual(shown, names)
+        def as_then(line: str) -> str:
+            first = quoted_name.search(line)
+            if not first:
+                return line
+            return line[:first.end()] + quoted_name.sub(lambda m: m.group(1), line[first.end():])
+
+        usage = workflows.not_read("not part of this test")
+        text = report.to_text(self.snap, assessment=rules.evaluate(self.snap, usage), usage=usage)
+        now = text.split("READ: 5 of 15\n")[1].split("\n\n")[0]
+        self.assertEqual(self.page_block().rstrip("\n"), "\n".join(as_then(line) for line in now.splitlines()))
 
     def test_the_page_says_the_block_is_worded_as_it_was_printed_then(self):
         # The current report quotes the names the block prints bare; the page must say so (issue #125).

@@ -9,25 +9,16 @@ is only when it is one plain word.
 import copy
 import unittest
 
-from test_settings_audit import R, TOKEN, entry_for, recording, replace, take
+from test_settings_audit import R, TOKEN, recording, replace, take
+
+from obaaf.audit import github
 
 from obaaf.audit import report
+from obaaf.audit import snapshot as snapshot_mod
 
 # The example in #125: a check name that, printed bare, reads as the end of one rule and a second rule of a
 # type the audit does not know.
 SPOOF = 'a), "evil" (a type this audit does not know), update, (b'
-
-
-def _ruleset_checks(entries, names):
-    for path in (f"{R}/rulesets/1?includes_parents=true", f"{R}/rules/branches/main?per_page=100"):
-        try:
-            body = entry_for(entries, path)["body"]
-        except (StopIteration, KeyError, AssertionError):
-            continue
-        for rule in body["rules"] if isinstance(body, dict) else body:
-            if rule["type"] == "required_status_checks":
-                rule["parameters"]["required_status_checks"] = [{"context": n} for n in names]
-    return entries
 
 
 class ListedNamesTest(unittest.TestCase):
@@ -96,6 +87,141 @@ class SingleValuesTest(unittest.TestCase):
         self.assertIn("approval is required for: first_time_contributors", text)
         self.assertIn('ruleset 42 "main protection": OrganizationAdmin (always), RepositoryRole 5 (pull_request)', text)
         self.assertIn('"main": no review required; required checks: "ci"; administrators are held to it', text)
+
+
+# A value that would pass for structure if printed bare: a comma, a bracket and a space.
+BAD = "x, y (z"
+SHOWN = '"x, y (z"'
+
+
+def _snapshot() -> dict:
+    """The administrator's recording, with every field the report prints from outside set to BAD (each is a
+    value the snapshot's schema allows)."""
+    snap, _ = take(recording("admin-token"), token=TOKEN)
+    snap = copy.deepcopy(snap)
+    s = snap["settings"]
+    repo = s["repository"]["value"]
+    repo.update(visibility=BAD, default_branch=BAD, owner=BAD)
+    ruleset = s["rulesets"]["value"][0]
+    ruleset.update(enforcement=BAD, target=BAD, source_type=BAD, source=BAD)
+    ruleset["rules"].append({"type": "required_status_checks",
+                             "parameters": {"required_status_checks": [{"context": BAD}]}})
+    actor = s["ruleset_bypass_actors"]["value"][0]["actors"][0]
+    actor.update(actor_type=BAD, bypass_mode=BAD)
+    for rules_in_force in s["branch_rules"]["value"].values():
+        rules_in_force.append({"type": "required_status_checks", "ruleset_id": 42, "ruleset_source_type": "Repository",
+                               "ruleset_source": "example-studio/game",
+                               "parameters": {"required_status_checks": [{"context": BAD}]}})
+    env = s["environments"]["value"][0]
+    env.update(deployment_branches="selected", branch_policies=[{"name": BAD, "type": BAD}],
+               reviewers=[{"type": "User", "name": BAD, "id": 1}], other_protection_rules=[BAD])
+    s["environment_secrets"]["value"] = {env["name"]: [BAD]}
+    s["repository_secrets"]["value"] = [BAD]
+    s["actions_permissions"]["value"].update(allowed_actions=BAD)
+    s["actions_permissions"]["value"].pop("selected_actions", None)   # only "selected" has the list
+    s["workflow_permissions"]["value"].update(default_workflow_permissions=BAD)
+    s["fork_pull_requests"]["value"].update(approval_policy=BAD)
+    policy = s["actions_policies"]["value"][0]
+    policy.update(enforcement=BAD)
+    policy["rules"] = [{"type": "restrict_action_events", "parameters": {"allowed_events": [BAD]}},
+                       {"type": BAD, "parameters": {}}]
+    policy["conditions"] = {"workflow_path": {"include": [BAD], "exclude": []}}
+    for branch in s["branches"]["value"].values():
+        branch["public_protection"] = {"enabled": True, "required_status_checks": {
+            "strict": True, "enforcement_level": BAD, "contexts": [BAD], "checks": []}}
+    snap["requested_as"] = BAD
+    snap["api"] = BAD
+    return snap
+
+
+class EveryFieldTest(unittest.TestCase):
+    """Each place the slice changed prints the bad value quoted (the review of slice 2b.8 found that reverting
+    most of them one at a time left every test passing)."""
+
+    def setUp(self):
+        self.snap = _snapshot()
+        self.assertEqual(snapshot_mod.problems(self.snap), [])
+        # Without the origin line the header prints where the settings were read from.
+        self.text = report.to_text(self.snap)
+        self.lines = self.text.splitlines()
+
+    def line(self, start: str) -> str:
+        return next(l for l in self.lines if l.strip().startswith(start))
+
+    def test_every_field_prints_quoted(self):
+        cases = {
+            "repository: visibility, default branch, owner": (
+                f"{SHOWN} repository, default branch {SHOWN}, owned by the organisation {SHOWN}", 1),
+            "ruleset: enforcement, target, source type, source": (
+                f"({SHOWN}, {SHOWN}, from {SHOWN} {SHOWN}):", 1),
+            "ruleset's required checks": (f"required_status_checks ({SHOWN})", 2),
+            "pattern: type and name": (f"may deploy: {SHOWN} {SHOWN};", 1),
+            "reviewers": (f"reviewers: {SHOWN};", 1),
+            "other protection rules": (f"other rules: {SHOWN};", 1),
+            "allowed actions": (f"allowed actions: {SHOWN};", 1),
+            "default token permission": (f"the workflow token defaults to {SHOWN};", 1),
+            "fork approval policy": (f"approval is required for: {SHOWN}", 1),
+            "policy: enforcement": (f"({SHOWN}, from ", 1),
+            "policy: paths": (f"for {SHOWN}:", 1),
+            "policy: events": (f"only these events may start a workflow: {SHOWN}", 1),
+            "policy: a rule of a type it does not know": (f"; {SHOWN}", 1),
+            "the public view: checks and enforcement level": (
+                f"required checks: {SHOWN} (enforcement: {SHOWN})", 1),
+            "header: asked for as": (f"Asked for as {SHOWN};", 1),
+            "header: where it was read from": (f"from {SHOWN}, with a token.", 1),
+        }
+        for what, (text, count) in cases.items():
+            with self.subTest(what=what):
+                self.assertGreaterEqual(self.text.count(text), count, text)
+        # Nothing prints the value bare, anywhere.
+        bare = [l for l in self.lines if BAD in l.replace(SHOWN, "")]
+        self.assertEqual(bare, [])
+
+    def test_the_bypass_actor_and_the_secrets_print_quoted(self):
+        self.assertIn(f"{SHOWN} ({SHOWN})", self.line("ruleset 42 "))
+        env = self.snap["settings"]["environments"]["value"][0]["name"]
+        self.assertIn(f"{github.quoted(env)}: {SHOWN}", self.text)
+        secrets = self.lines[self.lines.index("  Names of the repository's secrets") + 1]
+        self.assertEqual(secrets.strip(), SHOWN)
+
+    def test_patterns_and_bypass_actors_are_named_up_to_eight_as_before(self):
+        snap = copy.deepcopy(self.snap)
+        env = snap["settings"]["environments"]["value"][0]
+        env["branch_policies"] = [{"name": f"p{i}", "type": "branch"} for i in range(10)]
+        snap["settings"]["ruleset_bypass_actors"]["value"][0]["actors"] = [
+            {"actor_type": "Team", "actor_id": i + 1, "bypass_mode": "always"} for i in range(10)]
+        text = report.to_text(snap)
+        self.assertIn('branch "p7" and 2 more;', text)
+        self.assertIn("Team 8 (always) and 2 more", text)
+
+
+    def test_a_quote_without_a_space_is_not_a_plain_word(self):
+        self.assertEqual(report._token('x"y'), '"x\\"y"')
+
+
+class LooksLikeAQuoteTest(unittest.TestCase):
+    def test_issue_125s_example_with_a_look_alike_quote_stays_inside(self):
+        # From the review of slice 2b.8: U+02F6 is a modifier letter that prints as a double quote.
+        for mark in ("\u02f6", "\u02f5", "\u1cd3", "\u2e42", "\u275d", "\u275e", "\U0001f676", "\uff02"):
+            with self.subTest(mark=hex(ord(mark))):
+                shown = github.quoted(f"a){mark}, {mark}evil{mark} (b")
+                self.assertEqual(shown, '"a)?, ?evil? (b"')
+
+    def test_a_look_alike_backslash_cannot_make_the_closing_quote_look_escaped(self):
+        for mark in ("\uff3c", "\ufe68", "\u29f5", "\u29f9", "\u2216"):
+            with self.subTest(mark=hex(ord(mark))):
+                self.assertEqual(github.quoted(f"lint{mark}"), '"lint?"')
+
+    def test_a_compatibility_form_of_a_quote_or_backslash_is_caught_without_being_listed(self):
+        import unicodedata
+        found = [chr(c) for c in range(0x80, 0x30000) if chr(c) not in '"\\'
+                 and any(x in '"\\' for x in unicodedata.normalize("NFKC", chr(c)))]
+        self.assertTrue(found)
+        for ch in found:
+            self.assertEqual(github.quoted(ch), '"?"', hex(ord(ch)))
+
+    def test_names_with_ordinary_marks_are_left_alone(self):
+        self.assertEqual(github.quoted("Sean\u2019s env, l'autre, caf\u00e9"), '"Sean\u2019s env, l\'autre, caf\u00e9"')
 
 
 if __name__ == "__main__":

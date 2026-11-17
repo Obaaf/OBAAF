@@ -156,8 +156,8 @@ def _environment_text(env: dict) -> str:
     else:
         # A pattern is for branches or for tags, and the same text means different things: "v*" as a tag
         # pattern admits a release tag, as a branch pattern it admits any branch someone names v-something.
-        branches = "may deploy: " + (_join(f"{_token(p['type'], 20) if p['type'] else 'pattern'} {quoted(p['name'])}"
-                                           for p in env["branch_policies"])
+        branches = "may deploy: " + (_join((f"{_token(p['type'], 20) if p['type'] else 'pattern'} {quoted(p['name'])}"
+                                            for p in env["branch_policies"]), 8)
                                      if env["branch_policies"] else "nothing (no pattern is set)")
     if not env["reviewers"]:
         review = "no required reviewers"
@@ -194,9 +194,9 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
         names = _ruleset_names(settings)
         lines = []
         for entry in value:
-            who = _join(f"{_token(a['actor_type'], 30)}{'' if a['actor_id'] is None else ' ' + plain(a['actor_id'], 20)} "
+            who = _join((f"{_token(a['actor_type'], 30)}{'' if a['actor_id'] is None else ' ' + plain(a['actor_id'], 20)} "
                         f"({_token(a['bypass_mode'], 30) if a['bypass_mode'] else 'mode not given'})"
-                        for a in entry["actors"])
+                        for a in entry["actors"]), 8)
             name = f" {quoted(names[entry['ruleset_id']])}" if entry["ruleset_id"] in names else ""
             lines.append(f"ruleset {plain(entry['ruleset_id'], 20)}{name}: {who}")
         return lines or ["no ruleset's bypass list was read"]
@@ -354,9 +354,9 @@ def to_text(snapshot: dict, origin: str = "", assessment: dict | None = None, us
     tally = counts(snapshot)
     how = "with a token" if snapshot["viewer"].get("authenticated") else "without a token"
     lines = [f"Settings audit of {plain(snapshot['repository'], 140)}",
-             origin or f"Read {when(snapshot)} from {plain(snapshot['api'], 100)}, {how}."]
+             origin or f"Read {when(snapshot)} from {_token(snapshot['api'], 100)}, {how}."]
     if snapshot.get("requested_as"):
-        lines.append(f"Asked for as {plain(snapshot['requested_as'], 140)}; GitHub now calls it "
+        lines.append(f"Asked for as {_token(snapshot['requested_as'], 140)}; GitHub now calls it "
                      f"{plain(snapshot['repository'], 140)}.")
     if assessment is None:
         lines.append("This lists what was read and what was not. No rule was applied to it.")
