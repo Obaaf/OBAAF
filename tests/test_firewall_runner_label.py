@@ -3,7 +3,8 @@
 OBAAF-GHA-020 clears for a job on `ubuntu-24.04-firewall` with an enforcing policy (decision D-050),
 which reads the label as GitHub's own runner. OBAAF-GHA-013 used to report the same label at medium
 as one it could not name, so a job on the firewall still failed a medium gate. Both rules now read the
-label the same way: any letter case, no space trimmed, and only as the job's one label.
+label the same way: any letter case, no space trimmed, and only as the job's one label, which since
+slice 2d.10 (#216, D-080) may be written more than once.
 """
 
 import unittest
@@ -138,6 +139,20 @@ class TheSameLabelWrittenTwiceTest(unittest.TestCase):
                     write_repository(tmp, runs_on, on="pull_request_target", policy=None)
                     result = checker.check(tmp)
                 self.assertNotIn("OBAAF-GHA-013", {f.rule for f in result.findings})
+
+    def test_obaaf_verify_reads_the_agent_runs_runner_the_same_way(self):
+        """`obaaf verify`'s gate on an agent run's runner reads the record's kind, which comes from
+        `runner_kind`: the label written twice is GitHub-hosted, two different labels are not."""
+        from obaaf.attest import records
+        from obaaf.verify.policy import Policy
+        from obaaf.verify.release import agent_authority_problems
+        for runs_on, hosted in (("[ubuntu-latest, Ubuntu-Latest]", True), ("[ubuntu-latest, gpu]", False)):
+            with self.subTest(runs_on=runs_on), TempDir() as tmp:
+                write_repository(tmp, runs_on, policy=None)
+                auth, _ = records.authority_from_workflow(tmp / ".github" / "workflows" / "agent.yml", "agent")
+                problems = agent_authority_problems({"authority": auth}, Policy(repository="example/game"))
+                self.assertEqual(auth["runner"]["kind"] == "github-hosted", hosted)
+                self.assertEqual(any("not GitHub-hosted" in p for p in problems), not hosted, problems)
 
     def test_two_different_labels_are_still_not_one(self):
         for runs_on in ("[ubuntu-latest, ubuntu-24.04]", "[ubuntu-latest, 'ubuntu-latest ']", "[ubuntu-latest, gpu]"):
