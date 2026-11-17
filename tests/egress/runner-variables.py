@@ -8,7 +8,7 @@ see (tests/egress/runner-variables-probe). This script gives the values to set a
 seen against the file's `expected`. Every value is a made-up path or word; none is a secret.
 
   python3 -I runner-variables.py --github-env CHANNEL     lines for GITHUB_ENV
-  python3 -I runner-variables.py --judge DIR [OUTCOME]    read DIR/<channel>-<plain|composite>.json;
+  python3 -I runner-variables.py --judge DIR OUTCOME      read DIR/<channel>-<plain|composite>.json;
                                                           OUTCOME is how the step that wrote
                                                           NODE_OPTIONS to GITHUB_ENV ended
 """
@@ -149,8 +149,8 @@ def main(argv: list[str]) -> int:
         for name in set_in(data, argv[1]):
             print(f"{name}={marker(argv[1], name)}")
         return 0
-    if len(argv) in (2, 3) and argv[0] == "--judge":
-        return judge(Path(argv[1]), argv[2] if len(argv) == 3 else None)
+    if len(argv) == 3 and argv[0] == "--judge":
+        return judge(Path(argv[1]), argv[2])
     print(__doc__, file=sys.stderr)
     return 2
 

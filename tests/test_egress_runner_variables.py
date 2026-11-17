@@ -169,11 +169,32 @@ class Judge(unittest.TestCase):
                         continue
                     seen[name] = how[outcome](channel, twin if name not in rv.set_in(self.data, channel) and twin else name)
                 (Path(tmp) / f"{label}.json").write_text(json.dumps(seen))
-            for outcome, status in ((rv.NODE_OPTIONS_WRITE, 0), (None, 0), ("failure", 1), ("skipped", 1)):
+            for outcome, status in ((rv.NODE_OPTIONS_WRITE, 0), (None, 0), ("failure", 1), ("skipped", 1), ("", 1)):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(rv.judge(Path(tmp), outcome), status, (outcome, out.getvalue()[-400:]))
             self.assertEqual(rv.NODE_OPTIONS_WRITE, "success")
+            # One name that came back another way than the record says fails the judge, and it says which:
+            # the runner taking the NODE_OPTIONS line after all, and the runner giving up RUNNER_TEMP.
+            for label, name, value in (("genv-plain", "NODE_OPTIONS", rv.marker("genv", "NODE_OPTIONS")),
+                                       ("step-composite", "RUNNER_TEMP", rv.marker("step", "RUNNER_TEMP")),
+                                       ("job-plain", "HOME", None)):
+                path = Path(tmp) / f"{label}.json"
+                kept = path.read_text()
+                seen = json.loads(kept)
+                self.assertNotEqual(seen.get(name, "absent"), value)
+                seen[name] = value
+                path.write_text(json.dumps(seen))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(rv.judge(Path(tmp), rv.NODE_OPTIONS_WRITE), 1, (label, name))
+                self.assertIn(f"FAILED: {label} {name}:", out.getvalue())
+                path.write_text(kept)
+            # The command line needs the outcome: without it the check would be skipped silently.
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rv.main(["--judge", tmp]), 2)
+                self.assertEqual(rv.main(["--judge", tmp, rv.NODE_OPTIONS_WRITE]), 0)
+                self.assertEqual(rv.main(["--judge", tmp, "failure"]), 1)
 
     def test_the_job_gives_the_judge_the_outcome_of_the_step_that_wrote_node_options(self):
         steps = WORKFLOW["jobs"]["runner-variables"]["steps"]
