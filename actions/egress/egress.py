@@ -249,10 +249,10 @@ LOADER_PRESENCE_VARIABLES = ("LD_DYNAMIC_WEAK", "LD_SHOW_AUXV")
 #           (LC_ALL, then LC_CTYPE, then LANG), and glibc then opens the files
 #           of the locale that is named, under /usr/lib/locale. LC_ALL outranks
 #           the other two. "C" is the one locale glibc has built in: it opens no
-#           file for it, and with it glibc never consults LANGUAGE, which
-#           otherwise names directories of message catalogues and may hold
-#           "../". Python reads and writes UTF-8 in the C locale (its UTF-8
-#           mode), as it does in the hosted runner's own C.UTF-8.
+#           file for it, and in it glibc does not consult LANGUAGE, which in a
+#           locale such as en_US.UTF-8 names directories of message catalogues
+#           and may hold "../". Python reads and writes UTF-8 in the C locale
+#           (its UTF-8 mode).
 #   TZ      read when Python first imports time, which it does as it starts. A
 #           value that names a file, with or without a leading colon, is opened
 #           and read as a zone. UTC0 names none of the workflow's: glibc looks

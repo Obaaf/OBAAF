@@ -40,8 +40,9 @@ LOCALE = "locale"                      # what the watch calls LOCALE_DIR
 
 # name -> (what is planted, relative to DIR; "file" or "dir"), and the value the variable is given.
 # LC_ALL, LANG and TZ are read by glibc and Python while Python starts; the rest when first needed.
-# LANGUAGE names a directory of message catalogues, relative to /usr/share/locale, and glibc lets it
-# hold "../" in a program that is not setuid; it is read only in a locale other than "C".
+# LANGUAGE names a directory of message catalogues, relative to /usr/share/locale, and may hold "../".
+# glibc consults it only when the process's message locale is neither C nor C.UTF-8, and Python sets
+# only its character type from the environment as it starts, so nothing is expected to open it.
 PLANTED = {
     "LANGUAGE": ("language", "dir", "../../../..{dir}/language"),
     "TZ": ("zone", "file", ":{dir}/zone"),
