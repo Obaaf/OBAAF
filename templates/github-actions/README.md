@@ -16,7 +16,7 @@ One more is optional and not installed: [optional/obaaf-settings-drift.yml](opti
 ## Install
 
 The package from PyPI does not include these templates, so they are copied from a clone of the OBAAF
-repository checked out at the commit you pin:
+repository, kept outside the repository you are setting up and checked out at the commit you pin:
 
 ```bash
 git clone https://github.com/Obaaf/OBAAF.git obaaf-src
@@ -27,8 +27,10 @@ obaaf templates install --source obaaf-src/templates/github-actions \
   --repository YOU/YOUR-GAME
 ```
 
-Running `obaaf` inside the clone does not find them; `--source` does. With OBAAF installed from the clone
-(`pip install -e obaaf-src`), `--source` can be left out.
+For release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints the full SHA. `OWNER/obaaf` is the
+repository the workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it. `obaaf` does not look for the
+templates in the current directory, so running it inside the clone is not enough: pass `--source`. With OBAAF
+installed from the clone in editable mode (`pip install -e obaaf-src`), `--source` can be left out.
 
 This copies the workflows into `.github/workflows/`, pins the `setup-obaaf` action to that commit, and adds `.github/obaaf-policy.yaml`, `.github/obaaf.yml`, `.github/obaaf/agent.sh` and `obaaf-sources.yaml`. Until you install them, the templates contain the placeholders `OBAAF_OWNER` and an all-zero SHA, which `obaaf check` reports (`OBAAF-GHA-023`) so they cannot run by accident.
 
