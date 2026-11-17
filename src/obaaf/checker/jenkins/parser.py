@@ -121,6 +121,7 @@ class Opaque(Node):
 @dataclass
 class Block(Node):
     stmts: list
+    params: list = field(default_factory=list)    # a trailing closure's parameters (`list.each { x -> }`)
 
 
 @dataclass
@@ -543,7 +544,7 @@ class Parser:
             parts = []
             while not (self.tok.kind in ("nl", "eof") or self.at_op(";", "}")):
                 parts.append(self.advance().value)
-            return Import("".join(parts), line=t.line, col=t.col)
+            return Import(" ".join(parts), line=t.line, col=t.col)
         if kw == "if":
             self.expect_op("(")
             self.skip_nl()
@@ -1009,7 +1010,9 @@ class Parser:
                 continue
             if t.kind == "op" and t.value == "{" and self.same_line_as_previous() and isinstance(
                     node, (Name, Prop, Call)):
-                block = self.closure().body
+                closure = self.closure()
+                block = closure.body
+                block.params = list(closure.params)
                 if isinstance(node, Call) and node.closure is None:
                     node.closure = block
                 else:
@@ -1048,7 +1051,9 @@ class Parser:
         self.expect_op(")")
         closure = None
         if self.at_op("{") and self.same_line_as_previous():
-            closure = self.closure().body
+            trailing = self.closure()
+            closure = trailing.body
+            closure.params = list(trailing.params)
         return args, named, closure
 
     def argument(self, args: list, named: list) -> None:

@@ -207,6 +207,14 @@ agent_packages:
   - aider-install
   - "@qodo/command"
 
+# Install scripts of agent CLIs (R6), as regular expressions matched anywhere in a script line, however
+# the script is fetched and run (flagship slice 2d.2k: only `curl ... | sh` on one line was read). Each
+# installs the version the script chooses.
+agent_install_urls:
+  - 'claude\.ai/install\.(sh|ps1|cmd)\b'
+  - 'aider\.chat/install\.(sh|ps1)\b'
+  - 'opencode\.ai/install\b'
+
 # Steps that sign provenance or other attestations (G7.1, FR5).
 provenance_actions:
   - actions/attest-build-provenance
