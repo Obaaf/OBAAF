@@ -57,6 +57,10 @@ class Agent:
     line: int = 0
     yaml_ref: str | None = None    # a variable or call that holds the pod spec ("" when not a name)
     from_step: bool = False        # docker.image(...).inside or withDockerContainer: the image is a step argument
+    # Flagship slice 2d.2k: the Dockerfile a `dockerfile` agent builds ("?" when computed), and whether a
+    # pod template's container list could not be read (a variable the file changes, a call).
+    dockerfile: str | None = None
+    images_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,12 @@ class Library:
     how: str
     line: int
     exprs: tuple = ()
+    ref: str | None = None          # the variable or property a library named by a value reads (env.LIB)
+    # Flagship slice 2d.2k: where a `library` step's retriever takes the library from. "self" for
+    # legacySCM(scm), the build's own checkout; "computed" for a retriever built from values the file
+    # does not fix; None for a retriever written out, or none.
+    retriever: str | None = None
+    retriever_source: tuple | None = None   # (source, severity) when those values come from untrusted text
 
 
 @dataclass
@@ -138,6 +148,11 @@ class Pipeline:
     # None, line, stage). `jenkins-misnamed` is the variable under another spelling in an environment
     # block or a withEnv; `jenkins-scripted` is any spelling assigned to `env.` in a script.
     unread_lanes: list = field(default_factory=list)
+    # Flagship slice 2d.2k: every call that runs Groovy the file does not hold, whatever the receiver:
+    # (kind, name, call, ctx), kind one of load, evaluate, jobDsl. Variables holding a GroovyShell or
+    # GroovyClassLoader, whose `parse` compiles text.
+    code_loads: list = field(default_factory=list)
+    groovy_shells: set = field(default_factory=set)
 
 
 # ----------------------------------------------------------------------- helpers
@@ -241,6 +256,41 @@ def text_of(node) -> str | None:
 
 def first_arg(call: Call):
     return call.args[0] if call.args else None
+
+
+_EVAL_FUNCTIONS = {"me", "x", "xy", "xyz"}
+
+
+def code_loading(name: str, shells=()) -> str | None:
+    """`load`, `evaluate` or `jobDsl` when a call runs Groovy the file does not hold, on any receiver
+    (flagship slice 2d.2k: `s.load(...)` with `s` the script, `Eval.me(...)`, a GroovyShell's
+    `evaluate` and `parse`, `parseClass`, and Job DSL got past OBAAF-JEN-004); None otherwise."""
+    if not name:
+        return None
+    parts = name.split(".")
+    last = parts[-1]
+    if name == "jobDsl":
+        return "jobDsl"
+    if last == "load":
+        return "load"
+    if last == "evaluate" or last == "parseClass":
+        return "evaluate"
+    if len(parts) >= 2 and parts[-2] == "Eval" and last in _EVAL_FUNCTIONS:
+        return "evaluate"
+    if last == "parse" and len(parts) >= 2 and (parts[0] in shells or any(
+            "GroovyShell" in x or "GroovyClassLoader" in x or x == "classLoader" for x in parts[:-1])):
+        return "evaluate"
+    return None
+
+
+def code_text_arg(kind: str, name: str, call: Call):
+    """The argument that holds the code a code-loading call runs: the path for load, the text for
+    evaluate (the last argument of Eval.x, Eval.xy and Eval.xyz), scriptText for jobDsl."""
+    if kind == "jobDsl":
+        return named_arg(call, "scriptText")
+    if name.split(".")[-2:-1] == ["Eval"] and call.args:
+        return call.args[-1]
+    return first_arg(call) if call.args else named_arg(call, "path") or named_arg(call, "text")
 
 
 def iter_closure_bodies(node):
@@ -518,7 +568,9 @@ def if_eval(cond, methods: dict | None = None, depth: int = 0) -> tuple:
             _BRANCH_NAME.fullmatch(path_of(x)) or _CHANGE_ID.fullmatch(path_of(x)))), None)
         value = next((literal(x) for x in sides if literal(x) is not None), None)
         if var and value is not None and _BRANCH_NAME.fullmatch(var):
-            if "BRANCH_NAME" not in var:
+            # GIT_BRANCH holds the change request's name in a multibranch job, as BRANCH_NAME does
+            # (flagship slice 2d.2k: `env.GIT_BRANCH ==~ /PR-\d+/` was read as keeping them out).
+            if "BRANCH_NAME" not in var and "GIT_BRANCH" not in var:
                 match = (CR_NO, True)
             else:
                 match = _branch_match(value, "REGEXP" if cond.op == "==~" else "EQUALS")
@@ -879,6 +931,9 @@ def agent_from_closure(block: Block) -> Agent:
             a.kind = "dockerfile"
             if expr.closure is not None:
                 _docker_details(a, expr.closure)
+            else:
+                # `dockerfile true` builds ./Dockerfile; any other value is not read.
+                a.dockerfile = "Dockerfile" if path_of(arg) == "true" else "?"
         elif name == "kubernetes":
             a.kind = "kubernetes"
             if expr.closure is not None:
@@ -902,10 +957,16 @@ def _set_image(a: Agent, node) -> None:
     if lit is not None:
         a.image = lit
     elif node is not None:
-        a.image, a.image_dynamic = text_of(node), True
+        # `image params.X`, `image IMG`: a value the rules resolve from the file's literals or report as
+        # computed (flagship slice 2d.2k: such an image was dropped, and OBAAF-JEN-008 said nothing).
+        text = text_of(node)
+        if text is None:
+            text = "${" + (path_of(node) or "computed") + "}"
+        a.image, a.image_dynamic = text, True
 
 
 def _docker_details(a: Agent, block: Block) -> None:
+    filename = folder = None
     for stmt in block.stmts:
         expr = stmt.expr if isinstance(stmt, ExprStmt) else None
         if isinstance(expr, Call):
@@ -916,6 +977,20 @@ def _docker_details(a: Agent, block: Block) -> None:
                 a.args = _args_text(first_arg(expr))
             elif name == "label":
                 a.label = literal(first_arg(expr))
+            elif name == "filename":
+                filename = literal(first_arg(expr)) or "?"
+            elif name == "dir":
+                folder = literal(first_arg(expr)) or "?"
+    if a.kind == "dockerfile":
+        a.dockerfile = _dockerfile_path(folder, filename)
+
+
+def _dockerfile_path(folder: str | None, filename: str | None) -> str:
+    """The Dockerfile a `dockerfile` agent builds: `filename` inside `dir`, by default ./Dockerfile."""
+    if folder == "?" or filename == "?":
+        return "?"
+    parts = [x.strip("/") for x in (folder, filename or "Dockerfile") if x and x.strip("/") not in ("", ".")]
+    return "/".join(parts) or "Dockerfile"
 
 
 def _k8s_key(a: Agent, key: str, value) -> None:
@@ -933,8 +1008,27 @@ def _k8s_key(a: Agent, key: str, value) -> None:
     elif key == "containers" and isinstance(value, ListLit):
         for item in value.items:
             if isinstance(item, Call) and callee_name(item) == "containerTemplate":
-                img = named_arg(item, "image")
-                a.images.append((literal(img) or text_of(img) or "?", item.line))
+                _container_image(a, item)
+            else:
+                a.images_unknown = True
+    elif key == "containers" and value is not None:
+        a.images_unknown = True       # a list the file builds or changes elsewhere (flagship slice 2d.2k)
+
+
+def _container_image(a: Agent, item: Call) -> None:
+    """The image of a containerTemplate: a named argument, or `image '...'` in its closure (flagship
+    slice 2d.2k: the closure form was reported as "Image '?'")."""
+    img = named_arg(item, "image")
+    if img is None and item.closure is not None:
+        for stmt in item.closure.stmts:
+            expr = stmt.expr if isinstance(stmt, ExprStmt) else None
+            if isinstance(expr, Call) and callee_name(expr) == "image":
+                img = first_arg(expr)
+    if img is None:
+        a.images_unknown = True
+        return
+    text = literal(img) or text_of(img) or ("${" + path_of(img) + "}" if path_of(img) else "${computed}")
+    a.images.append((text, item.line))
 
 
 def _k8s_details(a: Agent, block: Block) -> None:
@@ -948,8 +1042,7 @@ def _k8s_details(a: Agent, block: Block) -> None:
             if name in ("yaml", "yamlFile", "inheritFrom", "label"):
                 _k8s_key(a, name, first_arg(expr))
             elif name == "containerTemplate":
-                img = named_arg(expr, "image")
-                a.images.append((literal(img) or text_of(img) or "?", expr.line))
+                _container_image(a, expr)
 
 
 TRIGGER_STEPS = {"GenericTrigger", "ghprbTrigger", "GhprbTrigger", "githubPullRequests", "gitlab", "bitbucketPR",
@@ -1292,6 +1385,8 @@ class Builder:
         cname = chain_name(value) if isinstance(value, Call) else None
         if cname and (cname.startswith("docker.build") or cname.startswith("docker.image")):
             self.p.docker_vars.add(name)
+        if cname and (cname.startswith("new GroovyShell") or cname.startswith("new GroovyClassLoader")):
+            self.p.groovy_shells.add(name)
         # def msg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim(): the output is text
         # the commit's author wrote.
         base = value
@@ -1344,6 +1439,14 @@ class Builder:
                 break
         if name.startswith("this.") and name.endswith(".call") and name[5:-5] in self.defs:
             name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
+        # Groovy the file does not hold, run through any receiver (flagship slice 2d.2k). Recorded here,
+        # before any branch below can return, so no spelling of the call is lost.
+        loading = code_loading(name, self.p.groovy_shells) if name not in self.defs else None
+        if loading is not None:
+            self.p.code_loads.append((loading, name, call, ctx))
+            self.p.opaque.append((call.line, f"{name}(): Groovy loaded at run time is not analyzed"
+                                  if loading != "jobDsl" else
+                                  "jobDsl(): Job DSL scripts run on the controller and are not analyzed"))
         # A closure held in a variable, given as the last argument, is the step's body like a literal one;
         # so is a method pointer (this.&build, or a variable holding one), as a call of the method.
         if call.closure is None and call.args and name != "parallel":
@@ -1534,8 +1637,6 @@ class Builder:
             return
         if name == "library":
             self.library_step(call)
-        if name in ("load", "evaluate"):
-            self.p.opaque.append((call.line, f"{name}(): Groovy loaded at run time is not analyzed"))
         if name in ("input",):
             sub = named_arg(call, "submitter")
             self.p.approvals.append(Approval(None if sub is None else (literal(sub) or "?"), call.line, ctx))
@@ -1645,10 +1746,27 @@ class Builder:
     def library_step(self, call: Call) -> None:
         node = named_arg(call, "identifier") or first_arg(call)
         self._library(node, "library step", call.line)
+        retriever = named_arg(call, "retriever")
+        if retriever is None or not self.p.libraries:
+            return
+        lib = self.p.libraries[-1]
+        # Flagship slice 2d.2k: where the library comes from. legacySCM(scm) is the build's own checkout,
+        # which for a change request is the change; a retriever whose remote or settings are values the
+        # file does not fix lets whoever sets them choose the library's code.
+        if isinstance(retriever, Call) and callee_name(retriever) == "legacySCM" and any(
+                path_of(a) == "scm" for a in list(retriever.args) + [v for _, v in retriever.named]):
+            lib.retriever = "self"
+            return
+        texts = [t for t in source_texts(retriever) if t not in ("true", "false", "null")]
+        source = untrusted_source(texts, self.p)
+        computed = bool(texts)
+        if computed:
+            lib.retriever, lib.retriever_source = "computed", source
 
     def _library(self, node, how: str, line: int) -> None:
         if not isinstance(node, Str):
-            self.p.libraries.append(Library("?", None, True, how, line))
+            self.p.libraries.append(Library("?", None, True, how, line, ref=path_of(node) if node is not None
+                                            else None))
             return
         text = node.text()
         name, _, version = text.partition("@")

@@ -1,0 +1,560 @@
+"""Flagship slice 2d.2k: OBAAF-JEN-004 (pipeline code from an unapproved revision) and OBAAF-JEN-008
+(an image, library or agent CLI not pinned).
+
+The cases are the ones an Opus 5.5 reviewer that did not write the rules wrote against them, recorded in
+docs/bypass-attempts.md, section 2d.2k, under their ids there: the ways past, the weaker results, the false
+positives that are fixed, and the safe forms beside them. Each case is a Jenkinsfile and the files of the
+repository it reads, kept here as text, not as files, so `obaaf check` on this repository does not read
+them as pipelines.
+"""
+
+import time
+import unittest
+from pathlib import Path
+
+from helpers import TempDir
+
+from obaaf.catalog import load
+from obaaf.checker import jenkins
+from obaaf.checker.jenkins import rules as jrules
+from obaaf.checker.jenkins.model import code_loading
+
+CASES = {
+ 'C001': {
+  'Jenkinsfile': "@Library('shared-lib@${BRANCH_NAME}') _\npipeline {\n  agent any\n  stages {\n    stage('Build') { steps { sh 'make' } }\n  }\n}\n",
+ },
+ 'C002': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  parameters { string(name: \'LIB_VERSION\', defaultValue: \'main\') }\n  stages {\n    stage(\'Build\') {\n      steps {\n        script { library "shared-lib@${params.LIB_VERSION}" }\n        sh \'make\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C003': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  parameters { string(name: 'LIB_VERSION', defaultValue: 'main') }\n  stages {\n    stage('Build') {\n      steps {\n        script { library('shared-lib@' + params.LIB_VERSION) }\n        sh 'make'\n      }\n    }\n  }\n}\n",
+ },
+ 'C004': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  parameters { string(name: 'LIB_REPO', defaultValue: 'https://git.example.com/ci/lib.git') }\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          library identifier: 'ci-lib@main', retriever: modernSCM([$class: 'GitSCMSource', remote: params.LIB_REPO])\n        }\n        sh 'make'\n      }\n    }\n  }\n}\n",
+ },
+ 'C005': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script {\n          def ver = env.CHANGE_BRANCH ?: env.BRANCH_NAME\n          library identifier: "shared-lib@${ver}", changelog: false\n        }\n        sh \'make\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C006': {
+  'Jenkinsfile': "def runCi(s) {\n  def ci = s.load('ci/build.groovy')\n  ci.build()\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script { runCi(this) }\n      }\n    }\n  }\n}\n",
+  'ci/build.groovy': 'def build() { sh "make" }; return this\n',
+ },
+ 'C007': {
+  'Jenkinsfile': "class CiRunner implements Serializable {\n  def script\n  CiRunner(script) { this.script = script }\n  def run() { script.load('ci/build.groovy').build() }\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script { new CiRunner(this).run() }\n      }\n    }\n  }\n}\n",
+  'ci/build.groovy': 'def build() { sh "make" }; return this\n',
+ },
+ 'C008': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  parameters { text(name: \'GROOVY\', defaultValue: \'echo "hi"\') }\n  stages {\n    stage(\'Run\') {\n      when { branch \'main\' }\n      steps {\n        script { evaluate("${params.GROOVY}") }\n      }\n    }\n  }\n}\n',
+ },
+ 'C009': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script {\n          def cfg = Eval.me(readFile(\'ci/config.groovy\'))\n          echo "${cfg}"\n        }\n      }\n    }\n  }\n}\n',
+  'ci/config.groovy': '[a: 1]\n',
+ },
+ 'C010': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          new GroovyShell(this.binding).evaluate(readFile('ci/steps.groovy'))\n        }\n      }\n    }\n  }\n}\n",
+  'ci/steps.groovy': 'println 1\n',
+ },
+ 'C011': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Seed jobs') {\n      steps {\n        jobDsl targets: 'jobs/**/*.groovy', removedJobAction: 'IGNORE'\n      }\n    }\n  }\n}\n",
+  'jobs/x.groovy': "job('x') { steps { shell('id') } }\n",
+ },
+ 'C012': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('PR checks') {\n      when { expression { env.GIT_BRANCH ==~ /PR-\\d+/ } }\n      steps {\n        script { load 'ci/pr.groovy' }\n      }\n    }\n  }\n}\n",
+  'ci/pr.groovy': 'sh "make test"\n',
+ },
+ 'C013': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Test') {\n      steps {\n        script {\n          library identifier: 'self@pr', retriever: legacySCM(scm)\n          ciSteps.runTests()\n        }\n      }\n    }\n  }\n}\n",
+  'vars/ciSteps.groovy': 'def runTests() { sh "make test" }\n',
+ },
+ 'C014': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def shell = new GroovyShell(this.binding)\n          def code = shell.parse(readFile('ci/steps.groovy'))\n          code.run()\n        }\n      }\n    }\n  }\n}\n",
+  'ci/steps.groovy': 'println 1\n',
+ },
+ 'C015': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def cls = this.class.classLoader.parseClass(readFile('ci/Steps.groovy'))\n          cls.newInstance().run(this)\n        }\n      }\n    }\n  }\n}\n",
+  'ci/Steps.groovy': 'class Steps { def run(s) { s.sh "make" } }\n',
+ },
+ 'C016': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script { this."load"(\'ci/build.groovy\') }\n      }\n    }\n  }\n}\n',
+  'ci/build.groovy': 'sh "make"\n',
+ },
+ 'C017': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Seed') {\n      steps {\n        jobDsl scriptText: readFile('seed/jobs.groovy'), sandbox: true\n      }\n    }\n  }\n}\n",
+  'seed/jobs.groovy': "job('x') { steps { shell('id') } }\n",
+ },
+ 'C018': {
+  'Jenkinsfile': "@Library('ci-lib@0123456789abcdef0123456789abcdef01234567') _\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script { evaluate(libraryResource('org/ci/steps.groovy')) }\n      }\n    }\n  }\n}\n",
+ },
+ 'C019': {
+  'Jenkinsfile': 'def helperCode = \'echo "static helper"\'\npipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script { evaluate(helperCode) }\n      }\n    }\n  }\n}\n',
+ },
+ 'C020': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script { evaluate(readTrusted('ci/steps.groovy')) }\n      }\n    }\n  }\n}\n",
+  'ci/steps.groovy': 'echo "x"\n',
+ },
+ 'C021': {
+  'Jenkinsfile': "def withCi(Closure body) {\n  def ctx = this\n  body.call(ctx)\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          withCi { s -> s.evaluate(readFile('ci/steps.groovy')) }\n        }\n      }\n    }\n  }\n}\n",
+  'ci/steps.groovy': 'echo "x"\n',
+ },
+ 'C022': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  parameters { string(name: 'CI_REF', defaultValue: 'main') }\n  stages {\n    stage('Deploy') {\n      when { branch 'main' }\n      steps {\n        dir('ci-scripts') {\n          checkout([$class: 'GitSCM', branches: [[name: params.CI_REF]],\n                    userRemoteConfigs: [[url: 'https://git.example.com/ci/scripts.git']]])\n        }\n        script { load 'ci-scripts/deploy.groovy' }\n      }\n    }\n  }\n}\n",
+ },
+ 'C023': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  environment { CI_LIB = 'shared-lib@main' }\n  stages {\n    stage('Build') {\n      steps {\n        script { library env.CI_LIB }\n        sh 'make'\n      }\n    }\n  }\n}\n",
+ },
+ 'C024': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { LIB_REF = \'main\' }\n  stages {\n    stage(\'Build\') {\n      steps {\n        script { library "shared-lib@${env.LIB_REF}" }\n        sh \'make\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C026': {
+  'Jenkinsfile': "@Library('ci-lib@0123456789abcdef0123456789abcdef01234567') _\npipeline {\n  agent any\n  stages { stage('Build') { steps { sh 'make' } } }\n}\n",
+ },
+ 'C027': {
+  'Jenkinsfile': '@Library(\'ai-review-lib@main\') _\npipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        aiReviewPrepare()\n        sh \'claude -p "review the diff" --output-format json > review.json\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C028': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  libraries { lib('ci-lib@v1.2') }\n  stages { stage('Build') { steps { sh 'make' } } }\n}\n",
+ },
+ 'C029': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    docker { image params.BUILD_IMAGE }\n  }\n  parameters { string(name: 'BUILD_IMAGE', defaultValue: 'node:20') }\n  stages { stage('Build') { steps { sh 'npm ci && npm test' } } }\n}\n",
+ },
+ 'C030': {
+  'Jenkinsfile': "def BUILD_IMAGE = 'node:20'\npipeline {\n  agent none\n  stages {\n    stage('Build') {\n      agent { docker { image BUILD_IMAGE } }\n      steps { sh 'npm ci && npm test' }\n    }\n  }\n}\n",
+ },
+ 'C031': {
+  'Jenkinsfile': "pipeline {\n  agent { docker 'node:20' }\n  stages { stage('Build') { steps { sh 'npm ci && npm test' } } }\n}\n",
+ },
+ 'C032': {
+  'Jenkinsfile': "pipeline {\n  agent { docker { image 'node:20@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' } }\n  stages { stage('Build') { steps { sh 'npm ci && npm test' } } }\n}\n",
+ },
+ 'C033': {
+  'Dockerfile': 'FROM node:20\nRUN npm i -g pnpm\n',
+  'Jenkinsfile': "pipeline {\n  agent { dockerfile true }\n  stages { stage('Build') { steps { sh 'npm ci && npm test' } } }\n}\n",
+ },
+ 'C034': {
+  'Jenkinsfile': "node {\n  checkout scm\n  def img = docker.build('app-ci', '-f ci/Dockerfile .')\n  img.inside {\n    sh 'make test'\n  }\n}\n",
+  'ci/Dockerfile': 'FROM python:3\n',
+ },
+ 'C035': {
+  'Jenkinsfile': "node {\n  checkout scm\n  def db = docker.image('postgres:16')\n  db.withRun('-e POSTGRES_PASSWORD=x') { c ->\n    sh 'make integration'\n  }\n}\n",
+ },
+ 'C036': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Test\') {\n      steps { sh \'docker run --rm -v "$PWD":/src -w /src node:20 npm test\' }\n    }\n  }\n}\n',
+ },
+ 'C037': {
+  'Jenkinsfile': "def containers = [\n  containerTemplate(name: 'node', image: 'node:20', command: 'sleep', args: '99d')\n]\npodTemplate(containers: containers) {\n  node(POD_LABEL) {\n    container('node') { sh 'npm ci && npm test' }\n  }\n}\n",
+ },
+ 'C038': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    kubernetes {\n      containerTemplate {\n        name 'node'\n        image 'node:20@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'\n        command 'sleep'\n        args 'infinity'\n      }\n      defaultContainer 'node'\n    }\n  }\n  stages { stage('Test') { steps { sh 'npm test' } } }\n}\n",
+ },
+ 'C039': {
+  'Jenkinsfile': 'pipeline {\n  agent {\n    kubernetes {\n      yaml \'\'\'\napiVersion: v1\nkind: Pod\nspec:\n  containers: [{name: node, image: "node:20", command: [sleep], args: [infinity]}]\n\'\'\'\n      defaultContainer \'node\'\n    }\n  }\n  stages { stage(\'Test\') { steps { sh \'npm test\' } } }\n}\n',
+ },
+ 'C040': {
+  'Jenkinsfile': 'pipeline {\n  agent {\n    kubernetes {\n      yaml \'\'\'{"apiVersion": "v1", "kind": "Pod", "spec": {"containers": [\n  {"name": "node", "image": "node:20", "command": ["sleep"], "args": ["infinity"]}]}}\'\'\'\n      defaultContainer \'node\'\n    }\n  }\n  stages { stage(\'Test\') { steps { sh \'npm test\' } } }\n}\n',
+ },
+ 'C041': {
+  'Jenkinsfile': 'pipeline {\n  agent {\n    kubernetes {\n      yaml \'\'\'\napiVersion: v1\nkind: Pod\nspec:\n  containers:\n  - name: node\n    "image": node:20\n    command: [sleep]\n    args: [infinity]\n\'\'\'\n      defaultContainer \'node\'\n    }\n  }\n  stages { stage(\'Test\') { steps { sh \'npm test\' } } }\n}\n',
+ },
+ 'C042': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    kubernetes {\n      yaml '''\napiVersion: v1\nkind: Pod\nspec:\n  containers:\n  - name: node\n    image : node:20\n    command: [sleep]\n    args: [infinity]\n'''\n      defaultContainer 'node'\n    }\n  }\n  stages { stage('Test') { steps { sh 'npm test' } } }\n}\n",
+ },
+ 'C043': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    kubernetes {\n      yaml '''\napiVersion: v1\nkind: Pod\nspec:\n  containers:\n  - name: node\n    image: >-\n      node:20@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    command: [sleep]\n    args: [infinity]\n'''\n      defaultContainer 'node'\n    }\n  }\n  stages { stage('Test') { steps { sh 'npm test' } } }\n}\n",
+ },
+ 'C044': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    kubernetes {\n      yamlFile 'ci/pod.yaml'\n      defaultContainer 'node'\n    }\n  }\n  stages { stage('Test') { steps { sh 'npm test' } } }\n}\n",
+  'ci/pod.yaml': 'apiVersion: v1\nkind: Pod\nspec:\n  initContainers:\n  - {name: init, image: busybox}\n  containers:\n  - name: node\n    image: node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    command: [sleep]\n    args: [infinity]\n',
+ },
+ 'C045': {
+  'Jenkinsfile': "podTemplate(containers: [containerTemplate(name: 'node', image: 'node:20', command: 'sleep', args: '99d')]) {\n  node(POD_LABEL) {\n    container('node') { sh 'npm ci && npm test' }\n  }\n}\n",
+ },
+ 'C046': {
+  'Jenkinsfile': 'pipeline {\n  agent none\n  stages {\n    stage(\'Test\') {\n      matrix {\n        axes { axis { name \'NODE\'; values \'18\', \'20\' } }\n        agent { docker { image "node:${NODE}" } }\n        stages { stage(\'npm\') { steps { sh \'npm test\' } } }\n      }\n    }\n  }\n}\n',
+ },
+ 'C047': {
+  'Jenkinsfile': "def img = 'node:20'\npipeline {\n  agent any\n  stages {\n    stage('Test') {\n      steps {\n        script {\n          docker.image(img).inside { sh 'npm test' }\n        }\n      }\n    }\n  }\n}\n",
+ },
+ 'C048': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm install -g @anthropic-ai/claude-code@^2.0.0\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C049': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm install --global @google/gemini-cli@preview\ngemini -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C050': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm i -g @anthropic-ai/claude-code@2\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C051': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'pip install "aider-chat>=0.80"\naider --message "fix lint" --yes\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C052': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'pip install aider-chat[playwright]\naider --message "fix lint" --yes\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C053': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'pip install "aider-chat==0.86.*"\naider --message "fix lint" --yes\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C054': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'pip install aider-chat~=0.86\naider --message "fix lint" --yes\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C055': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm install -g \\\n  @anthropic-ai/claude-code\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C056': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { CLAUDE_VERSION = \'latest\' }\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm i -g @anthropic-ai/claude-code@$CLAUDE_VERSION\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C057': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'curl -fsSL https://claude.ai/install.sh -o install.sh && bash install.sh\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C058': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'wget -qO- https://claude.ai/install.sh | bash\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C059': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'bash <(curl -fsSL https://claude.ai/install.sh)\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C060': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'curl -fsSL https://claude.ai/install.sh | sudo bash\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C061': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'curl -fsSL https://claude.ai/install.sh | /bin/bash\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C062': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('AI review') {\n      steps {\n        sh '''npm uninstall -g @anthropic-ai/claude-code || true\necho cleaned'''\n      }\n    }\n  }\n}\n",
+ },
+ 'C063': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'curl -fsSL https://claude.ai/install.sh | bash -s 2.0.14\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C064': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm i -g @anthropic-ai/claude-code@2.0.14\nclaude update\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C065': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm i -g @anthropic-ai/claude-code@2.0.14 @openai/codex@0.46.0\ncodex exec "fix the build"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C066': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'\'\'npm install -g \\\\\n  @anthropic-ai/claude-code\nclaude -p "review the diff"\'\'\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C067': {
+  'Jenkinsfile': 'def AGENT_PKG = \'@anthropic-ai/claude-code\'\npipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh "npm install -g ${AGENT_PKG}"\n        sh \'claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C068': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  parameters { string(name: \'CLAUDE_VERSION\', defaultValue: \'latest\') }\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh "npm install -g @anthropic-ai/claude-code@${params.CLAUDE_VERSION}"\n        sh \'claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C069': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'./ci/install-agent.sh\'\n        sh \'claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+  'ci/install-agent.sh': '#!/bin/sh\nset -e\nnpm install -g @anthropic-ai/claude-code\n',
+ },
+ 'C070': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'npm install\'\n        sh \'npx claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+  'package.json': '{ "name": "ci", "private": true, "devDependencies": { "@anthropic-ai/claude-code": "latest" } }\n',
+ },
+ 'C071': {
+  'Jenkinsfile': 'pipeline {\n  agent { label \'windows\' }\n  stages {\n    stage(\'AI review\') {\n      steps {\n        powershell \'irm https://claude.ai/install.ps1 | iex\'\n        powershell \'claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C072': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  environment { AGENT_INSTALLER = \'https://claude.ai/install.sh\' }\n  stages {\n    stage(\'AI review\') {\n      steps {\n        sh \'curl -fsSL "$AGENT_INSTALLER" | bash\'\n        sh \'claude -p "review the diff"\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C073': {
+  'Jenkinsfile': 'pipeline {\n  agent { dockerfile { filename \'ci/agent.Dockerfile\' } }\n  stages {\n    stage(\'AI review\') {\n      steps { sh \'claude -p "review the diff"\' }\n    }\n  }\n}\n',
+  'ci/agent.Dockerfile': 'FROM node:20@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nRUN npm install -g @anthropic-ai/claude-code\n',
+ },
+ 'C074': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI review\') {\n      steps { sh \'npx -y @anthropic-ai/claude-code -p "review the diff"\' }\n    }\n  }\n}\n',
+ },
+ 'C075': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI fix\') {\n      steps {\n        sh \'pip install -r ci/requirements-agent.txt\'\n        sh \'aider --message "fix lint" --yes\'\n      }\n    }\n  }\n}\n',
+  'ci/requirements-agent.txt': 'aider-chat\n',
+ },
+ 'C077': {
+  'Jenkinsfile': 'pipeline {\n  agent { docker { image \'node:20\' } }\n  stages {\n    stage(\'AI review\') {\n      steps { sh \'npm i -g @anthropic-ai/claude-code@2.0.14 && claude -p "review the diff"\' }\n    }\n  }\n}\n',
+ },
+ 'C078': {
+  'Jenkinsfile': "pipeline {\n  agent {\n    kubernetes {\n      yaml '''\napiVersion: v1\nkind: Pod\nspec:\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  containers:\n  - name: node\n    image: node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    command: [sleep]\n    args: [infinity]\n'''\n      defaultContainer 'node'\n    }\n  }\n  stages { stage('Test') { steps { sh 'npm test' } } }\n}\n",
+ },
+ 'C080': {
+  'Jenkinsfile': 'pipeline {\n  agent {\n    kubernetes {\n      yaml \'\'\'\napiVersion: v1\nkind: Pod\nspec:\n  containers:\n  - name: node\n    image: node:20\n    command: [sleep]\n    args: [infinity]\n\'\'\'\n    }\n  }\n  stages {\n    stage(\'AI review\') {\n      steps {\n        container(\'node\') { sh \'claude -p "review the diff"\' }\n      }\n    }\n  }\n}\n',
+ },
+ 'C082': {
+  '.ci-lib-version': 'main\n',
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script {\n          library "ci-lib@${readFile(\'.ci-lib-version\').trim()}"\n        }\n        sh \'make\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C083': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'AI fix\') {\n      steps {\n        sh \'pip install aider-chat==0.86.1 && aider --message "fix lint" --yes\'\n      }\n    }\n  }\n}\n',
+ },
+ 'C084': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('PR checks') {\n      when { changeRequest() }\n      steps {\n        script { load 'ci/pr.groovy' }\n      }\n    }\n  }\n}\n",
+  'ci/pr.groovy': 'sh "make test"\n',
+ },
+ 'C085': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'PR checks\') {\n      when { expression { env.GIT_BRANCH ==~ /PR-\\d+/ } }\n      steps {\n        withCredentials([string(credentialsId: \'gh-token\', variable: \'GH_TOKEN\')]) {\n          script { library "ci-lib@${env.GIT_BRANCH}" }\n          sh \'make test\'\n        }\n      }\n    }\n  }\n}\n',
+ },
+}
+
+# (case, rule, outcome, severity): outcome is finding, unknown or none, as obaaf check reports the rule.
+EXPECT = [
+    ('C001', 'OBAAF-JEN-004', 'unknown', None),  # before: held
+    ('C002', 'OBAAF-JEN-004', 'finding', 'high'),  # before: held
+    ('C003', 'OBAAF-JEN-004', 'unknown', None),  # before: held
+    ('C004', 'OBAAF-JEN-004', 'finding', 'high'),  # before: way past
+    ('C005', 'OBAAF-JEN-004', 'finding', 'high'),  # before: held
+    ('C006', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C007', 'OBAAF-JEN-004', 'unknown', None),  # before: way past
+    ('C008', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: held
+    ('C009', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C010', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C011', 'OBAAF-JEN-004', 'finding', 'high'),  # before: way past
+    ('C012', 'OBAAF-JEN-004', 'finding', 'high'),  # before: held
+    ('C013', 'OBAAF-JEN-004', 'finding', 'high'),  # before: way past
+    ('C014', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C015', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C016', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: held
+    ('C017', 'OBAAF-JEN-004', 'finding', 'high'),  # before: way past
+    ('C018', 'OBAAF-JEN-004', 'unknown', None),  # before: false positive
+    ('C019', 'OBAAF-JEN-004', 'unknown', None),  # before: false positive
+    ('C020', 'OBAAF-JEN-004', 'unknown', None),  # before: held
+    ('C021', 'OBAAF-JEN-004', 'finding', 'medium'),  # before: way past
+    ('C022', 'OBAAF-JEN-004', 'unknown', None),  # before: held
+    ('C023', 'OBAAF-JEN-008', 'finding', 'medium'),  # before: way past
+    ('C024', 'OBAAF-JEN-008', 'finding', 'medium'),  # before: way past
+    ('C026', 'OBAAF-JEN-008', 'none', None),  # before: held
+    ('C027', 'OBAAF-JEN-008', 'finding', 'high'),  # before: weaker
+    ('C028', 'OBAAF-JEN-008', 'finding', 'medium'),  # before: held
+    ('C029', 'OBAAF-JEN-008', 'unknown', None),  # before: way past
+    ('C030', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C031', 'OBAAF-JEN-008', 'finding', 'low'),  # before: held
+    ('C032', 'OBAAF-JEN-008', 'none', None),  # before: held
+    ('C033', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C034', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C035', 'OBAAF-JEN-008', 'finding', 'low'),  # before: held
+    ('C036', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C037', 'OBAAF-JEN-008', 'unknown', None),  # before: way past
+    ('C038', 'OBAAF-JEN-008', 'none', None),  # before: false positive
+    ('C039', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C040', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C041', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C042', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C043', 'OBAAF-JEN-008', 'none', None),  # before: false positive
+    ('C044', 'OBAAF-JEN-008', 'finding', 'low'),  # before: way past
+    ('C045', 'OBAAF-JEN-008', 'finding', 'low'),  # before: held
+    ('C046', 'OBAAF-JEN-008', 'unknown', None),  # before: held
+    ('C047', 'OBAAF-JEN-008', 'finding', 'low'),  # before: held
+    ('C048', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C049', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C050', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C051', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C052', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C053', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C054', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C055', 'OBAAF-JEN-008', 'finding', 'high'),  # before: held
+    ('C056', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C057', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C058', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C059', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C060', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C061', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C062', 'OBAAF-JEN-008', 'none', None),  # before: false positive
+    ('C063', 'OBAAF-JEN-008', 'finding', 'high'),  # before: held
+    ('C064', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C065', 'OBAAF-JEN-008', 'none', None),  # before: held
+    ('C066', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C067', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C068', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C069', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C070', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C071', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C072', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C073', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C074', 'OBAAF-JEN-008', 'finding', 'high'),  # before: held
+    ('C075', 'OBAAF-JEN-008', 'finding', 'high'),  # before: way past
+    ('C077', 'OBAAF-JEN-008', 'finding', 'high'),  # before: held
+    ('C078', 'OBAAF-JEN-008', 'none', None),  # before: slow
+    ('C080', 'OBAAF-JEN-008', 'finding', 'high'),  # before: held
+    ('C082', 'OBAAF-JEN-004', 'finding', 'high'),  # before: weaker
+    ('C083', 'OBAAF-JEN-008', 'none', None),  # before: held
+    ('C084', 'OBAAF-JEN-004', 'finding', 'high'),  # before: held
+    ('C085', 'OBAAF-JEN-004', 'finding', 'high'),  # before: held
+]
+
+CATALOG = load()
+
+
+def analyze(files: dict):
+    with TempDir() as tmp:
+        root = Path(tmp)
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return jenkins.analyze("Jenkinsfile", files["Jenkinsfile"].encode(), CATALOG, root)
+
+
+def outcome(result, rule: str) -> tuple:
+    found = [f for f in result.findings if f.rule == rule]
+    if found:
+        order = {"low": 0, "medium": 1, "high": 2}
+        return "finding", max((f.severity for f in found), key=order.get)
+    status = next(row["status"] for row in jenkins.coverage(result, result.findings) if row["rule"] == rule)
+    return ("unknown" if status == "unknown" else "none"), None
+
+
+def pipeline(steps: str) -> str:
+    return ("pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n" + steps +
+            "\n      }\n    }\n  }\n}\n")
+
+
+SHA = "0123456789abcdef" * 4          # a sha256 digest: 64 hex digits
+SHA40 = "0123456789abcdef" * 2 + "01234567"   # a git commit: 40 hex digits
+
+
+class AttackCasesTest(unittest.TestCase):
+    def test_each_case(self):
+        for cid, rule, kind, severity in EXPECT:
+            with self.subTest(cid):
+                result = analyze(CASES[cid])
+                self.assertIsNone(result.error, cid)
+                self.assertEqual(outcome(result, rule), (kind, severity), cid)
+
+    def test_a_long_pod_spec_stays_fast(self):
+        # C078: 3,000 blank lines in a pod spec took 13.7 seconds (a `^\s*` pattern backtracking over them).
+        start = time.monotonic()
+        result = analyze(CASES["C078"])
+        self.assertLess(time.monotonic() - start, 3.0)
+        self.assertEqual(outcome(result, "OBAAF-JEN-008"), ("none", None))
+
+    def test_a_long_line_of_downloads_stays_fast(self):
+        # C079: one line of 8,000 `curl` words took about 5 of its 7.5 seconds in the install pattern.
+        engine = jrules.JenkinsRules("Jenkinsfile", jenkins.model.Pipeline(), CATALOG, None)
+        start = time.monotonic()
+        engine._install_problems("echo " + "curl " * 8000 + "| sh claude")
+        self.assertLess(time.monotonic() - start, 1.0)
+
+
+class CodeLoadingTest(unittest.TestCase):
+    def test_names(self):
+        for name, kind in [("load", "load"), ("steps.load", "load"), ("script.load", "load"),
+                           ("evaluate", "evaluate"), ("s.evaluate", "evaluate"), ("Eval.me", "evaluate"),
+                           ("Eval.xyz", "evaluate"), ("new GroovyShell.parse", "evaluate"),
+                           ("this.class.classLoader.parseClass", "evaluate"), ("jobDsl", "jobDsl"),
+                           ("readJSON", None), ("JsonSlurper.parse", None), ("Date.parse", None), ("", None)]:
+            with self.subTest(name):
+                self.assertEqual(code_loading(name), kind)
+        self.assertEqual(code_loading("shell.parse", {"shell"}), "evaluate")
+
+    def test_eval_reads_its_last_argument(self):
+        text = pipeline("        script { Eval.x(1, readFile('ci/x.groovy')) }")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-004"), ("finding", "medium"))
+        text = pipeline("        script { Eval.x(readFile('ci/x.groovy'), 'x + 1') }")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-004")[0], "unknown")
+
+    def test_job_dsl_with_literal_text_is_not_a_finding(self):
+        text = pipeline("        jobDsl scriptText: \"job('a') { }\"")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-004")[0], "unknown")
+
+    def test_a_library_from_a_written_out_retriever_is_not_a_finding(self):
+        text = ("library identifier: 'ci@" + SHA40 + "', retriever: modernSCM([$class: 'GitSCMSource', "
+                "remote: 'https://example.com/ci.git'])\n" + pipeline("        sh 'make'"))
+        result = analyze({"Jenkinsfile": text})
+        self.assertFalse([f for f in result.findings if f.rule == "OBAAF-JEN-004"])
+        self.assertEqual(outcome(result, "OBAAF-JEN-008"), ("none", None))
+
+    def test_git_branch_compared_with_a_pr_pattern_reaches_change_requests(self):
+        for cond in ("env.GIT_BRANCH ==~ /PR-\\d+/", "env.GIT_BRANCH == 'PR-1'"):
+            with self.subTest(cond):
+                text = ("pipeline {\n  agent any\n  stages {\n    stage('PR') {\n      when { expression { " + cond +
+                        " } }\n      steps { script { load 'ci/x.groovy' } }\n    }\n  }\n}\n")
+                self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-004"), ("finding", "high"))
+        text = ("pipeline {\n  agent any\n  stages {\n    stage('Tag') {\n      when { expression { env.TAG_NAME == 'v1' }"
+                " }\n      steps { script { load 'ci/x.groovy' } }\n    }\n  }\n}\n")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-004")[0], "unknown")
+
+
+class PinsTest(unittest.TestCase):
+    def test_exact_versions(self):
+        for ver, exact in [("@1.2.3", True), ("@1.2.3-beta.1", True), ("@1.2.3+build.5", True), ("==0.86.1", True),
+                           ("==1.0rc1", True), ("===x", True), ("", False), ("@latest", False), ("@^1.2.3", False),
+                           ("@~1.2", False), ("@1.x", False), ("@2", False), ("@*", False), ("==0.86.*", False),
+                           ("~=0.86", False), (">=1", False), ("@$V", False), ("==${V}", False), ("@1.2.3 ", False)]:
+            with self.subTest(ver):
+                self.assertEqual(jrules._exact_version(ver), exact)
+
+    def test_the_dockerfile_docker_build_reads(self):
+        for options, path in [(".", "Dockerfile"), ("-f ci/Dockerfile .", "ci/Dockerfile"), ("ci", "ci/Dockerfile"),
+                              ("--file=./x.Dockerfile .", "x.Dockerfile"), ("--build-arg A=1 ci", "ci/Dockerfile"),
+                              ("-f $F .", "?"), ("'unterminated", "?")]:
+            with self.subTest(options):
+                self.assertEqual(jrules._build_dockerfile(options), path)
+
+    def test_images_in_container_commands(self):
+        engine = jrules.JenkinsRules("Jenkinsfile", jenkins.model.Pipeline(), CATALOG, None)
+        for script, images in [
+                ("docker run --rm -it -v a:b -e X=1 node:20 npm test", ["node:20"]),
+                ("podman pull alpine:3 && docker run --network=host -w /x busybox", ["alpine:3", "busybox"]),
+                ("docker container run -dit --name a nginx", ["nginx"]),
+                ("docker run --some-new-flag value node:20", [None]),
+                ("docker run -- node:20", ["node:20"]),
+                ("echo docker run is not run here", ["is"]),
+                ("docker build -t x .", [])]:
+            with self.subTest(script):
+                self.assertEqual([i for i, _ in engine._shell_images(script)], images)
+
+    def test_a_pinned_image_in_a_container_command_passes(self):
+        text = pipeline(f"        sh 'docker run --rm node:20@sha256:{SHA} npm test'")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-008"), ("none", None))
+
+    def test_a_digest_must_be_the_whole_reference(self):
+        for ref in (f"node:20 @sha256:{SHA}", f"node@sha256:{SHA}x", f"node@sha256:{SHA.upper()}", "node:sha256-abc"):
+            with self.subTest(ref):
+                self.assertIsNone(jrules.PINNED_IMAGE.match(ref))
+        self.assertIsNotNone(jrules.PINNED_IMAGE.match(f"registry.example.com/node:20@sha256:{SHA}"))
+
+    def test_a_pod_spec_full_of_aliases_is_bounded(self):
+        bomb = "a: &a [x, x, x, x, x, x, x, x, x]\n" + "".join(
+            f"{chr(98 + i)}: &{chr(98 + i)} [*{chr(97 + i)}, *{chr(97 + i)}, *{chr(97 + i)}, *{chr(97 + i)}]\n"
+            for i in range(9))
+        engine = jrules.JenkinsRules("Jenkinsfile", jenkins.model.Pipeline(), CATALOG, None)
+        start = time.monotonic()
+        self.assertEqual(engine._pod_images(bomb), [])
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertIsNone(engine._pod_images("spec: [unclosed"))
+
+    def test_a_pod_spec_that_is_not_yaml_is_unknown(self):
+        text = ("pipeline {\n  agent { kubernetes { yaml '''\nspec:\n  containers: [unclosed\n''' } }\n"
+                "  stages { stage('B') { steps { sh 'make' } } }\n}\n")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-008"), ("unknown", None))
+
+    def test_a_lockfile_fixes_package_json(self):
+        files = {"Jenkinsfile": pipeline("        sh 'npm ci && npx claude -p review'"),
+                 "package.json": '{"devDependencies": {"@anthropic-ai/claude-code": "^2.0.0"}}'}
+        self.assertEqual(outcome(analyze(files), "OBAAF-JEN-008"), ("finding", "high"))
+        files["package-lock.json"] = "{}"
+        self.assertEqual(outcome(analyze(files), "OBAAF-JEN-008")[0], "none")
+
+    def test_a_dockerfile_from_an_earlier_stage_or_scratch_is_not_an_image(self):
+        files = {"Jenkinsfile": "pipeline {\n  agent { dockerfile true }\n  stages { stage('B') { steps { sh 'make' }"
+                                " } }\n}\n",
+                 "Dockerfile": f"ARG BASE=alpine:3\nFROM golang@sha256:{SHA} AS build\nFROM build AS test\n"
+                               "FROM scratch\nFROM --platform=linux/amd64 ${BASE}\n"}
+        result = analyze(files)
+        found = [f.message for f in result.findings if f.rule == "OBAAF-JEN-008"]
+        self.assertEqual(found, ["Base image 'alpine:3' in Dockerfile is not pinned to a sha256 digest."])
+
+    def test_a_missing_dockerfile_is_unknown(self):
+        files = {"Jenkinsfile": "pipeline {\n  agent { dockerfile { filename 'ci/x.Dockerfile' } }\n"
+                                "  stages { stage('B') { steps { sh 'make' } } }\n}\n"}
+        self.assertEqual(outcome(analyze(files), "OBAAF-JEN-008"), ("unknown", None))
+
+    def test_commands_that_do_not_install_are_not_installs(self):
+        for script in ("npm uninstall -g @anthropic-ai/claude-code", "npm view @anthropic-ai/claude-code version",
+                       "pip show aider-chat", "npm ls -g @openai/codex"):
+            with self.subTest(script):
+                text = pipeline(f"        sh '{script}'")
+                self.assertNotIn("OBAAF-JEN-008", {f.rule for f in analyze({"Jenkinsfile": text}).findings})
+
+    def test_an_update_of_the_package_is_a_moving_version(self):
+        text = pipeline("        sh 'npm install -g @openai/codex@0.46.0 && npm update -g @openai/codex'")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-008"), ("finding", "high"))
+
+    def test_a_library_named_by_a_parameter_is_unknown_for_the_pin(self):
+        text = "library params.LIB\n" + pipeline("        sh 'make'")
+        self.assertEqual(outcome(analyze({"Jenkinsfile": text}), "OBAAF-JEN-008"), ("unknown", None))
+
+
+if __name__ == "__main__":
+    unittest.main()
