@@ -648,3 +648,245 @@ jobs:
           if [ "$NOW_OUTCOME" = success ] && [ "$NOW_CONFINED" = true ] && [ "$NOW_EXIT" = 0 ]; then ok "the action still ran its command in a sandbox that held"; else bad "the action now: outcome $NOW_OUTCOME, confined '$NOW_CONFINED', exit '$NOW_EXIT'"; fi
           echo "(the action at c1b590c had outcome $FLOOR_OUTCOME; it is continue-on-error and its own result is not asserted)"
           exit "$fail"
+
+  runner-variables-job-env:
+    # Slice 2c.12a, issue #198. Which of the names in
+    # tests/egress/runner-variables.json the job's env can set for a step run
+    # as the egress action's own steps are (Python by its full path, -I -S),
+    # plain and inside a composite action. The values are made-up paths and
+    # words. The names that would cut the job off from GitHub (proxies, CA
+    # files, the resolver's) are not set here, and a workflow's env keys are
+    # case-insensitive, so the lower-case proxy names are set only through
+    # GITHUB_ENV, in the next job.
+    name: "Runner variables: what the job's env can set for the action's own steps"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OBAAF_RV_NAMES: "RUNNER_TEMP RUNNER_TOOL_CACHE RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_OUTPUT GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_PATH GITHUB_STATE GITHUB_ACTION_PATH GITHUB_API_URL GITHUB_SERVER_URL GITHUB_ACTIONS CI HOME TMPDIR TEMP TMP HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY NO_PROXY no_proxy SSL_CERT_FILE SSL_CERT_DIR LC_ALL LANG LANGUAGE LOCPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT SUDO_ASKPASS NODE_OPTIONS TZDIR XDG_RUNTIME_DIR"
+      RUNNER_TEMP: "/tmp/obaaf-rv-job/RUNNER_TEMP"
+      RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-job/RUNNER_TOOL_CACHE"
+      RUNNER_WORKSPACE: "/tmp/obaaf-rv-job/RUNNER_WORKSPACE"
+      GITHUB_WORKSPACE: "/tmp/obaaf-rv-job/GITHUB_WORKSPACE"
+      GITHUB_OUTPUT: "/tmp/obaaf-rv-job/GITHUB_OUTPUT"
+      GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-job/GITHUB_STEP_SUMMARY"
+      GITHUB_ENV: "/tmp/obaaf-rv-job/GITHUB_ENV"
+      GITHUB_PATH: "/tmp/obaaf-rv-job/GITHUB_PATH"
+      GITHUB_STATE: "/tmp/obaaf-rv-job/GITHUB_STATE"
+      GITHUB_ACTION_PATH: "/tmp/obaaf-rv-job/GITHUB_ACTION_PATH"
+      GITHUB_API_URL: "https://obaaf-rv-job.invalid"
+      GITHUB_SERVER_URL: "https://obaaf-rv-job.invalid"
+      GITHUB_ACTIONS: "obaaf-rv-job"
+      CI: "obaaf-rv-job"
+      HOME: "/tmp/obaaf-rv-job/HOME"
+      TMPDIR: "/tmp/obaaf-rv-job/TMPDIR"
+      TEMP: "/tmp/obaaf-rv-job/TEMP"
+      TMP: "/tmp/obaaf-rv-job/TMP"
+      LC_ALL: "/tmp/obaaf-rv-job/LC_ALL"
+      LANG: "/tmp/obaaf-rv-job/LANG"
+      LANGUAGE: "/tmp/obaaf-rv-job/LANGUAGE"
+      LOCPATH: "/tmp/obaaf-rv-job/LOCPATH"
+      DOCKER_HOST: "/tmp/obaaf-rv-job/DOCKER_HOST"
+      DOCKER_CONFIG: "/tmp/obaaf-rv-job/DOCKER_CONFIG"
+      DOCKER_CONTEXT: "/tmp/obaaf-rv-job/DOCKER_CONTEXT"
+      SUDO_ASKPASS: "/tmp/obaaf-rv-job/SUDO_ASKPASS"
+      NODE_OPTIONS: "--title=obaaf-rv-job"
+      TZDIR: "/tmp/obaaf-rv-job/TZDIR"
+      XDG_RUNTIME_DIR: "/tmp/obaaf-rv-job/XDG_RUNTIME_DIR"
+    steps:
+      - name: Make the directories the values name
+        shell: /usr/bin/python3 -I -S {0}
+        run: |
+          import os
+          for name in os.environ["OBAAF_RV_NAMES"].split():
+              os.makedirs("/tmp/obaaf-rv-job/" + name, exist_ok=True)
+
+      - name: "The job's env: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: job-plain
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: Check out the repository, for the composite probe
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "The job's env: a step of a composite action"
+        if: steps.checkout.outcome == 'success'
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: job-composite
+
+      - name: Keep what was seen
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runner-variables-job-env
+          path: /tmp/obaaf-rv/seen
+          if-no-files-found: error
+
+  runner-variables:
+    # Slice 2c.12a, issue #198. The same names set in a step's env and through
+    # GITHUB_ENV, then judged with the previous job's record against
+    # runner-variables.json's expected (tests/egress/runner-variables.py).
+    name: "Runner variables: what a step's env and GITHUB_ENV can set for the action's own steps"
+    needs: runner-variables-job-env
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OBAAF_RV_NAMES: "RUNNER_TEMP RUNNER_TOOL_CACHE RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_OUTPUT GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_PATH GITHUB_STATE GITHUB_ACTION_PATH GITHUB_API_URL GITHUB_SERVER_URL GITHUB_ACTIONS CI HOME TMPDIR TEMP TMP HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY NO_PROXY no_proxy SSL_CERT_FILE SSL_CERT_DIR LC_ALL LANG LANGUAGE LOCPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT SUDO_ASKPASS NODE_OPTIONS TZDIR XDG_RUNTIME_DIR"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the job's env record
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runner-variables-job-env
+          path: /tmp/obaaf-rv/seen
+
+      - name: "A step's env: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: step-plain
+          RUNNER_TEMP: "/tmp/obaaf-rv-step/RUNNER_TEMP"
+          RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-step/RUNNER_TOOL_CACHE"
+          RUNNER_WORKSPACE: "/tmp/obaaf-rv-step/RUNNER_WORKSPACE"
+          GITHUB_WORKSPACE: "/tmp/obaaf-rv-step/GITHUB_WORKSPACE"
+          GITHUB_OUTPUT: "/tmp/obaaf-rv-step/GITHUB_OUTPUT"
+          GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-step/GITHUB_STEP_SUMMARY"
+          GITHUB_ENV: "/tmp/obaaf-rv-step/GITHUB_ENV"
+          GITHUB_PATH: "/tmp/obaaf-rv-step/GITHUB_PATH"
+          GITHUB_STATE: "/tmp/obaaf-rv-step/GITHUB_STATE"
+          GITHUB_ACTION_PATH: "/tmp/obaaf-rv-step/GITHUB_ACTION_PATH"
+          GITHUB_API_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_SERVER_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_ACTIONS: "obaaf-rv-step"
+          CI: "obaaf-rv-step"
+          HOME: "/tmp/obaaf-rv-step/HOME"
+          TMPDIR: "/tmp/obaaf-rv-step/TMPDIR"
+          TEMP: "/tmp/obaaf-rv-step/TEMP"
+          TMP: "/tmp/obaaf-rv-step/TMP"
+          HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
+          HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
+          ALL_PROXY: "http://obaaf-rv-step.invalid:9"
+          NO_PROXY: "obaaf-rv-step.invalid"
+          SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
+          SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
+          LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"
+          LANG: "/tmp/obaaf-rv-step/LANG"
+          LANGUAGE: "/tmp/obaaf-rv-step/LANGUAGE"
+          LOCPATH: "/tmp/obaaf-rv-step/LOCPATH"
+          HOSTALIASES: "/tmp/obaaf-rv-step/HOSTALIASES"
+          RES_OPTIONS: "timeout:2"
+          LOCALDOMAIN: "obaaf-rv-step.invalid"
+          DOCKER_HOST: "/tmp/obaaf-rv-step/DOCKER_HOST"
+          DOCKER_CONFIG: "/tmp/obaaf-rv-step/DOCKER_CONFIG"
+          DOCKER_CONTEXT: "/tmp/obaaf-rv-step/DOCKER_CONTEXT"
+          SUDO_ASKPASS: "/tmp/obaaf-rv-step/SUDO_ASKPASS"
+          NODE_OPTIONS: "--title=obaaf-rv-step"
+          TZDIR: "/tmp/obaaf-rv-step/TZDIR"
+          XDG_RUNTIME_DIR: "/tmp/obaaf-rv-step/XDG_RUNTIME_DIR"
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: "A step's env: a step of a composite action"
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: step-composite
+          RUNNER_TEMP: "/tmp/obaaf-rv-step/RUNNER_TEMP"
+          RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-step/RUNNER_TOOL_CACHE"
+          RUNNER_WORKSPACE: "/tmp/obaaf-rv-step/RUNNER_WORKSPACE"
+          GITHUB_WORKSPACE: "/tmp/obaaf-rv-step/GITHUB_WORKSPACE"
+          GITHUB_OUTPUT: "/tmp/obaaf-rv-step/GITHUB_OUTPUT"
+          GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-step/GITHUB_STEP_SUMMARY"
+          GITHUB_ENV: "/tmp/obaaf-rv-step/GITHUB_ENV"
+          GITHUB_PATH: "/tmp/obaaf-rv-step/GITHUB_PATH"
+          GITHUB_STATE: "/tmp/obaaf-rv-step/GITHUB_STATE"
+          GITHUB_ACTION_PATH: "/tmp/obaaf-rv-step/GITHUB_ACTION_PATH"
+          GITHUB_API_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_SERVER_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_ACTIONS: "obaaf-rv-step"
+          CI: "obaaf-rv-step"
+          HOME: "/tmp/obaaf-rv-step/HOME"
+          TMPDIR: "/tmp/obaaf-rv-step/TMPDIR"
+          TEMP: "/tmp/obaaf-rv-step/TEMP"
+          TMP: "/tmp/obaaf-rv-step/TMP"
+          HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
+          HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
+          ALL_PROXY: "http://obaaf-rv-step.invalid:9"
+          NO_PROXY: "obaaf-rv-step.invalid"
+          SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
+          SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
+          LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"
+          LANG: "/tmp/obaaf-rv-step/LANG"
+          LANGUAGE: "/tmp/obaaf-rv-step/LANGUAGE"
+          LOCPATH: "/tmp/obaaf-rv-step/LOCPATH"
+          HOSTALIASES: "/tmp/obaaf-rv-step/HOSTALIASES"
+          RES_OPTIONS: "timeout:2"
+          LOCALDOMAIN: "obaaf-rv-step.invalid"
+          DOCKER_HOST: "/tmp/obaaf-rv-step/DOCKER_HOST"
+          DOCKER_CONFIG: "/tmp/obaaf-rv-step/DOCKER_CONFIG"
+          DOCKER_CONTEXT: "/tmp/obaaf-rv-step/DOCKER_CONTEXT"
+          SUDO_ASKPASS: "/tmp/obaaf-rv-step/SUDO_ASKPASS"
+          NODE_OPTIONS: "--title=obaaf-rv-step"
+          TZDIR: "/tmp/obaaf-rv-step/TZDIR"
+          XDG_RUNTIME_DIR: "/tmp/obaaf-rv-step/XDG_RUNTIME_DIR"
+
+      - name: Set every name through GITHUB_ENV but NODE_OPTIONS
+        run: python3 -I tests/egress/runner-variables.py --github-env genv | grep -v '^NODE_OPTIONS=' >> "$GITHUB_ENV"
+
+      - name: Set NODE_OPTIONS through GITHUB_ENV (the runner refuses the line; the judge requires that this step wrote it)
+        id: genv_node_options
+        continue-on-error: true
+        run: python3 -I tests/egress/runner-variables.py --github-env genv | grep '^NODE_OPTIONS=' >> "$GITHUB_ENV"
+
+      - name: "GITHUB_ENV: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: genv-plain
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: "GITHUB_ENV: a step of a composite action"
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: genv-composite
+
+      - name: Judge what each step saw
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_JUDGE: ${{ github.workspace }}/tests/egress/runner-variables.py
+          NODE_OPTIONS_WRITE: ${{ steps.genv_node_options.outcome }}
+        run: |
+          import os, runpy, sys
+          sys.argv = [os.environ["OBAAF_RV_JUDGE"], "--judge", "/tmp/obaaf-rv/seen", os.environ["NODE_OPTIONS_WRITE"]]
+          runpy.run_path(sys.argv[0], run_name="__main__")
