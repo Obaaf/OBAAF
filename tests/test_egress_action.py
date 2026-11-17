@@ -68,7 +68,7 @@ class EnvNames(unittest.TestCase):
         self.assertEqual(egress.parse_env_names("", env), {})
 
     def test_refused(self):
-        env = {name: "x" for name in ("PATH", "HTTPS_PROXY", "no_proxy", "LD_PRELOAD", "GITHUB_ENV",
+        env = {name: "x" for name in ("PATH", "HTTPS_PROXY", "no_proxy", "LD_PRELOAD", "GITHUB_ENV", "LC_ALL", "TZ",
                                        "AWF_ANYTHING", "ACTIONS_RUNTIME_TOKEN", "BASH_ENV", "GIT_SSH_COMMAND",
                                        "OTEL_EXPORTER_OTLP_ENDPOINT", "ANTHROPIC_API_TARGET", "OPENAI_BASE_URL",
                                        "OPENAI_ENDPOINT_OVERRIDE", "FOUNDRY_ENDPOINT",
@@ -78,6 +78,21 @@ class EnvNames(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(egress.UsageError):
                     egress.parse_env_names(bad, env)
+
+
+    def test_what_the_steps_env_fixes_is_never_passed_on_in_the_workflows_place(self):
+        # Slice 2c.12: each step's own env sets LC_ALL and TZ, so the step sees the action's values,
+        # not the workflow's. Named under env, the command would be given "C" and "UTC0" in place of
+        # what the workflow wrote, so both are refused.
+        self.assertLessEqual(set(egress.STARTUP_PINS), egress.RESERVED_NAMES)
+        for name, value in egress.STARTUP_PINS.items():
+            with self.subTest(name=name):
+                with self.assertRaises(egress.UsageError) as refused:
+                    egress.parse_env_names(name, {name: value})
+                self.assertIn(f"env: {name} cannot be passed to the command", str(refused.exception))
+        # The locale names the action does not fix are the workflow's own, and are passed.
+        self.assertEqual(egress.parse_env_names("LANG LC_CTYPE", {"LANG": "en_US.UTF-8", "LC_CTYPE": "C"}),
+                         {"LANG": "en_US.UTF-8", "LC_CTYPE": "C"})
 
 
 class CommandLine(unittest.TestCase):

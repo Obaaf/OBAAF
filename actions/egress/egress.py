@@ -162,10 +162,14 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Variables the workflow may not pass to the command: they change how the
 # command, its shell or its network behave, or they point at the runner's
-# own files.
+# own files. LC_ALL and TZ are here because each step's own env fixes them
+# (STARTUP_PINS below, slice 2c.12): the value the workflow gave them never
+# reaches this file, and the action's own value must not be passed on in its
+# place. A command that needs either sets it itself.
 RESERVED_NAMES = frozenset(
     {
         "PATH", "HOME", "TMPDIR", "SHELL", "BASH_ENV", "ENV", "IFS", "CDPATH",
+        "LC_ALL", "TZ",
         "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP",
         "PYTHONHOME", "NODE_OPTIONS", "PERL5LIB", "PERL5OPT", "RUBYOPT",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
