@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 from dataclasses import dataclass
 
 from obaaf.audit.github import plain, quoted
 from obaaf.audit.settings import BY_KEY, CLASSIC_TOP
 from obaaf.audit.workflows import HEAD_COMMIT_EVENTS, PULL_REQUEST_EVENTS
-from obaaf.audit.workflows import called_path
+from obaaf.audit.workflows import called_path, self_repository_call
 from obaaf.checker.workflow import PRIVILEGED_UNTRUSTED_TRIGGERS
 
 FORMAT = "obaaf-settings-findings/v0.1"
@@ -840,7 +841,10 @@ def _stops(run: _Run):
             path = file["path"]
             loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
             # An action from another repository, or a reusable workflow from one (the third review of 2d.2g).
-            remote = any(job["actions"] or (job["calls"] and not called_path(job)) for job in file["jobs"])
+            # A call written `./` or `$/` is this repository's (issue #182).
+            actions = sorted({a for job in file["jobs"] for a in job["remote_actions"]})
+            workflows = sorted({job["calls"] for job in file["jobs"] if job["calls"] and called_path(job) is None})
+            remote = actions + workflows
             if value.get("enabled") is False:
                 stopped[path] = "GitHub Actions is turned off for the repository"
             elif value.get("sha_pinning_required") is True and loose and not run.usage.get("actions_lock"):
@@ -855,6 +859,11 @@ def _stops(run: _Run):
                 # and reusable workflows": which owner's actions that lets through is not matched here.
                 maybe[path] = ("the repository allows only some owners' actions and reusable workflows "
                                "(allowed_actions: local_only), which is not matched against those it uses")
+            elif value.get("allowed_actions") == "selected" and remote:
+                # Issue #182: an empty list of selected actions was read as letting everything run.
+                unsure = _not_surely_selected(actions, workflows, value.get("selected_actions"))
+                if unsure:
+                    maybe[path] = _selection_doubt(unsure, value.get("selected_actions"))
     policies, whole = run.got("actions_policies")
     if policies is None or not whole:
         unread.append(run.why("actions_policies"))
@@ -872,25 +881,81 @@ def _stops(run: _Run):
                 continue            # whatever it applies to, it allows every event the file uses
             maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
                                            "understand, may block its events")
-    # A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
-    # slice 2d.2g): the whole calling file is taken as one GitHub may not run, until nothing changes.
-    # A called file that is missing, or was not read (one GitHub refuses among them), counts the same.
-    read = {file["path"] for file in run.files()}
-    changed = True
-    while changed:
-        changed = False
-        for file in run.files():
-            if file["path"] in stopped or file["path"] in maybe:
-                continue
-            for job in file["jobs"]:
-                target = called_path(job)
-                if target and (target in stopped or target in maybe or target not in read):
-                    maybe[file["path"]] = (f"it calls {plain(target, 120)}, which GitHub "
-                                           + ("does not run" if target in stopped else "may not run" if target in maybe
-                                              else "may not run: it is not among the workflow files that were read"))
-                    changed = True
-                    break
+    # A call written with `$/`: whether GitHub takes `$/` in a job's `uses:` was not established (issue #182).
+    for file in run.files():
+        if file["path"] not in stopped and file["path"] not in maybe:
+            odd = next((job for job in file["jobs"] if self_repository_call(job)), None)
+            if odd is not None:
+                maybe[file["path"]] = (f"it calls {_q(odd['calls'], 120)}, written with $/, and whether GitHub "
+                                       "accepts $/ in a job's uses was not established")
+    _spread_to_callers(run, stopped, maybe)
     return stopped, maybe, blocked, unread
+
+
+def _spread_to_callers(run: _Run, stopped: dict, maybe: dict) -> None:
+    """A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
+    slice 2d.2g): the whole calling file is taken as one GitHub may not run, and so are its own callers. A
+    called file that is missing, or was not read (one GitHub refuses among them), counts the same, and so does
+    `uses: ./` alone (issue #182: it was skipped). Each file is looked at once from each file it calls, so a
+    chain of calls costs its length (it cost the square of it), and the reason a file is given is its first
+    call, in the order the jobs are written, to a file found not to run, or not to be sure to run, one step
+    nearer the cause (so a cycle of calls never gives a file its own caller as the reason)."""
+    files = run.files()
+    read = {file["path"] for file in files}
+    calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    callers: dict = {}
+    for path, targets in calls.items():
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    bad = set(stopped) | set(maybe) | {t for targets in calls.values() for t in targets if t not in read}
+    frontier = set(bad)
+    reasons: dict = {}
+    while frontier:
+        reached = {path for target in frontier for path in callers.get(target, ()) if path not in bad}
+        for path in reached:
+            reasons[path] = next(t for t in calls[path] if t in bad)
+        bad |= reached
+        frontier = reached
+    for file in files:
+        target = reasons.get(file["path"])
+        if target is not None:
+            maybe[file["path"]] = (f"it calls {plain(target, 120) if target else _q('./')}, which GitHub "
+                                   + ("does not run" if target in stopped else "may not run" if target in read
+                                      else "may not run: it is not among the workflow files that were read"))
+
+
+# An action of GitHub's own organisations, `actions/NAME[/path]@ref`, as plainly as it can be written: a repository
+# name of letters, digits, `.`, `_` and `-` that is not `.` or `..`, no `..` in its path, no space (issue #182).
+GITHUB_OWNED_RE = re.compile(r"(?:actions|github)/(?!\.\.?[/@])[A-Za-z0-9._-]+(?:/(?!\.\.?[/@])[A-Za-z0-9._-]+)*@[A-Za-z0-9._/-]+")
+
+
+def _not_surely_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
+    """The references, of actions or reusable workflows in another repository, that the list of selected
+    actions (`allowed_actions: selected`) is not sure to let run (issue #182). GitHub's matching of the list
+    was not read from its pages in the session that wrote this, so only two things count: a step's action of
+    the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
+    and an entry that is the reference itself, character for character. Neither counts while any entry begins
+    with `!`, which may block. A reusable workflow of GitHub's organisations, actions of the repository's own
+    owner and of verified creators are not matched. A list that was not read lets nothing through."""
+    if not isinstance(selected, dict):
+        return actions + workflows
+    patterns = [p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)]
+    if any(p.strip().startswith("!") for p in patterns):
+        return actions + workflows
+    own = selected.get("github_owned_allowed") is True
+    return ([uses for uses in actions if not (uses in patterns or (own and GITHUB_OWNED_RE.fullmatch(uses)))]
+            + [uses for uses in workflows if uses not in patterns])
+
+
+def _selection_doubt(unsure: list[str], selected) -> str:
+    """Why a file GitHub may refuse under `allowed_actions: selected` may not run."""
+    names = _names([_q(a, 100) for a in unsure], 2)
+    if not isinstance(selected, dict):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), "
+                f"the list was not read, and it uses {names}")
+    return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), and "
+            f"it uses {names}, which the list does not surely allow: only GitHub's own actions, where allowed, and "
+            "an entry that names the reference exactly are matched")
 
 
 def _api_reporters(run: _Run) -> str:
@@ -2055,7 +2120,9 @@ def _token_from_elsewhere(run: _Run, file: dict, job: dict) -> bool:
     if _stands_alone(file):
         return False
     callers = [j for _, j in run.jobs() if called_path(j) == file["path"]]
-    return bool(callers) and all(j["permissions"]["declared"] for j in callers)
+    # A call written with `$/` may not be one GitHub makes (issue #182): it never counts as the caller that
+    # covers the file, and an undeclared one still uncovers it.
+    return any(not self_repository_call(j) for j in callers) and all(j["permissions"]["declared"] for j in callers)
 
 
 def rule_012(run: _Run) -> None:

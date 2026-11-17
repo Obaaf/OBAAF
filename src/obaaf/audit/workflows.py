@@ -173,11 +173,12 @@ def _permissions(job: wf_mod.Job) -> dict:
             "writes_checks": "write" in (found.level("checks"), found.level("statuses"))}
 
 
-def _actions(job: wf_mod.Job) -> tuple[int, list[str]]:
-    """How many of the job's steps use an action from another repository, and which of those are not
-    pinned to a full commit. Local actions, container images and the reusable workflow a job calls are
-    left out; what GitHub's own pinning requirement makes of those was not established."""
-    used, loose = 0, []
+def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str]]:
+    """How many of the job's steps use an action from another repository, which of those are not pinned to
+    a full commit, and every such reference as written (for the list of selected actions, issue #182).
+    Local actions, container images and the reusable workflow a job calls are left out; what GitHub's own
+    pinning requirement makes of those was not established."""
+    used, loose, remote = 0, [], []
     for step in job.steps:
         uses = step.uses
         # `./path` and `$/path` are actions in this repository (flagship slice 2d.2g: `$/` was taken for a
@@ -185,12 +186,13 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str]]:
         if not uses or wf_mod.is_local_reference(uses) or uses.startswith("docker://"):
             continue
         used += 1
+        remote.append(uses)
         ref = uses.split("@", 1)[1] if "@" in uses else ""
         # A pin is 40 lower-case hex digits and nothing else, as the checker reads one (slice 2d.2f): a
         # 64-digit ref can only be a tag or a branch, and the old pattern's `$` took a trailing line break.
         if not wf_mod.COMMIT_SHA_RE.fullmatch(ref):
             loose.append(uses)
-    return used, sorted(set(loose))
+    return used, sorted(set(loose)), sorted(set(remote))
 
 
 def _runner(job: wf_mod.Job) -> str:
@@ -207,7 +209,7 @@ def _job(job: wf_mod.Job) -> dict:
     passed = job.raw.get("secrets") if job.reusable else None
     # A caller can also hand a secret over as an input, under `with:`.
     handed = (wf_mod.secret_names(passed) | wf_mod.secret_names(job.raw.get("with"))) if job.reusable else set()
-    used, loose = _actions(job)
+    used, loose, remote = _actions(job)
     return {
         "id": job.id, "line": job.line, "check": _check_name(job),
         "environment": _environment(job),
@@ -231,6 +233,7 @@ def _job(job: wf_mod.Job) -> dict:
         "runner": None if job.reusable else _runner(job),
         "actions": used,
         "unpinned": loose,
+        "remote_actions": remote,
     }
 
 
@@ -252,7 +255,7 @@ def _file(path: str, text: str) -> dict:
     # Every problem but those about the names of a step's inputs makes the file one GitHub may read otherwise or
     # refuse (the second review of slice 2d.2g: a step that is text, or has neither run nor uses, a job whose
     # uses is not text, are refused by GitHub, and a list of words to include missed them).
-    doubt = [p for p in problems if not HARMLESS_PROBLEM_RE.match(p)]
+    doubt = [p for p in problems if not HARMLESS_PROBLEM_RE.match(p)] + _odd_job_ids(workflow)
     return {"path": path, "error": None, "problems": problems, "doubt": doubt,
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
@@ -266,6 +269,42 @@ HARMLESS_PROBLEM_RE = re.compile(r"job '[A-Za-z0-9_-]+', step \d+ (?:has an inpu
                                  r"\(|gives the same input twice under two spellings \()")
 # Filters that GitHub's workflow syntax says cannot be used together on one event.
 EXCLUSIVE_FILTERS = (("branches", "branches-ignore"), ("tags", "tags-ignore"), ("paths", "paths-ignore"))
+# A job id as GitHub's workflow syntax gives its form: it "must start with a letter or _ and contain only
+# alphanumeric characters, -, or _" (issue #182; see _bad_job_id). Written from the reference as the author
+# knew it on 2026-11-17; the page could not be read from the session that wrote this. Only ASCII is judged:
+# whether GitHub's "alphanumeric" takes a letter or digit outside ASCII is not established (_odd_job_ids).
+# GitHub's message for an id it refuses, as the author knew it, adds that an id "must be less than 100
+# characters"; not read from a primary page this session, so a longer id is a doubt, not a refusal.
+JOB_ID_DOUBTFUL_LENGTH = 100
+
+
+def _bad_job_id(job_id: str) -> bool:
+    """Whether a job id written as text breaks GitHub's form in a way that holds whatever "alphanumeric"
+    means outside ASCII: an ASCII character other than a letter, a digit, `_` or `-` anywhere, or an ASCII
+    digit or `-` first."""
+    if not job_id:
+        return True
+    if job_id[0].isascii() and not (job_id[0].isalpha() or job_id[0] == "_"):
+        return True
+    return any(c.isascii() and not (c.isalnum() or c in "_-") for c in job_id)
+
+
+def _odd_job_ids(workflow) -> list[str]:
+    """Doubts about job ids GitHub may refuse, where its rule as known here does not settle it: a character
+    outside ASCII, or an id of 100 characters or more."""
+    raw_jobs = workflow.raw.get("jobs")
+    doubts = []
+    for job_id in raw_jobs if isinstance(raw_jobs, dict) else ():
+        if not isinstance(job_id, str) or _bad_job_id(job_id):
+            continue        # not text: the checker's own problem; a bad id: refused (_refused)
+        shown = wf_mod.one_line(repr(job_id), 80)
+        if not job_id.isascii():
+            doubts.append(f"the job id {shown} has a character outside ASCII, and whether GitHub accepts such an "
+                          "id is not established")
+        elif len(job_id) >= JOB_ID_DOUBTFUL_LENGTH:
+            doubts.append(f"the job id {shown} is {len(job_id)} characters long, and whether GitHub accepts an id "
+                          f"of {JOB_ID_DOUBTFUL_LENGTH} or more is not established")
+    return doubts
 
 
 def _refused(workflow) -> str:
@@ -273,6 +312,13 @@ def _refused(workflow) -> str:
     knows few: what it does not know is read as a file that runs."""
     raw_jobs = workflow.raw.get("jobs")
     if isinstance(raw_jobs, dict):
+        for job_id in raw_jobs:
+            # Checked for every job before anything else: an id outside GitHub's form is also how a problem's
+            # text could imitate one HARMLESS_PROBLEM_RE lets through (issue #182), since the checker's
+            # problems quote the id as written.
+            if isinstance(job_id, str) and _bad_job_id(job_id):
+                return (f"the job id {wf_mod.one_line(repr(job_id), 40)} is not in GitHub's form for one (a letter "
+                        "or _, then letters, digits, _ or -)")
         for job_id, value in raw_jobs.items():
             if not isinstance(value, dict):
                 return f"job {str(job_id)!r} is not a mapping"
@@ -287,9 +333,19 @@ def _refused(workflow) -> str:
 
 
 def called_path(job: dict) -> str | None:
-    """The path of the workflow file a job calls, when it is one in this repository."""
+    """The path of the workflow file a job calls, when it is one in this repository: `./path`, or `$/path`,
+    which the checker also reads as this repository (decision D-065; before issue #182 the audit took `$/` for
+    another repository's workflow). `uses: ./` or `$/` alone gives "", the path of no file: a call to a file
+    that was not read."""
     target = job["calls"] or ""
-    return target[2:] if target.startswith("./") else None
+    return target[2:] if wf_mod.is_local_reference(target) else None
+
+
+def self_repository_call(job: dict) -> bool:
+    """Whether a job calls a workflow written with `$/`. GitHub's changelog of 2026-07-30 introduced `$/` for
+    actions in the workflow's own repository; whether a job's `uses:` takes it for a reusable workflow was
+    not established when this was written (issue #182), so such a call is never counted as one GitHub runs."""
+    return (job["calls"] or "").startswith("$/")
 
 
 def _resolve_calls(files: list[dict]) -> None:
