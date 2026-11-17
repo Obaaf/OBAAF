@@ -185,11 +185,13 @@ def _actions(job: wf_mod.Job) -> tuple[int, list[str], list[str], list[str]]:
         uses = step.uses
         # `./path` and `$/path` are actions in this repository (flagship slice 2d.2g: `$/` was taken for a
         # remote action that is not pinned).
-        if uses and (wf_mod.is_local_reference(uses) or uses.lower().startswith("docker://")):
+        # `docker://` in any letter case is an image, as the checker reads it (slice 2d.2f; the review of 2b.7).
+        local_or_image = bool(uses) and (wf_mod.is_local_reference(uses) or uses.lower().startswith("docker://"))
+        if local_or_image:
             other.append(uses)
         elif "uses" in step.raw and not uses:
             other.append("''")      # an empty `uses`, which names nothing the setting can be matched against
-        if not uses or wf_mod.is_local_reference(uses) or uses.startswith("docker://"):
+        if not uses or local_or_image:
             continue
         used += 1
         remote.append(uses)
@@ -301,11 +303,15 @@ def _bad_job_id(job_id: str) -> bool:
 
 
 def _odd_job_ids(workflow) -> list[str]:
-    """Doubts about job ids GitHub may refuse, where its rule as known here does not settle it: a character
-    outside ASCII, or an id of 100 characters or more."""
+    """Why GitHub may refuse the file where its rules as known here do not settle it: a job id with a
+    character outside ASCII, or of 100 characters or more; a job whose `uses` is empty (the third review of
+    slice 2b.7: `lint: {uses: ''}` was read as a job that reports `lint`)."""
     raw_jobs = workflow.raw.get("jobs")
     doubts = []
-    for job_id in raw_jobs if isinstance(raw_jobs, dict) else ():
+    for job_id, value in raw_jobs.items() if isinstance(raw_jobs, dict) else ():
+        if isinstance(value, dict) and "uses" in value and not value.get("uses"):
+            doubts.append(f"the job {wf_mod.one_line(repr(str(job_id)), 80)} has an empty uses, which names no "
+                          "workflow to call")
         if not isinstance(job_id, str) or _bad_job_id(job_id):
             continue        # not text: the checker's own problem; a bad id: refused (_refused)
         shown = wf_mod.one_line(repr(job_id), 80)

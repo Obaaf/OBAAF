@@ -1049,29 +1049,31 @@ def _not_selected(actions: list[str], workflows: list[str], selected) -> list[st
     was not read from its pages in the session that wrote this, so only two things count: a step's action of
     the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
     and an entry that is the reference itself, character for character. Either only for a reference written
-    plainly (PLAIN_REFERENCE_RE), and neither while any entry holds a `!`, which may block. A reusable
-    workflow of GitHub's organisations, actions of the repository's own owner and of verified creators are
-    not matched. A list that was not read lets nothing through."""
+    plainly (PLAIN_REFERENCE_RE), and neither while any entry holds a `!`, which may block. Another
+    repository's reusable workflow is never allowed as written, an equal entry included, because its jobs are
+    not read; actions of the repository's own owner and of verified creators are not matched. A list that was
+    not read lets nothing through."""
     if not isinstance(selected, dict):
         return actions + workflows
     patterns = [p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)]
     if any("!" in p for p in patterns):
         return actions + workflows
 
-    def allowed(uses: str, action: bool) -> bool:
+    def allowed(uses: str) -> bool:
         plain_ref = PLAIN_REFERENCE_RE.fullmatch(uses)
         if plain_ref is None:
             return False        # a wildcard, a space or an odd part: never matched, even by an equal entry
-        owned = action and selected.get("github_owned_allowed") is True and plain_ref["owner"] in ("actions", "github")
+        owned = selected.get("github_owned_allowed") is True and plain_ref["owner"] in ("actions", "github")
         return owned or uses in patterns
 
-    return ([uses for uses in actions if not allowed(uses, True)]
-            + [uses for uses in workflows if not allowed(uses, False)])
+    # Another repository's reusable workflow is never taken as allowed: its jobs, and what they use, are not read
+    # (the third review of 2b.7), as a local action's steps are not.
+    return [uses for uses in actions if not allowed(uses)] + list(workflows)
 
 
 def _selection_doubt(unsure: list[str], selected) -> str:
     """Why a file GitHub may refuse under `allowed_actions: selected` may not run."""
-    names = _names([_q(a, 100) for a in unsure[:3]], 2) + (f" and {len(unsure) - 3} more" if len(unsure) > 3 else "")
+    names = ", ".join(_q(a, 100) for a in unsure[:2]) + (f" and {len(unsure) - 2} more" if len(unsure) > 2 else "")
     if not isinstance(selected, dict):
         return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), "
                 f"the list was not read, and it uses {names}")
@@ -1079,8 +1081,9 @@ def _selection_doubt(unsure: list[str], selected) -> str:
         return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), an "
                 f"entry of the list holds a !, which may block, so nothing is matched, and it uses {names}")
     return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), and "
-            f"it uses {names}, which the list as written does not allow: only GitHub's own actions, where allowed, "
-            "and an entry that names the reference exactly are matched")
+            f"it uses {names}, which the list as written does not allow: only a step's action of GitHub's own, "
+            "where allowed, or one an entry names exactly is matched, and another repository's reusable workflow, "
+            "whose jobs are not read, never is")
 
 
 def _api_reporters(run: _Run) -> str:
@@ -1901,22 +1904,32 @@ def _check_rules(run: _Run, kind: str) -> None:
                                for f, j in matches), key=lambda item: ORDER.index(item[0]))
                 item = f"{subject}: required check {_q(context)}"
                 # A route through a file GitHub may not run never stands for the check (the second review of slice
-                # 2b.7): it may add a finding, and where it would report more often than every sure route, whether
-                # the check reports is not known.
+                # 2b.7), and neither does a job that may report it under names that could not be written out, or in
+                # a file GitHub may read otherwise (the third review). A rival route that ranks better than the one
+                # that decides makes the answer "cannot tell", unless it too gives a finding (a paths filter,
+                # activity types, or no run on a pull request's commit where nothing else can report it): then the
+                # check fails to report on some pull requests whichever route holds.
                 sure = [r for r in runs if r[1]["path"] not in maybe]
-                if sure:
-                    how, file, job = sure[0]
-                    better = [r for r in runs if r[1]["path"] in maybe and ORDER.index(r[0]) < ORDER.index(how)]
-                    if better:
-                        _, other, other_job = better[0]
-                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
-                                              f"{_job_label(other, other_job)} reports it on more pull requests than "
-                                              f"{_job_label(file, job)} does, in a workflow GitHub may not run "
-                                              f"({maybe[other['path']]}), so whether it reports on every pull request "
-                                              "is not known.")
-                        continue
-                else:
-                    how, file, job = runs[0]
+                how, file, job = sure[0] if sure else runs[0]
+                failing = {"paths", "types"} | ({"never"} if _api_reporters(run) == "no" else set())
+                rivals = [r for r in runs if r[1]["path"] in maybe] if sure else []
+                for f, j in reporting:
+                    if _reports(j, context) is None:
+                        rivals.append(("always" if j.get("doubt") else _report_run(
+                            f, j, branch, skipped=j["check"]["kind"] == "static", blocked=blocked.get(f["path"], ())),
+                            f, j))
+                rival = next((r for r in sorted(rivals, key=lambda r: ORDER.index(r[0]))
+                              if ORDER.index(r[0]) < ORDER.index(how) and r[0] not in failing), None)
+                if rival is not None and how != "always":
+                    _, other, other_job = rival
+                    why = (f"in a workflow GitHub may not run ({maybe[other['path']]})" if other["path"] in maybe else
+                           "under names that could not be written out, or in a file GitHub may read otherwise than "
+                           "the audit does")
+                    run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. {_job_label(file, job)} "
+                                          f"reports it, and {_job_label(other, other_job)}, which may report it "
+                                          f"{why}, would on a wider set of pull requests, so whether it reports on "
+                                          "every pull request is not known.")
+                    continue
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
                     continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject

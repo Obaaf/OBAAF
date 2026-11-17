@@ -227,8 +227,9 @@ class SelectedActionsTest(unittest.TestCase):
     def test_a_reusable_workflow_of_another_repository(self):
         call = f"  scan:\n    uses: actions/tools/.github/workflows/scan.yml@{SHA}\n"
         self.assertEqual(self.check(selected(github_owned=True), PIN, calls=call), "cannot-tell")
+        # The third review of 2b.7: its jobs are not read, so an equal entry does not make it one that runs.
         self.assertEqual(self.check(selected([f"actions/tools/.github/workflows/scan.yml@{SHA}"], github_owned=True),
-                                    PIN, calls=call), "no-finding")
+                                    PIN, calls=call), "cannot-tell")
 
     def test_a_list_that_was_not_read(self):
         entries = answer(selected(), SELECTED, {"message": "Must have admin rights"}, status=403)
@@ -269,16 +270,58 @@ class SelectedActionsTest(unittest.TestCase):
                  "b.yml": wf(PR, job("lint", steps=steps(f"someone/tool@{SHA}")))}
         found = assess(requiring("lint", entries=local_only), files)
         self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell")
-        self.assertIn("b.yml#lint reports it on more pull requests", of(found, "OBAAF-SET-007")[0]["message"])
+        self.assertIn("b.yml#lint, which may report it in a workflow GitHub may not run", of(found, "OBAAF-SET-007")[0]["message"])
         # Without the other file, the finding stands.
         alone = assess(requiring("lint", entries=local_only), {"a.yml": files["a.yml"]})
         self.assertEqual(answered(alone, "OBAAF-SET-007"), "finding medium")
+
+    def test_a_rival_that_may_report_the_check_on_more_pull_requests(self):
+        # The third review of 2b.7: a job whose names could not be written out, or in a file GitHub may read
+        # otherwise, may report the check on every pull request; a finding from another route was false.
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        schedule = wf("  schedule:\n    - cron: '0 3 * * *'\n", job("lint", steps=steps(f"someone/t@{SHA}")))
+        upper = wf(PR, job("lint"))
+        computed = wf(PR, job("x", "    name: ${{ 'lint' }}\n"))
+        paths = wf("  pull_request:\n    paths: ['src/**']\n", job("lint"))
+        for files in ({"a.yml": schedule, "B.YML": upper}, {"a.yml": paths, "B.YML": upper},
+                      {"a.yml": paths, "c.yml": computed}):
+            found = assess(requiring("lint", entries=local_only), files)
+            self.assertEqual(answered(found, "OBAAF-SET-007"), "cannot-tell", sorted(files))
+            self.assertIn("would on a wider set of pull requests", of(found, "OBAAF-SET-007")[0]["message"])
+
+    def test_a_rival_that_also_fails_to_report_leaves_the_finding(self):
+        # The third review of 2b.7: a sure schedule-only job and a paths-filtered one in a file GitHub may not run
+        # both leave the check unreported on some pull requests, so the finding holds whichever runs.
+        local_only = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "local_only"})
+        files = {"a.yml": wf("  schedule:\n    - cron: '0 3 * * *'\n", job("lint")),
+                 "b.yml": wf("  pull_request:\n    paths: ['src/**']\n", job("lint", steps=steps(f"someone/t@{SHA}")))}
+        self.assertEqual(answered(assess(requiring("lint", entries=local_only), files), "OBAAF-SET-007"),
+                         "finding medium")
+
+    def test_more_than_two_references_are_counted_once(self):
+        snap, _ = take(selected(), token=TOKEN)
+        tools = [f"someone/t{k}@{SHA}" for k in range(5)]
+        usage = CallsThatWereNotComparedTest()._usage({"ci.yml": wf(PR, job("test", MATRIX_313, steps=steps(*tools)))})
+        _, maybe, _, _ = rules._stops(rules._Run(rules.RULES[0], snap, usage))
+        self.assertIn('"someone/t0@' + SHA + '", "someone/t1@' + SHA + '" and 3 more, which', maybe[W + "ci.yml"])
 
     def test_a_blocking_entry_is_named_as_the_reason(self):
         snap, _ = take(selected(["!evil/*"], github_owned=True), token=TOKEN)
         usage = CallsThatWereNotComparedTest()._usage({"ci.yml": wf(PR, job("test", MATRIX_313, steps=steps(PIN)))})
         _, maybe, _, _ = rules._stops(rules._Run(rules.RULES[0], snap, usage))
         self.assertIn("holds a !, which may block, so nothing is matched", maybe[W + "ci.yml"])
+
+    def test_an_image_in_another_letter_case_is_an_image(self):
+        # The third review of 2b.7: `Docker://` was taken for an unpinned action under the pinning requirement.
+        pinning = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "all",
+                                                      "sha_pinning_required": True})
+        self.assertEqual(self.check(pinning, "Docker://alpine:3.20"), "no-finding")
+        self.assertEqual(self.check(pinning, "docker://alpine:3.20"), "no-finding")
+
+    def test_a_job_whose_uses_is_empty(self):
+        # The third review of 2b.7: `lint: {uses: ''}` was read as a job that reports `lint`.
+        files = {"ci.yml": wf(PR, "  lint:\n    uses: ''\n")}
+        self.assertEqual(answered(assess(requiring("lint"), files), "OBAAF-SET-006"), "cannot-tell")
 
     def test_a_value_the_audit_does_not_know_and_an_empty_uses(self):
         unknown = answer(ADMIN, ACTIONS_PERMISSIONS, {"enabled": True, "allowed_actions": "owner_only_new"})
