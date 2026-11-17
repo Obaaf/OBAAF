@@ -93,7 +93,8 @@ jobs:
         self.assertEqual((iso["tier"], iso["slsaBuildLevel3"], iso["runnerEnvironment"]), ("B", False, "unknown"))
 
     def test_the_firewall_runner_and_a_hosted_label_in_any_case_are_tier_a(self):
-        for runs_on in ("ubuntu-24.04-firewall", "Ubuntu-Latest"):
+        # A hosted label written twice is one label, as the checker reads it (flagship slice 2d.10, #216).
+        for runs_on in ("ubuntu-24.04-firewall", "Ubuntu-Latest", "[ubuntu-latest, Ubuntu-Latest]"):
             with self.subTest(runs_on=runs_on), TempDir() as tmp:
                 iso = records.isolation_from_workflow(self.write(tmp, runs_on), "build")
                 self.assertEqual((iso["tier"], iso["runnerEnvironment"]), ("A", "github-hosted"))

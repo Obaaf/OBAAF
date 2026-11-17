@@ -118,5 +118,36 @@ class FirewallRunnerLabelTest(unittest.TestCase):
         self.assertNotEqual(found["OBAAF-GHA-020"].state, "fixed")     # one leg runs without it
 
 
+class TheSameLabelWrittenTwiceTest(unittest.TestCase):
+    """One GitHub-hosted label written twice, or twice in two letter cases, is one requirement, as
+    OBAAF-GHA-020's firewall reading has read it since slice 2d.2f. OBAAF-GHA-013 reported it at
+    medium, as labels it could not name (flagship slice 2d.10, issue #216)."""
+
+    def test_the_firewall_label_written_twice_is_the_firewall_runner(self):
+        for runs_on in ("[ubuntu-24.04-firewall, ubuntu-24.04-firewall]", "[ubuntu-24.04-firewall, Ubuntu-24.04-Firewall]"):
+            with self.subTest(runs_on=runs_on):
+                found = findings(runs_on, on="issues")
+                self.assertNotIn("OBAAF-GHA-013", found)
+                self.assertEqual(found["OBAAF-GHA-020"].state, "fixed")
+
+    def test_a_hosted_label_written_twice_is_github_hosted(self):
+        for runs_on in ("[ubuntu-latest, ubuntu-latest]", "[ubuntu-latest, UBUNTU-LATEST]",
+                        "[ubuntu-latest, ubuntu-latest, ubuntu-latest]"):
+            with self.subTest(runs_on=runs_on):
+                with TempDir() as tmp:
+                    write_repository(tmp, runs_on, on="pull_request_target", policy=None)
+                    result = checker.check(tmp)
+                self.assertNotIn("OBAAF-GHA-013", {f.rule for f in result.findings})
+
+    def test_two_different_labels_are_still_not_one(self):
+        for runs_on in ("[ubuntu-latest, ubuntu-24.04]", "[ubuntu-latest, 'ubuntu-latest ']", "[ubuntu-latest, gpu]"):
+            with self.subTest(runs_on=runs_on):
+                with TempDir() as tmp:
+                    write_repository(tmp, runs_on, on="pull_request_target", policy=None)
+                    result = checker.check(tmp)
+                found = [f for f in result.findings if f.rule == "OBAAF-GHA-013"]
+                self.assertEqual([f.severity for f in found], ["medium"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2160,7 +2160,9 @@ class Job:
         for labels in sets:
             if any(is_self_hosted_label(label) for label in labels):
                 kinds.add("self-hosted")
-            elif len(labels) == 1 and is_hosted_label(labels[0]):
+            elif len({str(label).lower() for label in labels}) == 1 and is_hosted_label(labels[0]):
+                # One GitHub-hosted label, written once or more, in any letter case: one requirement,
+                # as the native firewall's reading has it since flagship slice 2d.2f (slice 2d.10, #216).
                 kinds.add("github-hosted")
             else:
                 kinds.add("unknown")

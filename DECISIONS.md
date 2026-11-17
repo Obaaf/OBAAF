@@ -87,6 +87,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-077 | Every settings rule says in one sentence why a finding matters, printed before its fix, and the JSON report carries the sentence and the fix | Proposed, 2026-11-17 |
 | D-078 | The settings report quotes every name it lists, and prints a single value bare only when it is one plain word | Proposed, 2026-11-17 |
 | D-079 | The Jenkins rules about pipeline code and pins read Groovy run through any script receiver and Job DSL, library retrievers, Dockerfiles, pod specs as YAML, container commands, and agent CLI installs from scripts and manifests, putting in only what the file fixes | Proposed, 2026-11-17 |
+| D-080 | One GitHub-hosted label written more than once in a job's set of labels, in any letter case, is that label for every reader of a job's runner | Proposed, 2026-11-17 |
 
 ---
 
@@ -607,3 +608,10 @@ For #194 a private `HOME` for AWF was built and then taken out before review. AW
 
 **Consequence.** A Jenkinsfile gate can turn red on findings it did not have; `docs/upgrading.md` lists them. More "unknown" coverage where a folder, a package or an image is computed. Shell branches, `pushd -n`, a case pattern's `)` and agents the catalogue does not name are stated limits (docs/bypass-attempts.md, 2d.2k). No workflow rule and no other Jenkins rule changes.
 
+### D-080 One GitHub-hosted label written more than once is that label for every reader of a job's runner
+
+**Decision.** From flagship slice 2d.10 (issue #216). A set of runner labels that holds one GitHub-hosted label, written once or more and in any letter case (`[ubuntu-latest, ubuntu-latest]`, `[ubuntu-latest, UBUNTU-LATEST]`), is read as that label by `Job.runner_kind`, and so by OBAAF-GHA-013 and every other reader of a job's runner kind: the egress action's and the firewall's checks, the build record's isolation tier and the settings audit. Labels that differ in anything but case, a space included, are still two labels.
+
+**Reason.** Since slice 2d.2f (D-065) OBAAF-GHA-020's reading of GitHub's native egress firewall counts the same label written twice as one requirement, as GitHub's runner labels are matched without regard to case and a runner either has a label or not. `runner_kind` still required exactly one label, so the same report cleared OBAAF-GHA-020 for the firewall and gave a medium OBAAF-GHA-013 that called the same labels "not standard GitHub-hosted labels" (found by the review of slice 4.7), against D-064's "OBAAF-GHA-020 and OBAAF-GHA-013 read the label the same way" and the website's "OBAAF-GHA-013 does not report it". Release 0.3.0 reports OBAAF-GHA-013 for such a job too. How GitHub matches a label written twice was not read from its pages in this slice; the reading is D-065's.
+
+**Consequence.** Such a job loses a medium OBAAF-GHA-013 and passes a gate it failed; a build job on such labels gets Tier A in its build record without `OBAAF_TIER`, and one that declares `OBAAF_TIER: B` is refused, as for one hosted label. If GitHub does not treat the labels as one requirement, the job may wait for a runner it never gets, which a gate cannot see either way. `docs/upgrading.md` lists it.
