@@ -223,16 +223,18 @@ def plain(text: object, limit: int = 200) -> str:
 # ornaments. Single quotes and apostrophes are left alone; names have them.
 QUOTE_LOOKALIKES = frozenset(map(chr, (0x201C, 0x201D, 0x201E, 0x201F, 0x2033, 0x2036, 0x301D, 0x301E, 0x301F,
                                        0xFF02, 0x02BA, 0x02DD, 0x02EE, 0x05F4, 0x3003, 0x02F5, 0x02F6, 0x1CD3,
-                                       0x2E42, 0x275D, 0x275E, 0x1F676, 0x1F677, 0x1F678)))
+                                       0x2E42, 0x275D, 0x275E, 0x2760, 0x1F676, 0x1F677, 0x1F678)))
 # Characters that read as a backslash: before a closing quote one would make the quote look escaped (the
 # review of flagship slice 2b.8): the full-width and small reverse solidus, the reverse solidus operators and
 # the set minus.
-BACKSLASH_LOOKALIKES = frozenset(map(chr, (0xFF3C, 0xFE68, 0x29F5, 0x29F9, 0x2216, 0x244A)))
+BACKSLASH_LOOKALIKES = frozenset(map(chr, (0xFF3C, 0xFE68, 0x29F5, 0x29F9, 0x2216, 0x244A, 0x2572, 0x27CD)))
 
 
 def _lookalike(ch: str) -> bool:
     """Whether a character is not `"` or `\\` and reads as one: listed above, or one whose compatibility form
-    holds either (a full-width or small form the lists do not name)."""
+    holds either. Under Unicode 15.1 the only such forms (U+FF02, U+FF3C, U+FE68) are listed; the second test is
+    a guard for a later Unicode version. Not caught: a combining mark such as U+030B after a space, and two
+    apostrophes."""
     if ch in QUOTE_LOOKALIKES or ch in BACKSLASH_LOOKALIKES:
         return True
     return ch not in '"\\' and any(c in '"\\' for c in unicodedata.normalize("NFKC", ch))

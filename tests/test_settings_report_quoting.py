@@ -194,7 +194,6 @@ class EveryFieldTest(unittest.TestCase):
         self.assertIn('branch "p7" and 2 more;', text)
         self.assertIn("Team 8 (always) and 2 more", text)
 
-
     def test_a_quote_without_a_space_is_not_a_plain_word(self):
         self.assertEqual(report._token('x"y'), '"x\\"y"')
 
@@ -202,17 +201,17 @@ class EveryFieldTest(unittest.TestCase):
 class LooksLikeAQuoteTest(unittest.TestCase):
     def test_issue_125s_example_with_a_look_alike_quote_stays_inside(self):
         # From the review of slice 2b.8: U+02F6 is a modifier letter that prints as a double quote.
-        for mark in ("\u02f6", "\u02f5", "\u1cd3", "\u2e42", "\u275d", "\u275e", "\U0001f676", "\uff02"):
+        for mark in ("\u02f6", "\u02f5", "\u1cd3", "\u2e42", "\u275d", "\u275e", "\u2760", "\U0001f676", "\uff02"):
             with self.subTest(mark=hex(ord(mark))):
                 shown = github.quoted(f"a){mark}, {mark}evil{mark} (b")
                 self.assertEqual(shown, '"a)?, ?evil? (b"')
 
     def test_a_look_alike_backslash_cannot_make_the_closing_quote_look_escaped(self):
-        for mark in ("\uff3c", "\ufe68", "\u29f5", "\u29f9", "\u2216"):
+        for mark in ("\uff3c", "\ufe68", "\u29f5", "\u29f9", "\u2216", "\u2572", "\u27cd"):
             with self.subTest(mark=hex(ord(mark))):
                 self.assertEqual(github.quoted(f"lint{mark}"), '"lint?"')
 
-    def test_a_compatibility_form_of_a_quote_or_backslash_is_caught_without_being_listed(self):
+    def test_every_compatibility_form_of_a_quote_or_backslash_is_replaced(self):
         import unicodedata
         found = [chr(c) for c in range(0x80, 0x30000) if chr(c) not in '"\\'
                  and any(x in '"\\' for x in unicodedata.normalize("NFKC", chr(c)))]
