@@ -76,7 +76,7 @@ obaaf templates install --source obaaf-src/templates/github-actions \
 The package from PyPI does not include the templates, so they are copied from a clone of OBAAF. Keep the clone
 outside the repository you are setting up, and check out `<commit>`, the full commit SHA the installed workflows
 will pin: for release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints it. `OWNER/obaaf` is the
-repository those workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it. `obaaf` does not look for the
+repository those workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it, keeping its name. `obaaf` does not look for the
 templates in the current directory, so running it inside the clone is not enough: pass `--source`. With OBAAF
 installed from the clone in editable mode (`pip install -e obaaf-src`), `--source` can be left out.
 

@@ -28,7 +28,7 @@ obaaf templates install --source obaaf-src/templates/github-actions \
 ```
 
 For release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints the full SHA. `OWNER/obaaf` is the
-repository the workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it. `obaaf` does not look for the
+repository the workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it, keeping its name. `obaaf` does not look for the
 templates in the current directory, so running it inside the clone is not enough: pass `--source`. With OBAAF
 installed from the clone in editable mode (`pip install -e obaaf-src`), `--source` can be left out.
 
