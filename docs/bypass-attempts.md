@@ -21,9 +21,11 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2g** | **The settings rules: OBAAF-SET-001 to OBAAF-SET-015** | **2026-11-15** | `tests/test_settings_bypasses.py` |
 | **2d.2h** | **The repository and instruction-file rules: OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001** | **2026-11-15** | `tests/test_repo_instruction_bypasses.py` |
 | **2d.2i** | **Jenkins files and credentials: which Jenkinsfiles are read, OBAAF-JEN-001, 013, 014, 015** | **2026-11-15** | `tests/test_jenkins_files_credentials.py` |
-| Still open | The rest of 2d.2: OBAAF-JEN-002 to 012; see [the plan](flagship.md) | | |
+| **2d.2k** | **Pipeline code and pins: OBAAF-JEN-004, 008** | **2026-11-17** | `tests/test_jenkins_code_pins.py` |
+| 2d.2j (open) | Where pipeline code runs and agent stages: OBAAF-JEN-002, 003, 006, 007; [attempts recorded, not yet fixed](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed) | 2026-11-17 | |
+| Still open | The rest of 2d.2: OBAAF-JEN-005, 009 to 012; see [the plan](flagship.md) | | |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules) and [2d.2i](#2d2i-jenkins-files-and-credentials).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and the open [2d.2j](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed).
 
 ## 2d.2b: what a job can reach
 
@@ -2236,3 +2238,248 @@ A sixth pass (`6671776`) found nothing blocking: every secret spelling it had, a
 | C096 | JEN-001 | withCredentials(bindings: [list] + extra) |  | no finding; coverage not applicable | medium line 6 | missed; fixed |
 | C097 | JEN-001 | this.&runTests.call() inside binding |  | no finding; coverage pass | medium line 6 | missed; fixed |
 | C098 | JEN-001 | stage options { withCredentials } (not verified Jenkins accepts it) |  | no finding; coverage not applicable | medium line 5 | missed; fixed |
+
+
+## 2d.2k: pipeline code and pins
+
+Run `brant`, 2026-11-17, on a copy of `flagship` at `9b806db`. Three Opus 5.5 reviewers that did not write the Jenkins rules were set on the six rules run `gadwall` had split off as 2d.2j (OBAAF-JEN-002, 003, 004, 006, 007, 008). The one on OBAAF-JEN-004 and 008 (reviewer C) wrote 85 attempts: 48 ways past, 2 weaker, 7 false positives, 2 slow cases, 26 held. The one on OBAAF-JEN-003 and 007 (B) wrote 111; its classes need a model of which stages share a workspace, so they are recorded below as 2d.2j's starting points and not fixed here. The one on OBAAF-JEN-002 and 006 (A) was stopped by a safety classifier before its first case. This tranche is OBAAF-JEN-004 and 008.
+
+The fixes then went through nine review passes by fresh Opus 5.5 sub-agents, each given the code and the claims, not the author's view of them, and a tenth check of the last two-line fix. Blocking findings per pass: 16, 21, 11, 8, 5, 8, 2, 2, 1, then none. Every case a pass wrote that the fixes changed is a test in `tests/test_jenkins_code_pins.py` (the attack's cases under their ids, each pass's under `V1-` to `V9-`): 81 of reviewer C's cases (56 of them give another result on the code before the slice), and 214 cases in all, beside unit tests of the version, Dockerfile, container-command and YAML readers. Each class below names the attempts that showed it.
+
+### OBAAF-JEN-004: code the reviewers did not approve
+
+- **Any receiver.** `load` and `evaluate` were read only as those two names. Now any call whose last name is `load` or `evaluate` is code loading when its receiver is the script (`this`, `steps`, a variable or parameter given `this`), and so are `Eval.me/x/xy/xyz`, a GroovyShell, GroovyClassLoader or GroovyScriptEngine's `parse`, `run` and `evaluate` (made with `new`, `newInstance`, a qualified name or an import alias, and through copies), `parseClass`, a JSR-223 engine's `eval`, `.call` on a pointer, a pointer to `load` or `Eval.me` held in a variable or passed as an argument (`list.each(this.&load)`), and Job DSL (`jobDsl`, and the older `step([$class: 'ExecuteDslScripts'])` in both spellings), which runs on the controller (C006, C007, C009 to C011, C014, C015, C017, C021; the reviews' V1-003, 004, 010, 053, V2-030 to 040, V3-001 to 007, 049, V4-060 to 112). A receiver that may be something else (`props.load(...)`, `xpath.evaluate(...)`, a library's global variable) is "unknown" for OBAAF-JEN-004 only, not a finding (V1-005, 071, 088).
+- **Reviewed text.** Literal text, a variable only ever assigned one literal, `readTrusted` and `libraryResource` are not findings (C018, C019). A variable assigned anything else anywhere (a parameter, a closure's or loop's variable, `this.x`, `binding.x`, `binding['x']`, `setVariable`, `setProperty`, two different literals) is not reviewed text (V1-001, V2-037, 038, 046, V3-003, 004, 020). Groovy built from a parameter or a change's text is a finding on any branch (C008).
+- **Libraries.** A `library` step's retriever is read: `legacySCM(scm)` (also through a variable and `this.scm`) is the build's own checkout, high; a remote or other setting the file does not fix is medium, high when it comes from a parameter or a change's text; credentials and values the file fixes do not count (C004, C013, V1-006 to 009). A version read from a workspace file, directly or through a variable, is high (C082, V1-008). A `library(...)` at the root of a chain of properties is recorded (V1-077).
+- **Conditions.** `GIT_BRANCH` compared with `==`, `!=` or `==~` is read as `BRANCH_NAME` is, so `env.GIT_BRANCH ==~ /PR-\d+/` reaches change requests (C012).
+
+### OBAAF-JEN-008: images, libraries and agent CLIs that can move
+
+- **Images.** A docker agent's image given as a value is put in from what the file fixes or is "unknown" (C029, C030); a pod spec is read as YAML, aliases once each and at most 50,000 nodes (C039 to C044, C078); a containerTemplate in a closure or a list the file builds is read or "unknown" (C037, C038); a Dockerfile that a `dockerfile` agent, `docker.build` or a script's `docker build` reads is read in its folder, with comments dropped before continuations, every leading parser directive (`# escape=`), heredocs on RUN, COPY and ADD, exec-form RUN, global ARGs and build arguments for FROM, a stage's ARG and ENV (ENV first) for RUN, stage names, `COPY --from` and `RUN --mount=...,from=` (C033, C034, C073, V1-011 to 015, V2-003, 004, 024 to 026, V3-039, 040); `docker`, `podman` and `nerdctl` run, create and pull are read where a command starts, after keywords, assignments, `sudo`, `env`, `timeout`, `xargs` and `bash -c`, with their global options, and not after `echo` or in a comment (C036, V1-021 to 024, V2-020 to 023, V3-014 to 017); an image the job builds or tags itself is not a registry reference, but a `pull` always is (V3-046, V4-001 to 100).
+- **Agent CLIs.** Only an exact version passes: npm `@1.2.3`, pip `==1.2.3` (spaces allowed) or `===`; a range, a tag, a wildcard, extras without a version and a version set at run time do not (C048 to C054, C056, C068). Quotes are taken off first (V5-080 to 082). The installer's subcommand, its first word that is not an option, decides whether a package is installed; `uninstall`, `view`, `ls` are not installs (C062, V1-033, 087, V2-005, 006). pip names are compared as pip compares them (V1-031, 032). Install scripts count however they are fetched and run (`wget`, `bash <(curl ...)`, `| sudo bash`, PowerShell `irm ... | iex`, a known installer URL in any command) (C057 to C061, C071, C072, V2-015); `claude update` and `npm update -g` after an agent install, in any step, are updates (C064, V2-007, 008, V4-070); installs in the repository's scripts, `pip install -r` files (every `-r` and `-c`, nested ones), and `package.json` without a lockfile (npm aliases and peer dependencies included) are read, in the folder the command runs in: `dir()`, `cd`, `pushd` and `popd`, `cd -`, `--prefix`, a subshell's or a command substitution's `cd` ending with it, `$WORKSPACE` as the checkout; a folder that cannot be told is "unknown" (C066, C067, C069, C070, C075, V1-035 to 037, 075, V2-016 to 019, V3-032 to 037, V7-, V8-, V9-). A package named at run time is "unknown" (V1-074, V2-009, 010).
+- **What the script sets.** A shell variable is put in only when the script sets it to one literal before the command; `read`, `for`, `declare`, `printf -v`, `mapfile`, `unset`, `+=` and `eval` make it unknown, and so does `source` or `.` of a file that is not plainly outside the checkout (an absolute path, `~`, `$HOME`, `$NVM_DIR`, a virtual environment's `bin/activate` leave the variables as they were). Environment values are the script's starting variables. Groovy's own variables go into a script only where Groovy interpolates it (V2-011 to 014, 069, 070, V3-008 to 013, V4-152 to 160, V5-060, 102, V6-).
+- **Libraries.** A library named by a value is put in or "unknown"; a library is high when any stage runs an agent or publishes (C023, C024, C027).
+- **Messages.** Text from a file is escaped (quotes, backslashes, backticks, control characters) and cut at 120 characters, so it cannot end the quoted part of a message or start a new line (V1-041, V2-057). A pinned install is "pass", not "not applicable".
+
+### Time
+
+The patterns that took seconds on long input are linear or bounded: a 3,000-line pod spec took 13.7 s (C078, now 0.3 s); one line of 8,000 `curl` words 7.5 s (C079; 2.6 s now, all of it in the upload patterns of issue #179); 2,000 `docker run` words 6.5 s and 8,000 `pip install` words 3.7 s (V1-061, 063; 0.3 s and 0.5 s). Each step's script is read once per call and folder, each repository script, Dockerfile, pod spec and requirements file once.
+
+### Not fixed
+
+An upper-case 40-hex library version is still called a branch (C025; whether Jenkins' Git retriever takes it was not checked). `load` of a path just written from `readTrusted` is still a finding (C076). Agents the catalogue does not name (`@qwen-code/qwen-code`, C081) are slice 2d.5's. Shell branches are read one after the other, so a `pushd` in each arm of an `if` misplaces the folder, and `pushd -n` is taken for a move (the tenth check's P002, P006). A case pattern's `)` closes a subshell early (V8's Z010). `docker build -` and `IMAGE_ID=$(docker build -q .)` are "named at run time". A method run under many `dir()` calls is read once per folder, which costs time (150 folders: 13 s). The native Claude Code installer updates itself unless told not to, which a pinned install does not show (from the reviewers' reading of its documentation; not checked).
+
+### What changed for the first adopter
+
+Expectrail has no Jenkinsfile. At `49226b6c` (a copy without anything under `fresh-*`, committed to a fresh git work tree), `obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes` gives byte-identical text and JSON before and after: 36 files, 57 findings. On this repository `obaaf check .` is byte-identical. For the three Jenkins templates (`templates/jenkins`) the findings and the exit status are the same; OBAAF-JEN-008's coverage changes from "not applicable" to "unknown", because each installs OBAAF's own setup requirements from a checkout of another repository, which the checker cannot read. The other Jenkins rules give the same results before and after on all 111 of reviewer B's cases.
+
+### The attempts
+
+Reviewer C, at `9b806db`; "After" is what the test holds.
+
+| ID | Rule | Case | Before (at `9b806db`) | After | Result |
+| --- | --- | --- | --- | --- | --- |
+| C001 | JEN-004 | @Library('shared-lib@${BRANCH_NAME}') _ (single-quoted, so the version is the literal text ${BRANCH_NAME}) | 004 unknown (generic library-trust); 008 medium@1 'loaded at ${BRANCH_NAME}, a branch or tag that can move' | unknown | held |
+| C002 | JEN-004 | library "shared-lib@${params.LIB_VERSION}" in script{} | 004 high@7 version taken from params.LIB_VERSION; 008 not applicable | finding (high) | held |
+| C003 | JEN-004 | library('shared-lib@' + params.LIB_VERSION) (concatenation) | 004 unknown@7 'library step names a library computed at run time'; 008 not applicable | unknown | held |
+| C004 | JEN-004 | library identifier: 'ci-lib@main', retriever: modernSCM([$class: 'GitSCMSource', remote: params.LIB_REPO]): library code from a repository chosen by a build parameter | 004 no finding; unknown only generic (library trust; unresolved step modernSCM); 008 medium@8 'main' | finding (high) | way past; fixed |
+| C005 | JEN-004 | library identifier: "shared-lib@${ver}", changelog: false with def ver = env.CHANGE_BRANCH ?: env.BRANCH_NAME | 004 high@8 version from CHANGE_BRANCH | finding (high) | held |
+| C006 | JEN-004 | def runCi(s) { s.load('ci/build.groovy') }; runCi(this) in an unconditioned stage (change requests reach it) | 004 pass, no unknown; 008 not applicable | finding (medium) | way past; fixed |
+| C007 | JEN-004 | class CiRunner { def script; def run() { script.load('ci/build.groovy').build() } }; new CiRunner(this).run() | 004 unknown only generic 'class CiRunner' (statement not analyzed), no load finding | unknown | way past; fixed |
+| C008 | JEN-004 | evaluate("${params.GROOVY}") in when { branch 'main' }: Groovy text from a parameter (GString arg is skipped as Str) | 004 unknown only 'evaluate(): Groovy loaded at run time is not analyzed' (rule skips isinstance(arg, Str)) | finding (medium) | held |
+| C009 | JEN-004 | def cfg = Eval.me(readFile('ci/config.groovy')): evaluates workspace Groovy | 004 pass; 008 not applicable | finding (medium) | way past; fixed |
+| C010 | JEN-004 | new GroovyShell(this.binding).evaluate(readFile('ci/steps.groovy')) | 004 pass; 008 not applicable | finding (medium) | way past; fixed |
+| C011 | JEN-004 | jobDsl targets: 'jobs/**/*.groovy' in an unconditioned stage: Job DSL Groovy from the workspace runs on the controller | 004 unknown only generic 'calls 1 step(s) not built into Jenkins (jobDsl); probably shared-library or plugin code' | finding (high) | way past; fixed |
+| C012 | JEN-004 | load 'ci/pr.groovy' under when { expression { env.GIT_BRANCH ==~ /PR-\d+/ } } (a PR-only stage) | 004 no finding: step cr='no' (checked with model.build); held only by generic 'load(): Groovy loaded at run time is not analyzed' | finding (high) | held |
+| C013 | JEN-004 | library identifier: 'self@pr', retriever: legacySCM(scm): library code from the change's own checkout | 004 no finding; unknown only generic (library trust; unresolved legacySCM); 008 medium@7 'pr' | finding (high) | way past; fixed |
+| C014 | JEN-004 | new GroovyShell(binding).parse(readFile('ci/steps.groovy')).run() | 004 pass | finding (medium) | way past; fixed |
+| C015 | JEN-004 | this.class.classLoader.parseClass(readFile('ci/Steps.groovy')).newInstance().run(this) | 004 pass | finding (medium) | way past; fixed |
+| C016 | JEN-004 | this."load"('ci/build.groovy') (method name as a string) | 004 medium@6 loads Groovy from the workspace | finding (medium) | held |
+| C017 | JEN-004 | jobDsl scriptText: readFile('seed/jobs.groovy'), sandbox: true | 004 unknown only generic unresolved-step (jobDsl) | finding (high) | way past; fixed |
+| C018 | JEN-004 | evaluate(libraryResource('org/ci/steps.groovy')) from a library pinned to a full SHA (safe) | 004 medium@7 'evaluates Groovy text read at run time. For a change request the workspace holds the change's own files' | unknown | false positive; fixed |
+| C019 | JEN-004 | def helperCode = 'echo "static helper"'; evaluate(helperCode): text written in the Jenkinsfile (safe) | 004 medium@7 evaluates Groovy text read at run time | unknown | false positive; fixed |
+| C020 | JEN-004 | evaluate(readTrusted('ci/steps.groovy')) (the recommended form; safe) | 004 no finding; unknown only generic evaluate() | unknown | held |
+| C021 | JEN-004 | withCi { s -> s.evaluate(readFile('ci/steps.groovy')) } with withCi(Closure body) { body.call(this) } | 004 unknown only generic unresolved-step 's.evaluate' ('probably shared-library or plugin code') | unknown | way past; fixed |
+| C022 | JEN-004 | when { branch 'main' }: checkout of another repository at params.CI_REF, then load 'ci-scripts/deploy.groovy' | 004 no finding; only generic load() unknown | unknown | held |
+| C023 | JEN-008 | environment { CI_LIB = 'shared-lib@main' }; library env.CI_LIB: a literal branch, through the environment | 008 not applicable (no finding, no unknown); 004 unknown 'names a library computed at run time' | finding (medium) | way past; fixed |
+| C024 | JEN-008 | environment { LIB_REF = 'main' }; library "shared-lib@${env.LIB_REF}" | 008 not applicable; 004 medium 'version computed at run time' | finding (medium) | way past; fixed |
+| C025 | JEN-008 | @Library('ci-lib@<40 upper-case hex>') _ | 008 medium@1 'a branch or tag that can move' | not in the tests (stated limit) | false positive; not fixed, stated limit: an upper-case 40-hex library version is still called a branch (Jenkins' Git retriever not checked) |
+| C026 | JEN-008 | @Library('ci-lib@<40 lower-case hex>') _ (pinned; safe) | 008 pass | pass | held |
+| C027 | JEN-008 | @Library('ai-review-lib@main') whose step aiReviewPrepare() runs in the stage that runs claude -p | 008 medium@1 (description promises high for references used by agent stages) | finding (high) | weaker; fixed |
+| C028 | JEN-008 | libraries { lib('ci-lib@v1.2') } directive | 008 medium@3 'v1.2' | finding (medium) | held |
+| C029 | JEN-008 | agent { docker { image params.BUILD_IMAGE } } (default node:20) | 008 not applicable (no finding, no unknown) | unknown | way past; fixed |
+| C030 | JEN-008 | def BUILD_IMAGE = 'node:20'; stage agent { docker { image BUILD_IMAGE } } | 008 not applicable | finding (low) | way past; fixed |
+| C031 | JEN-008 | agent { docker 'node:20' } | 008 low@2 not pinned | finding (low) | held |
+| C032 | JEN-008 | agent { docker { image 'node:20@sha256:<64 hex>' } } (pinned; safe) | 008 pass | pass | held |
+| C033 | JEN-008 | agent { dockerfile true } with Dockerfile 'FROM node:20' | 008 not applicable (Dockerfile not read) | finding (low) | way past; fixed |
+| C034 | JEN-008 | docker.build('app-ci', '-f ci/Dockerfile .').inside { } with 'FROM python:3' | 008 not applicable | finding (low) | way past; fixed |
+| C035 | JEN-008 | def db = docker.image('postgres:16'); db.withRun(...) { } | 008 low@3 not pinned | finding (low) | held |
+| C036 | JEN-008 | sh 'docker run --rm -v "$PWD":/src -w /src node:20 npm test' | 008 not applicable | finding (low) | way past; fixed |
+| C037 | JEN-008 | def containers = [containerTemplate(name: 'node', image: 'node:20', ...)]; podTemplate(containers: containers) | 008 not applicable | unknown | way past; fixed |
+| C038 | JEN-008 | Declarative kubernetes { containerTemplate { name 'node'; image 'node:20@sha256:<64 hex>' ... } } (pinned; safe) | 008 low@4 "Image '?' ... not pinned" | pass | false positive; fixed |
+| C039 | JEN-008 | pod yaml with flow mapping: containers: [{name: node, image: "node:20", ...}] | 008 not applicable | finding (low) | way past; fixed |
+| C040 | JEN-008 | pod yaml written as JSON: {"spec": {"containers": [{"name": "node", "image": "node:20"}]}} | 008 not applicable | finding (low) | way past; fixed |
+| C041 | JEN-008 | pod yaml with a quoted key: "image": node:20 | 008 not applicable | finding (low) | way past; fixed |
+| C042 | JEN-008 | pod yaml with a space before the colon: image : node:20 | 008 not applicable | finding (low) | way past; fixed |
+| C043 | JEN-008 | pod yaml image as a folded block scalar: image: >-\n  node:20@sha256:<64 hex> (pinned; safe) | 008 low@2 "Image '>-' ... not pinned" | pass | false positive; fixed |
+| C044 | JEN-008 | yamlFile 'ci/pod.yaml' with initContainers: - {name: init, image: busybox} (flow) and a pinned main container | 008 pass (busybox missed) | finding (low) | way past; fixed |
+| C045 | JEN-008 | podTemplate(containers: [containerTemplate(name: 'node', image: 'node:20', ...)]) | 008 low@1 | finding (low) | held |
+| C046 | JEN-008 | matrix axis NODE, agent { docker { image "node:${NODE}" } } | 008 unknown 'image reference node:${NODE} is computed at run time' | unknown | held |
+| C047 | JEN-008 | def img = 'node:20'; docker.image(img).inside { } | 008 unknown 'an image reference is computed at run time' | finding (low) | held |
+| C048 | JEN-008 | npm install -g @anthropic-ai/claude-code@^2.0.0 (range) | 008 pass | finding (high) | way past; fixed |
+| C049 | JEN-008 | npm install --global @google/gemini-cli@preview (dist-tag) | 008 pass | finding (high) | way past; fixed |
+| C050 | JEN-008 | npm i -g @anthropic-ai/claude-code@2 (major-only range) | 008 pass | finding (high) | way past; fixed |
+| C051 | JEN-008 | pip install "aider-chat>=0.80" | 008 not applicable (package regex lookahead fails at '>') | finding (high) | way past; fixed |
+| C052 | JEN-008 | pip install aider-chat[playwright] (extras) | 008 not applicable | finding (high) | way past; fixed |
+| C053 | JEN-008 | pip install "aider-chat==0.86.*" (wildcard) | 008 pass | finding (high) | way past; fixed |
+| C054 | JEN-008 | pip install aider-chat~=0.86 | 008 not applicable | finding (high) | way past; fixed |
+| C055 | JEN-008 | sh ''' with backslash-newline inside the Groovy string (Groovy joins the lines): npm install -g \ @anthropic-ai/claude-code | 008 high@6 installed without a fixed version | finding (high) | held |
+| C056 | JEN-008 | environment { CLAUDE_VERSION = 'latest' }; sh 'npm i -g @anthropic-ai/claude-code@$CLAUDE_VERSION' | 008 pass | finding (high) | way past; fixed |
+| C057 | JEN-008 | curl -fsSL https://claude.ai/install.sh -o install.sh && bash install.sh (download, then run) | 008 not applicable | finding (high) | way past; fixed |
+| C058 | JEN-008 | wget -qO- https://claude.ai/install.sh \| bash | 008 not applicable | finding (high) | way past; fixed |
+| C059 | JEN-008 | bash <(curl -fsSL https://claude.ai/install.sh) | 008 not applicable | finding (high) | way past; fixed |
+| C060 | JEN-008 | curl -fsSL https://claude.ai/install.sh \| sudo bash | 008 not applicable | finding (high) | way past; fixed |
+| C061 | JEN-008 | curl -fsSL https://claude.ai/install.sh \| /bin/bash | 008 not applicable | finding (high) | way past; fixed |
+| C062 | JEN-008 | npm uninstall -g @anthropic-ai/claude-code \|\| true (removal; safe) | 008 high@6 'installed without a fixed version' | not applicable | false positive; fixed |
+| C063 | JEN-008 | curl -fsSL https://claude.ai/install.sh \| bash -s 2.0.14 (installer told a fixed version) | 008 high@6 'installs whatever version the script fetches': the reason given is wrong, the conclusion holds because the native install auto-updates | finding (high) | held |
+| C064 | JEN-008 | npm i -g @anthropic-ai/claude-code@2.0.14, then claude update (moves to the latest version) | 008 pass | finding (high) | way past; fixed |
+| C065 | JEN-008 | npm i -g @anthropic-ai/claude-code@2.0.14 @openai/codex@0.46.0 (both pinned; safe) | 008 pass | pass | held |
+| C066 | JEN-008 | shell line continuation: npm install -g \\<newline>  @anthropic-ai/claude-code (backslash reaches the shell) | 008 not applicable | finding (high) | way past; fixed |
+| C067 | JEN-008 | def AGENT_PKG = '@anthropic-ai/claude-code'; sh "npm install -g ${AGENT_PKG}" | 008 not applicable | finding (high) | way past; fixed |
+| C068 | JEN-008 | sh "npm install -g @anthropic-ai/claude-code@${params.CLAUDE_VERSION}" (default latest) | 008 pass (only JEN-009 reports the interpolation) | finding (high) | way past; fixed |
+| C069 | JEN-008 | sh './ci/install-agent.sh' whose file runs npm install -g @anthropic-ai/claude-code | 008 not applicable (the script is read for agent detection but not for JEN-008) | finding (high) | way past; fixed |
+| C070 | JEN-008 | package.json devDependencies @anthropic-ai/claude-code: latest, no lockfile; sh 'npm install'; sh 'npx claude -p ...' | 008 not applicable | finding (high) | way past; fixed |
+| C071 | JEN-008 | powershell 'irm https://claude.ai/install.ps1 \| iex' | 008 not applicable | finding (high) | way past; fixed |
+| C072 | JEN-008 | environment { AGENT_INSTALLER = 'https://claude.ai/install.sh' }; sh 'curl -fsSL "$AGENT_INSTALLER" \| bash' | 008 not applicable | finding (high) | way past; fixed |
+| C073 | JEN-008 | agent { dockerfile { filename 'ci/agent.Dockerfile' } } whose file runs RUN npm install -g @anthropic-ai/claude-code (FROM pinned) | 008 not applicable | finding (high) | way past; fixed |
+| C074 | JEN-008 | npx -y @anthropic-ai/claude-code -p ... | 008 high@5 | finding (high) | held |
+| C075 | JEN-008 | pip install -r ci/requirements-agent.txt containing aider-chat; then aider --message | 008 not applicable | finding (high) | way past; fixed |
+| C076 | JEN-004 | writeFile file: 'ci/steps.groovy', text: readTrusted('ci/steps.groovy'); load 'ci/steps.groovy' (loads the trusted text; safe) | 004 medium@7 loads Groovy from the workspace | not in the tests (stated limit) | false positive; not fixed, stated limit: `load` of a path just written from `readTrusted` is still a finding |
+| C077 | JEN-008 | agent { docker { image 'node:20' } } for a pipeline whose stage runs claude -p | 008 high@2 | finding (high) | held |
+| C078 | JEN-008 | kubernetes yaml with 3000 blank lines before containers: (pinned image) | 13.73s; 008 pass. POD_IMAGE ~7s and JEN-006's hostPath pattern ~7s | pass | slow; fixed |
+| C079 | JEN-008 | sh 'echo curl curl ... (8000 words)' on one line | 7.51s; 008 not applicable (AGENT_INSTALL_SCRIPT backtracking) | not in the tests (stated limit) | slow; partly fixed: the install pattern is linear now; the remaining 2.5 s is the upload patterns of #179 |
+| C080 | JEN-008 | kubernetes pod yaml image node:20; stage runs claude -p in container('node') | 008 high@2 | finding (high) | held |
+| C081 | JEN-008 | npm install -g @qwen-code/qwen-code@latest; qwen -p ... (agent not in the catalogue) | 008 not applicable (JEN-007 also silent) | not in the tests (stated limit) | way past; not fixed, left to slice 2d.5: `@qwen-code/qwen-code` is not in the agent catalogue |
+| C082 | JEN-004 | library "ci-lib@${readFile('.ci-lib-version').trim()}": version from a workspace file a change request can edit | 004 medium@7 'computed at run time' (rule severity high; a parameter gets high) | finding (high) | weaker; fixed |
+| C083 | JEN-008 | pip install aider-chat==0.86.1 (pinned; safe) | 008 pass | pass | held |
+| C084 | JEN-004 | load 'ci/pr.groovy' under when { changeRequest() } (baseline for C012) | 004 high@7 | finding (high) | held |
+| C085 | JEN-004 | library "ci-lib@${env.GIT_BRANCH}" in a PR-only stage with credentials | 004 high@8 version from GIT_BRANCH | finding (high) | held |
+
+
+## 2d.2j (open): agent stages, attempts recorded, not yet fixed
+
+Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for the run that takes 2d.2j: 71 ways past, 14 false positives, 3 slow cases, 23 held. The classes are in [the plan's entry for 2d.2j](flagship.md). None is fixed; the case files themselves were not kept, so each row says what the file did. OBAAF-JEN-002 and 006 have no recorded attempt yet (reviewer A was stopped by a safety classifier before its first case).
+
+| ID | Rule | Case | At `9b806db` | Verdict |
+| --- | --- | --- | --- | --- |
+| B001 | both | control: claude -p and git push in one stage | exit=1 time=0.31s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B002 | JEN-003 | top-level agent any; stage Fix runs claude -p, next stage Push runs git push in the same workspace | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B003 | JEN-003 | agent stage, then pipeline-level post { success { git push } } | exit=1 time=0.30s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B004 | JEN-003 | parent stage with nested sequential stages Fix (claude) and Ship (git push) | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@8[Maintain > Fix] | way past |
+| B005 | JEN-003 | scripted node { stage Fix claude; stage Push git push } | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B006 | JEN-003 | agent stage on label sandbox stashes the tree; stage on label trusted unstashes and pushes | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@7[Fix] | way past |
+| B007 | JEN-003 | docker agent with reuseNode true runs npx claude-code; next stage npm publish in the same workspace | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@12[Fix] | way past |
+| B008 | JEN-003 | nested stage Fix runs claude; parent stage's post { success } pushes | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@8[Maintain > Fix] | way past |
+| B009 | JEN-003 | scripted: claude -p outside any stage in node{}, git push in a stage of the same node | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@3[pipeline] | way past |
+| B010 | JEN-003 | agent writes NOTES.md; next stage passes it to build job: 'release' | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B011 | JEN-003 | bash -c "git commit && git push" (push after && inside quotes) | exit=1 time=0.30s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B012 | JEN-003 | /usr/bin/git push in the agent stage | exit=1 time=0.27s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B013 | JEN-003 | git -c "user.name=CI Bot" push (option value with a space) | exit=1 time=0.25s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B014 | JEN-003 | git --git-dir .git --work-tree . push (option value as separate word) | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B015 | JEN-003 | git \ newline push (shell line continuation) | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B016 | JEN-003 | def pushCmd = 'git push origin HEAD:main'; sh pushCmd | exit=1 time=0.30s; JEN-003 pass; JEN-007 fail low@7[Fix] | way past |
+| B017 | JEN-003 | helper def gitCmd(String args) { sh "git ${args}" }; gitCmd('push origin HEAD:main') | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@9[Fix] | way past |
+| B018 | JEN-003 | sh './ci/push-branch.sh'; the repo script runs git push | exit=1 time=0.27s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B019 | JEN-003 | sh 'make push-fix'; the Makefile target runs git push | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B020 | JEN-003 | git subtree push --prefix docs origin gh-pages | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B021 | JEN-003 | gh api -X PUT repos/o/r/contents/<path> writes a commit without git push | exit=1 time=0.25s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B022 | JEN-003 | gh api -X PUT repos/o/r/pulls/N/merge merges a PR | exit=1 time=0.25s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B023 | JEN-003 | bat: "C:\Program Files\Git\cmd\git.exe" push | exit=1 time=0.25s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B024 | JEN-003 | glab mr merge (GitLab analogue of gh pr merge) | exit=1 time=0.25s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B025 | JEN-003 | git push --dry-run only (nothing is pushed) | exit=1 time=0.26s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | false positive |
+| B026 | JEN-003 | echo "... do not git push from CI" (text only) | exit=1 time=0.26s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | false positive |
+| B027 | JEN-003 | git commit --amend && git -C . push --force | exit=1 time=0.30s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B028 | JEN-003 | sudo -u release sh -c "git push origin HEAD:main" (quote right before git) | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B029 | JEN-003 | build job: "deploy-${env.BRANCH_NAME}" (computed job) | exit=1 time=0.27s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B030 | JEN-003 | triggerRemoteJob (Parameterized Remote Trigger plugin) | exit=1 time=0.28s; JEN-003 unknown unknown@7: calls 1 step(s) that are not built into Jenkins or defined in this fil; JE | held |
+| B031 | JEN-003 | httpRequest POST ${JENKINS_URL}job/deploy/buildWithParameters (known step, no unknown) | exit=1 time=0.31s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B032 | JEN-003 | curl -X POST $JENKINS_URL/job/deploy/build | exit=1 time=0.30s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B033 | JEN-003 | java -jar jenkins-cli.jar build deploy | exit=1 time=0.33s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B034 | JEN-003 | mvn compile jib:build (builds and pushes an image) | exit=1 time=0.27s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B035 | JEN-003 | /kaniko/executor --destination registry/app:latest | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B036 | JEN-003 | buildah push registry/app:latest | exit=1 time=0.27s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B037 | JEN-003 | npm run release; package.json script runs npm publish | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B038 | JEN-003 | docker \ newline push (line continuation) | exit=1 time=0.27s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B039 | JEN-003 | bash -c "docker push registry/app:latest" (quote right before docker) | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B040 | JEN-003 | docker.build(...) then img.push() inside withRegistry | exit=1 time=0.26s; JEN-003 fail high@10[Fix]; JEN-007 fail low@6[Fix] | held |
+| B041 | JEN-003 | step([$class: 'S3BucketPublisher', ...]) uploads to S3 | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B042 | JEN-003 | python3 -m twine upload dist/* | exit=1 time=0.33s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B043 | both | $(command -v claude) -p ... | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B044 | both | environment { AGENT_BIN = 'claude' }; sh '$AGENT_BIN -p ...' | exit=1 time=0.27s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B045 | both | bat 'claude.cmd -p ...' (npm shim on Windows) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B046 | both | bat 'Claude -p ...' (Windows command names are case-insensitive) | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B047 | both | claude --append-system-prompt "Be terse; never ask" -p ... (';' inside a quoted option before -p) | exit=1 time=0.37s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B048 | both | npx -y opencode-ai@0.15.0 run "..." (package in agent_packages) | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B049 | both | codex e --full-auto "..." | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B050 | both | cat .ci/prompt.md \| gemini --yolo (no -p) | exit=1 time=0.28s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B051 | both | python3 ci/autofix.py; subprocess.run(["claude", "-p", ...]) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B052 | both | dir('ci') { sh './autofix.sh' } (script read from repo root, not ci/) | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B053 | both | sh 'cd tools && ./autofix.sh' | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B054 | both | writeFile file: 'autofix.sh', text: 'claude -p ...'; sh 'sh autofix.sh' | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B055 | both | sh 'make autofix'; Makefile runs claude -p | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B056 | both | sh 'npm run autofix'; package.json script runs claude -p | exit=1 time=0.31s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B057 | both | def run(String cmd) { sh cmd }; run('claude -p ...') in Fix, run('make test') later | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B058 | both | def cmd = 'claude -p ...'; sh cmd; then cmd = 'echo done' | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B059 | both | def agentCmd = ['claude','-p',...].join(' '); sh agentCmd | exit=1 time=0.29s; JEN-003 unknown unknown@7: calls 1 step(s) that are not built into Jenkins or defined in this fil; JE | held |
+| B060 | both | sh 'cl\u0061ude -p ...' (unicode escape) | exit=1 time=0.27s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B061 | both | powershell Start-Process -FilePath claude -ArgumentList @('-p', ...) | exit=1 time=0.34s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B062 | both | repo script ci/autofix.sh: claude \ newline --model x \ newline -p | exit=1 time=0.31s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B063 | both | ci/maintain.sh calls ./ci/autofix.sh, which runs claude -p (two levels) | exit=1 time=0.34s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B064 | both | node_modules/.bin/claude -p | exit=1 time=0.30s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B065 | both | aiAgent step | exit=1 time=0.30s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B066 | both | withEnv(['AGENT=claude']) { sh '${AGENT} -p ...' } | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B067 | both | npx -y @qodo/command@0.20.0 ... (package in agent_packages; flags from knowledge) | exit=1 time=0.31s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B068 | both | shared-library step runClaude(...) | exit=1 time=0.35s; JEN-003 unknown unknown@7: calls 1 step(s) that are not built into Jenkins or defined in this fil; JE | held |
+| B069 | both | load 'ci/helpers.groovy' then helpers.autofix() | exit=1 time=0.29s; JEN-003 unknown unknown@7: load(): Groovy loaded at run time is not analyzed]; JEN-007 unknown unknow | held |
+| B070 | both | docker run -v $PWD:/work image claude -p ... | exit=1 time=0.27s; JEN-003 fail high@7[Fix]; JEN-007 fail low@6[Fix] | held |
+| B071 | both | echo "Tip: ... claude -p ..." plus a real git push | exit=1 time=0.31s; JEN-003 fail high@7[Docs]; JEN-007 fail low@6[Docs] | false positive |
+| B072 | JEN-007 | npm uninstall -g @anthropic-ai/claude-code only | exit=1 time=0.31s; JEN-003 pass; JEN-007 fail low@6[Clean image] | false positive |
+| B073 | JEN-003 | scripted: two node blocks on different labels, stages with computed names (both read as '?') | exit=1 time=0.29s; JEN-003 fail high@13[?]; JEN-007 fail low@6[?] | false positive |
+| B074 | JEN-003 | scripted: two stages named 'Work' in node('sandbox') and node('trusted'); push of another repo on trusted | exit=1 time=0.29s; JEN-003 fail high@11[Work]; JEN-007 fail low@4[Work] | false positive |
+| B075 | JEN-003 | one scripted stage holding node('sandbox') { claude } and node('trusted') { push of another repo } | exit=1 time=0.29s; JEN-003 fail high@9[Nightly]; JEN-007 fail low@4[Nightly] | false positive |
+| B076 | JEN-007 | def run(cmd){sh cmd}; stage Test run('make test'), stage Review run('claude -p ...'): Test flagged | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@2[Test],low@2[Review] | false positive |
+| B077 | JEN-007 | docker agent args '--network none' plus a unix socket to a local model | exit=1 time=0.32s; JEN-003 pass; JEN-007 fail low@11[Review] | false positive |
+| B078 | JEN-007 | unshare --net --map-root-user claude -p ... | exit=1 time=0.31s; JEN-003 pass; JEN-007 fail low@6[Review] | false positive |
+| B079 | both | only a shell comment mentions claude -p and git push; runs make lint | exit=1 time=0.30s; JEN-003 fail high@6[Check]; JEN-007 fail low@6[Check] | false positive |
+| B080 | JEN-003 | claude in the workspace; ws("${WORKSPACE}@docs") checks out another repo and pushes | exit=1 time=0.27s; JEN-003 fail high@9[Review]; JEN-007 fail low@6[Review] | held |
+| B081 | JEN-007 | declarative parallel stages Claude and Codex | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@8[Review > Claude],low@12[Review > Codex] | held |
+| B082 | both | matrix axis AGENT_CMD values 'claude -p','gemini -p'; sh "${AGENT_CMD} ..." | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B083 | JEN-007 | environment OBAAF_EGRESS set | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@8[Review] | held |
+| B084 | both | agent and push in a stage's post { failure } | exit=1 time=0.26s; JEN-003 fail high@9[Test]; JEN-007 fail low@8[Test > post failure] | held |
+| B085 | JEN-007 | scripted parallel map of two agent closures in one stage | exit=1 time=0.26s; JEN-003 pass; JEN-007 fail low@5[Review] | held |
+| B086 | JEN-007 | matrix of 3 cells running claude | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@12[Review > Run] | held |
+| B087 | both | def s='ab'; s = "${s}" x250; sh "echo ${s}": 2 lines, 1 KB | exit=1 time=7.08s; JEN-003 not applicable; JEN-007 not applicable | slow |
+| B088 | both | gemini --yolo "..." > gemini.log (positional prompt, output redirected) | exit=1 time=0.34s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B089 | both | bash array args=(... -p "..."); claude "${args[@]}" | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B090 | both | \claude -p ... (backslash skips shell aliases) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B091 | JEN-003 | sshagent(deploy key) { claude -p "... commit and push it to main" --dangerously-skip-permissions } | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@7[Fix] | way past |
+| B092 | JEN-003 | docker compose build && docker compose push | exit=1 time=0.30s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B093 | JEN-003 | curl -X POST -F raw.asset1=@dist/app.tar.gz to the Nexus components API | exit=1 time=0.29s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B094 | JEN-003 | gcloud builds submit --tag gcr.io/acme/app:latest | exit=1 time=0.30s; JEN-003 pass; JEN-007 fail low@6[Fix] | way past |
+| B095 | both | def agentCmd() { return 'claude -p' }; sh "${agentCmd()} '...'" | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B096 | both | environment AGENT_BIN='claude'; sh "${env.AGENT_BIN} -p ..." | exit=1 time=0.32s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B097 | both | control: environment AGENT_BIN='claude'; sh '${AGENT_BIN} -p ...' | exit=1 time=0.26s; JEN-003 fail high@10[Fix]; JEN-007 fail low@9[Fix] | held |
+| B098 | both | def bin = env.CLAUDE_BIN ?: 'claude'; sh "${bin} -p ..." | exit=1 time=0.27s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B099 | both | sh readFile('ci/autofix.txt') and sh readFile('ci/push.txt') | exit=1 time=0.26s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B100 | both | control: docker.image.inside > withCredentials > timeout > retry > sh(label:, returnStdout:, script: npx claude-code -p), then sshagent push | exit=1 time=0.28s; JEN-003 fail high@21[Fix]; JEN-007 fail low@11[Fix] | held |
+| B101 | both | docker build --build-arg CLI_PACKAGE=@anthropic-ai/claude-code@1.0.0 ... && docker push (agent never run) | exit=1 time=0.29s; JEN-003 fail high@7[Tools image]; JEN-007 fail low@6[Tools image] | false positive |
+| B102 | JEN-003 | top-level closures review{claude} and release{git push} called in stages on labels sandbox and trusted | exit=1 time=0.28s; JEN-003 fail high@6[pipeline]; JEN-007 fail low@2[pipeline],low@2[Review] | false positive |
+| B103 | JEN-003 | git push to a mirror, then claude -p summarises to a file (push runs before the agent) | exit=1 time=0.30s; JEN-003 fail high@6[Mirror]; JEN-007 fail low@7[Mirror] | false positive |
+| B104 | both | 12 levels of methods each calling the next twice (budget test) | exit=1 time=0.67s; JEN-003 unknown unknown@24: call to f0() not expanded (recursion or too many calls); line 25: call; J | held |
+| B105 | other (JEN-011) | 2500 sha256sum -c steps and 2500 aws s3 cp steps in one stage, 216 KB | exit=1 time=2.60s; JEN-003 not applicable; JEN-007 not applicable | slow |
+| B106 | other (JEN-011) | 5000 sha256sum -c and 5000 aws s3 cp steps, 433 KB | exit=1 time=9.14s; JEN-003 not applicable; JEN-007 not applicable | slow |
+| B107 | JEN-003 | script { stage('Agent') { claude } ; git push } inside declarative stage Fix | exit=1 time=0.28s; JEN-003 pass; JEN-007 fail low@8[Fix > Agent] | way past |
+| B108 | both | def autofixScript = './ci/autofix.sh'; sh autofixScript | exit=1 time=0.28s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B109 | both | sh '"$WORKSPACE/ci/autofix.sh"' | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B110 | both | sh './ci/autofix' (script without .sh suffix) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+| B111 | both | def agentCmd = 'claude' + ' -p ...'; sh agentCmd | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
