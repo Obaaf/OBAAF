@@ -620,6 +620,162 @@ CASES = {
   'ci/requirements.txt': 'aider-chat\n',
   'requirements.txt': 'requests==2.32.3\n',
  },
+ 'V3-001': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def E = groovy.util.Eval\n          E.me(readFile('ci/x.groovy'))\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-002': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def engine = new javax.script.ScriptEngineManager().getEngineByName('groovy')\n          engine.eval(readFile('ci/x.groovy'))\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-003': {
+  'Jenkinsfile': "code = 'println 1'\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          binding.setVariable('code', readFile('ci/x.groovy'))\n          evaluate(code)\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-004': {
+  'Jenkinsfile': "code = 'println 1'\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          binding['code'] = readFile('ci/x.groovy')\n          evaluate(code)\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-005': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def s = this\n          def l = s.&load\n          l('ci/x.groovy')\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-006': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def l = this.&load\n          def m = l\n          m('ci/x.groovy')\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-007': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def ev = Eval.&me\n          ev(readFile('ci/x.groovy'))\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-008b': {
+  'Jenkinsfile': 'def VER = \'latest\'\nif (env.BRANCH_NAME == \'release\') {\n  VER = \'1.0.0\'\n}\npipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        sh "npm install -g @anthropic-ai/claude-code@${VER}"\n      }\n    }\n  }\n}\n',
+ },
+ 'V3-009b': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  environment { VER = 'latest' }\n  stages {\n    stage('Lint') {\n      environment { VER = '1.0.0' }\n      steps { sh 'echo $VER' }\n    }\n    stage('Build') {\n      steps {\n        sh 'npm install -g @anthropic-ai/claude-code@$VER'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-010': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  environment { VER = '1.0.0' }\n  stages {\n    stage('Build') {\n      steps {\n        script { env.VER = 'latest' }\n        sh 'npm install -g @anthropic-ai/claude-code@$VER'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-011': {
+  '.agent-version': 'latest\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\nVER=1.0.0\n[ -f .agent-version ] && read -r VER < .agent-version\nnpm install -g @anthropic-ai/claude-code@$VER\n'''\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-012': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\nVER=1.0.0\nfor VER in latest; do npm install -g @anthropic-ai/claude-code@$VER; done\n'''\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-013': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\nVER=1.0.0\ndeclare VER=latest\nnpm install -g @anthropic-ai/claude-code@$VER\n'''\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-013b': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\nVER=1.0.0\n. ./ci/env.sh\nnpm install -g @anthropic-ai/claude-code@$VER\n'''\n      }\n    }\n  }\n}\n",
+  'ci/env.sh': 'VER=latest\n',
+ },
+ 'V3-014': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'timeout -k 5 600 docker run --rm node:20 npm test'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-014b': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'timeout -s KILL 600 docker run --rm node:20 npm test'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-015': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'env -u HOME docker run --rm node:20 npm test'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-016': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'ls | xargs -I{} docker run --rm node:20 echo {}'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-017': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\necho done\\\\\\\\\ndocker run --rm node:20 npm test\n'''\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-020': {
+  'Jenkinsfile': "code = 'println 1'\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          this.setProperty('code', readFile('ci/x.groovy'))\n          evaluate(code)\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-021': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  parameters { string(name: \'SUB\', defaultValue: \'x\') }\n  stages {\n    stage(\'Build\') {\n      steps {\n        dir(sh(script: "mkdir -p out/${params.SUB} && echo out/${params.SUB}", returnStdout: true).trim()) {\n          sh \'make\'\n        }\n      }\n    }\n  }\n}\n',
+ },
+ 'V3-022': {
+  'Jenkinsfile': 'def workDir() {\n  withCredentials([string(credentialsId: \'tok\', variable: \'TOKEN\')]) {\n    sh \'curl -H "Authorization: $TOKEN" https://x/ > dir.txt\'\n  }\n  return readFile(\'dir.txt\').trim()\n}\npipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script {\n          dir(workDir()) { sh \'./build.sh\' }\n        }\n      }\n    }\n  }\n}\n',
+ },
+ 'V3-023': {
+  'Jenkinsfile': "@Library('ci-lib@0123456789abcdef0123456789abcdef01234567') _\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          ['a', 'b'].each { deployApp -> echo deployApp }\n          deployApp(env: 'prod')\n        }\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-024b': {
+  'Jenkinsfile': 'pipeline {\n  agent any\n  stages {\n    stage(\'Build\') {\n      steps {\n        script {\n          [a: { withCredentials([string(credentialsId: \'tok\', variable: \'T\')]) { sh "curl -H \'X: ${T}\' https://x" } }].with { branches -> parallel branches }\n        }\n      }\n    }\n  }\n}\n',
+ },
+ 'V3-025': {
+  'Jenkinsfile': "def dir(String p, Closure body) {\n  withCredentials([string(credentialsId: 'tok', variable: 'TOKEN')]) {\n    body()\n  }\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          dir('x') { sh './build.sh' }\n        }\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-032': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '(cd docs && npm ci) && npm install'\n      }\n    }\n  }\n}\n",
+  'docs/package-lock.json': '{}\n',
+  'docs/package.json': '{"name": "docs", "devDependencies": {"left-pad": "1.3.0"}}\n',
+  'package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-033': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\npushd docs\nnpm ci\npopd\nnpm install\n'''\n      }\n    }\n  }\n}\n",
+  'docs/package-lock.json': '{}\n',
+  'docs/package.json': '{"name": "docs", "devDependencies": {"left-pad": "1.3.0"}}\n',
+  'package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-034': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh '''\ncd docs\nnpm ci\ncd -\nnpm install\n'''\n      }\n    }\n  }\n}\n",
+  'docs/package-lock.json': '{}\n',
+  'docs/package.json': '{"name": "docs", "devDependencies": {"left-pad": "1.3.0"}}\n',
+  'package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-035': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'npm --prefix app install'\n      }\n    }\n  }\n}\n",
+  'app/package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-036': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'pnpm --dir app install'\n      }\n    }\n  }\n}\n",
+  'app/package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-037': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'npm --loglevel=error install'\n      }\n    }\n  }\n}\n",
+  'package.json': '{"name": "x", "devDependencies": {"@anthropic-ai/claude-code": "^1.0.0"}}\n',
+ },
+ 'V3-038': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'npm install -g @anthropic-ai/claude-code@1.0.0'\n        sh 'npm update -g --registry https://registry.npmjs.org'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-039': {
+  'Dockerfile': 'FROM node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nRUN ["npm", "install", "-g", "@anthropic-ai/claude-code"]\n',
+  'Jenkinsfile': "pipeline {\n  agent { dockerfile true }\n  stages { stage('Build') { steps { sh 'make' } } }\n}\n",
+ },
+ 'V3-040c': {
+  'Dockerfile': '# syntax=docker/dockerfile:1\n# escape=`\nFROM mcr.microsoft.com/windows/servercore@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nRUN dir C:\\\nFROM node:20\n',
+  'Jenkinsfile': "pipeline {\n  agent { dockerfile true }\n  stages { stage('Build') { steps { sh 'make' } } }\n}\n",
+ },
+ 'V3-040e': {
+  'Dockerfile': '# ESCAPE=`\nFROM mcr.microsoft.com/windows/servercore@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nRUN dir C:\\\nFROM node:20\n',
+  'Jenkinsfile': "pipeline {\n  agent { dockerfile true }\n  stages { stage('Build') { steps { sh 'make' } } }\n}\n",
+ },
+ 'V3-041': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  parameters { string(name: 'AGENT_PKG', defaultValue: '@anthropic-ai/claude-code') }\n  stages {\n    stage('Build') {\n      steps {\n        sh 'npx --package=$AGENT_PKG -- claude -p hi'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-042': {
+  'Jenkinsfile': 'def VER = \'latest\'\npipeline {\n  agent any\n  environment { VER = \'1.0.0\' }\n  stages {\n    stage(\'Build\') {\n      steps {\n        sh "npm install -g @anthropic-ai/claude-code@${VER}"\n      }\n    }\n  }\n}\n',
+ },
+ 'V3-046': {
+  'Dockerfile': 'FROM node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nCOPY . /src\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        sh 'docker build -t myapp:test . && docker run --rm myapp:test npm test'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-046c': {
+  'Dockerfile': 'FROM node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nCOPY . /src\n',
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          docker.build('myapp:ci')\n        }\n        sh 'docker run --rm myapp:ci npm test'\n      }\n    }\n  }\n}\n",
+ },
+ 'V3-049': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          ['ci/x.groovy'].each(this.&load)\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-051': {
+  'Jenkinsfile': "pipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          def l = this.&load\n          [l].each { f -> f('ci/x.groovy') }\n        }\n      }\n    }\n  }\n}\n",
+  'ci/x.groovy': 'println 1\n',
+ },
+ 'V3-061': {
+  'Jenkinsfile': "def withCi(Closure body) {\n  def ctx = this\n  body.call(ctx)\n}\npipeline {\n  agent any\n  stages {\n    stage('Build') {\n      steps {\n        script {\n          withCi { s -> s.evaluate(readFile('ci/steps.groovy')) }\n        }\n      }\n    }\n  }\n}\n",
+  'ci/steps.groovy': 'withCredentials([string(credentialsId: \'tok\', variable: \'T\')]) { sh "curl -H \'X: ${T}\' https://x" }\n',
+ },
 }
 
 # (case, rule, outcome, severity): outcome is finding, or the rule's coverage status when there is none
@@ -799,6 +955,48 @@ EXPECT = [
     ('V2-088', 'OBAAF-JEN-008', 'finding', 'high'),  # second review, S088
     ('V2-089', 'OBAAF-JEN-008', 'finding', 'low'),  # second review, S089
     ('V2-090', 'OBAAF-JEN-008', 'finding', 'high'),  # second review, S090
+    ('V3-001', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T001
+    ('V3-002', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T002
+    ('V3-003', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T003
+    ('V3-004', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T004
+    ('V3-005', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T005
+    ('V3-006', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T006
+    ('V3-007', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T007
+    ('V3-008b', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T008b
+    ('V3-009b', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T009b
+    ('V3-010', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T010
+    ('V3-011', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T011
+    ('V3-012', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T012
+    ('V3-013', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T013
+    ('V3-013b', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T013b
+    ('V3-014', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T014
+    ('V3-014b', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T014b
+    ('V3-015', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T015
+    ('V3-016', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T016
+    ('V3-017', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T017
+    ('V3-020', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T020
+    ('V3-021', 'OBAAF-JEN-009', 'finding', 'medium'),  # third review, T021
+    ('V3-022', 'OBAAF-JEN-001', 'finding', 'low'),  # third review, T022
+    ('V3-023', 'OBAAF-JEN-001', 'unknown', None),  # third review, T023
+    ('V3-024b', 'OBAAF-JEN-013', 'unknown', None),  # third review, T024b
+    ('V3-025', 'OBAAF-JEN-001', 'finding', 'medium'),  # third review, T025
+    ('V3-032', 'OBAAF-JEN-008', 'unknown', None),  # third review, T032
+    ('V3-033', 'OBAAF-JEN-008', 'unknown', None),  # third review, T033
+    ('V3-034', 'OBAAF-JEN-008', 'unknown', None),  # third review, T034
+    ('V3-035', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T035
+    ('V3-036', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T036
+    ('V3-037', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T037
+    ('V3-038', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T038
+    ('V3-039', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T039
+    ('V3-040c', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T040c
+    ('V3-040e', 'OBAAF-JEN-008', 'finding', 'low'),  # third review, T040e
+    ('V3-041', 'OBAAF-JEN-008', 'unknown', None),  # third review, T041
+    ('V3-042', 'OBAAF-JEN-008', 'finding', 'high'),  # third review, T042
+    ('V3-046', 'OBAAF-JEN-008', 'not applicable', None),  # third review, T046
+    ('V3-046c', 'OBAAF-JEN-008', 'pass', None),  # third review, T046c
+    ('V3-049', 'OBAAF-JEN-004', 'finding', 'medium'),  # third review, T049
+    ('V3-051', 'OBAAF-JEN-004', 'unknown', None),  # third review, T051
+    ('V3-061', 'OBAAF-JEN-001', 'unknown', None),  # third review, T061
 ]
 
 CATALOG = load()

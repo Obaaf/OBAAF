@@ -151,8 +151,9 @@ class Pipeline:
     # block or a withEnv; `jenkins-scripted` is any spelling assigned to `env.` in a script.
     unread_lanes: list = field(default_factory=list)
     # Flagship slice 2d.2k: every call that runs Groovy the file does not hold, whatever the receiver:
-    # (kind, name, call, ctx), kind one of load, evaluate, jobDsl. Variables holding a GroovyShell or
-    # GroovyClassLoader, whose `parse` compiles text.
+    # (kind, name, call, ctx, certain), kind one of load, evaluate, jobDsl; certain is False when the receiver
+    # may not be the script or a Groovy shell. Variables holding a GroovyShell, GroovyClassLoader,
+    # GroovyScriptEngine or JSR-223 engine, whose parse, run or eval compiles text.
     code_loads: list = field(default_factory=list)
     groovy_shells: set = field(default_factory=set)
     # Names a code-loading call can hide behind: `def l = this.&load` (name -> load or evaluate), and
@@ -165,6 +166,7 @@ class Pipeline:
     workspace_vars: set = field(default_factory=set)    # assigned from readFile and other workspace reads
     self_scm_vars: set = field(default_factory=set)     # assigned legacySCM(scm)
     script_vars: set = field(default_factory=set)       # variables and parameters given `this` or `steps`
+    literal_values: dict = field(default_factory=dict)  # name -> every literal assigned to it, environment included
 
 
 # ----------------------------------------------------------------------- helpers
@@ -291,7 +293,7 @@ def code_loading(name: str, shells=()) -> str | None:
         return "evaluate"
     if len(parts) >= 2 and parts[-2] == "Eval" and last in _EVAL_FUNCTIONS:
         return "evaluate"
-    if last in ("parse", "run") and len(parts) >= 2 and _shell_receiver(parts, shells):
+    if last in ("parse", "run", "eval") and len(parts) >= 2 and _shell_receiver(parts, shells):
         return "evaluate"
     if last == "eval" and any(x in ("getEngineByName", "getEngineByExtension") or "ScriptEngine" in x
                               for x in parts[:-1]):
@@ -1289,7 +1291,7 @@ class Builder:
         params = [x for x in getattr(block, "params", ()) if isinstance(x, str)]
         if params:
             # A trailing closure's parameters take values from whoever calls it (the second review of 2d.2k).
-            self.p.local_names.update(params)
+            # They are not added to the names the file defines: a call through one stays unknown code.
             self.p.nonliteral_names.update(params)
         for stmt in block.stmts:
             self.stmt(stmt, ctx)
@@ -1337,6 +1339,9 @@ class Builder:
                     for prefix in ("this.", "binding."):
                         if target.startswith(prefix) and "." not in target[len(prefix):]:
                             self.p.nonliteral_names.add(target[len(prefix):])
+                elif isinstance(stmt.target, Index) and path_of(stmt.target.target) in ("binding", "this") and \
+                        literal(stmt.target.index) is not None:
+                    self.p.nonliteral_names.add(literal(stmt.target.index))   # binding['code'] = ...
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
@@ -1427,13 +1432,22 @@ class Builder:
             self.p.nonliteral_names.add(name)
         if isinstance(value, Name) and value.name in ("this", "steps"):
             self.p.script_vars.add(name)
-        if isinstance(value, Name) and value.name in _CODE_CLASSES:
-            self.p.import_aliases[name] = value.name     # def E = Eval (the second review of 2d.2k)
+        last = (path_of(value) or "").split(".")[-1]
+        if isinstance(value, (Name, Prop)) and last in _CODE_CLASSES and path_of(value) not in self.p.literals:
+            self.p.import_aliases[name] = last           # def E = Eval, def E = groovy.util.Eval (2d.2k)
         if isinstance(value, Name) and value.name in self.p.groovy_shells:
             self.p.groovy_shells.add(name)               # def alias = shell
-        if isinstance(value, Prop) and isinstance(value.target, Name) and value.target.name in ("this", "steps") \
-                and value.name in ("load", "evaluate"):
-            self.p.code_aliases[name] = value.name      # def l = this.&load (the parser reads `.&` as `.`)
+        if isinstance(value, Name) and value.name in self.p.code_aliases:
+            self.p.code_aliases[name] = self.p.code_aliases[value.name]   # def m = l
+        pointed = self._pointer(value)
+        if pointed is not None:
+            self.p.code_aliases[name] = pointed if pointed != "evaluate" or value.name in ("load", "evaluate") \
+                else "Eval." + value.name                # def l = s.&load, def ev = Eval.&me
+        if isinstance(value, Str) and not value.interpolated and not merge:
+            seen = self.p.literal_values.setdefault(name, set())
+            seen.add(value.text())
+            if len(seen) > 1:
+                self.p.nonliteral_names.add(name)        # two different literals: which one is not fixed
         if next(find_nodes(value, lambda n: isinstance(n, Call) and callee_name(n) in WORKSPACE_READS,
                            limit=2000), None) is not None:
             self.p.workspace_vars.add(name)
@@ -1479,6 +1493,8 @@ class Builder:
             if cls in ("GroovyShell", "GroovyClassLoader", "GroovyScriptEngine") and (
                     first.startswith("new ") or cname.endswith(".newInstance")):
                 self.p.groovy_shells.add(name)
+            if cname.split(".")[-1] in ("getEngineByName", "getEngineByExtension", "getEngineByMimeType"):
+                self.p.groovy_shells.add(name)          # a JSR-223 engine: engine.eval(...) compiles text
         # def msg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim(): the output is text
         # the commit's author wrote.
         base = value
@@ -1534,6 +1550,16 @@ class Builder:
             name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
         # Groovy the file does not hold, run through any receiver (flagship slice 2d.2k). Recorded here,
         # before any branch below can return, so no spelling of the call is lost.
+        if name in ("binding.setVariable", "binding.setProperty", "setProperty", "this.setProperty",
+                    "setVariable") and call.args and literal(call.args[0]) is not None:
+            self.p.nonliteral_names.add(literal(call.args[0]))   # binding.setVariable('code', ...) (2d.2k)
+        # A pointer to load or evaluate given as an argument (`list.each(this.&load)`) runs where it is called.
+        for arg in call.args:
+            pointed = self._pointer(arg)
+            if pointed is not None:
+                self.p.code_loads.append((pointed, f"{path_of(arg)} (a pointer)", Call(Name(pointed, line=call.line),
+                                          line=call.line), ctx, True))
+                self.p.opaque.append((call.line, f"{path_of(arg)}: Groovy loaded at run time is not analyzed"))
         code_name = name[:-5] if name.endswith(".call") else name      # l.call(...), this.&load.call(...)
         code_name = self.p.code_aliases.get(code_name, code_name)
         if code_name in ("this.load", "this.evaluate", "steps.load", "steps.evaluate"):
@@ -1668,11 +1694,14 @@ class Builder:
                 root = root.target
             if isinstance(root, Call):
                 self.call(root, ctx)
-        if name == "dir" and call.closure is not None:
+        if name == "dir" and call.closure is not None and name not in self.defs:
             folder = literal(first_arg(call) if call.args else named_arg(call, "path"))
             here = "?" if folder is None or ctx.dir == "?" else "/".join(
                 x for x in (ctx.dir, folder.strip("/")) if x and x != ".")
             self.record_step(name, call, ctx)
+            for arg in list(call.args) + [v for _, v in call.named]:
+                if isinstance(arg, (Call, Closure, ListLit, MapLit)):
+                    self.expr(arg, ctx)
             self.block(call.closure, replace(ctx, dir=here))
             return
         if name == "pipeline" and call.closure is not None:
@@ -1807,6 +1836,18 @@ class Builder:
                             self.p.unread_lanes.append(("jenkins-misnamed", var.strip(), val.strip(), s.line,
                                                         " > ".join(ctx.stage)))
             self.block(call.closure, inner)
+
+    def _pointer(self, node) -> str | None:
+        """load or evaluate for a pointer to the script's own (`this.&load`, `s.&load` with `s` the script),
+        or to Eval.me and the like; None otherwise. The parser reads `.&` as `.`."""
+        if not isinstance(node, Prop) or not isinstance(node.target, Name):
+            return None
+        receiver = node.target.name
+        if node.name in ("load", "evaluate") and (receiver in _SCRIPT_RECEIVERS or receiver in self.p.script_vars):
+            return node.name
+        if self.p.import_aliases.get(receiver, receiver) == "Eval" and node.name in _EVAL_FUNCTIONS:
+            return "evaluate"
+        return None
 
     def _lists_in(self, node, depth: int = 0):
         if depth > 50:

@@ -91,6 +91,11 @@ EXACT_PIP = re.compile(r"^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A
 _REF = re.compile(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$env\.([A-Za-z_]\w*)|\$([A-Za-z_]\w*)")
 # Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
 _SEGMENTS = re.compile(r"&&|\|\||;")
+# Commands that set variables other than by NAME=value (read, for, declare, printf -v, mapfile, unset), and
+# those that may set any (source, `.`, eval): what they set is not a fixed value (the third review of 2d.2k).
+_OTHER_ASSIGN = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*"
+                           r"(read|for|select|declare|typeset|mapfile|readarray|unset|printf[ \t]+-v|source|\.|eval)"
+                           r"(?=[ \t]|$)(.*)$")
 # A shell assignment at the start of a command (after `then`, `do`, `else`, `{`): its literal value, single
 # quoted (never expanded), double quoted or bare; any other value makes the variable unknown.
 _ASSIGN_START = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
@@ -109,14 +114,15 @@ _OTHER_WORDS = {"uninstall", "remove", "rm", "r", "un", "unlink", "ls", "list", 
 _RUNNERS = {"npx", "bunx", "uvx", "pnpx"}
 _INSTALLER_NAMES = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
 _AGENT_SELF_UPDATE = re.compile(r"^(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
-_GLOBAL_UPDATE = re.compile(r"^(?:\S*/)?(?:npm|pnpm|bun)(?:[ \t]+-\S+)*[ \t]+(?:update|upgrade|up)"
-                            r"(?:[ \t]+-\S+)*[ \t]*(?:$|[|>&2])")
 # What may stand before a command in the same segment: keywords, assignments, and wrappers that run the
-# rest (sudo, env, timeout, nohup, exec, time, nice, xargs, bash -c "..."), each with its options.
+# rest (sudo, env, timeout, nohup, exec, time, nice, stdbuf, xargs, bash -c "..."), each with its options.
 _COMMAND_PREFIX = re.compile(
     r"^[ \t]*(?:(?:then|do|else|elif|if|while|until|!|\{|\()(?=[ \t])|[A-Za-z_]\w*=(?:'[^']*'|\"[^\"]*\"|\S*)|"
-    r"sudo(?:[ \t]+(?:-[ugCDhprtUT][ \t]+\S+|--[\w-]+=\S+|-[A-Za-z]+|--[\w-]+))*|env(?:[ \t]+(?:-\S+|[A-Za-z_]\w*=\S*))*|"
-    r"timeout(?:[ \t]+-\S+)*[ \t]+\S+|nohup|exec|time|nice(?:[ \t]+-n[ \t]*\S+)?|stdbuf(?:[ \t]+-\S+)*|"
+    r"sudo(?:[ \t]+(?:-[ugCDhprtUT][ \t]+\S+|--[\w-]+=\S+|-[A-Za-z]+|--[\w-]+))*|"
+    r"env(?:[ \t]+(?:-[uCS][ \t]*\S+|--(?:unset|chdir|split-string)[= ]\S+|-\S+|[A-Za-z_]\w*=\S*))*|"
+    r"timeout(?:[ \t]+(?:-[ks][ \t]*\S+|--(?:kill-after|signal)[= ]\S+|-\S+))*[ \t]+\S+|"
+    r"xargs(?:[ \t]+(?:-[IEdLnPsa][ \t]*\S+|--\S+|-\S+))*|"
+    r"nohup|exec|time|nice(?:[ \t]+-n[ \t]*\S+)?|stdbuf(?:[ \t]+-\S+)*|"
     r"(?:\S*/)?(?:ba|z|da)?sh[ \t]+-c[ \t]+[\"']?|[\"'])")
 # docker, podman and nerdctl run, create and pull, where a command starts: the start of a line, after a
 # separator, `$(`, a quote (bash -c "..."), sudo, exec, time or nohup; global options before the subcommand.
@@ -124,6 +130,9 @@ _CONTAINER_CMD = re.compile(
     r"^(?:[\w./-]*/)?(docker|podman|nerdctl)"
     r"((?:[ \t]+--?[A-Za-z][\w-]*(?:=\S*|[ \t]+(?!(?:run|create|pull|container|image)\b)[^\s-]\S*)?)*)"
     r"[ \t]+(?:(?:container|image)[ \t]+)?(run|create|pull)(?=[ \t]|$)", re.I)
+_BUILD_CMD = re.compile(r"^(?:\S*/)?(?:docker|podman|nerdctl|buildah)(?:[ \t]+(?:image|buildx))?[ \t]+(?:build|bud)\b")
+_TAG_OPTION = re.compile(r"(?:^|\s)(?:-t|--tag)(?:[ \t]+|=)(['\"]?)([^\s'\"]+)\1")
+_TAG_CMD = re.compile(r"^(?:\S*/)?(?:docker|podman|nerdctl)(?:[ \t]+image)?[ \t]+tag[ \t]+\S+[ \t]+(['\"]?)([^\s'\"]+)\1")
 # Where a command ends and another starts in a script.
 _COMMAND_SPLIT = re.compile(r"&&|\|\||[;&|\n(`]|\$\(")
 _DOCKER_BOOL = {"--rm", "-d", "--detach", "-i", "--interactive", "-t", "--tty", "--privileged", "--init",
@@ -176,7 +185,7 @@ def _shown(text: str, limit: int = 120) -> str:
     cannot end the quoted part of a message or start a new line (the review of 2d.2k), and cut short."""
     out = []
     for c in str(text):
-        if c in "'\\":
+        if c in "'\\`":
             out.append("\\" + c)
         elif not c.isprintable():
             out.append(f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}")
@@ -184,6 +193,26 @@ def _shown(text: str, limit: int = 120) -> str:
             out.append(c)
     shown = "".join(out)
     return shown if len(shown) <= limit else shown[:limit] + "..."
+
+
+def _global_update(command: str) -> bool:
+    """`npm update -g` (pnpm, bun), with any options, and no package named: every global package moves."""
+    words = command.split()
+    if not words or words[0].rsplit("/", 1)[-1] not in ("npm", "pnpm", "bun"):
+        return False
+    rest, i, verb = [], 1, None
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-"):
+            rest.append(w)
+            i += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+            continue
+        if verb is None:
+            verb = w
+        else:
+            return False
+        i += 1
+    return verb in _UPDATE_WORDS and any(w in ("-g", "--global") or w.startswith("--location=global") for w in rest)
 
 
 def _exact_version(ver: str) -> bool:
@@ -484,6 +513,7 @@ class JenkinsRules:
         self.install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
         self._line = 1                 # the step whose script OBAAF-JEN-008 is reading, for its unknowns
         self._agent_installed = False  # an earlier step installed an agent CLI (for `npm update -g`)
+        self._local_images: set = set()  # tags the job builds itself
         self._pod_cache: dict = {}
         self._dockerfile_cache: dict = {}
         self._script_cache: dict = {}
@@ -981,7 +1011,7 @@ class JenkinsRules:
                     continue
                 what = f"evaluates Groovy text read at run time ({name})"
             else:
-                what = f"loads Groovy from the workspace ({literal(arg) or 'a computed path'})"
+                what = f"loads Groovy from the workspace ({_shown(literal(arg)) if literal(arg) else 'a computed path'})"
             cr = ctx.cr
             source = untrusted_source(source_texts(arg), self.p) if kind != "load" and arg is not None else None
             if source is not None:
@@ -1112,22 +1142,22 @@ class JenkinsRules:
 
     # ------------------------------------------------------------------ JEN-008
     def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False) -> str:
-        """`${NAME}`, `$NAME` and `${env.NAME}` replaced by what the file fixes: a variable the script itself
-        set earlier to one literal value (`shell_vars`; None there means the script sets it otherwise), then
-        an environment value the file sets once to a literal, which the shell sees; and for `${NAME}`, when
-        Groovy interpolates the script (`groovy`), a variable of the file only ever assigned a literal
-        (flagship slice 2d.2k). What is left with a `$` is computed. Bounded: three passes, and no pass adds
-        more than 100,000 characters."""
+        """`${NAME}`, `$NAME` and `${env.NAME}` replaced by what the file fixes (flagship slice 2d.2k): a
+        variable the script itself set earlier to one literal value (`shell_vars`; None there means the script
+        sets it otherwise, and a "*" entry that it ran `source` or `eval`); else, for `${NAME}` when Groovy
+        interpolates the script (`groovy`), a variable of the file; else an environment value. A name the
+        file assigns anything but one literal, anywhere (two different literals included), is not put in.
+        What is left with a `$` is computed. Bounded: three passes, no pass adds more than 100,000 characters."""
         shell_vars = shell_vars or {}
 
         def value(name: str, braced: bool):
             if name in shell_vars:
                 return shell_vars[name]
-            if name in self.p.nonliteral_names:
-                return None
-            node = self.p.env_values.get(name)
-            if node is None and braced and groovy:
-                node = self.p.literals.get(name)
+            if "*" in shell_vars or name in self.p.nonliteral_names:
+                return None       # after `source` or `eval`, or a name given more than one value
+            node = self.p.literals.get(name) if braced and groovy else None
+            if node is None:
+                node = self.p.env_values.get(name)
             return node.text() if isinstance(node, Str) and not node.interpolated else None
 
         for _ in range(3):
@@ -1155,7 +1185,9 @@ class JenkinsRules:
         lines = [x for x in text.splitlines()
                  if not (x.lstrip().lower().startswith(comment) or (shell == "bat" and x.lstrip().startswith("::")))]
         joiner = {"bat": "^", "powershell": "`", "pwsh": "`"}.get(shell, "\\")
-        return re.sub(re.escape(joiner) + r"\r?\n[ \t]*", " ", "\n".join(lines))
+        # Only an odd run of the character continues a line: `echo done\\` ends with an escaped backslash.
+        return re.sub("(" + re.escape(joiner) + r"+)\r?\n[ \t]*",
+                      lambda m: m.group(1)[:-1] + " " if len(m.group(1)) % 2 else m.group(0), "\n".join(lines))
 
     def _pin_script(self, info: Info) -> str:
         """The step's script for OBAAF-JEN-008: as the shell reads it, with what the file fixes put in.
@@ -1231,8 +1263,13 @@ class JenkinsRules:
             return out
         build_args = build_args or {}
         # Comment lines go before continuations are joined, as BuildKit does; `# escape=` sets the character.
-        directive = re.match(r"[ \t]*#[ \t]*escape[ \t]*=[ \t]*(\S)", text)
-        escape = directive.group(1) if directive else "\\"
+        escape = "\\"
+        for first in text.splitlines():              # parser directives: leading `# key=value` lines
+            directive = re.match(r"[ \t]*#[ \t]*([A-Za-z]+)[ \t]*=[ \t]*(\S*)", first)
+            if not directive:
+                break
+            if directive.group(1).lower() == "escape" and directive.group(2):
+                escape = directive.group(2)[0]
         kept = [x for x in text.splitlines() if not x.lstrip().startswith("#")]
         lines = re.sub(re.escape(escape) + r"[ \t]*\r?\n", " ", "\n".join(kept)).splitlines()
         aliases: set = set()
@@ -1275,6 +1312,11 @@ class JenkinsRules:
                     stage_vars[name] = value
                     env_names.add(name)
                 continue
+            if word == "RUN" and rest.startswith("["):
+                try:                                  # exec form: RUN ["npm", "install", ...]
+                    rest = " ".join(str(x) for x in json.loads(rest))
+                except (ValueError, TypeError, RecursionError):
+                    pass
             if word == "RUN":
                 for mount in re.finditer(r"--mount=\S*?\bfrom=([^,\s]+)", rest):
                     if mount.group(1).lower() not in aliases and not mount.group(1).isdigit():
@@ -1344,6 +1386,22 @@ class JenkinsRules:
         """Record the variables a script line sets: one literal value, or None when the script sets it to
         anything else or to two different values."""
         for segment in _COMMAND_SPLIT.split(text):
+            other = _OTHER_ASSIGN.match(segment)
+            if other:
+                verb, rest = other.group(1), other.group(2)
+                if verb in ("source", ".", "eval"):
+                    for key in list(variables):
+                        variables[key] = None
+                    variables["*"] = None
+                else:
+                    for word in rest.split():
+                        if re.fullmatch(r"[A-Za-z_]\w*", word.split("=")[0]) and word != "in":
+                            variables[word.split("=")[0]] = None
+                continue
+            plus = re.match(r"^[ \t]*([A-Za-z_]\w*)\+=", segment)
+            if plus:
+                variables[plus.group(1)] = None
+                continue
             start = _ASSIGN_START.match(segment)
             if not start:
                 continue
@@ -1459,7 +1517,7 @@ class JenkinsRules:
                     if _AGENT_SELF_UPDATE.match(command):
                         self.applicable.add("OBAAF-JEN-008")
                         out.append("An agent CLI updates itself to the newest version (claude update)" + where)
-                    elif _GLOBAL_UPDATE.match(command) and self._agent_installed:
+                    elif self._agent_installed and _global_update(command):
                         out.append("Agent CLIs installed globally are updated to the newest version (an update "
                                    "of every global package)" + where)
         return out
@@ -1526,7 +1584,17 @@ class JenkinsRules:
                 continue
             following = installer_at[installer_at.index(k) + 1] if installer_at.index(k) + 1 < len(installer_at) \
                 else len(words)
-            if any(("$" in w or "`" in w) and not w.startswith("-") for w in words[k + 1: following]):
+            named = []
+            args = words[k + 1: following]
+            for n, w in enumerate(args):
+                if w.startswith("-"):
+                    if "=" in w:
+                        named.append(w.split("=", 1)[1])
+                    elif w in ("-p", "--package") and n + 1 < len(args):
+                        named.append(args[n + 1])
+                else:
+                    named.append(w)
+            if any("$" in w or "`" in w for w in named):
                 self.applicable.add("OBAAF-JEN-008")
                 self.unknown("OBAAF-JEN-008", self._line, f"a package is named at run time in "
                              f"`{_shown(command.strip(), 80)}`, so whether it is an agent CLI at a fixed version "
@@ -1539,7 +1607,14 @@ class JenkinsRules:
         them: `pip install -r FILE` (every -r and -c, `-rFILE` too) and `npm install` with no lockfile beside
         package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir())."""
         out: list = []
-        for command, _ in self._commands(text):
+        parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
+        for k in range(0, len(parts), 2):
+            opened = k > 0 and parts[k - 1] in ("(", "$(", "`")
+            command = next(self._commands(parts[k]), ("", ""))[0]
+            words = command.split()
+            if words and words[0] in ("popd",) or command in ("cd -", "cd") or (opened and _CD.match(command)):
+                folder = "?"         # a folder the checker does not follow (a subshell's cd, popd, cd -)
+                continue
             moved = _CD.match(command)
             if moved:
                 target = moved.group(2)
@@ -1549,7 +1624,10 @@ class JenkinsRules:
             if _PIP_INSTALL.search(command):
                 for m in _REQUIREMENT_FLAG.finditer(command):
                     out += self._requirements(_join(folder, m.group(2)), "given to pip")
-            if _NPM_INSTALL.search(command):
+            base = words[0].rsplit("/", 1)[-1] if words else ""
+            if base in ("npm", "pnpm", "yarn", "bun") and (
+                    self._installer_action(words, 0) == "install" or (base in ("yarn", "bun") and all(
+                        w.startswith("-") for w in words[1:]))) or _NPM_INSTALL.search(command):
                 prefix = _NPM_PREFIX.search(command)
                 where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
                 out += self._package_json_problems(where)
@@ -1669,6 +1747,21 @@ class JenkinsRules:
                 self.add("OBAAF-JEN-008", lib.line,
                          f"Library '{_shown(name)}' is loaded at '{_shown(version)}', a branch or tag that can move.", None,
                          severity=severity)
+        # Images the job builds and tags itself are not pulled from a registry (the third review of 2d.2k).
+        self._local_images = set()
+        for info in self.infos:
+            if info.use.name == "docker.build":
+                tag = literal(first_arg(info.use.call))
+                if tag:
+                    self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
+            elif info.shell:
+                for command, _ in self._commands(self._prepared(info.script, info.use.name)):
+                    if _BUILD_CMD.match(command):
+                        for m in _TAG_OPTION.finditer(command):
+                            self._local_images.update({m.group(2), m.group(2) + ":latest"})
+                    tagged = _TAG_CMD.match(command)
+                    if tagged:
+                        self._local_images.update({tagged.group(2), tagged.group(2) + ":latest"})
         scanned: set = set()
         for info in self.infos:
             # A method of the file expanded at many calls records its steps once per call; each step's
@@ -1703,7 +1796,7 @@ class JenkinsRules:
                     self.applicable.add("OBAAF-JEN-008")
                     self.unknown("OBAAF-JEN-008", info.line, f"a `{command}` command in stage "
                                  f"'{stage_label(info.ctx.stage)}' names its image in a way the checker cannot read")
-                else:
+                elif image not in self._local_images:
                     self._image(image, info.line, info.ctx.stage, where,
                                 severity_for(self.by_stage.get(info.ctx.stage, [])), groovy=False)
             for message in dict.fromkeys(problems):
@@ -1714,8 +1807,8 @@ class JenkinsRules:
         """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
         fixes them: dependencies of every kind, npm aliases (`npm:@scope/name@range`) included."""
         if folder == "?":
-            self.unknown("OBAAF-JEN-008", 1, "npm installs in a folder computed at run time, so its package.json "
-                         "is not read")
+            self.unknown("OBAAF-JEN-008", self._line, "npm installs in a folder computed at run time or that "
+                         "the checker does not follow, so its package.json is not read")
             return []
         if folder in self._package_cache:
             return self._package_cache[folder]
