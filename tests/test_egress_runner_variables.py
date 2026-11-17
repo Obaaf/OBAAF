@@ -110,8 +110,9 @@ class Workflow(unittest.TestCase):
             with self.subTest(step=step["name"]):
                 emptied = {n for n, v in (step.get("env") or {}).items() if n in self.data["names"] and v == ""}
                 self.assertEqual(emptied, {"TMPDIR", "LOCPATH", "TZDIR", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN"})
-                others = {n for n in (step.get("env") or {}) if n in self.data["names"]} - emptied
-                self.assertEqual(others, set())
+                # Slice 2c.12 fixed one more of the candidates to a value: the locale Python starts in.
+                others = {n: v for n, v in (step.get("env") or {}).items() if n in self.data["names"] and n not in emptied}
+                self.assertEqual(others, {"LC_ALL": "C"})
 
     def test_github_env_lines_are_the_judges_values(self):
         lines = [f"{n}={rv.marker('genv', n)}" for n in rv.set_in(self.data, "genv")]

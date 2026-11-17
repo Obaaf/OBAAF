@@ -75,6 +75,27 @@ OPENSSL_VARIABLES_REMOVED = sorted(
 for _openssl_name in OPENSSL_VARIABLES_REMOVED:
     del os.environ[_openssl_name]
 
+# OpenSSL's are not the only variables read from inside Python after it has
+# started. The standard library and the C library read others when they are
+# first needed: the proxy variables (urllib.request, for the install step's one
+# download), SSL_CERT_FILE and SSL_CERT_DIR (libcrypto), TEMP and TMP (tempfile),
+# HOME, the resolver's, and whatever a later version reads. A workflow can set
+# all of these for the action's steps, in an env or through GITHUB_ENV (measured
+# in slice 2c.12a, tests/egress/runner-variables.json). So the step does not
+# argue about each: it keeps a copy of what it was given, for its own inputs and
+# the runner's files, and empties the process's environment before anything but
+# ``os`` is imported. From here on nothing in this process, and no program it
+# starts without an environment of its own, sees a variable the workflow set.
+# What is read before this line runs (by the loader, by glibc and by Python as
+# they start) is fixed by each step's env in action.yml: LOADER_VARIABLES and
+# STARTUP_PINS below. Emptied only when this file is the program (the action's
+# steps and the resolver), not when it is imported, as the tests do. Slice
+# 2c.12, issue #198.
+STEP_ENVIRONMENT = dict(os.environ)
+ENVIRONMENT_EMPTIED = __name__ == "__main__"
+if ENVIRONMENT_EMPTIED:
+    os.environ.clear()
+
 import hashlib
 import json
 import re
@@ -219,6 +240,25 @@ LOADER_VARIABLES = (
 # fails the action when the run step ended 0 without reporting that the sandbox
 # held (action.yml).
 LOADER_PRESENCE_VARIABLES = ("LD_DYNAMIC_WEAK", "LD_SHOW_AUXV")
+
+# What glibc and Python read from the environment while Python starts, before
+# this file's first line, other than the loader's variables above and Python's
+# own (which -I ignores). Each step's env in action.yml sets them to these
+# values, and main() refuses to go on with any other (slice 2c.12):
+#   LC_ALL  Python sets its character type from the environment as it starts
+#           (LC_ALL, then LC_CTYPE, then LANG), and glibc then opens the files
+#           of the locale that is named, under /usr/lib/locale. LC_ALL outranks
+#           the other two. "C" is the one locale glibc has built in: it opens no
+#           file for it, and with it glibc never consults LANGUAGE, which
+#           otherwise names directories of message catalogues and may hold
+#           "../". Python reads and writes UTF-8 in the C locale (its UTF-8
+#           mode), as it does in the hosted runner's own C.UTF-8.
+#   TZ      read when Python first imports time, which it does as it starts. A
+#           value that names a file, with or without a leading colon, is opened
+#           and read as a zone. UTC0 names none of the workflow's: glibc looks
+#           for /usr/share/zoneinfo/UTC0, which Ubuntu does not have, and then
+#           reads the value as UTC.
+STARTUP_PINS = {"LC_ALL": "C", "TZ": "UTC0"}
 
 # The resolver the action gives AWF's proxy (slice 2c.4). Squid resolves every
 # name it is asked for before it refuses an unlisted one (AWF v0.29.13 puts an
@@ -782,8 +822,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def step_environment() -> dict[str, str]:
+    """What the workflow and the runner gave this step: the copy taken before
+    the process's environment was emptied, or the environment itself when this
+    file was imported and nothing was emptied (slice 2c.12)."""
+    return dict(STEP_ENVIRONMENT) if ENVIRONMENT_EMPTIED else dict(os.environ)
+
+
 def _state_dir() -> Path:
-    base = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+    base = step_environment().get("RUNNER_TEMP") or tempfile.gettempdir()
     return Path(base) / "obaaf-egress"
 
 
@@ -1401,6 +1448,15 @@ def inherited_hooks(environ: dict[str, str]) -> list[str]:
     return [name for name in LOADER_VARIABLES if environ.get(name)]
 
 
+def unpinned(environ: dict[str, str]) -> list[str]:
+    """The startup variables that do not have the value action.yml gives them
+    in this step (slice 2c.12). As for the loader's: the step's own env
+    outranks the job's, the workflow's and GITHUB_ENV, so another value means
+    the runner did not apply it, and glibc or Python may already have read
+    what the workflow set."""
+    return [name for name, value in STARTUP_PINS.items() if environ.get(name, "") != value]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[1] == "dns-filter":
         return dns_filter(argv[2:])
@@ -1411,25 +1467,33 @@ def main(argv: list[str]) -> int:
     if problem:
         print(f"::error::{problem}.")
         return 2
-    hooks = inherited_hooks(dict(os.environ))
+    environ = step_environment()
+    hooks = inherited_hooks(environ)
     if hooks:
         print(f"::error::obaaf-egress: this step's environment still sets {', '.join(hooks)}, which the action's "
               "own env empties, so the runner did not apply it and the dynamic loader may have obeyed them; "
               "nothing was run")
-        _set_output(dict(os.environ), "refused", "environment")
+        _set_output(environ, "refused", "environment")
+        return 2
+    loose = unpinned(environ)
+    if loose:
+        print(f"::error::obaaf-egress: this step's environment does not set {', '.join(loose)} as the action's own "
+              "env does, so the runner did not apply it and Python may have started with what the workflow set; "
+              "nothing was run")
+        _set_output(environ, "refused", "environment")
         return 2
     try:
         if argv[1] == "install":
             return install()
         if argv[1] == "check-allow":
-            parse_allow_list(os.environ.get("INPUT_ALLOW", ""))
-            parse_env_names(os.environ.get("INPUT_ENV", ""), dict(os.environ))
-            parse_model_keys(os.environ.get("INPUT_MODEL_KEYS", ""), dict(os.environ))
+            parse_allow_list(environ.get("INPUT_ALLOW", ""))
+            parse_env_names(environ.get("INPUT_ENV", ""), environ)
+            parse_model_keys(environ.get("INPUT_MODEL_KEYS", ""), environ)
             return 0
-        return run(dict(os.environ))
+        return run(environ)
     except UsageError as error:
         print(f"::error::{error}")
-        _set_output(dict(os.environ), "refused", error.reason)
+        _set_output(environ, "refused", error.reason)
         return 2
 
 
