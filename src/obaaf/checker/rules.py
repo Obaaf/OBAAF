@@ -2286,7 +2286,7 @@ class WorkflowRules:
         return Control(name, VERIFIED, f"started only by {', '.join(sorted(events))}; {took}", ident)
 
     # Variables that still reach the action's own steps, which hold the key outside the sandbox, at every
-    # commit that can be listed (from `egress_action_floor`, slice 2c.11a's change to the action, on).
+    # commit that can be listed (from `egress_action_floor`, slice 2c.12b's last change to the action, on).
     # Slice 2c.10b (decision D-070) dropped the rest of the list slice 2c.7 began with (issue #139): since
     # 2c.9 those steps are `/usr/bin/python3 -I -S` by its full path, so bash's variables (`BASH_ENV`,
     # `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `BASH_FUNC_*`) and Python's (`PYTHONPATH`,
@@ -2302,7 +2302,12 @@ class WorkflowRules:
     # trimmed and upper-cased, begins `OPENSSL_` from its own process before that import (decision
     # D-071), and the escape tests' job `openssl-modules` shows on a GitHub-hosted runner that a module
     # named that way through the job's `env`, the step's `env` and `GITHUB_ENV` loads at slice 2c.9's
-    # floor and not since. `ACTIONS_ALLOW_UNSECURE_COMMANDS` lets any line a step prints set variables
+    # floor and not since. Slice 2c.12 (decision D-075) added no name: from the floor on, each step's own
+    # `env` fixes `LC_ALL` and `TZ`, which glibc and Python read as Python starts, and `egress.py`
+    # empties its environment before it imports anything but `os`, so the steps read nothing else a
+    # workflow can set for them (the escape tests' job `own-steps-environment` shows it for the
+    # locale, the time-zone file, the CA file and the proxy, on a GitHub-hosted runner).
+    # `ACTIONS_ALLOW_UNSECURE_COMMANDS` lets any line a step prints set variables
     # for the steps after it (`::set-env::`; found by the second review of 2c.7), as a write to
     # `GITHUB_ENV` does, and it stays with that write (below).
     _REACHES_OWN_STEPS = frozenset({"ACTIONS_ALLOW_UNSECURE_COMMANDS"})

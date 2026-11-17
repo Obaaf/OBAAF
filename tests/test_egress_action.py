@@ -68,7 +68,7 @@ class EnvNames(unittest.TestCase):
         self.assertEqual(egress.parse_env_names("", env), {})
 
     def test_refused(self):
-        env = {name: "x" for name in ("PATH", "HTTPS_PROXY", "no_proxy", "LD_PRELOAD", "GITHUB_ENV",
+        env = {name: "x" for name in ("PATH", "HTTPS_PROXY", "no_proxy", "LD_PRELOAD", "GITHUB_ENV", "LC_ALL", "TZ",
                                        "AWF_ANYTHING", "ACTIONS_RUNTIME_TOKEN", "BASH_ENV", "GIT_SSH_COMMAND",
                                        "OTEL_EXPORTER_OTLP_ENDPOINT", "ANTHROPIC_API_TARGET", "OPENAI_BASE_URL",
                                        "OPENAI_ENDPOINT_OVERRIDE", "FOUNDRY_ENDPOINT",
@@ -78,6 +78,21 @@ class EnvNames(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(egress.UsageError):
                     egress.parse_env_names(bad, env)
+
+
+    def test_what_the_steps_env_fixes_is_never_passed_on_in_the_workflows_place(self):
+        # Slice 2c.12: each step's own env sets LC_ALL and TZ, so the step sees the action's values,
+        # not the workflow's. Named under env, the command would be given "C" and "UTC0" in place of
+        # what the workflow wrote, so both are refused.
+        self.assertLessEqual(set(egress.STARTUP_PINS), egress.RESERVED_NAMES)
+        for name, value in egress.STARTUP_PINS.items():
+            with self.subTest(name=name):
+                with self.assertRaises(egress.UsageError) as refused:
+                    egress.parse_env_names(name, {name: value})
+                self.assertIn(f"env: {name} cannot be passed to the command", str(refused.exception))
+        # The locale names the action does not fix are the workflow's own, and are passed.
+        self.assertEqual(egress.parse_env_names("LANG LC_CTYPE", {"LANG": "en_US.UTF-8", "LC_CTYPE": "C"}),
+                         {"LANG": "en_US.UTF-8", "LC_CTYPE": "C"})
 
 
 class CommandLine(unittest.TestCase):
@@ -440,9 +455,52 @@ class ActionSteps(unittest.TestCase):
             for name in egress.LOADER_VARIABLES:
                 self.assertIn(name, env, f"{step['name']}: {name}")
                 self.assertEqual(env[name], "", f"{step['name']}: {name}")
-            # Nothing else is emptied or set beyond the inputs and the script.
+            # Nothing else is emptied or set beyond the inputs, the script and the startup pins.
             others = {k for k in env if k not in egress.LOADER_VARIABLES}
-            self.assertTrue(others <= {"INPUT_ALLOW", "INPUT_ENV", "INPUT_MODEL_KEYS", "INPUT_RUN", "OBAAF_EGRESS_SCRIPT"})
+            self.assertTrue(others <= {"INPUT_ALLOW", "INPUT_ENV", "INPUT_MODEL_KEYS", "INPUT_RUN", "OBAAF_EGRESS_SCRIPT"}
+                            | set(egress.STARTUP_PINS))
+
+    def test_every_step_pins_what_glibc_and_python_read_as_python_starts(self):
+        # Slice 2c.12: LC_ALL (the locale whose files glibc opens) and TZ (a file read as a zone) are
+        # read before egress.py's first line, so only the step's env can fix them. LC_ALL outranks
+        # LANG and LC_CTYPE, and in the C locale glibc opens no locale file and never reads LANGUAGE.
+        self.assertEqual(egress.STARTUP_PINS, {"LC_ALL": "C", "TZ": "UTC0"})
+        self.assertFalse(set(egress.STARTUP_PINS) & set(egress.LOADER_VARIABLES))
+        for step in self.steps:
+            for name, value in egress.STARTUP_PINS.items():
+                self.assertEqual(step["env"].get(name), value, f"{step['name']}: {name}")
+
+    def test_a_startup_variable_with_another_value_is_reported(self):
+        pins = dict(egress.STARTUP_PINS)
+        self.assertEqual(egress.unpinned(pins), [])
+        self.assertEqual(egress.unpinned({**pins, "LC_ALL": "obaaf-planted"}), ["LC_ALL"])
+        self.assertEqual(egress.unpinned({**pins, "LC_ALL": "C.UTF-8"}), ["LC_ALL"])
+        self.assertEqual(egress.unpinned({**pins, "TZ": ":/tmp/planted"}), ["TZ"])
+        self.assertEqual(egress.unpinned({}), ["LC_ALL", "TZ"])
+        # Outranked by LC_ALL, or never read in the C locale: not the action's to refuse.
+        self.assertEqual(egress.unpinned({**pins, "LANG": "obaaf-planted", "LC_CTYPE": "obaaf-planted",
+                                          "LANGUAGE": "../../tmp/x"}), [])
+
+    def test_main_refuses_to_go_on_with_a_startup_variable_unpinned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.write_text("")
+            saved = dict(os.environ)
+            try:
+                for wrong in ({"LC_ALL": "obaaf-planted"}, {"TZ": ":/tmp/planted"}, {"TZ": ""}):
+                    os.environ.clear()
+                    os.environ.update({"GITHUB_OUTPUT": str(out), "INPUT_ALLOW": "api.github.com",
+                                       **egress.STARTUP_PINS, **wrong})
+                    for sub in self.STEPS:
+                        with self.subTest(sub=sub, wrong=wrong):
+                            self.assertEqual(egress.main(["egress.py", sub]), 2)
+                os.environ.clear()
+                os.environ.update({"GITHUB_OUTPUT": str(out), "INPUT_ALLOW": "api.github.com", **egress.STARTUP_PINS})
+                self.assertEqual(egress.main(["egress.py", "check-allow"]), 0)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(out.read_text(), "refused=environment\n" * 9)
 
     def test_the_loader_variables_are_the_ones_ubuntu_24_04s_loader_removes_for_setuid_programs(self):
         # Read from glibc 2.39's ld.so on 2026-11-16; the escape tests compare them with the runner's loader.
@@ -487,7 +545,8 @@ class ActionSteps(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             out.write_text("")
-            env = {"GITHUB_OUTPUT": str(out), "LD_PRELOAD": "/tmp/planted.so", "INPUT_ALLOW": "api.github.com"}
+            env = {"GITHUB_OUTPUT": str(out), "LD_PRELOAD": "/tmp/planted.so", "INPUT_ALLOW": "api.github.com",
+                   **egress.STARTUP_PINS}
             saved = dict(os.environ)
             try:
                 os.environ.clear()
@@ -583,6 +642,129 @@ class OpenSSLVariables(unittest.TestCase):
             self.assertLess(removal, source.index(later), f"the removal must precede `{later.strip()}`")
         # And `import os`, which the removal needs, must itself precede it and not pull in libcrypto.
         self.assertLess(source.index("\nimport os\n"), removal)
+
+
+class StepEnvironment(unittest.TestCase):
+    """The action's steps empty their own environment before anything but ``os`` is imported, and read
+    their inputs from a copy (slice 2c.12, issue #198). A workflow can set proxy, CA, temporary-directory,
+    home, docker and other variables for the action's steps, in an env or through GITHUB_ENV (measured in
+    slice 2c.12a); the standard library and libcrypto read some of them when first needed. With the
+    environment emptied, nothing in the step's process reads them and no program it starts inherits
+    them. What happens on a real runner is the escape tests'; these tests pin that it happens, and when."""
+
+    EGRESS = str(ROOT / "actions" / "egress" / "egress.py")
+    SET_BY_THE_WORKFLOW = {
+        "HTTPS_PROXY": "http://proxy.invalid:9", "https_proxy": "http://proxy.invalid:9", "NO_PROXY": "x.invalid",
+        "SSL_CERT_FILE": "/tmp/planted.pem", "SSL_CERT_DIR": "/tmp/planted", "HOME": "/tmp/planted-home",
+        "TEMP": "/tmp/planted", "TMP": "/tmp/planted", "DOCKER_HOST": "unix:///tmp/planted.sock",
+        "DOCKER_CONFIG": "/tmp/planted", "SUDO_ASKPASS": "/tmp/planted", "XDG_RUNTIME_DIR": "/tmp/planted",
+        "NODE_OPTIONS": "--title=planted", "LANG": "/tmp/planted", "SSLKEYLOGFILE": "/tmp/planted.log",
+        "ANTHROPIC_API_KEY": "made-up-not-a-key", "INPUT_MODEL_KEYS": "ANTHROPIC_API_KEY",
+    }
+
+    def _run_as_the_program(self, sub, environ):
+        """Run egress.py as the action's steps do (as ``__main__``, through runpy), then report its
+        status, what is left of the process's environment and what a program started with no env of
+        its own would be given."""
+        import json
+        import subprocess
+        import sys
+
+        code = (
+            "import json, os, runpy, subprocess, sys\n"
+            "script, sub = sys.argv[1], sys.argv[2]\n"
+            "sys.argv = [script, sub]\n"
+            "status = None\n"
+            "try:\n"
+            "    runpy.run_path(script, run_name='__main__')\n"
+            "except SystemExit as stop:\n"
+            "    status = stop.code\n"
+            "child = subprocess.run(['/usr/bin/env'], capture_output=True, text=True).stdout\n"
+            "print(json.dumps({'status': status, 'left': sorted(os.environ), 'child': child}))\n"
+        )
+        done = subprocess.run([sys.executable, "-I", "-S", "-c", code, self.EGRESS, sub],
+                              capture_output=True, text=True, env=environ, check=True)
+        return json.loads(done.stdout.splitlines()[-1])
+
+    def test_run_as_the_program_it_empties_its_environment_and_still_reads_its_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.write_text("")
+            got = self._run_as_the_program("check-allow", {
+                **self.SET_BY_THE_WORKFLOW, **egress.STARTUP_PINS,
+                "INPUT_ALLOW": "api.github.com", "GITHUB_OUTPUT": str(out)})
+            # The inputs, read from the copy, were accepted (a model key named in model-keys must be set).
+            self.assertEqual(got["status"], 0)
+            # Nothing is left for the standard library, libcrypto or a child to read.
+            self.assertEqual(got["left"], [])
+            self.assertEqual(got["child"], "")
+            self.assertEqual(out.read_text(), "")
+
+    def test_an_input_is_still_refused_from_the_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.write_text("")
+            got = self._run_as_the_program("check-allow", {
+                **egress.STARTUP_PINS, "INPUT_ALLOW": "api.github.com", "INPUT_MODEL_KEYS": "ANTHROPIC_API_KEY",
+                "GITHUB_OUTPUT": str(out)})
+            self.assertEqual(got["status"], 2)      # the key model-keys names is not in the step's env
+            self.assertEqual(got["left"], [])
+
+    def test_with_the_pins_python_still_reads_and_writes_utf_8(self):
+        # LC_ALL=C is the one locale glibc opens no file for. Python then turns on its UTF-8 mode, so a
+        # step still reads a command, an allow-list or a log that is not ASCII, whatever LANG, LC_CTYPE
+        # and LANGUAGE the workflow set.
+        import json
+        import subprocess
+        import sys
+
+        code = ("import json, locale, sys\n"
+                "print(json.dumps([sys.flags.utf8_mode, sys.getfilesystemencoding(), sys.stdout.encoding,\n"
+                "                  locale.getpreferredencoding(False), locale.setlocale(locale.LC_CTYPE, None),\n"
+                "                  sys.argv[1]], ensure_ascii=False))\n")
+        text = "h\u00e9llo \u65e5\u672c"
+        done = subprocess.run([sys.executable, "-I", "-S", "-c", code, text.encode("utf-8")], capture_output=True, check=True,
+                              env={**egress.STARTUP_PINS, "LANG": "obaaf-planted", "LC_CTYPE": "obaaf-planted",
+                                   "LANGUAGE": "../../tmp/x"})
+        mode, filesystem, stdout, preferred, ctype, argument = json.loads(done.stdout.decode("utf-8"))
+        self.assertEqual(mode, 1)
+        self.assertEqual({filesystem.lower(), stdout.lower(), preferred.lower()}, {"utf-8"})
+        self.assertEqual(ctype, "C")
+        self.assertEqual(argument, text)
+
+    def test_imported_it_leaves_the_environment_alone(self):
+        self.assertFalse(egress.ENVIRONMENT_EMPTIED)
+        self.assertIn("PATH", os.environ)
+        saved = os.environ.get("OBAAF_STEP_ENV_TEST")
+        try:
+            os.environ["OBAAF_STEP_ENV_TEST"] = "seen"
+            self.assertEqual(egress.step_environment().get("OBAAF_STEP_ENV_TEST"), "seen")
+        finally:
+            if saved is None:
+                os.environ.pop("OBAAF_STEP_ENV_TEST", None)
+            else:
+                os.environ["OBAAF_STEP_ENV_TEST"] = saved
+
+    def test_the_environment_is_emptied_before_every_import_but_os(self):
+        source = (ROOT / "actions" / "egress" / "egress.py").read_text()
+        copy = source.index("\nSTEP_ENVIRONMENT = dict(os.environ)\n")
+        emptied = source.index("\n    os.environ.clear()\n")
+        self.assertLess(source.index("\nimport os\n"), copy)
+        self.assertLess(source.index("del os.environ[_openssl_name]"), copy)    # the copy holds no OPENSSL_ name
+        self.assertLess(copy, emptied)
+        import ast
+
+        tree = ast.parse(source)
+        emptied_line = source[:emptied + 1].count("\n") + 1
+        imports = [(node.lineno, ast.unparse(node)) for node in ast.walk(tree)
+                   if isinstance(node, (ast.Import, ast.ImportFrom))]
+        before = [text for line, text in imports if line < emptied_line]
+        self.assertEqual(before, ["from __future__ import annotations", "import os"])
+        self.assertGreater(len(imports), 10)
+        # And the step reads the copy, never the environment it emptied.
+        after = source[emptied + len("\n    os.environ.clear()\n"):]
+        self.assertEqual(after.count("os.environ"), 1)            # step_environment()'s imported case only
+        self.assertIn("return dict(STEP_ENVIRONMENT) if ENVIRONMENT_EMPTIED else dict(os.environ)", after)
 
 
 if __name__ == "__main__":
