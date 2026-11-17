@@ -94,7 +94,8 @@ _REF = re.compile(r"\$\{env\.([A-Za-z_]\w*)\}|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\
 # Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
 _SEGMENTS = re.compile(r"&&|\|\||;")
 # Commands that set variables other than by NAME=value (read, for, declare, printf -v, mapfile, unset), and
-# those that may set any (source, `.`, eval): what they set is not a fixed value (the third review of 2d.2k).
+# those that may set any (eval, and source or `.` of a file not plainly outside the checkout): what they set
+# is not a fixed value (the third and sixth reviews of 2d.2k).
 _OTHER_ASSIGN = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*"
                            r"(read|for|select|declare|typeset|mapfile|readarray|unset|printf[ \t]+-v|source|\.|eval)"
                            r"(?=[ \t]|$)(.*)$")
@@ -1149,7 +1150,7 @@ class JenkinsRules:
     def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False, env: bool = True) -> str:
         """`${env.NAME}`, `${NAME}` and `$NAME` replaced by what the file fixes (flagship slice 2d.2k): a
         variable the script set earlier to one literal (`shell_vars`; None there means the script sets it
-        otherwise, and a "*" entry that it ran `source` or `eval`); else, for `${NAME}` when Groovy
+        otherwise, and a "*" entry that it ran eval or sourced a file that may set anything); else, for `${NAME}` when Groovy
         interpolates the text (`groovy`), a variable of the file; else, when `env`, an environment value.
         `${env.NAME}` is always the environment value. A name the file assigns anything but one literal,
         anywhere (two different literals included), is not put in. What is left with a `$` is computed.
@@ -1167,7 +1168,7 @@ class JenkinsRules:
             if name in shell_vars:
                 return shell_vars[name]
             if "*" in shell_vars or name in self.p.nonliteral_names:
-                return None       # after `source` or `eval`, or a name given more than one value
+                return None       # after eval or a sourced file, or a name given more than one value
             if braced and groovy and name in self.p.literals:
                 return from_node(self.p.literals[name])
             return from_node(self.p.env_values.get(name)) if env else None
@@ -1409,15 +1410,18 @@ class JenkinsRules:
             if other:
                 verb, rest = other.group(1), other.group(2)
                 if verb in ("source", "."):
-                    # A file in the checkout is read for what it sets (a change request can change it); a
-                    # file outside it (~/.nvm/nvm.sh, a venv's activate) is not the change's, so the
-                    # variables keep their values (the fifth review of 2d.2k).
+                    # A file plainly outside the checkout (an absolute path, ~, $HOME or $NVM_DIR: nvm, a
+                    # tool's profile) or a virtual environment's bin/activate is not the change's, so the
+                    # variables keep their values (the fifth review of 2d.2k). Any other file may set anything:
+                    # every variable becomes unknown, as for eval (the sixth review: reading the file in place
+                    # was wrong in folders and slow).
                     target = (rest.split() or [""])[0].strip("'\"")
-                    body = None if "$" in target or target.startswith(("/", "~")) or depth > 2 else \
-                        self._read(target.removeprefix("./"))
-                    if body is not None:
-                        for line in self._prepared(body).splitlines():
-                            self._assignments(line, variables, depth + 1)
+                    if "<(" not in rest and (re.match(r"(/|~|\$\{?(HOME|NVM_DIR)\b)", target) or re.search(
+                            r"(^|/)bin/activate$", target)):
+                        continue          # a virtual environment's activate script sets no tool version
+                    for key in list(variables):
+                        variables[key] = None
+                    variables["*"] = None
                 elif verb == "eval":
                     for key in list(variables):
                         variables[key] = None
@@ -1656,52 +1660,66 @@ class JenkinsRules:
         out: list = []
         parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
         stack: list = []
+        subshells: list = []
         previous = folder
         for k in range(0, len(parts), 2):
-            opened = k > 0 and parts[k - 1] in ("(", "$(", "`")
+            if k > 0 and parts[k - 1] == "(":
+                subshells.append(folder)          # a subshell's cd ends with it (the sixth review of 2d.2k)
+            closes = parts[k].count(")") - parts[k].count("(")
             command = next(self._commands(parts[k]), ("", ""))[0]
+            command = re.split(r"[ \t]\d*(?:[<>]|&>)", " " + command)[0].strip()    # `pushd x > /dev/null`
+            command = re.sub(r"^(cd|pushd)([ \t]+)[\"']?\$\{?(?:env\.)?WORKSPACE\}?/?", r"\1\2./", command)
             words = [w.strip("\"'") for w in command.split()]
-            built = _BUILD_CMD.match(command)
-            if built and builds is not None:
-                rel, args = _build_options(command[built.end():])
-                if any("$" in v for v in args.values()):
-                    args = "?"
-                tags = [m.group(2) for m in _TAG_OPTION.finditer(command)]
-                builds.append((_join(folder, rel) if rel != "?" else "?", args, tags))
-                continue
-            if words and words[0] == "popd":
-                previous, folder = folder, (stack.pop() if stack else "?")
-                continue
-            if command == "cd -":
-                previous, folder = folder, previous
-                continue
-            if command == "cd" or (opened and _CD.match(command)):
-                previous, folder = folder, "?"     # home, or a subshell's cd the checker does not follow
-                continue
-            moved = _CD.match(command)
-            if moved:
-                target = moved.group(2)
-                if words[0] == "pushd":
-                    stack.append(folder)
-                previous = folder
-                if "$" in target or folder == "?" or target.startswith("/"):
-                    folder = "?"
-                else:
-                    joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
-                    folder = "?" if joined.startswith("..") else ("" if joined == "." else joined)
-                continue
-            if builds_only:
-                continue
-            if _PIP_INSTALL.search(command):
-                for m in _REQUIREMENT_FLAG.finditer(command):
-                    out += self._requirements(_join(folder, m.group(2)), "given to pip")
-            base = words[0].rsplit("/", 1)[-1] if words else ""
-            sub = next((w for w in self._non_options(words[1:])), None) if words else None
-            if base in ("npm", "pnpm", "yarn", "bun") and (sub in _MANIFEST_INSTALLS or (
-                    sub is None and base in ("yarn", "bun"))):
-                prefix = _NPM_PREFIX.search(command)
-                where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
-                out += self._package_json_problems(where)
+            if closes > 0 and subshells:
+                restore = subshells[-closes] if closes <= len(subshells) else subshells[0]
+                del subshells[-closes:]
+            else:
+                restore = None
+            try:
+                built = _BUILD_CMD.match(command)
+                if built and builds is not None:
+                    rel, args = _build_options(command[built.end():])
+                    if any("$" in v for v in args.values()):
+                        args = "?"
+                    tags = [m.group(2) for m in _TAG_OPTION.finditer(command)]
+                    builds.append((_join(folder, rel) if rel != "?" else "?", args, tags))
+                    continue
+                if words and words[0] == "popd":
+                    previous, folder = folder, (stack.pop() if stack and len(words) == 1 else "?")
+                    continue
+                if command == "cd -":
+                    previous, folder = folder, previous
+                    continue
+                moved = _CD.match(command)
+                if words and words[0] in ("cd", "pushd") and not moved:
+                    previous, folder = folder, "?"     # home, options, `$(...)`: a folder the checker cannot tell
+                    continue
+                if moved:
+                    target = moved.group(2)
+                    if words[0] == "pushd":
+                        stack.append(folder)
+                    previous = folder
+                    if "$" in target or folder == "?" or target.startswith("/"):
+                        folder = "?"
+                    else:
+                        joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
+                        folder = "?" if joined.startswith("..") else ("" if joined == "." else joined)
+                    continue
+                if builds_only:
+                    continue
+                if _PIP_INSTALL.search(command):
+                    for m in _REQUIREMENT_FLAG.finditer(command):
+                        out += self._requirements(_join(folder, m.group(2)), "given to pip")
+                base = words[0].rsplit("/", 1)[-1] if words else ""
+                sub = next((w for w in self._non_options(words[1:])), None) if words else None
+                if base in ("npm", "pnpm", "yarn", "bun") and (sub in _MANIFEST_INSTALLS or (
+                        sub is None and base in ("yarn", "bun"))):
+                    prefix = _NPM_PREFIX.search(command)
+                    where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
+                    out += self._package_json_problems(where)
+            finally:
+                if restore is not None:
+                    folder = restore
         return out
 
     def _requirements(self, rel: str, where_from: str, depth: int = 0) -> list:
@@ -1889,10 +1907,28 @@ class JenkinsRules:
                 self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
 
         seen: set = set()
+        texts: dict = {}
+
+        def scan(text: str, folder: str) -> None:
+            """Builds and `docker tag` targets of a script, once per text and folder, with no other effect."""
+            if (text, folder) in texts or not re.search(r"\b(build|bud|tag)\b", text):
+                return
+            texts[(text, folder)] = True
+            resolved = self._substituted(text, env_vars)
+            builds: list = []
+            self._manifests(resolved, folder, builds, builds_only=True)
+            for _, _, tags in builds:
+                for tag in tags:
+                    add(tag)
+            for command, _ in self._commands(resolved):
+                tagged = _TAG_CMD.match(command)
+                if tagged:
+                    add(tagged.group(2))
+
         for info in self.infos:
-            if id(info.use.call) in seen:
+            if (id(info.use.call), info.ctx.dir) in seen:
                 continue
-            seen.add(id(info.use.call))
+            seen.add((id(info.use.call), info.ctx.dir))
             if info.use.name == "docker.build":
                 tag = self._resolve(literal(first_arg(info.use.call)) or (
                     first_arg(info.use.call).text() if isinstance(first_arg(info.use.call), Str) else "$"),
@@ -1900,20 +1936,12 @@ class JenkinsRules:
                 add(tag)
             elif info.shell:
                 # The builds a step and its scripts run; their Dockerfiles are checked in the main loop.
-                text = self._pin_script(info)
-                builds: list = []
-                if re.search(r"\b(build|bud|tag)\b", text):
-                    resolved = self._substituted(text, env_vars)
-                    self._manifests(resolved, info.ctx.dir, builds, builds_only=True)
-                    for command, _ in self._commands(resolved):
-                        tagged = _TAG_CMD.match(command)
-                        if tagged:
-                            add(tagged.group(2))
+                scan(self._pin_script(info), info.ctx.dir)
                 for rel in self._scripts(info.script):
-                    builds += self._script_scan(_join(info.ctx.dir, rel), info.ctx.dir, env_vars)[2]
-                for _, _, tags in builds:
-                    for tag in tags:
-                        add(tag)
+                    path = _join(info.ctx.dir, rel)
+                    body = self._read(path) if path != "?" else None
+                    if body:
+                        scan(self._prepared(body), info.ctx.dir)
 
     def _package_json_problems(self, folder: str) -> list:
         """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
