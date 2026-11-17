@@ -70,6 +70,16 @@ def option(args: list[str], name: str, default: str | None = None) -> str | None
     return default
 
 
+def full_history() -> bool:
+    """Whether this is a git checkout that is not shallow, so that its tags can be read."""
+    try:
+        found = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return found.returncode == 0 and found.stdout.strip() == "false"
+
+
 class TemplatesInstallAsDocumented(unittest.TestCase):
     def test_every_command_takes_the_templates_from_the_clone_at_the_pinned_commit(self):
         for page in PAGES:
@@ -92,11 +102,15 @@ class TemplatesInstallAsDocumented(unittest.TestCase):
             for directory, rev in revisions(page, clone):
                 with self.subTest(page=page, rev=rev):
                     self.assertEqual(directory, clone, f"{page}: rev-parse in {directory}, the clone is {clone}")
-                    found = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", rev],
-                                           capture_output=True, text=True)
-                    if found.returncode != 0 and not (ROOT / ".git").exists():
-                        self.skipTest("not a git checkout")
-                    self.assertEqual(found.returncode, 0, f"{page}: {rev} is not a revision of this repository")
+                    try:
+                        found = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", rev],
+                                               capture_output=True, text=True, timeout=30).returncode == 0
+                    except (OSError, subprocess.SubprocessError):
+                        found = False
+                    if not found and not full_history():
+                        self.skipTest("this checkout does not hold the repository's history and tags "
+                                      "(CI's test job fetches them)")
+                    self.assertTrue(found, f"{page}: {rev} is not a revision of this repository")
 
     def test_each_command_runs_as_printed(self):
         for page in PAGES:
