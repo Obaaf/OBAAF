@@ -291,6 +291,9 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
             lines.append(f"            {plain(result['message'], 1500)}")
             lines += [f"            {plain(item, 400)}" for item in result["evidence"]]
         if show_fixes:
+            # Why it matters, then the fix: both are the rule's own sentences, and --no-fixes leaves both out,
+            # as it does for `obaaf check` (flagship slice 3.2c).
+            lines.append(f"    Why: {rule.why}")
             lines.append(f"    Fix: {rule.fix}")
     unknown = [r for r in results if r["state"] == "cannot-tell"]
     if unknown:

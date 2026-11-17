@@ -28,7 +28,7 @@ import fnmatch
 import heapq
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from obaaf.audit.github import plain, quoted
 from obaaf.audit.settings import BY_KEY, CLASSIC_TOP
@@ -63,6 +63,11 @@ class Rule:
     description: str
     fix: str
     files: bool = True       # whether it reads the workflow files at all
+    # Why a finding of this rule matters, in one sentence of at most 160 characters (WHY_MAX), as for the
+    # rules of `obaaf check` (flagship slice 3.2c, from #202). It must hold for every kind of finding the rule
+    # gives, with "may" where a kind does not show the consequence; it is required, so a rule cannot be
+    # added without one.
+    why: str = field(kw_only=True)
 
 
 RULES: tuple[Rule, ...] = (
@@ -79,7 +84,9 @@ RULES: tuple[Rule, ...] = (
          "pattern matches, and what trusts an environment that holds no secret.",
          "In the environment's settings, limit deployment to selected branches and name the default branch. "
          "Add required reviewers where a person should decide; a wildcard or a tag pattern is reported until "
-         "there are reviewers."),
+         "there are reviewers.",
+         why="Anyone who can push a branch may run a job in the environment, using its secrets or whatever trusts "
+             "it, with at most one reviewer's approval in the way."),
     Rule("OBAAF-SET-002", "A job outsiders can start gets an environment that asks nobody", "high",
          ("environments", "environment_secrets", "repository"),
          "jobs started by pull_request_target, issue and comment events",
@@ -90,7 +97,9 @@ RULES: tuple[Rule, ...] = (
          "stands between the event and the environment's secrets. Not followed: what a pattern in the limit matches, "
          "and the callers of a reusable workflow in another repository.",
          "Add required reviewers to the environment, or move the step that needs the secret to a workflow "
-         "that only people with write access can start."),
+         "that only people with write access can start.",
+         why="An event people without write access can cause may run a job in the environment, with its secrets or "
+             "those the job reads, and no reviewer to approve."),
     Rule("OBAAF-SET-003", "A secret kept behind an environment is also stored where every job can read it", "high",
          ("environment_secrets", "repository_secrets", "organization_secrets", "environments"),
          "protected_secrets in .github/obaaf.yml, and the secrets jobs read",
@@ -101,7 +110,9 @@ RULES: tuple[Rule, ...] = (
          "branch may use and that asks nobody. Not followed: a copy in an environment with a limit or reviewers, "
          "and Dependabot or Codespaces secrets.",
          "Delete the repository or organisation secret so that the environment holds the only copy, and "
-         "create the environment the configuration names, limited to the default branch."),
+         "create the environment the configuration names, limited to the default branch.",
+         why="A job on any branch may read the secret without the environment meant to keep it, so whatever branch "
+             "limit and reviewers that environment has may not apply."),
     Rule("OBAAF-SET-004", "Those who author changes can bypass the branch's rules", "high",
          ("ruleset_bypass_actors", "branch_rules", "branch_protection", "branches", "rulesets", "collaborators",
           "repository"),
@@ -113,7 +124,9 @@ RULES: tuple[Rule, ...] = (
          "roles, and a bypass list GitHub did not show.",
          "Remove the bypass. If one must stay for emergencies, give it to a team nobody works from day to "
          "day; it is still reported, at medium. For classic protection, hold administrators to the rule and "
-         "empty the list of who may bypass required pull requests.", files=False),
+         "empty the list of who may bypass required pull requests.", files=False,
+         why="Anyone who may bypass, or an agent or token acting as them, can put a change on the branch without "
+             "the checks, reviews or other results its rules require."),
     Rule("OBAAF-SET-005", "Required approvals cannot be given", "medium",
          ("branch_rules", "branch_protection", "branches", "collaborators"),
          "nothing in the workflow files: it reads the approvals a branch requires and who can give them",
@@ -121,7 +134,9 @@ RULES: tuple[Rule, ...] = (
          "approve their own pull request, and only accounts with write access count. Every merge then needs "
          "a bypass, which trains everyone to bypass. Not followed: the CODEOWNERS file and who is in a team.",
          "Lower the required approvals to what the team can give, or give a second person write access. Do "
-         "not solve it with a bypass.", files=False),
+         "not solve it with a bypass.", files=False,
+         why="Pull requests by those who can push cannot get the approvals the branch requires from a person, so "
+             "they may merge only by a bypass, making bypassing routine."),
     Rule("OBAAF-SET-006", "A required check that no workflow job reports", "medium",
          ("branch_rules", "branch_protection", "branches", "workflow_permissions", "actions_permissions",
           "actions_policies"),
@@ -131,7 +146,9 @@ RULES: tuple[Rule, ...] = (
          "could report it another way. The check stays pending on every pull request, so nothing merges "
          "without a bypass. Not followed: check runs GitHub has recorded, other apps, and what a step with a "
          "token that may write checks reports.",
-         "Correct the name in the ruleset or branch protection to the one the job reports, or remove it."),
+         "Correct the name in the ruleset or branch protection to the one the job reports, or remove it.",
+         why="The required check never reports, so every pull request into the branch stays blocked and can merge "
+             "only by a bypass of its rules."),
     Rule("OBAAF-SET-007", "A required check that does not report on every pull request", "medium",
          ("branch_rules", "branch_protection", "branches", "workflow_permissions", "actions_permissions",
           "actions_policies"),
@@ -143,7 +160,9 @@ RULES: tuple[Rule, ...] = (
          "requests (a push trigger counts for every pull request), and how GitHub counts a pull_request_target "
          "check.",
          "Let the workflow run on every pull request and skip inside the job instead (a job skipped by `if:` "
-         "reports as passed), or stop requiring the check."),
+         "reports as passed), or stop requiring the check.",
+         why="Pull requests the job does not run for wait on a required check that does not report, so they stay "
+             "blocked until it reports on their commit or someone bypasses."),
     Rule("OBAAF-SET-008", "A pull-request job whose failure does not block a merge", "medium",
          ("branch_rules", "branch_protection", "branches", "actions_permissions", "actions_policies"),
          "the jobs that run on every pull request",
@@ -153,14 +172,18 @@ RULES: tuple[Rule, ...] = (
          "name.",
          "Add the job's check to the required checks. If the job is advisory, give it "
          "`continue-on-error: true` at job level, which says in the workflow that its failure is not meant "
-         "to block."),
+         "to block.",
+         why="A pull request may merge while such a job is failing, so whatever it checks may not stop a change "
+             "from reaching the branch."),
     Rule("OBAAF-SET-009", "An Actions policy blocks an event a workflow uses", "medium",
          ("actions_policies",), "the events under each workflow's `on:`",
          "An Actions policy allows only some events to start a workflow, and the workflow names another. A "
          "run for that event fails at startup with no job, so whatever it was meant to check is not checked "
          "and nothing reports it. Not followed: how GitHub matches a path pattern, and a policy's repository "
          "conditions other than \"every repository\".",
-         "Add the event to the policy's allowed events, or remove the trigger from the workflow."),
+         "Add the event to the policy's allowed events, or remove the trigger from the workflow.",
+         why="A run for the blocked event fails at startup with no job, now or once the policy is enforced, so "
+             "whatever the workflow does for that event does not happen."),
     Rule("OBAAF-SET-010", "A pull_request_target workflow and GitHub's default policy of 2026-12-02", "medium",
          ("actions_policies", "repository"), "workflows started by pull_request_target",
          "By GitHub's changelog of 2026-11-02, from 2026-12-02 a default policy blocks the "
@@ -169,7 +192,9 @@ RULES: tuple[Rule, ...] = (
          "conditions other than \"every repository\".",
          "Move the workflow off pull_request_target where it does not need the base repository's secrets or "
          "write token. Where it does, add an Actions policy that allows the event for that workflow file, "
-         "and read OBAAF-GHA-001 and OBAAF-GHA-002 on what such a workflow must not do."),
+         "and read OBAAF-GHA-001 and OBAAF-GHA-002 on what such a workflow must not do.",
+         why="From 2026-12-02 GitHub's announced default policy blocks this event here, so the workflow's runs for "
+             "it will fail at startup and do nothing for pull requests."),
     Rule("OBAAF-SET-011", "A reusable workflow is passed a secret its caller cannot read", "medium",
          ("environment_secrets", "repository_secrets", "organization_secrets"),
          "the secrets a job passes to a reusable workflow",
@@ -179,14 +204,18 @@ RULES: tuple[Rule, ...] = (
          "in another repository declares.",
          "Declare the environment on the job inside the reusable workflow, let that job read the "
          "environment's secret under its own name, and stop passing it from the caller. Do not copy the "
-         "secret to the repository."),
+         "secret to the repository.",
+         why="The called workflow may get an empty value for the secret, and the tempting fix, copying it to the "
+             "repository, would remove the environment's protection."),
     Rule("OBAAF-SET-012", "Jobs with no permissions block get a token that can write", "medium",
          ("workflow_permissions",), "jobs that declare no `permissions`",
          "The repository's default for the workflow token is read and write, and a job declares no "
          "permissions, so it gets a token that can push, comment and release. Not followed: the callers of a "
          "workflow in another repository, and an organisation's limit on the token.",
          "Set the default to read in the repository's Actions settings, and give each job the permissions it "
-         "needs."),
+         "needs.",
+         why="Any command run in such a job, its own or one injected into it, may get a token that can push, "
+             "comment and release in the repository."),
     Rule("OBAAF-SET-013", "A workflow can give a required approval", "medium",
          ("workflow_permissions", "branch_rules", "branch_protection", "branches"),
          "nothing in the workflow files: a workflow on any branch can ask for the token, so it reads whether "
@@ -199,7 +228,9 @@ RULES: tuple[Rule, ...] = (
          "settings. Where a workflow has to open pull requests, which needs the same switch (OBAAF's effect "
          "lane does), require a code owner's review, keep the required approvals at one, and give every file "
          "a code owner: the rule then answers \"cannot tell\", because it does not read the CODEOWNERS file.",
-         files=False),
+         files=False,
+         why="Anyone who can push a branch can have a workflow approve their own pull request, so a required "
+             "approval may not be a person's review."),
     Rule("OBAAF-SET-014", "Fork pull requests run on the repository's runners or with its secrets", "high",
          ("fork_pull_requests", "repository"),
          "the runners the jobs name (a fork's pull request runs its own copy of the workflows)",
@@ -210,7 +241,9 @@ RULES: tuple[Rule, ...] = (
          "read whatever the jobs here do. Not followed: whether the repository has self-hosted runners that no "
          "job here names.",
          "Require approval for all external contributors, or move the job to a GitHub-hosted runner. In a "
-         "private repository, do not send secrets or write tokens to fork pull requests."),
+         "private repository, do not send secrets or write tokens to fork pull requests.",
+         why="Code in a fork's pull request may run on the repository's self-hosted runner, which may keep state, "
+             "or with its secrets or a write token."),
     Rule("OBAAF-SET-015", "Pinning actions to a commit: the setting and the workflows disagree", "medium",
          ("actions_permissions",), "the actions each job's steps use",
          "The repository requires actions to be pinned to a full commit and a workflow uses one that is not, "
@@ -219,7 +252,9 @@ RULES: tuple[Rule, ...] = (
          "composite action or a called workflow uses, and GitHub's lockfile (an action that is not pinned beside "
          "one is \"cannot tell\").",
          "Pin each action to a full commit SHA, and turn on the requirement in the repository's Actions "
-         "settings."),
+         "settings.",
+         why="Either a workflow is refused and runs nothing, or nothing stops the next change from adding an "
+             "action whose code can change under the same reference."),
 )
 RULE_BY_ID = {rule.id: rule for rule in RULES}
 
@@ -2542,7 +2577,9 @@ def evaluate(snapshot: dict, usage: dict) -> dict:
         status = ("findings" if findings else "cannot-tell" if unknown else
                   "no-finding" if run.compared else "not-applicable")
         note = run.compared if status == "no-finding" else run.idle if status == "not-applicable" else ""
-        rules.append({"id": rule.id, "title": rule.title, "status": status, "findings": len(findings),
+        # `why` and `fix` are the rule's own sentences, the same on every run (flagship slice 3.2c).
+        rules.append({"id": rule.id, "title": rule.title, "why": rule.why, "fix": rule.fix, "status": status,
+                      "findings": len(findings),
                       "cannot_tell": len(unknown),
                       "note": note or ("" if findings or unknown else "nothing to compare"),
                       "assumed": run.assumed, "failed": run.failed})

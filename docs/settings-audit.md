@@ -17,7 +17,7 @@ obaaf audit DIR --repo OWNER/REPO    # or name the clone and the repository
 
 With no token this reads what GitHub shows anyone about a public repository: the repository itself, its rulesets and their rules, the rules in force on the default branch, whether GitHub calls that branch protected, and its environments with the branches that may deploy to each. That is enough for the open environment (`OBAAF-SET-001`) and, unless the branch has a classic protection rule whose checks GitHub does not show as enforced, for the three rules about required checks (`OBAAF-SET-006` to `OBAAF-SET-008`). `OBAAF-SET-002` can answer for a job that reads a secret. The other rules read a setting GitHub does not show without a token: where a workflow depends on it they say "cannot tell", naming the setting, and where none does they say "does not apply". On this repository that was 6 rules of 15 saying "cannot tell".
 
-The report begins with the findings, then what the rules could not tell, then one line for every rule, then everything that was read and not read. This is the report for this repository, made on 2026-11-13 with no network from GitHub's answers of 2026-11-12 06:32 UTC to a caller with no token (they are kept as a test recording) and the workflow files as they were on 2026-11-13. It is shortened where `...` stands, and its second line, which says where the settings came from, is left out:
+The report begins with the findings, each rule's ending with why they matter and the fix, then what the rules could not tell, then one line for every rule, then everything that was read and not read. This is the report for this repository, made on 2026-11-13 with no network from GitHub's answers of 2026-11-12 06:32 UTC to a caller with no token (they are kept as a test recording) and the workflow files as they were on 2026-11-13. It is shortened where `...` stands, its second line, which says where the settings came from, is left out, and the `Why:` line, which the audit prints since slice 3.2c, is added as it would print it (the report was made before):
 
 ```text
 Settings audit of Obaaf/OBAAF
@@ -28,6 +28,7 @@ FINDINGS: 1 (0 high, 1 medium, 0 low). CANNOT TELL: 6, from 6 of 15 rules. "Cann
   OBAAF-SET-008  A pull-request job whose failure does not block a merge
     MEDIUM  branch "main": job .github/workflows/ci.yml#dependency-lock
             .github/workflows/ci.yml#dependency-lock runs on every pull request into "main" and reports the check "dependency-lock", which is not required (8 checks are required there). A pull request can merge while the job is failing. The checks of the classic protection rule are taken from what GitHub shows anyone; the rule itself was not read.
+    Why: A pull request may merge while such a job is failing, so whatever it checks may not stop a change from reaching the branch.
     Fix: Add the job's check to the required checks. If the job is advisory, give it `continue-on-error: true` at job level, which says in the workflow that its failure is not meant to block.
 
 CANNOT TELL: 6. A setting or a file the rule needs was not read, or was not in a form the rule understands.
@@ -89,7 +90,7 @@ obaaf audit --repo OWNER/REPO --snapshot-out settings.json
 obaaf audit --from-snapshot settings.json
 ```
 
-Other options: `--branch NAME` audits another branch as well as the default one (repeatable); `--format json` prints the results, the rules and the snapshot as one JSON document (`obaaf-settings-audit/v0.1`) instead of the text report; `-o FILE` writes the report to a file; `--no-fixes` leaves the fix out of each finding; `--record DIR` also saves GitHub's answers as they arrived, for a bug report (see [Recordings](#recordings)).
+Other options: `--branch NAME` audits another branch as well as the default one (repeatable); `--format json` prints the results, the rules and the snapshot as one JSON document (`obaaf-settings-audit/v0.1`) instead of the text report; `-o FILE` writes the report to a file; `--no-fixes` leaves out each rule's `Why:` and `Fix:` lines; `--record DIR` also saves GitHub's answers as they arrived, for a bug report (see [Recordings](#recordings)).
 
 What ends the command with status 1 is chosen with three options:
 
@@ -161,6 +162,26 @@ A rule with neither gets one line saying what it compared ("no finding: 8 requir
 | `OBAAF-SET-013` | A workflow can give a required approval | medium | `workflow_permissions`, `branch_rules`, `branch_protection`, `branches` | nothing in the workflow files: a workflow on any branch can ask for the token, so it reads whether workflows may approve and the approvals each branch requires |
 | `OBAAF-SET-014` | Fork pull requests run on the repository's runners or with its secrets | high | `fork_pull_requests`, `repository` | the runners the jobs name (a fork's pull request runs its own copy of the workflows) |
 | `OBAAF-SET-015` | Pinning actions to a commit: the setting and the workflows disagree | medium | `actions_permissions` | the actions each job's steps use |
+
+### Why each finding matters
+
+Each rule says in one sentence why its finding matters (flagship slice 3.2c, as slice 3.2b did for `obaaf check`). The text report prints the sentence as `Why:` under the rule's findings, just before its `Fix:`, and `--no-fixes` leaves out both; a rule with only "cannot tell" answers gets neither, because nothing was found. The JSON report has the sentence and the fix as `why` and `fix` on each rule's entry under `rules`. A sentence is meant to hold for every kind of finding its rule gives, with "may" where a kind does not show the consequence; the review of slice 3.2c found five that did not, and they were corrected. It says what is at stake, not what the rule reads: that is in the rule's description and its "not followed" list.
+
+- `OBAAF-SET-001`: Anyone who can push a branch may run a job in the environment, using its secrets or whatever trusts it, with at most one reviewer's approval in the way.
+- `OBAAF-SET-002`: An event people without write access can cause may run a job in the environment, with its secrets or those the job reads, and no reviewer to approve.
+- `OBAAF-SET-003`: A job on any branch may read the secret without the environment meant to keep it, so whatever branch limit and reviewers that environment has may not apply.
+- `OBAAF-SET-004`: Anyone who may bypass, or an agent or token acting as them, can put a change on the branch without the checks, reviews or other results its rules require.
+- `OBAAF-SET-005`: Pull requests by those who can push cannot get the approvals the branch requires from a person, so they may merge only by a bypass, making bypassing routine.
+- `OBAAF-SET-006`: The required check never reports, so every pull request into the branch stays blocked and can merge only by a bypass of its rules.
+- `OBAAF-SET-007`: Pull requests the job does not run for wait on a required check that does not report, so they stay blocked until it reports on their commit or someone bypasses.
+- `OBAAF-SET-008`: A pull request may merge while such a job is failing, so whatever it checks may not stop a change from reaching the branch.
+- `OBAAF-SET-009`: A run for the blocked event fails at startup with no job, now or once the policy is enforced, so whatever the workflow does for that event does not happen.
+- `OBAAF-SET-010`: From 2026-12-02 GitHub's announced default policy blocks this event here, so the workflow's runs for it will fail at startup and do nothing for pull requests.
+- `OBAAF-SET-011`: The called workflow may get an empty value for the secret, and the tempting fix, copying it to the repository, would remove the environment's protection.
+- `OBAAF-SET-012`: Any command run in such a job, its own or one injected into it, may get a token that can push, comment and release in the repository.
+- `OBAAF-SET-013`: Anyone who can push a branch can have a workflow approve their own pull request, so a required approval may not be a person's review.
+- `OBAAF-SET-014`: Code in a fork's pull request may run on the repository's self-hosted runner, which may keep state, or with its secrets or a write token.
+- `OBAAF-SET-015`: Either a workflow is refused and runs nothing, or nothing stops the next change from adding an action whose code can change under the same reference.
 
 ### The six incidents
 

@@ -119,6 +119,7 @@ The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycl
 - **SARIF**: an accepted finding has a suppression, and its message says who accepted it. Errors and notes are notifications of the run.
 - **`--write-baseline`** needs `--owner`, `--reason` and `--expires` for anything it newly accepts (exit status 2 without them), and does not write over a file that is not a baseline. It ends with 1 when it leaves out a finding at or above `--fail-on` that a check with the new baseline would then fail on (slice 3.2b; above).
 - **Each finding in the text report has a `Why:` line** under its message: one sentence from the rule's `why` in the catalogue (slice 3.2b). `--no-fixes` leaves it out with the `Fix:` line, so a report written with `--no-fixes` is unchanged. JSON has the same sentence as `why` on every finding, and SARIF begins each rule's help with it (`Why it matters: ...`).
+- **`obaaf audit`'s text report has a `Why:` line** just before each rule's `Fix:`: one sentence from the rule's `why` (slice 3.2c). `--no-fixes` leaves it out with the fix. In its JSON report each entry under `rules` has `why` and `fix`; the format name is unchanged.
 
 ### One upgrade, start to finish
 
