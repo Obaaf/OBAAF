@@ -108,6 +108,14 @@ runs:
   # reporting that the sandbox held, which is what a variable the loader obeys
   # whatever its value (LD_TRACE_LOADED_OBJECTS) does to every step. Slice 2c.9,
   # issues #139 and #145; see docs/egress-control.md.
+  #
+  # Each step's env also fixes the two things glibc and Python read from the
+  # environment before egress.py's first line runs (STARTUP_PINS in egress.py,
+  # which refuses to go on if one has another value): LC_ALL, which outranks
+  # LANG and LC_CTYPE, is "C", the locale glibc has built in, so no locale file
+  # is opened and LANGUAGE is never consulted; and TZ is UTC0, so no file the
+  # job named is read as a time zone. Everything read later is read from an
+  # environment egress.py has emptied (slice 2c.12, issue #198).
   steps:
     - name: Check the inputs and the runner
       shell: /usr/bin/python3 -I -S {0}
@@ -148,6 +156,8 @@ runs:
         RES_OPTIONS: ""
         TMPDIR: ""
         TZDIR: ""
+        LC_ALL: C
+        TZ: UTC0
       run: |
         import os, runpy, sys
         sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "check-allow"]
@@ -189,6 +199,8 @@ runs:
         RES_OPTIONS: ""
         TMPDIR: ""
         TZDIR: ""
+        LC_ALL: C
+        TZ: UTC0
       run: |
         import os, runpy, sys
         sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "install"]
@@ -235,6 +247,8 @@ runs:
         RES_OPTIONS: ""
         TMPDIR: ""
         TZDIR: ""
+        LC_ALL: C
+        TZ: UTC0
       run: |
         import os, runpy, sys
         sys.argv = [os.environ["OBAAF_EGRESS_SCRIPT"], "run"]

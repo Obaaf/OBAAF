@@ -447,9 +447,14 @@ harden_runner_releases:
 # OPENSSL_MODULES) made libcrypto load a module the job named into those steps' Python, where the key
 # is held; from it, egress.py removes every OPENSSL_ variable before the import that initialises
 # libcrypto, which the escape tests' openssl-modules job showed on a GitHub-hosted runner (run
-# 43817685428; decision D-071), so the checker no longer counts those names (decision D-072). A test
+# 43817685428; decision D-071), so the checker no longer counts those names (decision D-072). Since
+# slice 2c.12b it is that slice's last change to the action: before it, those steps started in the locale
+# and with the time-zone file the job named, and their one download used the proxy and the CA file
+# the job named; from it, each step's env fixes LC_ALL and TZ and egress.py empties its environment
+# before it imports anything but os, which the escape tests' own-steps-environment job showed on a
+# GitHub-hosted runner (run 43986589031), so no further variable counts (decision D-075). A test
 # refuses a listed commit that does not have the floor as an ancestor in this repository's history, or
 # whose action's own steps differ from the floor's where the checker's verdicts rest on them. A later
 # commit that reads its inputs another way must not be listed until the checker reads it that way too.
-egress_action_floor: cc2ba59d4dfb70b6dcdcd660ca700c6dbe20d13e
+egress_action_floor: f3b50d418f421ea5dd17b277310fa11fe3541635
 egress_action_releases: []

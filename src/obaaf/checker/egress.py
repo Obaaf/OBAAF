@@ -39,8 +39,8 @@ LIMIT = 1_000_000       # bytes of the policy file the checker reads; a larger f
 # How OBAAF's egress action reads its `env` and `model-keys` inputs (actions/egress/egress.py, from the
 # merge of slice 2c.4 on; a test keeps these the same as the action's). The checker reads a step that
 # uses the action as the action would, which holds only for the commits OBAAF lists as released, and
-# those may only be commits at or after `egress_action_floor` in detection.yaml (slice 2c.11a's
-# change to the action since slice 2c.11b), which reads them the same way.
+# those may only be commits at or after `egress_action_floor` in detection.yaml (slice 2c.12b's last
+# change to the action since that slice), which reads them the same way.
 #
 # MODEL_KEYS: the names `model-keys` accepts, each with the API host AWF's API proxy sends that key to
 # whatever `allow` says. WITHHELD_BY_AWF: names the action refuses under `env`, because AWF withholds
@@ -62,8 +62,8 @@ NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def removed_before_inputs(name: str) -> bool:
     """Whether the action removes the variable `name` from its own steps before it reads its `env`
     input, so a name under `env` that is one of these is refused as unset: every name that, trimmed
-    and upper-cased, begins `OPENSSL_` (egress.py from slice 2c.11a's change, the floor since 2c.11b;
-    issue #197 is about the message)."""
+    and upper-cased, begins `OPENSSL_` (egress.py from slice 2c.11a's change, which every commit at or
+    after the floor has; issue #197 is about the message)."""
     return str(name).strip().upper().startswith("OPENSSL_")
 
 

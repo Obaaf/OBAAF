@@ -968,9 +968,11 @@ class ReleaseDataTest(unittest.TestCase):
         model-keys input and describes its resolver, both of which exist from the merge of slice 2c.4
         (slice 2c.5), the runner's sockets in /tmp and links left in the copy are dealt with from
         slice 2c.6's last change to the action, the action's own steps run no shell, look nothing up
-        through the PATH and empty the loader's variables from slice 2c.9's (slice 2c.10a), and they remove
-        every OPENSSL_ variable before libcrypto loads from slice 2c.11a's (slice 2c.11b). Checked against
-        the repository's history, which CI's test job fetches in full."""
+        through the PATH and empty the loader's variables from slice 2c.9's (slice 2c.10a), they remove
+        every OPENSSL_ variable before libcrypto loads from slice 2c.11a's (slice 2c.11b), and they start
+        in a fixed locale and time zone and empty their environment before anything else is imported
+        from slice 2c.12's. Checked against the repository's history, which CI's test job fetches in
+        full."""
         detection = checker.load().detection
         self.assertEqual(detection["egress_action_floor"], FLOOR)
         self.assertEqual(floor_problems(detection["egress_action_releases"], FLOOR), [])
@@ -979,18 +981,20 @@ class ReleaseDataTest(unittest.TestCase):
         if not has_history(FLOOR):
             self.skipTest("this checkout does not hold the repository's history (CI's test job fetches it)")
         self.assertEqual(floor_problems([FLOOR, AFTER_FLOOR], FLOOR), [])
-        problems = floor_problems([BEFORE_FLOOR, OLD_FLOOR, BASH_FLOOR, "0" * 40, "v1"], FLOOR)
-        self.assertEqual(len(problems), 5, problems)
-        for problem in problems[:3]:
+        problems = floor_problems([BEFORE_FLOOR, FIRST_CHANGE, OLD_FLOOR, OLDER_FLOOR, BASH_FLOOR, "0" * 40, "v1"], FLOOR)
+        self.assertEqual(len(problems), 7, problems)
+        for problem in problems[:5]:
             self.assertIn("not at or after", problem)
         self.assertEqual(lists_differ(FLOOR), "")
         self.assertEqual(lists_differ(AFTER_FLOOR), "")
 
 
-FLOOR = "cc2ba59d4dfb70b6dcdcd660ca700c6dbe20d13e"          # slice 2c.11a's change to the action
-AFTER_FLOOR = "a8b591b580c575fa134b0271f7504f6d75a019a8"    # the merge of #196, slice 2c.11a
-BEFORE_FLOOR = "186993c7339977e362ae9747f373630436364583"   # the commit 2c.11a's change was made on: just before the floor
-OLD_FLOOR = "c1b590c970e6246305415ad4d61a6136a7786d99"      # the floor before slice 2c.11b, slice 2c.9's last change
+FLOOR = "f3b50d418f421ea5dd17b277310fa11fe3541635"          # slice 2c.12's last change to the action
+AFTER_FLOOR = "40e9dd2b07f18849e0117ccff5265a8d1000e5b7"    # the next commit of the same pull request: documents only
+BEFORE_FLOOR = "1f2657527dcc7e9258270cdb09a56b3cc9e93450"   # the commit that change was made on: just before the floor
+FIRST_CHANGE = "8646c3503894228cd6418abcfc33cfcd74aca94e"   # slice 2c.12's first change: LC_ALL and TZ could still be named under env
+OLD_FLOOR = "cc2ba59d4dfb70b6dcdcd660ca700c6dbe20d13e"      # the floor before slice 2c.12: slice 2c.11a's change
+OLDER_FLOOR = "c1b590c970e6246305415ad4d61a6136a7786d99"    # the floor before slice 2c.11b: slice 2c.9's last change
 BASH_FLOOR = "7c1bded84f32a86135f89dde30396a32f44de9e0"     # the floor before slice 2c.10a, when the steps were bash
 
 
@@ -1420,8 +1424,11 @@ def _floor_facts(root):
     tree = ast.parse(out["egress.py"])
     loader = next((node.value for node in tree.body if isinstance(node, ast.Assign)
                    and any(getattr(t, "id", None) == "LOADER_VARIABLES" for t in node.targets)), None)
+    pins = next((node.value for node in tree.body if isinstance(node, ast.Assign)
+                 and any(getattr(t, "id", None) == "STARTUP_PINS" for t in node.targets)), None)
     return {"runs": [str(step.get("run", "")) for step in steps[:-1]],
             "loader": set(ast.literal_eval(loader)) if loader is not None else set(),
+            "pins": dict(ast.literal_eval(pins)) if pins is not None else {},
             "starts": _program_starts(tree)}
 
 
@@ -1707,7 +1714,8 @@ def openssl_removal_differs(tree, floor_tree):
         return "the floor's egress.py has no top-level import hashlib; the guard cannot read it"
     if prefix is None or [ast.dump(n) for n in prefix] != [ast.dump(n) for n in floor_prefix]:
         return ("egress.py's statements before and up to `import hashlib` are not the floor's, so OpenSSL's "
-                "variables may not be removed before libcrypto is initialised; it needs a fresh review")
+                "variables may not be removed before libcrypto is initialised, nor the process's environment "
+                "emptied before anything but os is imported; it needs a fresh review")
     extra = sorted(_import_spellings(tree) - _import_spellings(floor_tree), key=str)
     if extra:
         return (f"egress.py imports {extra[0]!r}, which the floor does not, so it may write the environment or "
@@ -1827,6 +1835,14 @@ def own_steps_differ(sha, root=None):
         missing = sorted(name for name in floor["loader"] if env.get(name) != "")
         if missing:
             return f"step {step.get('name')!r} does not empty {', '.join(missing[:3])}"
+        # Since slice 2c.12 each step's env also fixes what glibc and Python read from the environment
+        # as Python starts, before egress.py's first line (the floor's STARTUP_PINS): with another
+        # value, or none, the step starts in the locale or with the time-zone file the workflow named.
+        if not floor["pins"]:
+            return "the floor's egress.py has no STARTUP_PINS; the guard cannot read it"
+        loose = sorted(name for name, value in floor["pins"].items() if env.get(name) != value)
+        if loose:
+            return f"step {step.get('name')!r} does not set {', '.join(loose)} as the floor does"
     if [str(step.get("run", "")) for step in steps[:-1]] != floor["runs"]:
         return "a step's run text is not the floor's; its program starts were not reviewed again"
     last = steps[-1]
@@ -1880,8 +1896,27 @@ def own_steps_differ(sha, root=None):
     for fn in ("parse_model_keys", "parse_env_names"):
         if _function_dump(tree, fn) != _function_dump(floor_tree, fn):
             return f"egress.py's {fn}(), which builds what the launch env or the command's env-file holds, differs from the floor"
+    # The names the env input refuses. With one dropped, the command is given a variable that changes
+    # how its shell, its loader or its network behave or, for LC_ALL and TZ (slice 2c.12), the action's
+    # own value in place of the workflow's.
+    for const in ("RESERVED_NAMES", "RESERVED_PREFIXES", "RESERVED_SUFFIXES"):
+        if _const_dump(tree, const) != _const_dump(floor_tree, const):
+            return f"egress.py's {const}, the names the env input refuses, differs from the floor; it needs a fresh review"
+    # Slice 2c.12: the step reads its inputs from the copy of its environment taken before the
+    # environment was emptied, and refuses to go on when a loader variable has a value or a start-up
+    # variable is not the pinned one. The emptying itself is among the statements before `import
+    # hashlib`, which openssl_removal_differs holds to the floor's.
+    for const in ("STARTUP_PINS", "LOADER_VARIABLES"):
+        if _const_dump(tree, const) != _const_dump(floor_tree, const):
+            return (f"egress.py's {const}, which main() holds each step's environment to, differs from the floor; "
+                    "it needs a fresh review")
+    for fn in ("main", "inherited_hooks", "unpinned", "step_environment", "_state_dir"):
+        if _function_dump(tree, fn) != _function_dump(floor_tree, fn):
+            return (f"egress.py's {fn}(), by which a step reads its inputs from the copy of its environment and refuses "
+                    "one the runner did not fix, differs from the floor; it needs a fresh review")
     # Slice 2c.11b: OpenSSL's variables are removed before libcrypto is first initialised, and none is
-    # put back (D-071); the checker no longer counts them only on that premise.
+    # put back (D-071); the checker no longer counts them only on that premise. Since slice 2c.12 the
+    # same statements empty the whole environment before anything but os is imported.
     problem = openssl_removal_differs(tree, floor_tree)
     if problem:
         return problem
@@ -2018,9 +2053,13 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         self.assertEqual(own_steps_differ(FLOOR), "")
         self.assertEqual(own_steps_differ(AFTER_FLOOR), "")
         self.assertEqual(own_steps_differ("HEAD"), "")
-        # Before 2c.11a the steps left OpenSSL's variables in place, and before 2c.9 they were bash:
-        # the check must see both.
-        self.assertIn("OpenSSL's variables may not be removed", own_steps_differ(OLD_FLOOR))
+        # Before 2c.12 the steps started in the locale and with the time-zone file the workflow named
+        # and kept its environment, before 2c.11a they left OpenSSL's variables in place as well, and
+        # before 2c.9 they were bash: the check must see each.
+        # 2c.12's first change fixed LC_ALL and TZ for the steps but still let both be named under env.
+        self.assertIn("RESERVED_NAMES, the names the env input refuses", own_steps_differ(FIRST_CHANGE))
+        self.assertIn("does not set LC_ALL, TZ as the floor does", own_steps_differ(OLD_FLOOR))
+        self.assertIn("does not set LC_ALL, TZ as the floor does", own_steps_differ(OLDER_FLOOR))
         self.assertIn("has the shell", own_steps_differ(BASH_FLOOR))
 
     @unittest.skipUnless(has_history(FLOOR), "needs the repository's history (git fetch --unshallow)")
@@ -2032,7 +2071,9 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         (round 2); the launch env's contents and `FIXED_PATH` (rounds 3 to 6). Slice 2c.11b: the removal
         of OpenSSL's variables before `import hashlib`, writes of the environment after it, new
         imports, an `env=` dict that names a new variable, one more program start, and, after its
-        review, any other change to the action's code (`action_differs`). Each must be caught, by the
+        review, any other change to the action's code (`action_differs`). Slice 2c.12: a step's
+        start-up pins, the emptying of the environment before the imports, and main() reading the copy
+        and refusing a start-up variable that is not pinned. Each must be caught, by the
         check its expected text names. The escape tests on a listed commit are the proof; this guard keeps a
         change to how a program is started from being listed without a fresh review."""
         import subprocess
@@ -2291,6 +2332,58 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
                           lambda: edit("action.yml", "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/egress.py",
                                        "OBAAF_EGRESS_SCRIPT: ${{ github.action_path }}/other.py"),
                           "the action's action.yml is not the floor's, apart from comments and descriptions"))
+
+            # Slice 2c.12: the step's env fixes what is read as Python starts, the process's environment
+            # is emptied before anything but os is imported, and main() reads the copy and refuses a
+            # start-up variable that is not the pinned one.
+            pin = "as the floor does"
+            cases.append(("a step starts in another locale",
+                          lambda: edit("action.yml", "        LC_ALL: C\n", "        LC_ALL: C.UTF-8\n"),
+                          "does not set LC_ALL " + pin))
+            cases.append(("a step's time zone is left to the workflow",
+                          lambda: edit("action.yml", "        LC_ALL: C\n        TZ: UTC0\n", "        LC_ALL: C\n"),
+                          "does not set TZ " + pin))
+            cases.append(("a step's locale is left to the workflow",
+                          lambda: edit("action.yml", "        LC_ALL: C\n        TZ: UTC0\n", "        TZ: UTC0\n"),
+                          "does not set LC_ALL " + pin))
+            cases.append(("the environment is not emptied",
+                          lambda: edit("egress.py", "if ENVIRONMENT_EMPTIED:\n    os.environ.clear()\n",
+                                       "if ENVIRONMENT_EMPTIED:\n    pass\n"),
+                          before))
+            cases.append(("the environment is emptied only after the imports",
+                          lambda: (edit("egress.py", "if ENVIRONMENT_EMPTIED:\n    os.environ.clear()\n", ""),
+                                   edit("egress.py", "from pathlib import Path\n",
+                                        "from pathlib import Path\nif ENVIRONMENT_EMPTIED:\n    os.environ.clear()\n")),
+                          before))
+            cases.append(("the environment is emptied but for the proxy variables",
+                          lambda: edit("egress.py", "if ENVIRONMENT_EMPTIED:\n    os.environ.clear()\n",
+                                       "if ENVIRONMENT_EMPTIED:\n    for _name in list(os.environ):\n"
+                                       "        if not _name.lower().endswith('_proxy'):\n            del os.environ[_name]\n"),
+                          before))
+            cases.append(("urllib imported before the environment is emptied",
+                          lambda: edit("egress.py", "STEP_ENVIRONMENT = dict(os.environ)\n",
+                                       "import urllib.request\nSTEP_ENVIRONMENT = dict(os.environ)\n"),
+                          before))
+            reads = "by which a step reads its inputs from the copy of its environment and refuses"
+            cases.append(("main() no longer refuses a start-up variable the workflow set",
+                          lambda: edit("egress.py", "    loose = unpinned(environ)\n", "    loose = []\n"),
+                          "egress.py's main(), " + reads))
+            cases.append(("unpinned() lets any value through",
+                          lambda: edit("egress.py",
+                                       '    return [name for name, value in STARTUP_PINS.items() if environ.get(name, "") != value]\n',
+                                       "    return []\n"),
+                          "egress.py's unpinned(), " + reads))
+            cases.append(("the pins main() holds the steps to are fewer",
+                          lambda: edit("egress.py", 'STARTUP_PINS = {"LC_ALL": "C", "TZ": "UTC0"}',
+                                       'STARTUP_PINS = {"LC_ALL": "C"}'),
+                          "egress.py's STARTUP_PINS, which main() holds each step's environment to"))
+            cases.append(("LC_ALL and TZ can be named under env again",
+                          lambda: edit("egress.py", '        "LC_ALL", "TZ",\n', ""),
+                          "egress.py's RESERVED_NAMES, the names the env input refuses"))
+            cases.append(("the state directory is read from somewhere else",
+                          lambda: edit("egress.py", '    base = step_environment().get("RUNNER_TEMP") or tempfile.gettempdir()\n',
+                                       '    base = step_environment().get("OBAAF_STATE") or tempfile.gettempdir()\n'),
+                          "egress.py's _state_dir(), " + reads))
 
             for name, mutate, expect in cases:
                 mutate()
