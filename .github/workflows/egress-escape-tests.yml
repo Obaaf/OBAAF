@@ -672,7 +672,9 @@ jobs:
     # runs docker on the runner when it tears its containers down, with the
     # command's home as its HOME and the model keys in its environment; AWF
     # does not mount .docker of that home into the sandbox, so the file should
-    # never reach the place AWF's docker reads, and nothing may run it.
+    # never reach the place AWF's docker reads, and nothing may run it. A
+    # control first shows that docker on this runner does run a plug-in found
+    # in the .docker of the home it is given.
     name: What a workflow sets for the action's own steps does not reach them
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -692,6 +694,17 @@ jobs:
           nohup /usr/bin/python3 -I tests/egress/environment-watch.py watch /opt/obaaf-env/planted /opt/obaaf-env/logs/seen > /opt/obaaf-env/logs/watch.out 2>&1 &
           for _ in $(seq 1 50); do [ -f /opt/obaaf-env/logs/watch-ready ] && break; sleep 0.2; done
           [ -f /opt/obaaf-env/logs/watch-ready ] || { echo "the watch did not start"; cat /opt/obaaf-env/logs/watch.out; exit 1; }
+
+      - name: Control for issue 194, docker given a home that holds a plug-in (docker must run it)
+        run: |
+          set -euo pipefail
+          home=/opt/obaaf-env/control-home
+          mkdir -p "$home/.docker/cli-plugins"
+          printf '#!/bin/sh\necho "the control plug-in ran: $*" >> /opt/obaaf-env/logs/ran-control\n' > "$home/.docker/cli-plugins/docker-compose"
+          chmod 755 "$home/.docker/cli-plugins/docker-compose"
+          # As AWF's docker is started: a small environment whose HOME is that home.
+          env -i PATH="$PATH" HOME="$home" docker compose version || true
+          cat /opt/obaaf-env/logs/ran-control 2>/dev/null || echo "(the control plug-in did not run)"
 
       - name: Control, a plain step run as the action's steps are (it must use what is planted)
         shell: /usr/bin/python3 -I -S {0}
@@ -756,6 +769,10 @@ jobs:
           sleep 2
           mv /opt/obaaf-env/logs/seen /opt/obaaf-env/logs/seen-floor || touch /opt/obaaf-env/logs/seen-floor
           mv /opt/obaaf-env/planted/ran /opt/obaaf-env/logs/ran-floor 2>/dev/null || true
+          # The next step shows nothing about the proxy and the CA file unless it downloads AWF itself,
+          # and the action skips the download when AWF is already installed. The step above shares the
+          # state directory and must have failed at its download.
+          if [ -e "$RUNNER_TEMP/obaaf-egress/bin/awf" ]; then echo "FAILED: AWF is already installed, so the action now would not download it"; exit 1; fi
 
       - name: The action now, with the variables (it must use nothing planted, and still confine its command)
         id: now
@@ -819,9 +836,10 @@ jobs:
           echo "(the action at cc2ba59 with the variables had outcome $FLOOR_OUTCOME: its download goes to the planted proxy, which only listens)"
           if [ -s "$logs/ran-floor" ]; then echo "(a planted program ran in it: $(tr '\n' ';' < "$logs/ran-floor"))"; fi
           # Issue 194: the plug-in the command wrote into its home. The command ended 0, so it wrote the file.
+          if [ -s "$logs/ran-control" ]; then ok "control: docker ran the plug-in in the .docker of the home it was given, so the route issue 194 describes exists on this runner"; else bad "control: docker did not run a plug-in in the .docker of its home, so the checks below show nothing"; fi
           if [ -s "$logs/ran-now" ]; then bad "something ran a planted program or the plug-in the command wrote: $(tr '\n' ';' < "$logs/ran-now")"; else ok "nothing ran the plug-in the command wrote into its home, nor the planted askpass and plug-in"; fi
           left="$(sudo find /tmp "$RUNNER_TEMP" -xdev -path '*cli-plugins/docker-compose' 2>/dev/null || true)"
-          if [ -z "$left" ]; then ok "the plug-in the command wrote is nowhere under /tmp or RUNNER_TEMP afterwards (it was in AWF's own copy of the home, which is deleted)"; else bad "the plug-in the command wrote is left on the runner: $left"; fi
+          if [ -z "$left" ]; then ok "the plug-in the command wrote is nowhere under /tmp or RUNNER_TEMP afterwards (where the write landed inside the sandbox was not observed)"; else bad "the plug-in the command wrote is left on the runner: $left"; fi
           if [ -n "$NOW_SCRATCH" ] && [ ! -e "$NOW_SCRATCH/home/.docker" ]; then ok "the home AWF's docker reads ($NOW_SCRATCH/home) has no .docker"; else bad "the home AWF's docker reads has a .docker, or the action gave no scratch directory ('$NOW_SCRATCH')"; fi
           exit "$fail"
 
