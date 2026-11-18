@@ -217,7 +217,7 @@ class BoundsTest(unittest.TestCase):
     def test_a_text_past_the_bound_is_an_error_and_is_read_as_written(self):
         files = {CALLED: called(checkout("${{ inputs.ref }}"))}
         for n in range(30):
-            files[f".github/workflows/c{n:02d}.yml"] = caller(given=f"ref: {HEAD}-{n}-" + "x" * 5000)
+            files[f".github/workflows/c{n:02d}.yml"] = caller(given=f"ref: {HEAD}-{n}-" + "x" * 40_000)
         with TempDir() as tmp:
             result = check(tmp, files)
         self.assertTrue(any(CALLED in e and "inputs are read as written" in e for e in result.errors), result.errors)
@@ -338,6 +338,110 @@ class FromTheFirstReviewTest(unittest.TestCase):
         checker._give_callers([(CALLER, caller_wf), (CALLED, called_wf)])
         for key in ("run-name", "concurrency"):
             self.assertIn("github.event.pull_request.head.sha", called_wf.raw[key])
+
+
+def bomb(levels, leaf="'${{ github.event.comment.body }}'"):
+    lines = [f"          l0: &l0 [{leaf}]\n"]
+    lines += [f"          l{n}: &l{n} [*l{n - 1}, *l{n - 1}]\n" for n in range(1, levels + 1)]
+    return "".join(lines)
+
+
+ECHO_X = '      - run: echo "${{ inputs.x }}"\n'
+
+
+class FromTheSecondReviewTest(unittest.TestCase):
+
+    def run_check(self, files, limit=20):
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, files)
+            spent = time.monotonic() - start
+        self.assertLess(spent, limit)
+        return result
+
+    def test_an_alias_bomb_in_the_callers_matrix_is_an_error_not_a_crash(self):
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  call:\n    strategy:\n      matrix:\n"
+                + bomb(22).replace("          ", "        ") + "        b: [*l22]\n"
+                "    uses: ./.github/workflows/called.yml\n    with:\n      x: ${{ matrix.b }}\n")
+        result = self.run_check({CALLER: text, CALLED: called(ECHO_X, inputs="x")})
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_an_alias_bomb_handed_as_a_value_is_an_error_not_a_crash(self):
+        text = ("on: issue_comment\npermissions: {}\nx-bomb:\n" + bomb(22).replace("          ", "  ") +
+                "jobs:\n  call:\n    uses: ./.github/workflows/called.yml\n    with:\n      x: *l22\n")
+        result = self.run_check({CALLER: text, CALLED: called(ECHO_X, inputs="x")})
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_an_alias_bomb_as_a_default_is_an_error_not_a_crash(self):
+        text = called(ECHO_X, inputs="").replace(
+            "on: workflow_call\n", "x-bomb:\n" + bomb(22).replace("          ", "  ") +
+            "on:\n  workflow_call:\n    inputs:\n      x:\n        type: string\n        default: *l22\n")
+        result = self.run_check({CALLER: caller(), CALLED: text})
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_a_wide_matrix_read_many_times_is_quick(self):
+        keys = ", ".join(f"k{n}: a" for n in range(2000))
+        refs = "".join("${{ matrix.z%d }}" % n for n in range(50))
+        jobs = "".join(f"  c{n}:\n    strategy: *s\n    uses: ./.github/workflows/called.yml\n    with: *w\n"
+                       for n in range(1, 50))
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  c0:\n    strategy: &s\n      matrix:\n        x: [a]\n"
+                f"        include:\n          - &it {{{keys}}}\n" + "          - *it\n" * 200 +
+                f"    uses: ./.github/workflows/called.yml\n    with: &w\n      x: '{refs}'\n" + jobs)
+        self.run_check({CALLER: text, CALLED: called(ECHO_X, inputs="x")}, limit=30)
+
+    def test_a_matrix_of_many_values_read_in_many_lines_is_no_error(self):
+        services = ", ".join(f"service-{n:03d}" for n in range(256))
+        text = ("on: push\npermissions: {}\njobs:\n  call:\n    strategy:\n      matrix:\n"
+                f"        service: [{services}]\n    uses: ./.github/workflows/called.yml\n    with:\n"
+                "      service: ${{ matrix.service }}\n")
+        script = "      - run: |\n" + "".join(f"          echo \"step {n} for ${{{{ inputs.service }}}}\"\n" for n in range(25))
+        result = self.run_check({CALLER: text, CALLED: called(script, inputs="service")})
+        self.assertEqual(result.errors, [])
+
+    def outsiders_text_through(self, caller_text):
+        result = self.run_check({CALLER: caller_text, CALLED: called(ECHO_X, inputs="x")})
+        return [f.severity for f in found(result, "OBAAF-GHA-010")]
+
+    PRE = ("  pre:\n    runs-on: ubuntu-latest\n    outputs:\n      b: ${{ github.event.comment.body }}\n"
+           "    steps:\n      - run: echo\n")
+
+    def test_every_output_of_the_needed_jobs(self):
+        for value in ("${{ join(needs.*.outputs.b, ',') }}", "${{ toJSON(needs) }}",
+                      "${{ needs[format('{0}', 'pre')].outputs.b }}", "${{ needs.pre.outputs[format('b')] }}"):
+            text = ("on: issue_comment\npermissions: {}\njobs:\n" + self.PRE + "  call:\n    needs: pre\n"
+                    f"    uses: ./.github/workflows/called.yml\n    with:\n      x: \"{value}\"\n")
+            with self.subTest(value=value):
+                self.assertEqual(self.outsiders_text_through(text), ["high"])
+
+    def test_two_levels_of_outputs(self):
+        text = ("on: issue_comment\npermissions: {}\njobs:\n" + self.PRE.replace("pre:", "pre0:") +
+                "  pre:\n    needs: pre0\n    runs-on: ubuntu-latest\n    outputs:\n      b: ${{ needs.pre0.outputs.b }}\n"
+                "    steps:\n      - run: echo\n  call:\n    needs: pre\n    uses: ./.github/workflows/called.yml\n"
+                "    with:\n      x: ${{ needs.pre.outputs.b }}\n")
+        self.assertEqual(self.outsiders_text_through(text), ["high"])
+
+    def test_an_output_that_reads_its_own_jobs_matrix(self):
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  pre:\n    runs-on: ubuntu-latest\n    strategy:\n"
+                "      matrix:\n        v: ['${{ github.event.comment.body }}']\n    outputs:\n      b: ${{ matrix.v }}\n"
+                "    steps:\n      - run: echo\n  call:\n    needs: pre\n    uses: ./.github/workflows/called.yml\n"
+                "    with:\n      x: ${{ needs.pre.outputs.b }}\n")
+        self.assertEqual(self.outsiders_text_through(text), ["high"])
+
+    def test_a_matrix_made_from_a_needed_jobs_output(self):
+        for matrix in ("${{ fromJSON(needs.pre.outputs.b) }}", "\n        v: ['${{ needs.pre.outputs.b }}']"):
+            text = ("on: issue_comment\npermissions: {}\njobs:\n" + self.PRE + "  call:\n    needs: pre\n"
+                    f"    strategy:\n      matrix: {matrix}\n    uses: ./.github/workflows/called.yml\n"
+                    "    with:\n      x: ${{ matrix.v }}\n")
+            with self.subTest(matrix=matrix):
+                self.assertEqual(self.outsiders_text_through(text), ["high"])
+
+    def test_a_secret_in_a_needed_jobs_output_reaches_nothing(self):
+        # GitHub leaves an output that holds a secret out; the second review found a false OBAAF-GHA-001.
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  pre:\n    runs-on: ubuntu-latest\n    outputs:\n"
+                "      b: ${{ secrets.TOKEN }}\n    steps:\n      - run: echo\n  call:\n    needs: pre\n"
+                "    uses: ./.github/workflows/called.yml\n    with:\n      x: ${{ needs.pre.outputs.b }}\n")
+        result = self.run_check({CALLER: text, CALLED: called(ECHO_X, inputs="x")})
+        self.assertEqual(found(result, "OBAAF-GHA-001"), [])
 
 
 class TheCallersGrantTest(unittest.TestCase):

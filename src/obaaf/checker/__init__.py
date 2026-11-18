@@ -467,33 +467,44 @@ def _caller_notes(workflows: list) -> list[str]:
 _CALLER_ONLY_CONTEXTS = frozenset({"matrix", "strategy", "needs", "inputs", "job", "steps", "runner", "env"})
 # The longest text of a called workflow that putting its callers' inputs in may make, and every such
 # text for the check together; past either, the workflow's inputs are left as written, an error.
-CALLER_INPUT_TEXT = 100_000
-CALLER_INPUTS_CHECK_TEXT = 2_000_000
+CALLER_INPUT_TEXT = 1_000_000
+CALLER_INPUTS_CHECK_TEXT = 5_000_000
 # The places (values in mappings and lists, an alias's each time it is given) looked at in one workflow.
 CALLER_INPUTS_PLACES = 1_000_000
 _INPUTS_WORD = re.compile(r"\binputs\b", re.I)
 
 
 class _CallerInputsExceeded(Exception):
-    """Putting callers' inputs into a called workflow would make more text than the checker reads."""
+    """Putting callers' inputs into a called workflow would pass a bound: `reason` is `text`, `check` or
+    `places`."""
+
+    def __init__(self, reason: str = "check") -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
-_TOO_MUCH_GIVEN = (f"putting in what the jobs that call it give its inputs would make a text of more than "
-                   f"{CALLER_INPUT_TEXT} characters, or more than {CALLER_INPUTS_CHECK_TEXT} for the check, or would "
-                   f"look at more than {CALLER_INPUTS_PLACES} places in it (counting each value each time it is "
-                   "given), so its inputs are read as written and the checker cannot tell what its jobs are given")
+def _too_much_given(exc: "_CallerInputsExceeded") -> str:
+    """The problem a called workflow has when putting in its callers' inputs passes a bound, naming it."""
+    which = {"text": f"make one text of more than {CALLER_INPUT_TEXT} characters",
+             "places": f"look at more than {CALLER_INPUTS_PLACES} places in it, each alias counted each time it is given",
+             }.get(exc.reason, f"make more than {CALLER_INPUTS_CHECK_TEXT} characters of such values and texts for the "
+                               "check, each value counted each time it is given")
+    return (f"putting in what the jobs that call it give its inputs would {which}, so its inputs are read as written "
+            "and the checker cannot tell what its jobs are given")
 
 
-def _caller_value_tokens(value) -> list:
+def _caller_value_tokens(value: str, followed: bool = False) -> list:
     """The tokens of an expression that gives what a calling job's `with:` hands an input, with each
-    reference to a context of the caller's own (`_CALLER_ONLY_CONTEXTS`) moved under `caller.`, so the
-    called workflow's rules do not read the caller's `matrix.ref` as its own matrix's."""
-    toks = _value_tokens(value if isinstance(value, str) else wf_mod.as_text(value))
+    reference to a context of the caller's own (`_CALLER_ONLY_CONTEXTS`, and `secrets` for a value
+    `followed` through a matrix or an output) moved under `caller.`, so the called workflow's rules do
+    not read the caller's `matrix.ref` as its own matrix's."""
+    toks = _value_tokens(value)
+    moved = _CALLER_ONLY_CONTEXTS | {"secrets"} if followed else _CALLER_ONLY_CONTEXTS
     out: list = []
     for i, tok in enumerate(toks):
         before = toks[i - 1] if i else None
         after = toks[i + 1] if i + 1 < len(toks) else None
-        if tok[0] == "id" and tok[1].lower() in _CALLER_ONLY_CONTEXTS and before != ("op", ".") \
+        if tok[0] == "id" and tok[1].lower() in moved and before != ("op", ".") \
                 and after != ("op", "("):
             out += [("id", "caller"), ("op", "."), tok]
         else:
@@ -509,49 +520,175 @@ def _found_in(mapping, name: str) -> list:
     return [value for key, value in mapping.items() if isinstance(key, str) and key.strip().lower() == wanted]
 
 
-def _caller_context_values(text: str, job, caller) -> list:
-    """What a calling job's `matrix` and the outputs of the jobs it needs give, for each reference to
-    them in `text` (one of its `with:` values): the values its strategy's matrix lists for the name
-    (under `include` too), and the value a needed job's `outputs` gives, as written in the calling
-    workflow. They are read where the caller runs, so each is given to the called workflow with the
-    caller's contexts moved under `caller.` too, beside the `caller.` reference itself. One level only:
-    an output that reads another job's output is that reference. A reference to the whole matrix, or a
-    name the checker cannot read, gives every value of the matrix (the review found an outsider's text
-    in the caller's matrix, or a needed job's output, handed on through an input and expanded in a
-    script without a word)."""
-    if job is None or not isinstance(text, str) or expr_mod.OPEN not in text:
-        return []
-    out: list = []
-    strategy = job.raw.get("strategy")
-    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-    try:
-        bodies = expr_mod.bodies(text)
-        found = [ref.path for body in bodies for ref in expr_mod.refs(body)]
-    except (expr_mod.TooComplex, RecursionError):
-        return [text]
-    for path in found:
-        root = path[0].value.lower() if path[0].kind == expr_mod.NAME else ""
-        if root == "matrix" and matrix is not None:
-            if not isinstance(matrix, dict):
-                out.append(matrix)
-            elif len(path) > 1 and path[1].kind == expr_mod.NAME:
-                for value in _found_in(matrix, path[1].value):
-                    out.extend(value if isinstance(value, list) else [value])
-                for entry in _found_in(matrix, "include"):
-                    for item in (entry if isinstance(entry, list) else [entry]):
-                        out.extend(_found_in(item, path[1].value) if isinstance(item, dict) else [item])
+# How deep a value a caller hands is followed through its matrix and its needed jobs' outputs, each of
+# which can read another job's matrix or outputs.
+CALLER_FOLLOW_DEPTH = 3
+
+
+def _bounded_size(value, limit: int) -> int:
+    """The characters of `value` as its text would hold them (each string, and a few for each key and
+    item), counted at every place YAML gives it through an alias, without making the text; past
+    `limit`, `_CallerInputsExceeded` (the second review made a 1 KB caller whose matrix doubles through
+    aliases at each of 22 levels end in a MemoryError)."""
+    size = 0
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, str):
+            size += len(node) + 4
+        elif isinstance(node, dict):
+            size += 4
+            for key, item in node.items():
+                size += (len(key) if isinstance(key, str) else 8) + 4
+                todo.append(item)
+        elif isinstance(node, list):
+            size += 4
+            todo.extend(node)
+        else:
+            size += 8
+        if size > limit:
+            raise _CallerInputsExceeded("check")
+    return size
+
+
+class _CallerValues:
+    """What the checker reads of the jobs that call one workflow: each value's text and tokens worked out
+    once (by object, so a value YAML gives through an alias is one), counted towards the check's
+    `CALLER_INPUTS_CHECK_TEXT` each time it is given; and each calling job's matrix, and each calling
+    workflow's jobs, indexed once (the second review found a matrix scanned again for each reference:
+    147 s for a 48 KB repository)."""
+
+    def __init__(self, budget: dict) -> None:
+        self.budget, self.charged = budget, 0
+        self._texts: dict = {}
+        self._tokens: dict = {}
+        self._matrices: dict = {}
+        self._jobs: dict = {}
+
+    def charge(self, size: int) -> None:
+        self.charged += size
+        if self.budget["chars"] + self.charged > CALLER_INPUTS_CHECK_TEXT:
+            raise _CallerInputsExceeded("check")
+
+    def text(self, value) -> str:
+        """As GitHub hands a value that is not text: `true` for true, nothing for a key with no value."""
+        key = id(value)
+        if key not in self._texts:
+            if value is None:
+                found = ""
+            elif isinstance(value, bool):
+                found = "true" if value else "false"
+            elif isinstance(value, str):
+                found = value
             else:
-                out.append(matrix)
-        elif root == "needs" and caller is not None and len(path) > 1 and path[1].kind == expr_mod.NAME:
-            needed = [other for other_id, other in caller.jobs.items() if str(other_id).lower() == path[1].value.lower()]
-            for other in needed:
-                outputs = other.raw.get("outputs")
-                if len(path) > 3 and path[2].kind == expr_mod.NAME and path[2].value.lower() == "outputs" \
-                        and path[3].kind == expr_mod.NAME:
-                    out.extend(_found_in(outputs, path[3].value))
-                elif outputs is not None:
-                    out.append(outputs)
-    return out
+                _bounded_size(value, CALLER_INPUTS_CHECK_TEXT - self.budget["chars"] - self.charged)
+                found = wf_mod.as_text(value)
+            self._texts[key] = found
+        return self._texts[key]
+
+    def tokens(self, value, own: bool = False, followed: bool = False) -> tuple[str, list]:
+        """(written, tokens) of the expression that gives `value`: in the called workflow's own terms
+        (`own`, a default), or the caller's, with its contexts under `caller.` (and `secrets` too for a
+        value reached through a matrix or an output: GitHub refuses a secret in a matrix and leaves one
+        out of an output, so a secret there reaches nothing; the second review found a false OBAAF-GHA-001)."""
+        key = (id(value), own, followed)
+        if key not in self._tokens:
+            text = self.text(value)
+            toks = _value_tokens(text) if own else _caller_value_tokens(text, followed)
+            self._tokens[key] = (_written_tokens(toks), toks, max(len(text), 1))
+        written, toks, size = self._tokens[key]
+        self.charge(size)
+        return written, toks
+
+    def matrix(self, job) -> tuple[dict | None, Any] | None:
+        """(name in lower case -> the values the job's matrix lists for it, under `include` too, or None
+        for a matrix that is not a mapping; the whole matrix), or None for a job without one."""
+        key = id(job)
+        if key not in self._matrices:
+            strategy = job.raw.get("strategy")
+            whole = strategy.get("matrix") if isinstance(strategy, dict) else None
+            named: dict = {}
+            if isinstance(whole, dict):
+                for name, given in whole.items():
+                    self.charge(1)
+                    shown = wf_mod.as_text(name).strip().lower()
+                    if shown == "exclude":
+                        continue
+                    if shown != "include":
+                        named.setdefault(shown, []).extend(given if isinstance(given, list) else [given])
+                        continue
+                    for item in (given if isinstance(given, list) else [given]):
+                        self.charge(1)
+                        for inner, value in (item.items() if isinstance(item, dict) else ()):
+                            self.charge(1)
+                            named.setdefault(wf_mod.as_text(inner).strip().lower(), []).append(value)
+            # A matrix written as one expression (`fromJSON(...)`) gives it for every name.
+            self._matrices[key] = None if whole is None else (named if isinstance(whole, dict) else None, whole)
+        return self._matrices[key]
+
+    def jobs(self, workflow) -> dict:
+        key = id(workflow)
+        if key not in self._jobs:
+            index: dict = {}
+            for job_id, job in workflow.jobs.items():
+                index.setdefault(str(job_id).lower(), []).append(job)
+            self._jobs[key] = index
+        return self._jobs[key]
+
+    def followed(self, value, job, caller) -> list:
+        """The values a calling job's `matrix` and the outputs of the jobs it needs give, for each reference
+        to them in `value` (one of its `with:` values), each read where it is written: a matrix's values
+        in that job's terms, an output in the terms of the job that has it. They are followed to
+        CALLER_FOLLOW_DEPTH, each once. A reference to the whole matrix, or a name the checker cannot
+        read, gives the whole matrix; one to `needs` that does not name a job and an output (`needs.*`,
+        `toJSON(needs)`, a computed name) gives every output of every job the calling job needs (the
+        first review found an outsider's text in the caller's matrix, or a needed job's output, handed on
+        and expanded in a script without a word; the second, the wider forms)."""
+        out: list = []
+        seen: set = set()
+        todo = [(value, job, 0)]
+        while todo:
+            current, where, depth = todo.pop()
+            if where is None or depth >= CALLER_FOLLOW_DEPTH:
+                continue
+            text = self.text(current)
+            if expr_mod.OPEN not in text:
+                continue
+            try:
+                paths = [ref.path for body in expr_mod.bodies(text) for ref in expr_mod.refs(body)]
+            except (expr_mod.TooComplex, RecursionError):
+                continue
+            for path in paths:
+                self.charge(len(path))
+                head = path[0].value.lower() if path[0].kind == expr_mod.NAME else ""
+                found: list = []
+                if head == "matrix":
+                    index = self.matrix(where)
+                    if index is not None:
+                        named, whole = index
+                        found = [(v, where) for v in (named.get(path[1].value.lower(), []) if named is not None
+                                                      and len(path) > 1 and path[1].kind == expr_mod.NAME else [whole])]
+                elif head == "needs" and caller is not None:
+                    jobs = self.jobs(caller)
+                    if len(path) > 1 and path[1].kind == expr_mod.NAME:
+                        targets = jobs.get(path[1].value.lower(), [])
+                    else:
+                        targets = [t for name in where.needs for t in jobs.get(str(name).lower(), [])]
+                    for target in targets:
+                        outputs = target.raw.get("outputs")
+                        if len(path) > 3 and path[2].kind == expr_mod.NAME and path[2].value.lower() == "outputs" \
+                                and path[3].kind == expr_mod.NAME:
+                            found += [(v, target) for v in _found_in(outputs, path[3].value)]
+                        elif outputs is not None:
+                            found.append((outputs, target))
+                for item, owner in found:
+                    marker = (id(item), id(owner))
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    out.append(item)
+                    todo.append((item, owner, depth + 1))
+        return out
 
 
 def _caller_input_values(workflow, budget: dict) -> tuple[dict, list]:
@@ -562,35 +699,28 @@ def _caller_input_values(workflow, budget: dict) -> tuple[dict, list]:
     does not declare is put in too (GitHub refuses such a call; the wider reading). A `with:` that is
     not a mapping, a key that is not text (`null:`, `true:`) and a name with a letter outside ASCII
     (which GitHub's folding of names may make any input) give every input their value, and a note says
-    so. Each value is read once however many times YAML gives it through an alias, and counted towards
-    the check's `CALLER_INPUTS_CHECK_TEXT` each time it is given (the review found 100 jobs giving 100
-    aliases of a 100 KB value took 128 s, and 10,000 inputs sharing a 200 KB default took 1.9 GB)."""
+    so. Beside each value, what the caller's matrix and needed jobs' outputs give it (`_CallerValues.
+    followed`). Each value is read once however many times YAML gives it through an alias, and counted
+    towards the check's `CALLER_INPUTS_CHECK_TEXT` each time it is given (the first review found 100
+    jobs giving 100 aliases of a 100 KB value took 128 s, and 10,000 inputs sharing a 200 KB default
+    took 1.9 GB)."""
     declared = workflow.triggers.get("workflow_call")
     declared = declared.get("inputs") if isinstance(declared, dict) else None
-    memo: dict = {}
-    charged = 0
-
-    def tokens_of(value, own: bool = False) -> tuple[str, list]:
-        nonlocal charged
-        key = (id(value), own)
-        if key not in memo:
-            # As GitHub hands a value that is not text: `true`, and nothing for a key with no value.
-            text = "" if value is None else ("true" if value else "false") if isinstance(value, bool) else \
-                wf_mod.as_text(value)
-            toks = _value_tokens(text) if own else _caller_value_tokens(text)
-            memo[key] = (_written_tokens(toks), toks, max(len(text), 1))
-        written, toks, size = memo[key]
-        charged += size
-        if budget["chars"] + charged > CALLER_INPUTS_CHECK_TEXT:
-            raise _CallerInputsExceeded()
-        return written, toks
-
+    read = _CallerValues(budget)
     defaults: dict = {}
     for name, spec in (declared.items() if isinstance(declared, dict) else ()):
         default = spec.get("default") if isinstance(spec, dict) else None
         defaults[wf_mod.input_name(wf_mod.as_text(name).strip())] = "" if default is None else default
     values: dict[str, dict] = {}
     every: dict = {}
+
+    def given_to(found: dict, value, job, caller) -> None:
+        written, toks = read.tokens(value)
+        found.setdefault(written, toks)
+        for each in read.followed(value, job, caller):
+            written, toks = read.tokens(each, followed=True)
+            found.setdefault(written, toks)
+
     for call in workflow.callers:
         job = call.workflow.jobs.get(call.job) if call.workflow is not None else None
         given = job.raw.get("with") if job is not None else None
@@ -601,32 +731,26 @@ def _caller_input_values(workflow, budget: dict) -> tuple[dict, list]:
                 if isinstance(key, str) and key.isascii():
                     named.setdefault(wf_mod.input_name(key.strip()), []).append(value)
                     continue
-                for each in [value, *_caller_context_values(value, job, call.workflow)]:
-                    written, toks = tokens_of(each)
-                    every.setdefault(written, toks)
+                given_to(every, value, job, call.workflow)
                 why = (f"a key written as {wf_mod.shown_value(key)}, which is not text" if not isinstance(key, str) else
                        f"a name with a letter outside ASCII ('{wf_mod.one_line(key, 60)}'), which GitHub may take for "
                        "another input's name")
                 workflow.caller_input_notes.append(f"{where} gives an input under {why}, so its value is read as given "
                                                    "to every input")
         elif given is not None:
-            for each in [given, *_caller_context_values(given, job, call.workflow)]:
-                written, toks = tokens_of(each)
-                every.setdefault(written, toks)
+            given_to(every, given, job, call.workflow)
             workflow.caller_input_notes.append(
                 f"{where} gives `with:` as one value, not a mapping, so every input is read as "
-                f"'{wf_mod.one_line(wf_mod.as_text(given), 60)}'")
+                f"'{wf_mod.one_line(read.text(given), 60)}'")
         for name in list(defaults) + [n for n in named if n not in defaults]:
             found = values.setdefault(name, {})
             if name not in named:
-                written, toks = tokens_of(defaults[name], own=True)
+                written, toks = read.tokens(defaults[name], own=True)
                 found.setdefault(written, toks)
                 continue
             for value in named[name]:
-                for each in [value, *_caller_context_values(value, job, call.workflow)]:
-                    written, toks = tokens_of(each)
-                    found.setdefault(written, toks)
-    budget["chars"] += charged
+                given_to(found, value, job, call.workflow)
+    budget["chars"] += read.charged
     return {name: list(found.values()) for name, found in values.items()}, list(every.values())
 
 
@@ -715,7 +839,7 @@ def _caller_inputs_in_body(body: str, given: "_CallerInputs", notes: list) -> st
             if head:
                 size += length
                 if size > CALLER_INPUT_TEXT:
-                    raise _CallerInputsExceeded()
+                    raise _CallerInputsExceeded("text")
                 out += [*head, *toks[i:i + width], *rest]
                 changed = True
             else:
@@ -747,7 +871,7 @@ def _caller_inputs_in_text(text: str, given: "_CallerInputs", notes: list, condi
             expr_mod.CLOSE if _INPUTS_WORD.search(body) else expr_mod.OPEN + body + expr_mod.CLOSE
         size += len(piece)
         if size > CALLER_INPUT_TEXT:
-            raise _CallerInputsExceeded()
+            raise _CallerInputsExceeded("text")
         out.append(piece)
     return "".join(out)
 
@@ -774,8 +898,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
     workflow.caller_inputs_put_in = True
     try:
         values, every = _caller_input_values(workflow, budget)
-    except _CallerInputsExceeded:
-        workflow.problems.append(_TOO_MUCH_GIVEN)
+    except _CallerInputsExceeded as exc:
+        workflow.problems.append(_too_much_given(exc))
         return
     if not values and not every:
         return
@@ -792,13 +916,13 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
         if marker not in worked:
             found = _caller_inputs_in_text(value, given, notes, condition)
             if len(found) > CALLER_INPUT_TEXT:
-                raise _CallerInputsExceeded()
+                raise _CallerInputsExceeded("text")
             worked[marker] = found
         found = worked[marker]
         if found != value:
             made += len(found)
             if budget["chars"] + made > CALLER_INPUTS_CHECK_TEXT:
-                raise _CallerInputsExceeded()
+                raise _CallerInputsExceeded("check")
             changes.append((container, key, found))
 
     conditions: set = set()
@@ -817,7 +941,7 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
             node = todo.pop()
             places += len(node) + 1
             if places > CALLER_INPUTS_PLACES:
-                raise _CallerInputsExceeded()
+                raise _CallerInputsExceeded("places")
             if isinstance(node, dict):
                 for key, value in node.items():
                     if isinstance(value, str):
@@ -830,8 +954,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
                         put(node, index, value)
                     elif isinstance(value, (dict, list)):
                         todo.append(value)
-    except _CallerInputsExceeded:
-        workflow.problems.append(_TOO_MUCH_GIVEN)
+    except _CallerInputsExceeded as exc:
+        workflow.problems.append(_too_much_given(exc))
         return
     budget["chars"] += made
     for container, key, found in changes:
