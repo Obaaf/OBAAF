@@ -549,5 +549,36 @@ class TheReviewersSecondPassTest(unittest.TestCase):
         self.assertIn("OBAAF-GHA-016", {f.rule for f in result.findings})
 
 
+class TheReviewersThirdPassTest(unittest.TestCase):
+    """What the third review pass of slice 2d.4b2 found (2026-11-18), each now a test."""
+
+    def test_an_if_given_an_empty_input_is_still_a_condition(self):
+        action_text = ("name: x\ninputs: {verify: {default: ''}}\nruns:\n  using: composite\n  steps:\n"
+                       "    - if: ${{ inputs.verify }}\n      run: obaaf verify release dist\n      shell: bash\n"
+                       "    - run: npm publish\n      shell: bash\n")
+        result = check(job(using(), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertIn("OBAAF-GHA-016", {f.rule for f in result.findings})
+        self.assertIn("OBAAF-GHA-017", {f.rule for f in result.findings})
+
+    def test_the_release_case_is_added_beside_the_first_passs_other_case(self):
+        text = ("on: issue_comment\npermissions: {packages: write}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                "    environment: builder\n    steps:\n" + indent(using(), 6))
+        written = ("on: issue_comment\npermissions: {packages: write}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                   "    environment: builder\n    steps:\n" + indent("- run: npm publish\n  shell: bash\n", 6))
+        through = {f.kind for f in check(text, {f"{ACTION}/action.yml": composite(
+            "- run: npm publish\n  shell: bash\n")}).findings if f.rule == "OBAAF-GHA-015"}
+        inline = {f.kind for f in check(written).findings if f.rule == "OBAAF-GHA-015"}
+        self.assertLessEqual(inline, through)
+
+    def test_a_placeholder_is_found_in_each_use_of_an_action(self):
+        action_text = composite("- run: echo deploy to OBAAF_OWNER\n  shell: bash\n")
+        twice = check(job(using() + using()), {f"{ACTION}/action.yml": action_text})
+        jobs = ("on: push\npermissions: {contents: read}\njobs:\n" + "".join(
+            f"  {j}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./{ACTION}\n" for j in ("a", "b")))
+        two_jobs = check(jobs, {f"{ACTION}/action.yml": action_text})
+        self.assertEqual(len([f for f in twice.findings if f.rule == "OBAAF-GHA-023"]), 2)
+        self.assertEqual(sorted(f.job for f in two_jobs.findings if f.rule == "OBAAF-GHA-023"), ["a", "b"])
+
+
 if __name__ == "__main__":
     unittest.main()

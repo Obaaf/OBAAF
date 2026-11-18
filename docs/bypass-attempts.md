@@ -2390,6 +2390,12 @@ Two Opus 5.5 sub-agents that did not write it reviewed it in turn, on 2026-11-18
   6. worse control verdicts from the second pass were dropped (OBAAF-GHA-005's "no outsider's input" verified beside a fetch of a pull request's code in the action).
 
   All fixed by class: a first-pass finding of the same case is now replaced by the second pass's, never less severe or nearer to cleared.
+- **Third pass, 37 attempts, on the second pass's fixes.** Blocking:
+  1. the fix for a constant input opened a way past in `if:`: `if: ${{ inputs.verify }}` given `''` became no condition, so a check GitHub skips counted (OBAAF-GHA-016 and 017 lost). An expression in `if:` or `continue-on-error` is no longer turned into text;
+  2. OBAAF-GHA-015's release case was dropped beside the first pass's `capability` at the same severity; another case is now added where the action's steps put the job in a lane;
+  3. OBAAF-GHA-023 read an action's steps once per workflow, so a second use, in the same job or another, gave nothing; each use is now read.
+
+  A test of 114 workflows with actions that do nothing risky found no change of identity apart from the digest of "cannot tell" findings on a step after a local action, which D-083 now states.
 
 **Left, stated in D-083:** an action's `outputs` read in the job; the secrets rules, which read the job's own text; OBAAF-GHA-015 `capability` (medium) beside the second pass's high finding for a job whose action publishes; OBAAF-GHA-014 and 016 twice for a job that publishes in its own step after an action that publishes; nesting more than ten deep is a note (as in 2d.4a); a `./` path whose letter case differs from the folder's (as in 2d.4a).
 

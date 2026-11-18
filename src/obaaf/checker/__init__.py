@@ -1192,7 +1192,7 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
     return _written_tokens(out) if changed else body
 
 
-def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: dict) -> str:
+def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: dict, fold: bool = True) -> str:
     """`text` with the action's inputs put into each expression that reads them, and the action's folder
     for `${{ github.action_path }}`. A text that would be longer than the checker reads is left as written
     and added to `problems`; every text made counts towards `LOCAL_STEPS_TEXT`."""
@@ -1203,7 +1203,7 @@ def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: 
             problems.append(f"an expression in '{wf_mod.one_line(text, 60)}' does not end, so the action's inputs "
                             "were not put into it")
         else:
-            put = "".join(body if kind == "text" else _expression_put_in(body, inputs, problems)
+            put = "".join(body if kind == "text" else _expression_put_in(body, inputs, problems, fold)
                           if re.search(r"\binputs\b", body, re.I) else expr_mod.OPEN + body + expr_mod.CLOSE
                           for kind, body in parts)
     if put != text and len(put) > LOCAL_ACTION_TEXT:
@@ -1212,13 +1212,16 @@ def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: 
     return put
 
 
-def _expression_put_in(body: str, inputs: dict, problems: list) -> str:
+def _expression_put_in(body: str, inputs: dict, problems: list, fold: bool = True) -> str:
     """One `${{ }}` with the inputs put in. One that is then a string and nothing else is that text, as
     GitHub gives it (`push: ${{ inputs.push }}` given `false` is `false`, not an expression a rule must
     take for any value: the second review found a build that does not push read as a publish)."""
     put = _inputs_put_in_body(body, inputs, problems)
     toks = expr_mod.tokens(put)
-    if len(toks) == 1 and toks[0][0] == "str":
+    # Not in `if:` or `continue-on-error`, where GitHub reads the text an expression gives as a value of
+    # its own (`''` is false) and the checker reads text that is not an expression as always true (the
+    # third review found `if: ${{ inputs.verify }}` given '' read as no condition).
+    if fold and len(toks) == 1 and toks[0][0] == "str":
         return toks[0][1]
     return expr_mod.OPEN + " " + put + " " + expr_mod.CLOSE
 
@@ -1347,6 +1350,9 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # The step's own fields are in the action's terms, so its inputs are put into them; the using
             # step's `env`, in the caller's terms, goes under its own `env` after.
             put = dict(_with_env(_inputs_put_in_value(step_raw, inputs, folder, problems, state, {}), given_env))
+            for key_name in ("if", "continue-on-error"):
+                if isinstance(step_raw.get(key_name), str):
+                    put[key_name] = _inputs_put_in(step_raw[key_name], inputs, folder, problems, state, fold=False)
             if "if" in put and put["if"] is None:
                 put["if"] = "null"     # `if:` with no value is read as a condition, as in a job
             own_if = put.get("if")

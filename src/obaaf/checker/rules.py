@@ -370,7 +370,8 @@ class WorkflowRules:
 
         - every finding on a step of a local action, which names the action and the step;
         - a finding on a job's own step, or on the job, of a case the first pass gave there, in its place;
-        - one of another case, where the first pass has none of that rule there as severe.
+        - a finding of another case, where the first pass has none of that rule there as severe, or where
+          the action's steps put the job in a lane it was not in.
 
         A first-pass finding replaced so has what the action's steps do in its facts and controls, as for
         steps written in the job, unless the replacement is less severe or nearer to cleared: reading
@@ -392,6 +393,8 @@ class WorkflowRules:
         for finding in self.findings:
             first.setdefault((finding.rule, finding.job, finding.step, finding.kind), []).append(finding)
             at.setdefault((finding.rule, finding.job, finding.step), []).append(finding)
+        # The jobs the action's steps put in a lane they were not in: their other cases are the new lane's.
+        relaned = {job_id for job_id, job in view.jobs.items() if set(job.lanes) != set(self.wf.jobs[job_id].lanes)}
         place = {id(finding): n for n, finding in enumerate(self.findings)}
         added: list = []
         for finding in found:
@@ -411,9 +414,13 @@ class WorkflowRules:
                     finding.severity = mate.severity
                 self.findings[place[id(mate)]] = finding
                 continue
+            # Another case of the rule: added where the first pass has none of that rule there as severe, or
+            # where the action's steps put the job in a lane it was not in (the third review found the release
+            # case dropped beside the first pass's "cannot tell whether it releases").
             there = at.get((finding.rule, finding.job, finding.step), [])
-            if there and all(order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
-                continue      # another case of the rule is there already, at least as severe
+            if finding.job not in relaned and there and all(
+                    order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
+                continue
             added.append(finding)
         self.findings.extend(added)
 
@@ -476,6 +483,7 @@ class WorkflowRules:
             for job in self.wf.jobs.values():
                 for step in job.steps:
                     if step.via is not None and isinstance(step.written, dict):
+                        seen.clear()      # each use of an action is read, as each step written in a job is
                         visit(step.written, "step", step.line, job, step)
         done: set = set()
         for line, job, step, where, placeholder in found:
