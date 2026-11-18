@@ -2306,7 +2306,17 @@ class Job:
         that is itself a called workflow passes on what its own callers give it, so the chain is
         followed to its first caller, each workflow once for each name. Empty for a workflow no job of
         the repository calls. Names are compared as GitHub compares them, in any letter case; a job that
-        reads every secret (`toJSON(secrets)`) reads every one passed."""
+        reads every secret (`toJSON(secrets)`) reads every one passed. A key with space round it is read
+        without it, and a key that is not text (`null:`, `true:`, a number) is taken for every name the
+        job reads, since how GitHub spells it is not established: the wider readings. Worked out once
+        for each set of names."""
+        memo = self.workflow.__dict__.setdefault("_passed_secrets", {})
+        asked_for = frozenset(names)
+        if asked_for not in memo:
+            memo[asked_for] = self._passed_secrets(asked_for)
+        return list(memo[asked_for])
+
+    def _passed_secrets(self, names) -> list[str]:
         out: set[str] = set()
         # Per workflow: the names asked for so far, and whether every secret is.
         asked: dict[int, tuple[set, bool]] = {}
@@ -2337,7 +2347,7 @@ class Job:
                     continue
                 for key, value in passed.items():
                     param = as_text(key)
-                    if not every and param.upper() not in wanted:
+                    if not every and isinstance(key, str) and param.strip().upper() not in wanted:
                         continue
                     refs: set[str] = set()
                     for body in expressions(value):
@@ -2348,7 +2358,9 @@ class Job:
                         source = ", ".join(sorted({r.upper() for r in refs}))
                     else:
                         source = one_line(value_identity(value))
-                    out.add(f"{where} passes {bounded(one_line(param.upper()))} as {source}")
+                    shown = bounded(one_line(param.strip().upper())) if isinstance(key, str) else \
+                        f"{one_line(value_identity(key))} (a key that is not text)"
+                    out.add(f"{where} passes {shown} as {source}")
                     if refs:
                         todo.append((call.workflow, {r.upper() for r in refs if r != "*"}, "*" in refs))
         return sorted(out)

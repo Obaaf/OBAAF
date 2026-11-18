@@ -298,55 +298,97 @@ def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
     return out, None
 
 
+def _call_candidates(uses: str) -> list[str]:
+    """The workflow files a local `uses` of a job may name, relative to the repository: the path as
+    written, without what follows an `@`, and with backslashes as slashes, each normalised. How GitHub
+    reads the last two is not established, so each is a candidate; one that leads outside the
+    repository, or a path with an expression, is dropped on its own (a call names a file of
+    `.github/workflows`, which can hold no expression)."""
+    path = uses.strip()[2:]
+    if "${{" in path:
+        return []
+    candidates = [path]
+    if "@" in path:
+        candidates.append(path.split("@", 1)[0])
+    candidates += [c.replace("\\", "/") for c in list(candidates) if "\\" in c]
+    out = []
+    for candidate in candidates:
+        found = posixpath.normpath(candidate.strip("/") or ".")
+        if found != ".." and not found.startswith("../") and found not in out:
+            out.append(found)
+    return out
+
+
 def _give_callers(read: list) -> None:
-    """Give each workflow that a job of the repository calls (`uses: ./.github/workflows/x.yml`) those
-    calls, and the events that can start each calling job (flagship slice 2d.4b1). `read` is (the
-    file's paths in the repository, workflow) for every workflow file read without error.
+    """Give each workflow that a job of the repository calls by its path (`uses:
+    ./.github/workflows/x.yml`) those calls, and the events that can start each calling job (flagship
+    slice 2d.4b1). `read` is (the file's path in the repository as found, workflow) for every workflow
+    file read without error.
 
     A called workflow's jobs run on whatever starts the job that calls it, and `github.event` there is
     the caller's event, so without this a `pull_request_target` workflow could check out a pull
-    request's head through a local workflow it calls and no rule saw it. The events are worked out
-    until nothing changes, so a chain of calls carries the first caller's events to the last, and a
-    cycle (which GitHub refuses) ends with every file in it given all of them: the wider reading.
+    request's head through a local workflow it calls and no rule saw it. Workflows are taken callers
+    first (a topological order of the calls), so a chain carries the first caller's events to the last
+    in one pass; what is left is in or behind a cycle, which GitHub refuses, and is worked out from a
+    queue until nothing changes, every file in it given all the events that reach it: the wider reading.
 
-    A path is matched as git stores it, letter case included. A workflow without `on: workflow_call`
-    is given nothing: GitHub refuses to call it, so the call never runs its jobs. What follows an `@`,
-    a backslash and `..` are read as `_local_action_folders` reads them for an action, each reading a
-    candidate."""
+    A path is matched as git stores it, letter case included, by the path the file was found at (a link
+    is matched by its own name, not its target's). A workflow without `on: workflow_call` is given
+    nothing: GitHub refuses to call it, so the call never runs its jobs."""
     by_path: dict[str, list] = {}
-    for paths, workflow in read:
-        for found in paths:
-            by_path.setdefault(found, [])
-            if all(workflow is not other for other in by_path[found]):
-                by_path[found].append(workflow)
-    calls: list[tuple] = []
+    for found, workflow in read:
+        by_path.setdefault(found, [])
+        if all(workflow is not other for other in by_path[found]):
+            by_path[found].append(workflow)
+    calls: dict[int, list] = {}           # id of the calling workflow -> [(job, targets)]
+    waiting: dict[int, int] = {}          # id of a workflow -> calls into it from workflows not yet taken
     for _, workflow in read:
         for job in workflow.jobs.values():
             uses = job.raw.get("uses")
             if not _is_local_like(uses):
                 continue
             targets: list = []
-            for candidate in _local_action_folders(uses)[0]:
+            for candidate in _call_candidates(uses):
                 for target in by_path.get(candidate, []):
                     if target.callable and all(target is not other for other in targets):
                         targets.append(target)
             for target in targets:
                 target.callers.append(wf_mod.Call(workflow.path, job.id, job.line, job.raw.get("secrets"), workflow))
+                waiting[id(target)] = waiting.get(id(target), 0) + 1
             if targets:
-                calls.append((job, targets))
-    changed = True
-    while changed:
-        changed = False
-        for job, targets in calls:
+                calls.setdefault(id(workflow), []).append((job, targets))
+    workflows = {id(workflow): workflow for _, workflow in read}
+    ready = [key for key in dict.fromkeys(id(w) for _, w in read) if not waiting.get(key)]
+    taken: set[int] = set()
+    while ready:
+        key = ready.pop()
+        taken.add(key)
+        for job, targets in calls.get(key, []):
             events = job.triggers()
             for target in targets:
-                changed = target.give_caller_events(events) or changed
+                target.give_caller_events(events)
+                waiting[id(target)] -= 1
+                if not waiting[id(target)]:
+                    ready.append(id(target))
+    # In or behind a cycle: from a queue, each call again whenever its workflow is given new events.
+    queue = [key for key in workflows if key not in taken and key in calls]
+    queued = set(queue)
+    while queue:
+        key = queue.pop()
+        queued.discard(key)
+        for job, targets in calls[key]:
+            events = job.triggers()
+            for target in targets:
+                if target.give_caller_events(events) and id(target) in calls and id(target) not in queued:
+                    queue.append(id(target))
+                    queued.add(id(target))
 
 
 def _caller_notes(workflows: list) -> list[str]:
     """A note for each called workflow whose jobs the checker read with events its own `on` does not
     name (flagship slice 2d.4b1), so a finding that says a file of `on: workflow_call` can be started
-    by `pull_request_target` says why."""
+    by `pull_request_target` says why. The first five callers and ten events are named, and the rest
+    counted."""
     out = []
     for workflow in workflows:
         extra = sorted(workflow.caller_events - set(workflow.triggers))
@@ -356,8 +398,11 @@ def _caller_notes(workflows: list) -> list[str]:
         shown = ", ".join(wf_mod.one_line(c, 120) for c in callers[:5])
         if len(callers) > 5:
             shown += f" and {len(callers) - 5} more"
-        out.append(f"{wf_mod.one_line(workflow.path, 120)} is called by {shown}, so its jobs are read as started "
-                   f"by what can start the calling jobs as well as by its own triggers: {', '.join(extra)}")
+        events = ", ".join(wf_mod.one_line(e, 60) for e in extra[:10])
+        if len(extra) > 10:
+            events += f" and {len(extra) - 10} more"
+        out.append(f"{wf_mod.one_line(workflow.path, 120)} is called by {shown}, so its jobs are also read as "
+                   f"started by what can start the calling jobs: {events}")
     return out
 
 
@@ -1310,7 +1355,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
         read.append((path, rel, workflow))
     readable = [workflow for _, _, workflow in read if isinstance(workflow, wf_mod.Workflow) and not workflow.error]
-    _give_callers([(_as_found(path, root), workflow) for path, _, workflow in read
+    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
                    if any(workflow is other for other in readable)])
     for path, rel, workflow in read:
         rels.append(rel)
@@ -1726,7 +1771,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             read.append((path, rel, exc))
             continue
         read.append((path, rel, wf_mod.parse(rel, text)))
-    _give_callers([(_as_found(path, root), workflow) for path, _, workflow in read
+    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
                    if isinstance(workflow, wf_mod.Workflow) and not workflow.error])
     for path, rel, workflow in read:
         seen.append(rel)

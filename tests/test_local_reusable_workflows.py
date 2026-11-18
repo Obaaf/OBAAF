@@ -14,6 +14,8 @@ well as `workflow_call` (another repository may call it too). OBAAF-GHA-001 and 
 as a fact of the finding, what each caller passes for the secrets the called job reads.
 """
 
+import os
+import time
 import unittest
 
 from helpers import TempDir
@@ -162,6 +164,44 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
             result = check(tmp, {".github/workflows/caller.yml": text, CALLED: called(steps=steps)})
         (found,) = [f for f in result.findings if f.rule == "OBAAF-GHA-002"]
         self.assertEqual((found.path, found.severity, found.kind), (CALLED, "medium", "checkout-unresolved"))
+
+    def test_an_at_reading_outside_the_repository_does_not_drop_the_one_inside(self):
+        # From the review: the path as written leads outside, the path before the `@` does not.
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/caller.yml": caller(
+                "pull_request_target", uses="./.github/workflows/called.yml@../../../../../x"), CALLED: called()})
+            self.assertIn("OBAAF-GHA-002", rules_on(result, CALLED))
+
+    @unittest.skipIf(os.name == "nt", "links need privileges on Windows")
+    def test_a_link_is_matched_by_its_own_name_only(self):
+        # From the review: a link to the called file was given the events too, and every finding twice.
+        with TempDir() as tmp:
+            root = build(tmp, {".github/workflows/caller.yml": caller("pull_request_target"), CALLED: called()})
+            os.symlink("called.yml", root / ".github/workflows/link.yml")
+            result = checker.check(root)
+            self.assertEqual([f.path for f in result.findings if f.rule == "OBAAF-GHA-002"], [CALLED])
+            self.assertEqual(len([n for n in result.notes if "is called by" in n]), 1)
+
+    def test_a_long_chain_with_an_event_at_each_level_is_quick(self):
+        # From the review: each pass moved the events one file, and every pass worked every call out again.
+        files = {}
+        count = 300
+        for level in range(count):
+            name = f".github/workflows/w{count - level:05d}.yml"
+            event = "".join(chr(97 + int(d)) for d in f"{level:04d}")
+            if level == count - 1:
+                files[name] = called(on=f"[workflow_call, ev_{event}]", steps="      - run: echo\n")
+            else:
+                files[name] = (f"on: [workflow_call, ev_{event}]\npermissions: {{}}\njobs:\n  call:\n"
+                               f"    uses: ./.github/workflows/w{count - level - 1:05d}.yml\n")
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, files)
+            spent = time.monotonic() - start
+        last = [n for n in result.notes if n.startswith(".github/workflows/w00001.yml")]
+        self.assertEqual(len(last), 1)
+        self.assertIn(f"and {count - 1 - 10} more", last[0])
+        self.assertLess(spent, 30)
 
     def test_a_workflow_that_cannot_be_called_gets_no_events(self):
         # GitHub refuses to call a workflow without `on: workflow_call`, so its jobs never run from the call.
@@ -319,6 +359,53 @@ class WhatTheCallerPassesIsPartOfTheFindingTest(unittest.TestCase):
                                  "    secrets:\n      MODEL_KEY: ${{ secrets.MODEL_KEY }}\n")
         found = self.gha005({".github/workflows/one.yml": one, CALLED: text})
         self.assertIn(".github/workflows/one.yml", found.message)
+
+    def test_a_key_that_is_not_text_is_taken_for_every_name(self):
+        # From the review: `null:` was read as NONE, so changing what it maps kept an acceptance.
+        for key in ["null", "NULL", "true", "12"]:
+            with self.subTest(key=key):
+                one = self.gha005({".github/workflows/caller.yml": mapping_caller(
+                    "${{ secrets.ANTHROPIC }}").replace("MODEL_KEY:", f"{key}:"), CALLED: agent_called()})
+                two = self.gha005({".github/workflows/caller.yml": mapping_caller(
+                    "${{ secrets.PROD }}").replace("MODEL_KEY:", f"{key}:"), CALLED: agent_called()})
+                self.assertIn("PROD", two.message)
+                self.assertNotEqual(baseline_mod.key(one), baseline_mod.key(two))
+
+    def test_a_key_with_space_round_it_is_read_without_it(self):
+        text = mapping_caller("${{ secrets.PROD_DEPLOY_KEY }}").replace("MODEL_KEY:", "' MODEL_KEY ':")
+        found = self.gha005({".github/workflows/caller.yml": text, CALLED: agent_called()})
+        self.assertIn("PROD_DEPLOY_KEY", found.message)
+
+    def test_what_callers_pass_is_bounded(self):
+        # From the review: one entry per caller and key, for every called job, made a 290 KB repository
+        # print 249 MB. Past five entries the finding names three and a digest of all of them.
+        keys = "".join(f"      K{i}: ${{{{ secrets.S{i} }}}}\n" for i in range(400))
+        text = ("on: workflow_dispatch\npermissions: {}\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n"
+                "    secrets:\n" + keys)
+        steps = AGENT_STEPS.replace("${{ secrets.MODEL_KEY }}", "${{ toJSON(secrets) }}")
+        jobs = "".join(f"  j{i}:\n    runs-on: ubuntu-latest\n    steps:\n{steps}" for i in range(50))
+        many = "on: workflow_call\npermissions:\n  contents: read\njobs:\n" + jobs
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/caller.yml": text, CALLED: many})
+        found = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
+        self.assertEqual(len(found), 50)
+        self.assertLess(max(len(f.message) for f in found), 1200)
+        self.assertEqual(len(found[0].facts["passed"]), 4)
+        self.assertIn("400 entries", found[0].facts["passed"][-1])
+        changed = text.replace("secrets.S399 ", "secrets.OTHER ")
+        with TempDir() as tmp:
+            again = check(tmp, {".github/workflows/caller.yml": changed, CALLED: many})
+        other = [f for f in again.findings if f.rule == "OBAAF-GHA-005"]
+        self.assertNotEqual(baseline_mod.key(found[0]), baseline_mod.key(other[0]))
+
+    def test_gha018_names_what_is_passed(self):
+        steps = "      - run: make sign\n        env:\n          K: ${{ secrets.SIGNING_KEY }}\n"
+        text = mapping_caller("${{ secrets.RELEASE_GPG }}").replace("MODEL_KEY:", "SIGNING_KEY:")
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/caller.yml": text, CALLED: called(steps=steps)})
+        found = [f for f in result.findings if f.rule == "OBAAF-GHA-018" and f.kind == "secrets" and f.path == CALLED]
+        self.assertEqual(len(found), 1)
+        self.assertIn("RELEASE_GPG", found[0].message)
 
     def test_gha001_names_what_is_passed_too(self):
         with TempDir() as tmp:

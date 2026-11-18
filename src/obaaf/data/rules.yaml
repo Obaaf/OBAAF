@@ -36,8 +36,9 @@ rules:
       setting; `obaaf audit` reads it); events an app can raise for an outsider's change (`check_run`,
       `check_suite`, `status`, `deployment`, `deployment_status`) and `merge_group`, which are not treated as
       untrusted; a workflow another repository calls, whose caller's trigger is not known from its own file
-      (a job of the same repository that calls it gives it the events that can start that job, and the
-      finding names what each such caller passes for the secrets the job reads, since slice 2d.4b1); and
+      (a job of the same repository that calls it by its path, `./.github/workflows/...`, gives it the
+      events that can start that job, and the finding names what each such caller passes for the secrets
+      the job reads, since slice 2d.4b1; a call written as `owner/repo/...@ref` is not matched); and
       secrets that reach the job through artifacts, caches or another job's outputs. An event name written
       other than in lower-case letters and underscores is a problem of the file, which fails the check.
     fix: >-
@@ -168,11 +169,13 @@ rules:
       it receives. Prompt injection can make the agent disclose any secret in its environment. The job's
       environment is part of the finding, because a secret of the same name in another environment is another
       secret, so an acceptance written for one environment does not cover another. In a workflow that a job of
-      the same repository calls, what each such caller passes for the secrets the job reads, followed through
-      callers that are themselves called, is part of the finding too, so an acceptance written for one mapping
-      does not cover another (slice 2d.4b1). Not followed by the finding itself: a caller in another
-      repository; the calling job, which is not read as an agent job; and secrets that reach the agent
-      through artifacts, caches, files or another job's outputs. When the job references secrets, the finding lists five controls and is cleared
+      the same repository calls by its path (`./.github/workflows/...`), what each such caller passes for the
+      secrets the job reads, followed through callers that are themselves called, is part of the finding too,
+      so a baseline entry written for one mapping does not cover another (slice 2d.4b1); a secret the caller
+      picks with an expression (`secrets[matrix.k]`) is "any secret", whichever it picks. Not followed by the
+      finding itself: a caller in another repository, or one written as `owner/repo/...@ref`; the calling
+      job, which is not read as an agent job; and secrets that reach the agent through artifacts, caches,
+      files or another job's outputs. When the job references secrets, the finding lists five controls and is cleared
       only when the checker has verified all five. (1) Each secret is listed in `protected_secrets` and the
       job declares the environment named there. (2) The secrets are stored only in that environment and only
       protected branches may use it; this is a repository setting, which `obaaf check` does not read, so it is
@@ -460,9 +463,10 @@ rules:
       `include` or an `include` entry computed when the job runs, a key written in another case, a key
       that is not plain ASCII text, a value YAML 1.2 could read as other than text, a merge key (`<<`) in
       the file, or any other expression is not resolved. A job that calls a reusable workflow is not
-      reported (it has no runner); the jobs of a workflow that a job of the same repository calls are
-      read with the events that can start that job, as well as `workflow_call` (slice 2d.4b1); not
-      followed: the events of a caller in another repository, and agents the checker does not recognise. If you verify the selector and runner lifecycle, record the
+      reported (it has no runner); the jobs of a workflow that a job of the same repository calls by its
+      path (`./.github/workflows/...`) are read with the events that can start that job, as well as
+      `workflow_call` (slice 2d.4b1); not followed: the events of a caller in another repository or
+      written as `owner/repo/...@ref`, and agents the checker does not recognise. If you verify the selector and runner lifecycle, record the
       evidence in a job-scoped, expiring `ignore` entry (see the checker configuration guide). A
       declaration is not verification of runtime isolation.
     fix: >-
@@ -489,7 +493,8 @@ rules:
       the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a
       cloud service (not counted as publishing unless the job is declared a release job), a command
       built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local action or
-      reusable workflow (slices 2d.4b2 and 2d.4b3).
+      reusable workflow counted for the job that uses or calls it (slices 2d.4b2 and 2d.4b3; since slice
+      2d.4b1 a called workflow's own job is checked with its callers' events).
     fix: >-
       Reference an environment (for example `environment: release`) configured with required reviewers,
       self-review prevention and no administrator bypass.
@@ -524,7 +529,8 @@ rules:
       name says it publishes, a step using an action under `publishing_actions`, or an environment name
       the checker cannot read, is reported at medium (low on pull request events only) as one that may
       release. Not followed: `id-token: write` on its own (it also signs and attests), publishing through
-      a local reusable workflow or composite action (plan slices 2d.4b2 and 2d.4b3), commands not in the lists, and the
+      a local reusable workflow or composite action counted for the job that calls or uses it (plan slices 2d.4b2 and
+      2d.4b3; since slice 2d.4b1 the called workflow's own job is checked with its callers' events), commands not in the lists, and the
       repository's default token permissions. A command named in an `echo` is still taken for one that runs.
     fix: >-
       Start release workflows only from pushes to protected branches or tags, published releases, or

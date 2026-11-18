@@ -157,6 +157,12 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
     return template.format(**shown), facts
 
 
+# How many entries of what callers pass a secrets finding names in full (flagship slice 2d.4b1): up to
+# PASSED_NAMED (and 1,000 characters), every one; beyond that, the first PASSED_SHOWN and a digest of all.
+PASSED_NAMED = 5
+PASSED_SHOWN = 3
+
+
 def _truthy(value) -> bool:
     return as_text(value).strip().lower() in ("true", "1", "yes")
 
@@ -3483,8 +3489,9 @@ class WorkflowRules:
         environment = self._environment_fact(job)
         if keys:
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' loads signing material from secret(s): {secrets}{environment}.", job,
-                     severity=severity, kind="secrets", secrets=keys, environment=environment)
+                     "Job '{job}' loads signing material from secret(s): {secrets}{passed}{environment}.", job,
+                     severity=severity, kind="secrets", secrets=keys, passed=self._passed_fact(job, keys),
+                     environment=environment)
         # A job that can read every secret (a computed name, toJSON(secrets), secrets: inherit) can read
         # any signing key the repository or the job's environment holds; which secrets those are is
         # not in the workflow, so the checker cannot tell that none is one.
@@ -3521,10 +3528,26 @@ class WorkflowRules:
         parameter (`secrets.MODEL_KEY`), and which secret that is depends on the caller, so an
         acceptance written for one mapping must not cover another. Nothing for a workflow no job of the
         repository calls, so such a finding is as before."""
-        passed = job.passed_secrets(names)
-        if not passed:
-            return Note("")
-        return Fact(passed, f" (from the jobs that call its workflow: {'; '.join(passed)})")
+        memo = job.workflow.__dict__.setdefault("_passed_facts", {})
+        asked_for = frozenset(names)
+        if asked_for not in memo:
+            passed = job.passed_secrets(names)
+            if not passed:
+                memo[asked_for] = Note("")
+            elif len(passed) <= PASSED_NAMED and sum(len(entry) for entry in passed) <= 1000:
+                memo[asked_for] = Fact(passed, f" (from the jobs that call its workflow: {'; '.join(passed)})")
+            else:
+                # The finding grows with what each caller passes; what identifies it must not (the review
+                # of slice 2d.4b1 made a 290 KB repository print 249 MB). The first few entries are named,
+                # and every one is in the digest, so a change to any changes the finding.
+                digest = hashlib.sha256("\n".join(passed).encode("utf-8", "surrogatepass")).hexdigest()
+                named = passed[:PASSED_SHOWN]
+                memo[asked_for] = Fact([*named, f"sha256:{digest} ({len(passed)} entries)"],
+                                       f" (from the jobs that call its workflow: {'; '.join(named)}; and "
+                                       f"{len(passed) - len(named)} more, {len(passed)} in all, by digest "
+                                       f"sha256:{digest})")
+        found = memo[asked_for]
+        return Fact(list(found.value), found.shown) if isinstance(found, Fact) else found
 
     @staticmethod
     def _environment_fact(job: Job) -> Fact | Note:
