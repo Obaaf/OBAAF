@@ -582,6 +582,28 @@ class FromTheFifthReviewTest(unittest.TestCase):
         self.assertEqual(result.errors, [])
 
 
+class FromTheSixthReviewTest(unittest.TestCase):
+
+    def test_reading_local_steps_again_after_a_put_back_counts_them_once(self):
+        # The second reading after the values were put back counted the first one's steps again: a false
+        # error past the check's 10,000 steps, and four jobs' local steps, with their OBAAF-GHA-002, lost.
+        doubling = "[&a0 [xxxxxxxxxxxxxxxx, xxxxxxxxxxxxxxxx], " + ", ".join(
+            f"&a{n} [*a{n - 1}, *a{n - 1}]" for n in range(1, 10)) + "]"
+        jobs = "".join(f"  b{n}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/a\n"
+                       for n in range(10))
+        text = ("on:\n  workflow_call:\n    inputs:\n      v:\n        type: string\npermissions: {}\n"
+                'env:\n  V0: "${{ inputs.v }}"\njobs:\n' + jobs)
+        action = ("runs:\n  using: composite\n  steps:\n"
+                  f"    - uses: actions/checkout@{SHA}\n      with:\n        ref: {HEAD}\n"
+                  + '    - run: git fetch o $V0\n      shell: bash\n' * 600)
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(given=f"v: {doubling}"), CALLED: text,
+                                 ".github/actions/a/action.yml": action})
+        self.assertEqual(len([f for f in found(result, "OBAAF-GHA-002") if f.severity == "high"]), 10)
+        self.assertEqual([e for e in result.errors if "for the check" in e and "steps" in e and "inputs" not in e], [])
+        self.assertEqual(len([e for e in result.errors if "inputs are read as written" in e]), 1, result.errors)
+
+
 class TheCallersGrantTest(unittest.TestCase):
 
     AGENT = "      - run: claude -p 'review'\n"

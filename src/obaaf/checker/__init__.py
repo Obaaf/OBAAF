@@ -1052,6 +1052,27 @@ def _check_caller_input_reads(workflow) -> bool:
     return True
 
 
+def _local_steps_marks(state: dict, unread: list, errors: list) -> tuple:
+    """Where the check's count of local actions' steps, its notes and its errors stand before a workflow's
+    local steps are read, so that a second reading after `_check_caller_input_reads` puts the values back
+    starts from there (the sixth review found the first reading counted twice: a false error, and four
+    jobs' local steps, with their findings, lost)."""
+    return state.get("steps", 0), state.get("chars", 0), state.get("exceeded"), len(unread), len(errors)
+
+
+def _back_to_marks(marks: tuple, state: dict, unread: list, errors: list) -> None:
+    steps, chars, exceeded, notes, said = marks
+    state["steps"], state["chars"] = steps, chars
+    if exceeded is None:
+        state.pop("exceeded", None)
+    else:
+        state["exceeded"] = exceeded
+    problem = errors[said:]
+    del unread[notes:]
+    del errors[said:]
+    errors.extend(e for e in problem if "inputs are read as written" in e)
+
+
 class _ActionFileError(ValueError):
     """An action file the checker cannot read as it reads a workflow: an error of the check."""
 
@@ -2409,9 +2430,11 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         _apply_script_detection(workflow, root, script_cmds)
         _apply_local_action_detection(workflow, None if on_its_own else root, agent_actions, script_cmds,
                                       unread_actions, errors, action_cache)
+        marks = _local_steps_marks(steps_state, unread_actions, errors)
         _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
                                   config.agents)
         if _check_caller_input_reads(workflow):
+            _back_to_marks(marks, steps_state, unread_actions, errors)
             _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
                                       config.agents)
         declared.workflow(workflow, path)
@@ -2829,9 +2852,11 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
         _apply_script_detection(workflow, root, script_cmds)
         _apply_local_action_detection(workflow, root if is_repo else None, agent_actions, script_cmds,
                                       unread_actions, errors, action_cache)
+        marks = _local_steps_marks(steps_state, unread_actions, errors)
         _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
                                   config.agents)
         if _check_caller_input_reads(workflow):
+            _back_to_marks(marks, steps_state, unread_actions, errors)
             _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
                                       config.agents)
         declared.workflow(workflow, path)
