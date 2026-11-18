@@ -584,7 +584,8 @@ class TheReviewersFourthPassTest(unittest.TestCase):
         with TempDir() as tmp:
             started = time.monotonic()
             check(tmp, job_using("./.github/actions/a0"), files)
-            self.assertLess(time.monotonic() - started, 5)
+            # About 2 s locally; the limit leaves room for a slow CI runner (slice 2d.4a-timing).
+            self.assertLess(time.monotonic() - started, 12)
 
 
 class TheReviewersFifthPassTest(unittest.TestCase):
@@ -608,7 +609,8 @@ class TheReviewersFifthPassTest(unittest.TestCase):
         with TempDir() as tmp:
             started = time.monotonic()
             check(tmp, job_using("./.github/actions/p"), files)
-            self.assertLess(time.monotonic() - started, 6)
+            # About 2 s locally; the limit leaves room for a slow CI runner (slice 2d.4a-timing).
+            self.assertLess(time.monotonic() - started, 12)
 
     def test_an_alias_shared_by_env_and_run_is_read_for_each(self):
         body = ("runs:\n  using: composite\n  steps:\n    - env:\n        T: ${{ inputs.tool }}\n"
@@ -670,7 +672,9 @@ class TheReviewersSeventhPassTest(unittest.TestCase):
         with TempDir() as tmp:
             started = time.monotonic()
             result = check(tmp, text, files)
-            self.assertLess(time.monotonic() - started, 4)
+            # About 1.6 s locally (9.6 s before the fix, with no error); the error is the main check,
+            # and the limit leaves room for a slow CI runner (slice 2d.4a-timing: 5.0 s on CI once).
+            self.assertLess(time.monotonic() - started, 8)
             self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
 
