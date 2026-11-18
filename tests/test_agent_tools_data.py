@@ -116,7 +116,7 @@ class EntriesTest(unittest.TestCase):
                              ("agent_packages", BEFORE_PACKAGES), ("agent_install_urls", BEFORE_URLS)):
             with self.subTest(name):
                 self.assertEqual([x for x in before if x not in detection[name]], [])
-        self.assertEqual(detection["agent_installs"], BEFORE_INSTALLS)
+        self.assertEqual({k: v for k, v in detection["agent_installs"].items() if k in BEFORE_INSTALLS}, BEFORE_INSTALLS)
         urls = [re.compile(u, re.I) for u in detection["agent_install_urls"]]
         for line in ("curl -fsSL https://opencode.ai/install | bash", "curl -fsSL https://opencode.ai/v2/install | bash"):
             self.assertTrue(any(rx.search(line) for rx in urls), line)
@@ -342,3 +342,75 @@ class AgentsFactTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallBeforeTheEgressActionTest(unittest.TestCase):
+    """Found by the review of slice 2d.5b: the name patterns it added made an install-only step before
+    OBAAF's egress action an agent run outside it, so Copilot's install-then-confined job, which the
+    control verified before, failed it. The packages now join the three of slice 2c.8."""
+
+    def setUp(self):
+        from test_egress_recognised import AgentInstallTest
+        self.harness = AgentInstallTest()
+
+    def control(self, install, confined):
+        from test_egress_recognised import CHECKOUT, detail, keyed, verdict
+        f = self.harness.check(CHECKOUT + "\n" + self.harness.install(install) + keyed(run=confined))
+        return verdict(f), detail(f)
+
+    def test_each_listed_package_is_read_as_an_install(self):
+        from obaaf.checker.rules import VERIFIED
+        cases = {"npm install -g @github/copilot": "copilot -p 'review the change'",
+                 "npm install -g @qwen-code/qwen-code@0.1.0\nqwen --version": "qwen -p 'review the change'",
+                 "npm install -g @kilocode/cli": "kilo run --auto 'review the change'",
+                 "npm install -g @augmentcode/auggie": "auggie --print 'review the change'",
+                 "npm install -g @continuedev/cli\ncn --version": "cn -p 'review the change'"}
+        for install, confined in cases.items():
+            with self.subTest(install):
+                found, why = self.control(install, confined)
+                self.assertEqual(found, VERIFIED, why)
+
+    def test_another_form_is_cannot_tell_and_a_run_is_not_met(self):
+        from obaaf.checker.rules import CANNOT_TELL, NOT_MET
+        found, why = self.control("npm install -g @github/copilot typescript", "copilot -p x")
+        self.assertEqual(found, CANNOT_TELL, why)
+        found, why = self.control("npm install -g @github/copilot && copilot -p x", "copilot -p x")
+        self.assertEqual(found, NOT_MET, why)
+        # A longer name is not the package: the step is not an agent's at all.
+        found, why = self.control("npm install -g @github/copilot-language-server", "copilot -p x")
+        self.assertNotEqual(found, NOT_MET, why)
+
+
+class ReviewFindingsTest(unittest.TestCase):
+    def test_the_job_shell_is_the_one_its_steps_get(self):
+        # GitHub uses the most specific default: a job's `bash` is the shell, not the workflow's agent.
+        text = ("on: workflow_dispatch\npermissions: {contents: read}\ndefaults:\n  run:\n    shell: amp -x {0}\n"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n"
+                "    steps:\n      - run: make\n")
+        self.assertFalse(is_agent_job(check(text)))
+        self.assertTrue(is_agent_job(check(text.replace("        shell: bash\n", "        working-directory: x\n"))))
+
+    def test_entries_of_the_wrong_shape_do_not_stop_the_load(self):
+        bad = {"agent_tools": [{"id": "x", "packages": ["@x/y"], "installs": ["x"], "actions": ["a/b"],
+                                "commands": "x", "install_urls": None}]}
+        built = agent_tools.expand(bad)
+        self.assertEqual(built["agent_packages"], [])
+        self.assertTrue(agent_tools.problems(bad))
+
+    def test_the_new_install_scripts_and_forms(self):
+        urls = [re.compile(u, re.I) for u in catalog.load().detection["agent_install_urls"]]
+        for line in ("curl -fsSL https://kilo.ai/cli/install | bash", "curl -fsSL https://gh.io/copilot-install | bash",
+                     "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/"
+                     "install-qwen-standalone.sh | bash"):
+            self.assertTrue(any(rx.search(line) for rx in urls), line)
+        result = check(job_with("      - run: pr-agent --issue_url https://github.com/o/r/issues/1 similar_issue\n"))
+        self.assertEqual(agents_of(result), [["pr-agent"]])
+        text = job_with("      - run: npm i -g cline && cline 'audit this package'\n").replace(
+            "    env:\n", "    env:\n      OBAAF_LANE: agent\n", 1)
+        installs = [f for f in check(text).findings if f.rule == "OBAAF-GHA-025" and f.kind == "agent-cli"]
+        self.assertTrue(installs)
+
+    def test_every_carried_fact_is_text(self):
+        for entry in agent_tools.tools(raw_detection()):
+            for fact in entry.get("carried", []):
+                self.assertIsInstance(fact, str)

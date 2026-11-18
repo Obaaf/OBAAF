@@ -2531,10 +2531,16 @@ class Job:
         out: list[str] = []
         for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
             run = defaults.get("run") if isinstance(defaults, dict) else None
-            shell = run.get("shell") if isinstance(run, dict) else None
+            if not isinstance(run, dict) or "shell" not in run:
+                continue
+            shell = run.get("shell")
             if isinstance(shell, str):
                 out.extend(form for variant in _readings(shell) for segment in command_segments(variant)
                            for form in _first_word_forms(segment))
+            # The job's own `shell` is the one its steps get: GitHub uses the most specific default
+            # (found by the review of slice 2d.5b). One that is not text is read with the workflow's too.
+            if isinstance(shell, str) and defaults is self.raw.get("defaults"):
+                break
         return out
 
     def steps_run(self) -> list[Step]:

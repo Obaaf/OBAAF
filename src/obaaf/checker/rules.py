@@ -138,8 +138,8 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
     is a fact unless it is a `Note`. So what the message says about a finding is in what identifies
     it, apart from line and column numbers, and the template's wording can change without changing
     which finding it is. One fact is itself text the checker wrote, and rewording it does change the
-    finding: why a job is an agent job (OBAAF-GHA-003). Since flagship slice 2d.5b the agents a job runs
-    are also named, as the fact `agents`, by the catalogue's entries.
+    finding: why a job is an agent job (`why`, in OBAAF-GHA-003 and 025). Since flagship slice 2d.5b the
+    agents a job runs are also named, as the fact `agents`, by the catalogue's entries.
     """
     if TEMPLATES.setdefault((rule, kind), template) != template and (rule, kind) not in CONFLICTS:
         CONFLICTS.append((rule, kind))
@@ -1410,8 +1410,11 @@ class WorkflowRules:
         another named agent is added to it or takes the place of the one it ran. A job that runs no agent
         the checker can name (one declared an agent job, or one whose agent is in a repository script) has
         no such fact, so its findings are the ones they were before the slice."""
-        named = agent_tools.named_agents(job, self.detection, self.agents)
-        return {"agents": named} if named else {}
+        cache = self.__dict__.setdefault("_agents_cache", {})
+        if id(job) not in cache:
+            named = agent_tools.named_agents(job, self.detection, self.agents)
+            cache[id(job)] = (job, {"agents": named} if named else {})
+        return dict(cache[id(job)][1])
 
     def agent_rules(self, job: Job) -> None:
         if not job.in_lane("agent"):
@@ -2157,7 +2160,10 @@ class WorkflowRules:
         if any(f"{name}/" in text for name in packages):
             return False        # a path into the package (`…/claude-code/cli.js`) runs it
         patterns = list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())
-        others = [re.compile(p, re.M) for p in patterns if p not in packages]
+        # A package's own pattern is its name, or its name with `(?![\w-])` after it so that a longer name
+        # (`@github/copilot-language-server`) is not it (slice 2d.5b).
+        own = packages | {name + r"(?![\w-])" for name in packages}
+        others = [re.compile(p, re.M) for p in patterns if p not in own]
         return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
 
     def _reads_output(self, step: Step, ids: set) -> list[str]:

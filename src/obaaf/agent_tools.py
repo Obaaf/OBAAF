@@ -17,7 +17,7 @@ import re
 
 # Every key an entry may have, and the ones it must have.
 FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "prompt_flags", "packages",
-          "installs", "install_urls", "settings")
+          "installs", "install_urls", "settings", "carried")
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
 ACTION_FIELDS = ("prompt_inputs",)
@@ -46,15 +46,21 @@ def expand(detection: dict) -> dict:
     packages: list = []
     installs: dict = {}
     urls: list = []
+    def listed(value) -> list:
+        # A value of the wrong shape builds nothing here; `problems` names it, and `obaaf catalog` fails.
+        return [str(v) for v in value] if isinstance(value, (list, dict)) else []
+
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        actions += [str(a) for a in (entry.get("actions") or {})]
-        commands += [str(c) for c in (entry.get("commands") or [])]
+        actions += listed(entry.get("actions"))
+        commands += listed(entry.get("commands"))
+        given = entry.get("packages")
         for registry in REGISTRIES:
-            packages += [str(p) for p in ((entry.get("packages") or {}).get(registry) or [])]
-        installs.update({str(k): str(v) for k, v in (entry.get("installs") or {}).items()})
-        urls += [str(u) for u in (entry.get("install_urls") or [])]
+            packages += listed(given.get(registry)) if isinstance(given, dict) else []
+        if isinstance(entry.get("installs"), dict):
+            installs.update({str(k): str(v) for k, v in entry["installs"].items()})
+        urls += listed(entry.get("install_urls"))
     out = dict(detection)
     out["agent_actions"] = list(dict.fromkeys(actions))
     out["agent_commands"] = list(dict.fromkeys(commands))
@@ -162,6 +168,9 @@ def problems(detection: dict) -> list[str]:
         settings = entry.get("settings")
         if not isinstance(settings, list):
             out.append(f"agent tool {tool}: settings must be a list")
+        carried = entry.get("carried", [])
+        if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
+            out.append(f"agent tool {tool}: carried must be a list of text")
         if not actions and not entry.get("commands"):
             out.append(f"agent tool {tool}: has neither an action nor a command, so nothing finds it")
     return out
@@ -181,6 +190,8 @@ def _compiled(detection: dict) -> list:
         if isinstance(entry, dict) and isinstance(entry.get("id"), str):
             out.append((entry["id"], [str(a) for a in (entry.get("actions") or {})],
                         [re.compile(str(p), re.M) for p in (entry.get("commands") or [])]))
+    if len(_COMPILED) >= 8:
+        _COMPILED.clear()       # tests build their own data; the catalogue's is the one that matters
     _COMPILED[key] = (detection, out)
     return out
 
@@ -193,7 +204,12 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
     and in the default shell `defaults.run.shell` gives its `run` steps; and, for a repository's own
     agents, `agents.actions: <prefix>` or `agents.commands: <pattern>` for each entry of the checker
     configuration that matches there. An agent found only in a repository script a step runs, or only by
-    a lane declaration, is not named here (the `why` the agent rules give says how the job was found)."""
+    a lane declaration, is not named here (the `why` the agent rules give says how the job was found).
+    A pattern matches anywhere in the text a step's command lines are read as, as the lanes are found, so
+    a command written in an `echo` or a comment is read as run (the wider reading).
+
+    The entries' patterns are compiled once for each detection mapping; a mapping changed after its first
+    use keeps the patterns it had then."""
     configured = configured or {}
     entries = _compiled(detection)
     extra_actions = [str(a) for a in (configured.get("actions") or ())]

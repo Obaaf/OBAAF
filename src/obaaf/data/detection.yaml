@@ -13,8 +13,10 @@ version: 0.1.0
 # Agent tools, one entry per tool (flagship slice 2d.5b, agent control R6). Agent products change faster
 # than the controls, so what the checker knows about each one is data, read from the tool's own
 # repository or documentation and dated. Every tool ci-agent-audit recognised at its commit 4a88ee6
-# (2026-11-07) has an entry; that list was used to know which tools to look at, and each fact below was
-# read from the source the entry names, not copied from it. The checker reads, for each entry:
+# (2026-11-07) has an entry; that list was used to know which tools to look at. Each fact slice 2d.5b
+# added was read from a source the entry names, not copied from that list; facts kept from OBAAF's
+# lists before the slice that no named source shows are listed under `carried`. The checker reads,
+# for each entry:
 #
 #   id            a short name, used in findings' facts (`agents`) and never changed once released
 #   name          the tool's own name for itself
@@ -35,6 +37,8 @@ version: 0.1.0
 #                 script is fetched and run; each installs the version the script chooses
 #   settings      the settings the tool's own documentation warns about, each with the sentence it rests
 #                 on (filled by flagship slice 2d.5c; empty until then)
+#   carried       facts kept from OBAAF's lists before slice 2d.5b that none of the sources shows (they
+#                 were not dropped, so that nothing found before is lost; none is a new finding)
 #
 # The checker builds its lists from these entries when it loads them (obaaf/agent_tools.py):
 # `agent_actions`, `agent_commands`, `agent_packages`, `agent_installs` and `agent_install_urls`, in the
@@ -63,6 +67,7 @@ agent_tools:
     install_urls:
       - 'claude\.ai/install\.(sh|ps1|cmd)\b'
     settings: []
+    carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
   - id: gemini-cli
     name: Gemini CLI
@@ -128,11 +133,11 @@ agent_tools:
       - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/README.md
     # The-PR-Agent/pr-agent and qodo-ai/pr-agent served the same repository (the same commit) when read.
     actions:
-      qodo-ai/pr-agent: {prompt_inputs: []}
-      Codium-ai/pr-agent: {prompt_inputs: []}
-      The-PR-Agent/pr-agent: {prompt_inputs: []}
+      qodo-ai/pr-agent: {prompt_inputs: [artifact_instructions]}
+      Codium-ai/pr-agent: {prompt_inputs: [artifact_instructions]}
+      The-PR-Agent/pr-agent: {prompt_inputs: [artifact_instructions]}
     commands:
-      - '(^|[\s;&|(/"''`])pr-agent["''`]?\s+([^\n;&|]*\s)?--pr_url\b'
+      - '(^|[\s;&|(/"''`])pr-agent["''`]?\s+([^\n;&|]*\s)?--(pr_url|issue_url)\b'
     programs: [pr-agent]
     prompt_flags: []
     packages:
@@ -205,23 +210,28 @@ agent_tools:
     install_urls:
       - 'opencode\.ai/(v2/)?install\b'
     settings: []
+    carried: ["opencode run", "the package opencode-ai", "the install script opencode.ai/install"]
 
   - id: cline
     name: Cline
     read: 2026-11-18
     sources:
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/README.md
-    # In OBAAF's list before slice 2d.5b. The README read documents no form for CI, so nothing was added.
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/README.md
+    # The CLI's README gives `cline "<prompt>"` for a headless run, which the pattern below finds; the
+    # action was in OBAAF's list before slice 2d.5b, and the repository had no action file when read.
     actions:
       cline/cline: {prompt_inputs: []}
     commands:
       - '(^|[\s;&|(])cline\s'
     programs: [cline]
     prompt_flags: []
-    packages: {}
+    packages:
+      npm: [cline]
     installs: {}
     install_urls: []
     settings: []
+    carried: ["the action cline/cline"]
 
   - id: aider
     name: Aider
@@ -239,6 +249,7 @@ agent_tools:
     install_urls:
       - 'aider\.chat/install\.(sh|ps1)\b'
     settings: []
+    carried: ["aider as a command", "the install scripts aider.chat/install.sh and .ps1"]
 
   - id: copilot-cli
     name: GitHub Copilot CLI
@@ -253,9 +264,11 @@ agent_tools:
     prompt_flags: [-p, --prompt]
     packages:
       npm: ["@github/copilot"]
-    installs: {}
-    install_urls: []
+    installs: {"@github/copilot": copilot}
+    install_urls:
+      - 'gh\.io/copilot-install\b'
     settings: []
+    carried: ["copilot -p and --prompt"]
 
   - id: qodo
     name: Qodo Command
@@ -310,7 +323,7 @@ agent_tools:
     prompt_flags: [--print]
     packages:
       npm: ["@augmentcode/auggie"]
-    installs: {}
+    installs: {"@augmentcode/auggie": auggie}
     install_urls: []
     settings: []
 
@@ -329,7 +342,7 @@ agent_tools:
     prompt_flags: [-p]
     packages:
       npm: ["@continuedev/cli"]
-    installs: {}
+    installs: {"@continuedev/cli": cn}
     install_urls: []
     settings: []
 
@@ -382,8 +395,9 @@ agent_tools:
     prompt_flags: []
     packages:
       npm: ["@kilocode/cli"]
-    installs: {}
-    install_urls: []
+    installs: {"@kilocode/cli": kilo}
+    install_urls:
+      - 'kilo\.ai/cli/install\b'
     settings: []
 
   - id: kiro
@@ -417,8 +431,9 @@ agent_tools:
     prompt_flags: [-p, --prompt]
     packages:
       npm: ["@qwen-code/qwen-code"]
-    installs: {}
-    install_urls: []
+    installs: {"@qwen-code/qwen-code": qwen}
+    install_urls:
+      - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.sh\b'
     settings: []
 
   - id: swe-agent
