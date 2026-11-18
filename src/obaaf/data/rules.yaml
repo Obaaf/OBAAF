@@ -93,10 +93,14 @@ rules:
       end; actions other than actions/checkout that check out code (composite or marketplace actions of
       other repositories; since slice 2d.4b2 the steps of a local composite action are read as the job's,
       with the inputs the using step gives put in); a reusable workflow of another repository called from such a workflow; a ref a caller
-      passes to a local reusable workflow as an input (since slice 2d.4b1 its jobs are read with the
-      events that start the jobs of the repository that call it, so a checkout of `inputs.ref` there is
-      "cannot tell" at medium; the input itself is not put in, slice 2d.4b3); and commands the list above
-      does not name.
+      passes to a reusable workflow of another repository as an input; and commands the list above does
+      not name. A local reusable workflow's jobs are read with the events that start the jobs of the
+      repository that call it (slice 2d.4b1), and each `inputs` reference in it with what each of those
+      jobs hands the input (slice 2d.4b3a): its `with:` or the input's default, with the caller's own
+      contexts as `caller.<context>` and what its matrix lists and the jobs it needs output, to three
+      levels. A checkout of `inputs.ref` given the pull request's head is high; the reference as written
+      stays among the values, for a caller the checker cannot see, so one given only the base is still
+      "cannot tell".
     fix: >-
       Build pull-request code in a pull_request workflow, which runs with a read-only token and no
       secrets. If a privileged step must follow, pass results through artifacts and treat them as
@@ -122,7 +126,9 @@ rules:
       which fails the check, and are read as the widest grant they could be; `permissions:` with no value is
       taken as not written, and a scope name in lower-case letters and hyphens that GitHub does not know is
       read as written. Not followed: the repository's or organization's default token permissions (an
-      undeclared job is reported whatever they are); what a calling workflow grants; write access through a
+      undeclared job is reported whatever they are); what a workflow of another repository that calls this one
+      grants (where jobs of this repository call it, what each grants, followed to the first caller that
+      declares, is part of the `inherited` finding, slice 2d.4b3a); write access through a
       token taken from a secret, which OBAAF-GHA-005 reports as a secret; and an agent inside an action from
       another repository. An agent inside a local composite action makes the job an agent job (slice 2d.4a);
       a local action the checker cannot read through is named in a note, and one whose file it cannot read
@@ -146,7 +152,9 @@ rules:
       A job that runs an AI agent has `id-token: write`, so the agent can request an OIDC token and exchange
       it for cloud or signing credentials. A scope written in another case counts as `id-token`. An agent job
       that declares no permissions in a workflow another can call (`workflow_call`) is reported too, because
-      the calling job can grant `id-token: write`. Not followed: what a calling workflow really grants; and
+      the calling job can grant `id-token: write`; where jobs of this repository call it, what each grants
+      for `id-token`, followed to the first caller that declares, is part of the finding (slice 2d.4b3a).
+      Not followed: what a calling workflow of another repository grants; and
       the repository default, which the checker takes never to include `id-token: write`, so an undeclared job
       in a workflow nothing calls is not reported. Cloud credentials held as long-lived secrets are
       OBAAF-GHA-005's.
@@ -371,8 +379,10 @@ rules:
       `check_suite`, `check_run` and `status` included) or another workflow's call can start the job,
       and for a commit's text on `push`, `merge_group` and a `workflow_run` after a push, where a merged
       pull request's title and branch name are in the merge commit's message; medium otherwise. Not
-      followed: values set while the job runs (`GITHUB_ENV`, step outputs), values passed into
-      reusable workflows (`inputs`; slice 2d.4b3), an action's `outputs` read in the job, the inputs of
+      followed: values set while the job runs (`GITHUB_ENV`, step outputs), values a reusable workflow of
+      another repository is given (since slice 2d.4b3a a local reusable workflow's `inputs` are read with
+      what the jobs of the repository that call it hand them, their matrix's values and the outputs of
+      the jobs they need included, to three levels), an action's `outputs` read in the job, the inputs of
       other actions (since slice 2d.4b2 a local composite action's steps are read with its inputs put in), a `with:`
       written as one expression, and the `env` of a `parallel` group. It does not work out whether an
       expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is
@@ -498,7 +508,7 @@ rules:
       the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a
       cloud service (not counted as publishing unless the job is declared a release job), a command
       built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local
-      reusable workflow counted for the job that calls it (slice 2d.4b3; since slice 2d.4b1 a called
+      reusable workflow counted for the job that calls it (slice 2d.4b3b; since slice 2d.4b1 a called
       workflow's own job is checked with its callers' events). Since slice 2d.4b2 a publish in a local
       composite action's steps makes the job that uses it a release job.
     fix: >-
@@ -535,7 +545,7 @@ rules:
       name says it publishes, a step using an action under `publishing_actions`, or an environment name
       the checker cannot read, is reported at medium (low on pull request events only) as one that may
       release. Not followed: `id-token: write` on its own (it also signs and attests), publishing through
-      a local reusable workflow counted for the job that calls it (plan slice 2d.4b3; since slice 2d.4b2 a
+      a local reusable workflow counted for the job that calls it (plan slice 2d.4b3b; since slice 2d.4b2 a
       local composite action's steps are read as the job's; since slice 2d.4b1 the called workflow's own job is checked with its callers' events), commands not in the lists, and the
       repository's default token permissions. A command named in an `echo` is still taken for one that runs.
     fix: >-

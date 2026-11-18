@@ -1223,10 +1223,11 @@ class WorkflowRules:
         if perms is None and self.wf.callable:
             # A called workflow's job holds what the calling job grants (it can only be narrowed), so
             # what it holds is not read from this file at all.
+            # What the jobs of this repository that call it grant is part of the finding (slice 2d.4b3a).
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, and its workflow can be called "
                      "by another (workflow_call), so it holds whatever the calling job grants, write access "
-                     "included.", job, kind="inherited", why=why)
+                     "included{granted}.", job, kind="inherited", why=why, granted=self._granted_fact(job))
         elif perms is None:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, so it may inherit "
@@ -1242,7 +1243,7 @@ class WorkflowRules:
             self.add("OBAAF-GHA-004", job.line,
                      "Agent job '{job}' does not declare permissions, and its workflow can be called by another "
                      "(workflow_call), so it can request OIDC tokens whenever the calling job grants "
-                     "id-token: write.", job, kind="inherited")
+                     "id-token: write{granted}.", job, kind="inherited", granted=self._granted_fact(job, "id-token"))
         names = job.secret_names()
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
@@ -3661,6 +3662,31 @@ class WorkflowRules:
                          severity=severity, kind="command")
 
     @staticmethod
+    def _callers_fact(entries: list, lead: str) -> Fact | Note:
+        """Entries about what the jobs of this repository that call a job's workflow give it, as one
+        bounded fact: up to PASSED_NAMED entries (and 1,000 characters) each named; beyond that, the
+        first few that fit and a digest of all. Nothing for no entries, so a finding on a workflow no job
+        of the repository calls is as before."""
+        if not entries:
+            return Note("")
+        if len(entries) <= PASSED_NAMED and sum(len(entry) for entry in entries) <= 1000:
+            return Fact(entries, f" ({lead}: {'; '.join(entries)})")
+        # The finding grows with what each caller gives; what identifies it must not (the review of slice
+        # 2d.4b1 made a 290 KB repository print 249 MB). The first few entries are named, and every one is
+        # in the digest, so a change to any changes the finding.
+        digest = hashlib.sha256("\n".join(entries).encode("utf-8", "surrogatepass")).hexdigest()
+        # Entries are named while they fit in the budget, at most PASSED_SHOWN of them; an entry is itself
+        # bounded (a long list of secrets in one value is its digest).
+        named: list = []
+        for entry in entries[:PASSED_SHOWN]:
+            if sum(len(e) for e in named) + len(entry) > 1000:
+                break
+            named.append(entry)
+        rest = (f"{len(entries) - len(named)} more, {len(entries)} in all, by digest sha256:{digest}" if named
+                else f"{len(entries)} entries, by digest sha256:{digest}")
+        return Fact([*named, f"sha256:{digest} ({len(entries)} entries)"], f" ({lead}: {'; '.join([*named, rest])})")
+
+    @staticmethod
     def _passed_fact(job: Job, names) -> Fact | Note:
         """What the jobs of this repository that call the job's workflow pass for the secrets it reads,
         as part of a finding about those secrets (flagship slice 2d.4b1): the called job reads a
@@ -3670,29 +3696,18 @@ class WorkflowRules:
         memo = job.workflow.__dict__.setdefault("_passed_facts", {})
         asked_for = frozenset(names)
         if asked_for not in memo:
-            passed = job.passed_secrets(names)
-            if not passed:
-                memo[asked_for] = Note("")
-            elif len(passed) <= PASSED_NAMED and sum(len(entry) for entry in passed) <= 1000:
-                memo[asked_for] = Fact(passed, f" (from the jobs that call its workflow: {'; '.join(passed)})")
-            else:
-                # The finding grows with what each caller passes; what identifies it must not (the review
-                # of slice 2d.4b1 made a 290 KB repository print 249 MB). The first few entries are named,
-                # and every one is in the digest, so a change to any changes the finding.
-                digest = hashlib.sha256("\n".join(passed).encode("utf-8", "surrogatepass")).hexdigest()
-                # Entries are named while they fit in the budget, at most PASSED_SHOWN of them; an entry is
-                # itself bounded (a long list of secrets in one value is its digest).
-                named: list = []
-                for entry in passed[:PASSED_SHOWN]:
-                    if sum(len(e) for e in named) + len(entry) > 1000:
-                        break
-                    named.append(entry)
-                rest = (f"{len(passed) - len(named)} more, {len(passed)} in all, by digest sha256:{digest}" if named
-                        else f"{len(passed)} entries, by digest sha256:{digest}")
-                memo[asked_for] = Fact([*named, f"sha256:{digest} ({len(passed)} entries)"],
-                                       f" (from the jobs that call its workflow: {'; '.join([*named, rest])})")
+            memo[asked_for] = WorkflowRules._callers_fact(job.passed_secrets(names), "from the jobs that call its workflow")
         found = memo[asked_for]
         return Fact(list(found.value), found.shown) if isinstance(found, Fact) else found
+
+    @staticmethod
+    def _granted_fact(job: Job, scope: str | None = None) -> Fact | Note:
+        """What the jobs of this repository that call the job's workflow grant its token, where the job
+        declares no permissions (flagship slice 2d.4b3a), as part of OBAAF-GHA-003's and 004's
+        `inherited` finding: an acceptance written while every caller granted read only must not cover a
+        caller that grants `contents: write` or `id-token: write`. Nothing for a workflow no job of the
+        repository calls."""
+        return WorkflowRules._callers_fact(job.granted_by_callers(scope), "the jobs of this repository that call it")
 
     @staticmethod
     def _environment_fact(job: Job) -> Fact | Note:
