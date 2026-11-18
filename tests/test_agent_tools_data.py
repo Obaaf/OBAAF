@@ -419,34 +419,36 @@ class ReviewFindingsTest(unittest.TestCase):
                 self.assertIsInstance(fact, str)
 
 
-class JoinedPatternsTest(unittest.TestCase):
-    """The agent patterns are asked about as one joined pattern (slice 2d.5b's cost, found when CI's
-    large-repository test went over its limit); the answer must be the one each pattern gives."""
+class AnyPatternTest(unittest.TestCase):
+    """Whether any agent pattern matches is asked with each pattern's needle first (slice 2d.5b's cost,
+    found when CI's large-repository test went over its limit); the answer must be the one each pattern
+    gives."""
 
-    def test_the_joined_pattern_answers_as_each_would(self):
+    def test_the_answer_is_the_one_each_pattern_gives(self):
         import random
 
         from obaaf.checker import workflow as wf
         commands = [re.compile(p, re.M) for p in catalog.load().detection["agent_commands"]]
+        commands += [re.compile(p, re.M) for p in (r"(?i)Agent\s+go", r"\w+-bot\b", r"(?<=@)scope/cli", r"x*")]
         words = ["claude", "-p", "--print", "codex", "exec", "qwen", "--prompt", "goose", "run", "kilo", "cn",
                  "amp", "-x", "npx", "@github/copilot", "@github/copilot-language-server", "sudo", "'", '"', ";",
-                 "|", "\n", "aider", "cline", "echo", "sweagent", "kiro-cli", "--no-interactive", "x"]
+                 "|", "\n", "aider", "cline", "echo", "sweagent", "kiro-cli", "--no-interactive", "AGENT", "go",
+                 "ci-bot", "@scope/cli", "x"]
         rng = random.Random(25)
         for _ in range(3000):
             text = " ".join(rng.choice(words) for _ in range(rng.randint(1, 8)))
             for anchored in (False, True):
-                expected = any((rx.match(text) if anchored else rx.search(text)) for rx in commands)
-                self.assertEqual(wf.matches_any(commands, text, anchored=anchored), expected, (text, anchored))
+                for chosen in (commands, commands[:26], commands[26:-1]):
+                    expected = any((rx.match(text) if anchored else rx.search(text)) for rx in chosen)
+                    self.assertEqual(wf.matches_any(chosen, text, anchored=anchored), expected, (text, anchored))
 
-    def test_patterns_that_cannot_be_joined_are_tried_one_by_one(self):
+    def test_needles(self):
         from obaaf.checker import workflow as wf
-        for patterns in ([r"(a)\1", r"b"], [r"(?i)claude", r"x"], [r"(?P<n>a)", r"(?P<n>b)"], [r"(x)?(?(1)a|b)", r"c"]):
-            with self.subTest(patterns):
-                commands = [re.compile(p, re.M) for p in patterns]
-                self.assertIsNone(wf.any_of(commands))
-        commands = [re.compile(r"(?i)claude", re.M), re.compile("x", re.M)]
-        self.assertTrue(wf.matches_any(commands, "CLAUDE"))
-        self.assertFalse(wf.matches_any(commands, "y"))
+        cases = {r"(^|[\s;&|(])aider\s": "aider", r"@qodo/(command|cli)(?![\w-])": "@qodo/", r"(?i)claude": None,
+                 r"a|b": None, r"\w+": None, r"(?x) cl au de ": "claude", r"x": None}
+        for pattern, needle in cases.items():
+            with self.subTest(pattern):
+                self.assertEqual(wf._needle(re.compile(pattern, re.M)), needle)
 
     def test_a_list_changed_in_place_is_read_again(self):
         from obaaf.checker import workflow as wf

@@ -2587,56 +2587,88 @@ class Job:
         return out
 
 
-# Patterns joined into one, for asking whether any of a list matches (flagship slice 2d.5b, whose 23
-# agent tools made the list of agent patterns 2.6 times as long and a large repository's check slower):
-# `(?:a)|(?:b)` matches where `a` or `b` does, at the same place, so one search or match answers what a
-# search or match with each would. A list is not joined when its flags differ, or when a pattern holds a
-# back-reference, a conditional group or a flag for the whole pattern, which joining would change.
-_NOT_JOINED_RE = re.compile(r"\\[1-9]|\(\?P=|\(\?\(|\(\?[aiLmsux]+\)")
-_JOINED: dict = {}
-_UNSET_JOINED = object()
-_LAST_JOINED: list = [None]
+# Asking whether any of a list of patterns matches (flagship slice 2d.5b, whose 23 agent tools made the
+# list of agent patterns 2.6 times as long, and a large repository's check slower: by 40 % and more on
+# Python 3.10 and 3.11, whose regular expressions are slower than 3.13's, where it went over CI's limit).
+# Each pattern is tried only where the text holds a piece of literal text the pattern cannot match
+# without (its "needle": the longest run of plain characters at its top level, read from Python's own
+# parse of it); where every pattern of the list has one, one search for any needle answers first, and most
+# command lines hold none. A pattern with no needle (one that ignores case, or holds no such run) is always
+# tried. Each answer is the one trying every pattern gives.
+try:
+    from re import _parser as _re_parser          # Python 3.11 and later
+except ImportError:                                 # pragma: no cover - Python 3.10
+    import sre_parse as _re_parser                  # type: ignore[no-redef]
+_NEEDLES: dict = {}
+_LISTS: dict = {}
+_LAST_LIST: list = [None]
 
 
-def any_of(commands) -> "re.Pattern | None":
-    """One pattern that matches exactly where one of the compiled `commands` does, or None when they
-    cannot be joined (then each must be tried)."""
-    # The same list is asked about many times in a row (each command line of each step): it is kept, with
-    # a copy of what it held, and answered again while it holds the same patterns.
+def _needle(rx) -> "str | None":
+    """The longest run of two or more literal characters at the top level of `rx`, which every match of
+    it holds; None when there is none or the pattern ignores case."""
+    key = (rx.pattern, rx.flags)
+    if key in _NEEDLES:
+        return _NEEDLES[key]
+    needle = None
+    try:
+        parsed = _re_parser.parse(rx.pattern, rx.flags)
+        flags = getattr(getattr(parsed, "state", None), "flags", rx.flags)
+        if not (flags | rx.flags) & re.IGNORECASE:
+            runs, run = [], []
+            for op, arg in parsed.data:
+                if op is _re_parser.LITERAL:
+                    run.append(chr(arg))
+                else:
+                    runs.append("".join(run))
+                    run = []
+            runs.append("".join(run))
+            best = max(runs, key=len)
+            needle = best if len(best) >= 2 else None
+    except Exception:       # anything the parser does not take is tried as it is
+        needle = None
+    if len(_NEEDLES) >= 4096:
+        _NEEDLES.clear()
+    _NEEDLES[key] = needle
+    return needle
+
+
+def _prepared(commands) -> tuple:
+    """For a list of compiled patterns: each with its needle, and one pattern that finds any needle, or
+    None when a pattern has none."""
     key = tuple(commands)
-    last = _LAST_JOINED[0]
-    if last is not None and last[0] is commands and last[2] == key:
-        return last[3]
-    # Compiled patterns compare and hash by their text and flags, so the tuple is the key.
-    joined = _JOINED.get(key, _UNSET_JOINED)
-    if joined is not _UNSET_JOINED:
-        if isinstance(commands, list):
-            _LAST_JOINED[0] = (commands, len(commands), key, joined)
-        return joined
-    joined = None
-    if key and len({rx.flags for rx in key}) == 1 and not any(_NOT_JOINED_RE.search(rx.pattern) for rx in key):
-        try:
-            joined = re.compile("|".join(f"(?:{rx.pattern})" for rx in key), key[0].flags)
-        except (re.error, RecursionError, OverflowError):
-            joined = None
-    if len(_JOINED) >= 64:
-        _JOINED.clear()
-    _JOINED[key] = joined
+    last = _LAST_LIST[0]
+    if last is not None and last[0] is commands and last[1] == key:
+        return last[2]
+    prepared = _LISTS.get(key)
+    if prepared is None:
+        pairs = tuple((_needle(rx), rx) for rx in key)
+        needles = [n for n, _rx in pairs]
+        gate = (re.compile("|".join(re.escape(n) for n in sorted(set(needles), key=len, reverse=True)))
+                if pairs and all(n is not None for n in needles) else None)
+        prepared = (pairs, gate)
+        if len(_LISTS) >= 64:
+            _LISTS.clear()
+        _LISTS[key] = prepared
     if isinstance(commands, list):
-        _LAST_JOINED[0] = (commands, len(commands), key, joined)
-    return joined
+        _LAST_LIST[0] = (commands, key, prepared)
+    return prepared
 
 
 def matches_any(commands, text: str, anchored: bool = False) -> bool:
     """Whether one of the compiled `commands` matches `text`: searched for, or at its start when
     `anchored`, as `re.search` and `re.match` do."""
     if not isinstance(commands, (list, tuple)):
-        commands = tuple(commands)      # read twice below (found by the review)
-    joined = any_of(commands)
-    if joined is not None:
-        return (joined.match(text) if anchored else joined.search(text)) is not None
-    return any((rx.match(text) if anchored else rx.search(text)) for rx in commands)
-
+        commands = tuple(commands)      # read more than once below (found by the review)
+    pairs, gate = _prepared(commands)
+    if gate is not None and gate.search(text) is None:
+        return False
+    for needle, rx in pairs:
+        if needle is not None and needle not in text:
+            continue
+        if (rx.match(text) if anchored else rx.search(text)) is not None:
+            return True
+    return False
 
 def _readings(text: str) -> list[str]:
     """`upload_readings`, and the last of them with each backslash before a character taken out, as the
