@@ -109,6 +109,9 @@ The issues titled "For Sean: ..." (#94 to #98) are not slices. They list what wa
 | 2c.11a The egress action removes OpenSSL's variables before libcrypto is initialised, with an escape test (split from 2c.11, F-178) | 2c.10b | | #195, done (#196) |
 | 2c.11b Move `egress_action_floor` to a 2c.11a commit and drop the `OPENSSL_` names from `key-out-of-reach` (the rest of 2c.11) | 2c.11a | core | #195, done (#199) |
 | 2c.12 Which variables set for the egress action's own steps, in an `env` or through `GITHUB_ENV`, still change what they do with the key (from 2c.11b, D-072) | 2c.11b | core | #198, done (#203, #206) |
+| 2d.4 Local reusable workflows and composite actions | nothing | core | #80 |
+| 2d.5 Agent tools: named, pinned, and not set to unsafe | 1.4 | core | #81 |
+| 2d.3 Property and fuzz tests | nothing | core | #79 |
 | 2d.2 Bypass attempts, rule by rule | nothing | core | #78 |
 | 2d.2b What a job can reach: bypass attempts on OBAAF-GHA-001, 003, 004, 005, 018, 024 (split from 2d.2) | nothing | core | #156, done (#157) |
 | 2d.2c What a run checks out: bypass attempts on OBAAF-GHA-002, 011, 012, 019 (split from 2d.2) | nothing | core | #161, done (#162) |
@@ -120,9 +123,6 @@ The issues titled "For Sean: ..." (#94 to #98) are not slices. They list what wa
 | 2d.2i Jenkins files and credentials: bypass attempts on discovery and OBAAF-JEN-001, 013, 014, 015 (split from 2d.2) | nothing | core | #187, done (#188) |
 | 2d.2j Where pipeline code runs and agent stages: bypass attempts on OBAAF-JEN-002, 003, 006, 007 (split from 2d.2; the attempts on 003 and 007 are recorded) | nothing | core | #210 |
 | 2d.2k Pipeline code and pins: bypass attempts on OBAAF-JEN-004, 008 (split from 2d.2j) | nothing | core | #219, done (#218) |
-| 2d.3 Property and fuzz tests | nothing | core | #79 |
-| 2d.4 Local reusable workflows and composite actions | nothing | core | #80 |
-| 2d.5 Agent tools: named, pinned, and not set to unsafe | 1.4 | core | #81 |
 | 2d.6 Signature keys: only the documented ones, and no traceback | nothing | | #115, done (#116) |
 | 2d.7 Runner labels: a matrix value with a written default (from #141) | nothing | core | #141, done (#147) |
 | 2d.8 Files the checker could not read, and `--lanes` options (from #155) | nothing | core | #155, done (#159) |
@@ -145,6 +145,8 @@ The issues titled "For Sean: ..." (#94 to #98) are not slices. They list what wa
 | 4.7 The website after 4.4: every development-version sentence checked against `flagship` (from the brief: the site changes whenever what it describes changes) | 4.4 | | #214, done (#215) |
 
 The settings audit (2b) is new code in its own module, so it is not marked core; if a 2b slice has to change the checker's shared code it waits for the core slot like any other. Where a later slice's design should follow the positioning section and 1.4 is not yet done, the slice says in its pull request what it assumed.
+
+2d.4, 2d.5 and 2d.3, in that order, come before the rest of 2d.2 and 2d.2j, which are Jenkins rules: the brief asks for depth on GitHub Actions first, 2d.4 holds recorded ways past OBAAF-GHA-003, 004 and 005, and 3.3 needs 2d.5 (decision F-226, 2026-11-18). The order of the other rows is unchanged.
 
 **Reserved for the ChatGPT sessions** (decision F-62; the rules are [above](#work-handed-to-the-chatgpt-and-grok-sessions)). The scheduled runs do not take these, and where another slice needs one of them, the need is met when it is merged into `flagship` like any other.
 
@@ -591,6 +593,7 @@ Each needs PyPI, which the scheduled runs' sessions cannot reach. They are reser
 | F-223 | 2026-11-17 | The Jenkins templates' OBAAF-JEN-008 coverage changes from "not applicable" to "unknown" and is left so: each runs `pip install -r` on OBAAF's own setup requirements from a checkout of another repository, which the checker cannot read. | Allowing that one path would make the checker trust a file it has not read; the findings and the exit status are unchanged. |
 | F-224 | 2026-11-17 | The run went on past its three hours (18:03 to about 22:40) to finish 2d.2k rather than stop with it half-reviewed. | The brief says to stop at a slice boundary, never in the middle of one; the slice was built by 19:00, and every later hour was review passes and their fixes, each pass finding fewer blocking faults. |
 | F-225 | 2026-11-17 | #218 was merged with 9 of its 11 checks green: the two macOS jobs, "setup-action (macos-latest)" and the advisory "The send-us-the-result page, as written (macos-latest)", had been queued for ten minutes with no runner. | As F-212 did for the advisory job: a job with no runner is GitHub's capacity, not a result. The slice changes nothing under `actions/setup-obaaf` or the 3.8 page; both jobs' Ubuntu twins, and the Windows setup job, passed on the same head (`886a373`, run 44186134846); the standing pull request runs them again before anything reaches `main`. |
+| F-226 | 2026-11-18 | Run `redpoll` moves 2d.4 (local reusable workflows and composite actions), 2d.5 (agent tools: named, pinned, and not set to unsafe) and 2d.3 (property and fuzz tests), in that order, above 2d.2 and 2d.2j in the table of slices. The other rows keep their order. The list under "The plan" keeps its order; the table decides what starts. | The brief's 2e says "Depth on GitHub Actions first; other CI systems only if the repository already supports them." What is left of 2d.2 (the rules OBAAF-JEN-005 and 009 to 012; some older notes in its entry are about workflows) and of 2d.2j (OBAAF-JEN-002, 003, 006, 007) is Jenkins rules. The first adopter, Expectrail, has no Jenkinsfile (`git ls-files` at `f167f4e`), and no other adopter is known. 2d.4 holds recorded ways past OBAAF-GHA-003, 004 and 005, rules that apply to the first adopter's 19 agent jobs ([bypass-attempts.md](bypass-attempts.md): an agent inside a local composite action does not make the job an agent job, and a caller can map any secret onto a local reusable agent workflow's parameter), and limits that four later tranches (2d.2c to 2d.2f) sent to it; Expectrail has five local `action.yml` files. 2d.5 is the only unmerged need of 3.3 (`obaaf init`), and 3.6 needs 3.3, so it is on the way to finishing item 3. 2d.3 is about the GitHub Actions readers too, but has no recorded way past and nothing waits on it, so it comes third. The Jenkins tranches stay open and keep their recorded starting points. Made through a reviewed pull request, because it changes other slices' rows (F-25). |
 
 ## Waiting on Sean
 
