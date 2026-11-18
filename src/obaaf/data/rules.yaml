@@ -118,7 +118,8 @@ rules:
       undeclared job is reported whatever they are); what a calling workflow grants; write access through a
       token taken from a secret, which OBAAF-GHA-005 reports as a secret; and an agent inside an action from
       another repository. An agent inside a local composite action makes the job an agent job (slice 2d.4a);
-      a local action the checker cannot read through is named in a note.
+      a local action the checker cannot read through is named in a note, and one whose file it cannot read
+      is an error.
     fix: >-
       Give the agent job `permissions: {contents: read}` (plus other read permissions it needs) and
       apply its proposals in a separate effect job behind a protected environment.

@@ -217,23 +217,38 @@ class WhatIsNotReadIsNamedTest(unittest.TestCase):
                                  "not a list"),
             "a step not a mapping": ({f"{ACTION_DIR}/action.yml": "runs:\n  using: composite\n  steps: [x]\n"},
                                      "step 1 is not a mapping"),
-            "not YAML": ({f"{ACTION_DIR}/action.yml": "runs: [\n"}, "not YAML"),
-            "duplicate keys": ({f"{ACTION_DIR}/action.yml": "runs:\n  using: composite\n  using: node24\n"},
-                               "not YAML"),
-            "a list": ({f"{ACTION_DIR}/action.yml": "- runs\n"}, "not a mapping"),
-            "a tag": ({f"{ACTION_DIR}/action.yml": "runs: !!binary aGk=\n"}, "does not read"),
-            "a disputed break": ({f"{ACTION_DIR}/action.yml": "name: a\u2028b\nruns:\n  using: composite\n"
-                                  "  steps: []\n"}, "line break"),
-            "too large": ({f"{ACTION_DIR}/action.yml": composite(PLAIN) + "#" * 1_000_001 + "\n"}, "larger"),
+            "an input read in a way not worked out": (
+                {f"{ACTION_DIR}/action.yml": composite("    - run: ${{ fromJSON(inputs.tool)[0] }} -p x\n"
+                                                       "      shell: bash\n")}, "does not work out"),
         }
         for label, (files, why) in cases.items():
             with self.subTest(label):
                 self.assertIn(why, self.note_for(files))
 
+    def test_an_action_file_the_checker_cannot_read_is_an_error(self):
+        """As a workflow file the checker cannot read is: the action's author writes it as freely."""
+        cases = {
+            "not YAML": ("runs: [\n", "cannot parse YAML"),
+            "duplicate keys": ("runs:\n  using: composite\n  using: node24\n", "cannot parse YAML"),
+            "a list": ("- runs\n", "not an action"),
+            "a tag": ("runs: !!binary aGk=\n", "does not read"),
+            "a disputed break": ("name: a\u2028b\nruns:\n  using: composite\n  steps: []\n", "line break"),
+            "too large": (composite(PLAIN) + "#" * 1_000_001 + "\n", "larger than the checker reads"),
+        }
+        for label, (body, why) in cases.items():
+            with self.subTest(label), TempDir() as tmp:
+                result = check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
+                self.assertEqual(len(result.errors), 1, result.errors)
+                self.assertIn(why, result.errors[0])
+                self.assertIn("cannot tell whether an agent runs in it", result.errors[0])
+                self.assertIn(f"job 'a' uses the local action ./{ACTION_DIR}", result.errors[0])
+
     def test_paths_outside_the_repository(self):
-        for uses in ("./../elsewhere", "./.github/../../elsewhere", "./${{ inputs.where }}"):
+        for uses, why in (("./../elsewhere", "leads outside the repository"),
+                          ("./.github/../../elsewhere", "leads outside the repository"),
+                          ("./${{ inputs.where }}", "holds an expression")):
             with self.subTest(uses=uses):
-                self.assertIn("leads outside the repository or holds an expression", self.note_for({}, uses=uses))
+                self.assertIn(why, self.note_for({}, uses=uses))
 
     def test_a_link_out_of_the_repository(self):
         with TempDir() as tmp:
@@ -316,7 +331,102 @@ class ManyUsesCostOneReadingTest(unittest.TestCase):
         files[".github/actions/a9/action.yml"] = composite(PLAIN)
         with TempDir() as tmp:
             result = check(tmp, job_using("./.github/actions/a0"), files)
-            self.assertTrue(any("reads no more" in n for n in result.notes), result.notes)
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertIn("more than 1000 times over", result.errors[0])
+
+
+class TheReviewersWaysPastTest(unittest.TestCase):
+    """The ways past the first version of this slice that its reviewer found (2026-11-18), one test
+    for each class."""
+
+    def two_workflows(self, tmp, files, first, second):
+        root = build(tmp, first, files, name="a.yml")
+        (root / ".github" / "workflows" / "b.yml").write_text(second, encoding="utf-8")
+        return checker.check(root)
+
+    def test_a_reading_cut_short_elsewhere_is_not_kept(self):
+        """A reading cut short by a cycle or by the depth in one workflow was kept and given to a job of
+        another workflow, where neither applied."""
+        cycle = {".github/actions/X/action.yml": composite(CLI, "    - uses: ./.github/actions/Y\n      if: false\n"),
+                 ".github/actions/Y/action.yml": composite("    - uses: ./.github/actions/X\n")}
+        chain = {f".github/actions/a{n}/action.yml": composite(PLAIN, f"    - uses: ./.github/actions/a{n + 1}\n")
+                 for n in range(10)}
+        chain[".github/actions/a10/action.yml"] = composite(CLI)
+        for label, files, deep, shallow in (("cycle", cycle, "./.github/actions/X", "./.github/actions/Y"),
+                                            ("depth", chain, "./.github/actions/a0", "./.github/actions/a9")):
+            with self.subTest(label), TempDir() as tmp:
+                second = job_using(shallow).replace("  a:", "  second:")
+                result = self.two_workflows(tmp, files, job_using(deep), second)
+                self.assertEqual(agent_rules(result, job="second"), AGENT_RULES)
+
+    def test_an_at_sign_and_a_backslash_in_the_path(self):
+        """Whether GitHub takes what follows `@` as part of the path, or a backslash as a separator, is
+        not established: each reading is read, and an agent in any counts."""
+        cases = {
+            "x@main is a folder": ("./.github/actions/x@main", {".github/actions/x/action.yml": composite(PLAIN),
+                                                               ".github/actions/x@main/action.yml": composite(CLI)}),
+            "x@v1/../y": ("./.github/actions/x@v1/../y", {".github/actions/x/action.yml": composite(PLAIN),
+                                                          ".github/actions/x@v1/README": "x\n",
+                                                          ".github/actions/y/action.yml": composite(CLI)}),
+            "x@ only": ("./.github/actions/x@", {".github/actions/x/action.yml": composite(CLI)}),
+            ".\\ on Windows": (".\\.github\\actions\\x", {".github/actions/x/action.yml": composite(CLI)}),
+            "space around": (" ./.github/actions/x ", {".github/actions/x/action.yml": composite(CLI)}),
+        }
+        for label, (uses, files) in cases.items():
+            with self.subTest(label), TempDir() as tmp:
+                text = job_using(f"'{uses}'")
+                self.assertEqual(agent_rules(check(tmp, text, files)), AGENT_RULES)
+
+    def test_the_action_path_in_other_spellings(self):
+        script = {f"{ACTION_DIR}/agent.sh": "#!/bin/sh\nclaude -p 'fix it'\n"}
+        for step in ("    - run: ${{ GITHUB.ACTION_PATH }}/agent.sh\n      shell: bash\n",
+                     "    - run: ${{ github['action_path'] }}/agent.sh\n      shell: bash\n",
+                     "    - run: \"${GITHUB_ACTION_PATH:-.}/agent.sh\"\n      shell: bash\n",
+                     "    - run: ${{ format('{0}/agent.sh', github.action_path) }}\n      shell: bash\n",
+                     "    - run: bash \"$P/agent.sh\"\n      shell: bash\n      env:\n        P: ${{ github.action_path }}\n",
+                     "    - run: cd \"$GITHUB_ACTION_PATH\" && ./agent.sh\n      shell: bash\n",
+                     "    - run: ./agent.sh\n      shell: bash\n      working-directory: ${{ github.action_path }}\n"):
+            with self.subTest(step=step.strip()[:50]), TempDir() as tmp:
+                files = {f"{ACTION_DIR}/action.yml": composite(step), **script}
+                self.assertEqual(agent_rules(check(tmp, job_using(f"./{ACTION_DIR}"), files)), AGENT_RULES)
+
+    def test_the_using_steps_env_reaches_the_actions_steps(self):
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        env:\n          AGENT: claude\n"
+        files = {f"{ACTION_DIR}/action.yml": composite("    - run: $AGENT -p x\n      shell: bash\n")}
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, text, files)), AGENT_RULES)
+
+    def test_inputs_inside_larger_expressions(self):
+        given = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
+        for run in ("${{ (inputs.tool) }} -p x", "${{ format('{0} -p x', inputs.tool) }}",
+                    "${{ inputs.other || inputs.tool }} -p x", "${{ ((inputs.tool)) }} -p x",
+                    "${{ format('{0} {1}', inputs.tool, '-p x') }}"):
+            with self.subTest(run=run), TempDir() as tmp:
+                files = {f"{ACTION_DIR}/action.yml": composite(f"    - run: \"{run}\"\n      shell: bash\n")}
+                self.assertEqual(agent_rules(check(tmp, given, files)), AGENT_RULES)
+
+    def test_an_alias_named_a_million_times_is_quick(self):
+        import time
+        levels = ["l0: &l0 [claude -p x]"]
+        for n in range(1, 7):
+            levels.append(f"l{n}: &l{n} [" + ", ".join([f"*l{n - 1}"] * 10) + "]")
+        body = ("name: x\nx-anchors:\n" + "".join(f"  {line}\n" for line in levels) +
+                "runs:\n  using: composite\n  steps:\n    - uses: some/action@" + SHA + "\n      with:\n"
+                "        big: *l6\n")
+        with TempDir() as tmp:
+            started = time.monotonic()
+            check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
+            self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_long_input_put_in_many_times_is_not_read_whole(self):
+        import time
+        body = ("name: x\ninputs:\n  big:\n    default: '" + "a" * 100_000 + "'\nruns:\n  using: composite\n"
+                "  steps:\n    - run: \"" + "${{ inputs.big }} " * 100 + "\"\n      shell: bash\n")
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertTrue(any("longer than the checker reads" in n for n in result.notes), result.notes)
 
 
 class TheEgressControlSeesTheAgentOutsideTest(unittest.TestCase):

@@ -199,42 +199,80 @@ def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
 # Flagship slice 2d.4a: how deep local actions are followed into each other. A chain deeper than this
 # is named as not read rather than followed further.
 LOCAL_ACTION_DEPTH = 10
-# The largest action file read; a larger one is named as not read.
+# The largest action file read; a larger one is an error, as a workflow the checker cannot read is.
 LOCAL_ACTION_BYTES = 1_000_000
-# How many times one check reads a local action (each folder once for each set of inputs it is given);
-# beyond it, what is left is named as not read, so local actions that use each other many times over
-# with different inputs cannot make the check slow.
-LOCAL_ACTION_READINGS = 2_000
-_READINGS = "readings"      # the counter's key in the cache, which no (folder, inputs) key can equal
-# Where a composite action's own files are, as its steps may write it.
-_ACTION_PATH_RE = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}|\$\{GITHUB_ACTION_PATH\}|\$GITHUB_ACTION_PATH\b")
+# How many times one check reads a local action (each folder once for each set of inputs and
+# environment it is given). Beyond it the check stops reading them and fails with an error, so local
+# actions that use each other many times over, with different inputs, can neither make the check slow
+# nor hide an agent in a job read after them.
+LOCAL_ACTION_READINGS = 1_000
+# The longest text a step of an action is read as once its inputs are put in; a longer one is read
+# as written, and named as not read.
+LOCAL_ACTION_TEXT = 200_000
+# Where a composite action's own files are, as a step may write it: the expression in any letter case,
+# with a dot or an index, and the runner's variable as the shell expands it.
+_ACTION_PATH_EXPR_RE = re.compile(r"\$\{\{\s*github\s*(?:\.\s*action_path|\[\s*'action_path'\s*\])\s*\}\}", re.I)
+_ACTION_PATH_VAR_RE = re.compile(r"\$\{GITHUB_ACTION_PATH(?:[:]?[-=?+][^}]*)?\}|\$GITHUB_ACTION_PATH(?![A-Za-z0-9_])")
+_SHELL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[:]?[-=?+][^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+# The fields of a step `Step.agent_text` and the script reading read as command lines.
+_COMMAND_FIELDS = ("run", "shell", "env", "with", "working-directory")
+
+
+_READINGS = "readings"      # the counter's key in the cache, which no (folders, inputs, env) key can equal
+
+
+class _ReadingsExceeded(Exception):
+    """More readings of local actions than one check makes (`LOCAL_ACTION_READINGS`)."""
 
 
 @dataclass
 class _ActionReading:
-    """What reading a local action found: the agent, if one runs in it, and what could not be read,
-    as (the action as written, why) pairs."""
+    """What reading a local action found: the agent, if one runs in it; what could not be read, as
+    (the action as written, why) pairs; and whether the reading was cut short by the depth or by a
+    cycle, in which case it is not kept for another use, where neither may apply."""
     agent: str | None = None
     unread: list = field(default_factory=list)
+    cut: bool = False
 
 
-def _local_action_folder(uses: str) -> str | None:
-    """The folder a local `uses` names, relative to the repository, or None when it leads outside the
-    repository or holds an expression. `./` and `$/` are both the repository's own; what follows an `@`
-    is not part of the path."""
-    path = uses[2:].split("@", 1)[0]
+def _is_local_like(uses) -> bool:
+    """A `uses` that may name an action of the repository itself: `./`, `$/` or `.\\` at its start,
+    after any space around it. `Step.is_local` takes only `./` and `$/` as written; how GitHub reads
+    the other two forms is not established, so for an agent they are read as well."""
+    return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
+
+
+def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
+    """The folders a local `uses` may name, relative to the repository, and why none can be read when
+    there are none. Whether GitHub takes what follows an `@` as part of the path, and a backslash as a
+    separator, is not established, so each reading is a candidate: the path as written, without what
+    follows an `@`, and with backslashes as slashes."""
+    path = uses.strip()[2:]
     if "${{" in path:
-        return None
-    folder = posixpath.normpath(path.strip("/") or ".")
-    if folder == ".." or folder.startswith("../"):
-        return None
-    return folder
+        return [], "its path holds an expression"
+    candidates = [path]
+    if "@" in path:
+        candidates.append(path.split("@", 1)[0])
+    candidates += [c.replace("\\", "/") for c in list(candidates) if "\\" in c]
+    out = []
+    for candidate in candidates:
+        folder = posixpath.normpath(candidate.strip("/") or ".")
+        if folder == ".." or folder.startswith("../"):
+            return [], "its path leads outside the repository"
+        if folder not in out:
+            out.append(folder)
+    return out, None
 
 
-def _read_local_action(root: Path, folder: str) -> tuple[list | None, str | None]:
-    """([metadata, ...], None) for the action in `folder`, or (None, why it was not read). When both
-    `action.yml` and `action.yaml` are there, both are read: which one GitHub takes is not
-    established, so an agent in either counts."""
+class _ActionFileError(ValueError):
+    """An action file the checker cannot read as it reads a workflow: an error of the check."""
+
+
+def _read_local_action(root: Path, folder: str) -> tuple[list, str | None]:
+    """The metadata of the action in `folder` (both `action.yml` and `action.yaml` when both are there:
+    which one GitHub takes is not established, so an agent in either counts), or ([], why) when there
+    is none to read. An action file the checker cannot read as YAML it reads raises `_ActionFileError`,
+    as a workflow it cannot read is an error."""
     root_r = root.resolve()
     prefix = "" if folder == "." else f"{folder}/"
     found = []
@@ -242,43 +280,136 @@ def _read_local_action(root: Path, folder: str) -> tuple[list | None, str | None
         try:
             real = (root / name).resolve()
             if real != root_r and root_r not in real.parents:
-                return None, f"{name} leads outside the repository"
+                return [], f"{name} leads outside the repository"
             if not real.is_file():
                 continue
             with real.open("rb") as handle:
                 data = handle.read(LOCAL_ACTION_BYTES + 1)
-        except (OSError, RuntimeError):
-            return None, f"{name} cannot be read"
+        except (OSError, RuntimeError) as exc:
+            raise _ActionFileError(f"{name} cannot be read: {exc}") from None
         if len(data) > LOCAL_ACTION_BYTES:
-            return None, f"{name} is larger than the checker reads"
+            raise _ActionFileError(f"{name} is larger than the checker reads ({LOCAL_ACTION_BYTES} bytes)")
         text = data.decode("utf-8", errors="replace")
-        if any(char in text for char in wf_mod._DISPUTED_BREAKS):
-            return None, f"{name} holds a character YAML readers do not agree is a line break"
+        for char, char_name in wf_mod._DISPUTED_BREAKS.items():
+            if char in text:
+                raise _ActionFileError(f"{name} contains the character {char_name}, which YAML readers do not "
+                                       "agree is a line break")
         try:
             raw = yamlutil.load(text)
-        except Exception:       # YAML errors, duplicate keys
-            return None, f"{name} is not YAML the checker can read"
+        except Exception as exc:       # YAML errors, duplicate keys
+            raise _ActionFileError(f"{name}: cannot parse YAML: {wf_mod.one_line(str(exc), 200)}") from None
         if not isinstance(raw, dict):
-            return None, f"{name} is not a mapping"
+            raise _ActionFileError(f"{name} is not an action (its top level is not a mapping)")
         try:
             odd = wf_mod._unreadable(raw)
         except RecursionError:
             odd = "nesting too deep to read"
         if odd:
-            return None, f"{name} holds a value the checker does not read ({odd})"
+            raise _ActionFileError(f"{name} contains a value the checker does not read ({odd})")
         found.append(raw)
     if not found:
-        return None, "the repository has no action.yml or action.yaml there, so an earlier step may make it"
+        return [], "the repository has no action.yml or action.yaml there, so an earlier step may make it"
     return found, None
 
 
-_INPUT_RE = re.compile(r"\$\{\{\s*inputs\s*(?:\.\s*([A-Za-z0-9_-]+)|\[\s*'([^']*)'\s*\]|\[\s*\"([^\"]*)\"\s*\])\s*\}\}",
-                       re.I)
+def _wraps(toks: list) -> bool:
+    """Whether a pair of parentheses holds the whole of `toks`."""
+    if len(toks) < 2 or toks[0] != ("op", "(") or toks[-1] != ("op", ")"):
+        return False
+    depth = 0
+    for i, tok in enumerate(toks):
+        if tok == ("op", "("):
+            depth += 1
+        elif tok == ("op", ")"):
+            depth -= 1
+            if depth == 0 and i != len(toks) - 1:
+                return False
+    return True
+
+
+def _split_top(toks: list, by: str) -> list:
+    """`toks` split where `||` or `&&` (`by="logic"`) or a comma (`by=","`) stands outside brackets."""
+    parts: list = [[]]
+    depth, i = 0, 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok in (("op", "("), ("op", "[")):
+            depth += 1
+        elif tok in (("op", ")"), ("op", "]")):
+            depth -= 1
+        if depth == 0 and by == "," and tok == ("op", ","):
+            parts.append([])
+            i += 1
+            continue
+        if depth == 0 and by == "logic" and tok in (("op", "|"), ("op", "&")) and i + 1 < len(toks) \
+                and toks[i + 1] == tok:
+            parts.append([])
+            i += 2
+            continue
+        parts[-1].append(tok)
+        i += 1
+    return parts
+
+
+def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0) -> list[str] | None:
+    """The texts an expression can give when all it reads is the action's inputs, `github.action_path`
+    and literals, read the widest way: in parentheses, joined by `||` or `&&` (any operand can be the
+    result), or `format()` of such. None when the expression is anything else, or nested too deeply."""
+    if depth > 8:
+        return None
+    while _wraps(toks):
+        toks = toks[1:-1]
+    if not toks:
+        return None
+    parts = _split_top(toks, "logic")
+    if len(parts) > 1:
+        out: list = []
+        for part in parts:
+            values = _token_values(part, inputs, folder, depth + 1)
+            if values is None:
+                return None
+            out.extend(values)
+        return out[:16]
+    head = toks[0]
+    if len(toks) == 1 and head[0] in ("str", "num"):
+        return [head[1]]
+    if len(toks) == 1 and head[0] == "id" and head[1].lower() in ("true", "false", "null"):
+        return ["" if head[1].lower() == "null" else head[1].lower()]
+    if head[0] == "id" and head[1].lower() in ("inputs", "github"):
+        if len(toks) == 3 and toks[1] == ("op", ".") and toks[2][0] == "id":
+            name = toks[2][1]
+        elif len(toks) == 4 and toks[1] == ("op", "[") and toks[2][0] == "str" and toks[3] == ("op", "]"):
+            name = toks[2][1]
+        else:
+            return None
+        if head[1].lower() == "github":
+            return [f"./{folder}"] if name.lower() == "action_path" else None
+        return [inputs.get(wf_mod.input_name(name), "")]
+    if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
+        args = [_token_values(arg, inputs, folder, depth + 1) for arg in _split_top(toks[2:-1], ",")]
+        if not args or any(values is None or not values for values in args):
+            return None
+
+        def filled(template: str, choice: list) -> str:
+            for n, value in enumerate(choice):
+                template = template.replace("{" + str(n) + "}", value)
+            return template
+
+        out = []
+        for template in args[0][:4]:
+            first = [values[0] for values in args[1:]]
+            out.append(filled(template, first))
+            for n, values in enumerate(args[1:]):
+                for other in values[1:4]:
+                    out.append(filled(template, first[:n] + [other] + first[n + 1:]))
+        return out[:16]
+    return None
 
 
 def _action_inputs(raw: dict, given: dict) -> dict:
     """An action's inputs as its steps see them: each `default` the action writes, replaced by what
-    the step that uses it gives in `with:`, by name in lower case (as `Step.with_` gives them)."""
+    the step that uses it gives in `with:`, by name with A to Z in lower case (as `Step.with_` gives
+    them). A default that is itself an expression is kept as written."""
     out: dict = {}
     declared = raw.get("inputs")
     for name, spec in (declared.items() if isinstance(declared, dict) else ()):
@@ -291,62 +422,139 @@ def _action_inputs(raw: dict, given: dict) -> dict:
     return out
 
 
-def _put_inputs(value, inputs: dict):
-    """`value` (a step of a composite action) with each `${{ inputs.name }}` that names a known input put
-    in, in every text it holds, so an agent given as an input is read where the step runs it."""
+def _put_in(text: str, inputs: dict, folder: str, problems: list) -> str:
+    """`text` with what the checker can work out put in: each expression that reads the action's
+    inputs (every value it can give, one reading per line, when there are several) and the action's
+    own folder for `github.action_path`. An expression that reads an input in a way the checker does
+    not work out is added to `problems`."""
+    text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
+    if "${{" not in text:
+        return text
+    readings = [text]
+    for body in dict.fromkeys(expr_mod.bodies(text)):
+        whole = "${{" + body + "}}"
+        if whole not in text or not re.search(r"inputs\s*[.\[]|action_path", body, re.I):
+            continue
+        values = _token_values(expr_mod.tokens(body), inputs, folder)
+        if values is None:
+            problems.append(f"an expression reads an input in a way the checker does not work out "
+                            f"('{wf_mod.one_line(whole, 60)}')")
+            continue
+        readings = [r.replace(whole, value) for r in readings for value in dict.fromkeys(values)][:16]
+    out = "\n".join(dict.fromkeys(readings))
+    if len(out) > LOCAL_ACTION_TEXT:
+        problems.append("its inputs, put in, make a text longer than the checker reads")
+        return text
+    return out
+
+
+def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None):
+    """A step of a composite action with `_put_in` applied to every text it holds. A value YAML gives
+    many times through an alias is worked on once (a file of a few kilobytes can name a million)."""
+    done = {} if _done is None else _done
+    if id(value) in done:
+        return done[id(value)]
     if isinstance(value, str):
-        def put(match):
-            name = wf_mod.input_name(next(g for g in match.groups() if g is not None))
-            return inputs.get(name, match.group(0))
-        return _INPUT_RE.sub(put, value) if "inputs" in value.lower() else value
-    if isinstance(value, dict):
-        return {key: _put_inputs(item, inputs) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_put_inputs(item, inputs) for item in value]
-    return value
+        out = _put_in(value, inputs, folder, problems)
+    elif isinstance(value, dict):
+        out = {}
+        done[id(value)] = out
+        for key, item in value.items():
+            out[key] = _put_inputs(item, inputs, folder, problems, done)
+    elif isinstance(value, list):
+        out = []
+        done[id(value)] = out
+        out.extend(_put_inputs(item, inputs, folder, problems, done) for item in value)
+    else:
+        out = value
+    done[id(value)] = out
+    return out
+
+
+def _with_env(step_raw: dict, env: dict) -> dict:
+    """A composite step with the environment the step that uses the action gave (its `env`, which the
+    action's steps inherit as the runner hands it on) under its own `env`, which wins."""
+    if not env:
+        return step_raw
+    own = step_raw.get("env")
+    merged = dict(env)
+    if isinstance(own, dict):
+        merged.update(own)
+    return {**step_raw, "env": merged}
+
+
+def _expand_variables(run: str, env: dict) -> str:
+    """`run` with each `$NAME` or `${NAME}` the step's `env` sets put in, for finding the scripts it
+    runs (`P: ${{ github.action_path }}` and `bash "$P/agent.sh"`)."""
+    values = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
+    if not values or "$" not in run:
+        return run
+    return _SHELL_VAR_RE.sub(lambda m: values.get(m.group(1) or m.group(2), m.group(0)), run)
+
+
+def _action_folder_script(root: Path, folder: str, run: str, commands: list) -> str | None:
+    """A script in the action's own folder that `run` names relative to it (after `cd
+    "$GITHUB_ACTION_PATH"`, or with `working-directory` there), in which an agent CLI is found."""
+    tok = _script_with_agent(root / folder, run, commands) if folder != "." else None
+    return f"{folder}/{tok}" if tok else None
 
 
 def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
-                           given: dict | None = None) -> _ActionReading:
-    """Whether the local action `uses` (`./path` or `$/path`) runs an agent (flagship slice 2d.4a). A
-    composite action's steps are read as a job's steps are for an agent: an agent action, an agent CLI
-    in any command line `Step.agent_text` reads, a repository script a step runs, and another local
-    action, followed in turn, with each `${{ inputs.name }}` put in from the `with:` of the step that uses
-    the action, or else from the action's `default`. A JavaScript or Docker action, a file that cannot be read and a chain too
-    deep or that comes back to itself are named as not read. A `./` path is read in the repository as
-    checked out; an action an earlier step writes or replaces there is not. Each folder is read once
-    per `cache`, so an action used many times through others costs one reading."""
+                           given: dict | None = None, given_env: dict | None = None) -> _ActionReading:
+    """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
+    2d.4a). A composite action's steps are read for an agent as a job's steps are, with more put in: an
+    agent action; an agent CLI in any command line `Step.agent_text` reads, with each expression that
+    reads an input worked out from the `with:` of the step that uses the action (or else the action's
+    `default`) and that step's `env` under the action step's own; a repository script a step runs,
+    looked for from the repository's root and from the action's folder, with `github.action_path` and
+    the step's `env` put in; and another local action, followed in turn. A JavaScript or Docker action,
+    a missing file, a path that leads outside the repository, an input read in a way the checker does
+    not work out, and a chain too deep or that comes back to itself are named as not read. A file the
+    checker cannot read as YAML raises `_ActionFileError`, and too many readings `_ReadingsExceeded`.
+    A `./` path is read in the repository as checked out; an action an earlier step writes or replaces
+    there is not. A reading nothing cut short is kept in `cache` for every other use of the folder with
+    the same inputs and environment."""
     out = _ActionReading()
     shown = wf_mod.one_line(uses, 120)
-    folder = _local_action_folder(uses)
-    if folder is None:
-        out.unread.append((shown, "its path leads outside the repository or holds an expression"))
-        return out
-    if folder in seen:
-        out.unread.append((shown, "it comes back to itself through the local actions it uses"))
+    folders, why = _local_action_folders(uses)
+    if not folders:
+        out.unread.append((shown, why))
         return out
     if depth >= LOCAL_ACTION_DEPTH:
         out.unread.append((shown, f"it is used through more than {LOCAL_ACTION_DEPTH} local actions"))
+        out.cut = True
+        return out
+    if any(folder in seen for folder in folders):
+        out.unread.append((shown, "it comes back to itself through the local actions it uses"))
+        out.cut = True
         return out
     given = given or {}
+    given_env = given_env or {}
     cache = {} if cache is None else cache
-    key = (folder, tuple(sorted((name, wf_mod.as_text(value)) for name, value in given.items()
-                                if isinstance(value, (str, int, float, bool)))))
+
+    def fixed(mapping):
+        return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
+                            if isinstance(value, (str, int, float, bool))))
+
+    key = (tuple(folders), fixed(given), fixed(given_env))
     if key in cache:
         return cache[key]
     readings = cache.get(_READINGS, 0) + 1
     cache[_READINGS] = readings
     if readings > LOCAL_ACTION_READINGS:
-        out.unread.append((shown, f"the check had read local actions {LOCAL_ACTION_READINGS} times, with the inputs "
-                                  "each use gives, and reads no more"))
-        return out
-    cache[key] = out
-    raws, why = _read_local_action(root, folder)
-    if raws is None:
-        out.unread.append((shown, why))
-        return out
-    for raw in raws:
+        raise _ReadingsExceeded()
+    raws: list = []
+    missing = []
+    for folder in folders:
+        found, why = _read_local_action(root, folder)
+        if found:
+            raws.extend((folder, raw) for raw in found)
+        else:
+            missing.append(why)
+    if not raws:
+        out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
+    for folder, raw in raws:
         runs = raw.get("runs")
         using = runs.get("using") if isinstance(runs, dict) else None
         kind = using.strip().lower() if isinstance(using, str) else None
@@ -368,7 +576,15 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             if not isinstance(step_raw, dict):
                 out.unread.append((shown, f"its step {number} is not a mapping"))
                 continue
-            step = wf_mod.Step(index=number - 1, raw=_put_inputs(step_raw, inputs), line=getattr(step_raw, "line", 0))
+            problems: list = []
+            put, done, ignored = {}, {}, {}
+            for key_name, value in _with_env(step_raw, given_env).items():
+                if key_name in _COMMAND_FIELDS:
+                    put[key_name] = _put_inputs(value, inputs, folder, problems, done)
+                else:
+                    put[key_name] = _put_inputs(value, inputs, folder, [], ignored)
+            step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0))
+            out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
             if out.agent is None:
                 prefix = next((p for p in actions if step.uses_action(p)), None)
@@ -379,39 +595,67 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 if text and any(rx.search(text) for rx in commands):
                     out.agent = f"runs an agent CLI in {where}"
             if out.agent is None and step.run:
-                tok = _script_with_agent(root, _ACTION_PATH_RE.sub(f"./{folder}", step.run), commands)
+                run = _ACTION_PATH_VAR_RE.sub(f"./{folder}", _expand_variables(step.run, step.env))
+                tok = _script_with_agent(root, run, commands) or _action_folder_script(root, folder, run, commands)
                 if tok:
                     out.agent = f"runs an agent in the script {tok}, from {where}"
-            if step.is_local:
-                inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1, seen | {folder}, cache,
-                                               step.with_)
+            if _is_local_like(step.uses):
+                inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1,
+                                               seen | set(folders), cache, step.with_, step.env)
                 out.unread.extend(inner.unread)
+                out.cut = out.cut or inner.cut
                 out.agent = out.agent or inner.agent
+    if not out.cut:
+        cache[key] = out
     return out
 
 
 def _apply_local_action_detection(workflow, root: Path | None, actions: list, commands: list,
-                                  unread: list, cache: dict | None = None) -> None:
+                                  unread: list, errors: list, cache: dict | None = None) -> None:
     """Put a job whose agent runs inside a local action in the agent lane, and record the step for
     the egress control, as `_apply_script_detection` does for a script (flagship slice 2d.4a). With
     no `root` (a file checked on its own, whose repository the checker does not know), every local
     action is named as not read. What could not be read is added to `unread` as (file, job, action,
-    why)."""
+    why). An action file the checker cannot read as YAML, more readings than one check makes, and
+    nesting too deep for Python are added to `errors`, which fail the check, as a workflow file the
+    checker cannot read does: the action's author writes it as freely as the workflow's."""
+    cache = {} if cache is None else cache
     for job in workflow.jobs.values():
         for step in job.steps:
-            if not step.is_local:
+            if not _is_local_like(step.uses):
                 continue
+            shown = wf_mod.one_line(step.uses, 120)
             if root is None:
-                unread.append((workflow.path, job.id, wf_mod.one_line(step.uses, 120),
+                unread.append((workflow.path, job.id, shown,
                                "the file was checked on its own, so its repository's actions were not read"))
                 continue
-            reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_)
+            where = f"{workflow.path}: job '{wf_mod.one_line(job.id, 60)}' uses the local action {shown}, and"
+            try:
+                reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
+                                                 given_env=step.env)
+            except _ActionFileError as exc:
+                errors.append(f"{where} {exc}, so the checker cannot tell whether an agent runs in it")
+                continue
+            except _ReadingsExceeded:
+                if not cache.get(_EXCEEDED):
+                    cache[_EXCEEDED] = True
+                    errors.append(f"{where} the local actions of this check use each other more than "
+                                  f"{LOCAL_ACTION_READINGS} times over, with the inputs each use gives, so the "
+                                  "checker stopped reading them and cannot tell whether an agent runs in them")
+                continue
+            except (RecursionError, MemoryError):
+                errors.append(f"{where} it is too deeply nested or too large to read, so the checker cannot tell "
+                              "whether an agent runs in it")
+                continue
             unread.extend((workflow.path, job.id, action, why) for action, why in reading.unread)
             if reading.agent:
                 job.agent_script_steps.add(step.index)
                 job.agent_step_why.setdefault(step.index, reading.agent)
                 if not job.in_lane("agent"):
                     job.add_lane("agent", reading.agent)
+
+
+_EXCEEDED = "exceeded"      # in the cache: the error for too many readings is given once per check
 
 
 def _local_action_notes(unread: list) -> list[str]:
@@ -781,7 +1025,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
         _apply_local_action_detection(workflow, None if on_its_own else root, agent_actions, script_cmds,
-                                      unread_actions, action_cache)
+                                      unread_actions, errors, action_cache)
         declared.workflow(workflow, path)
         for job in workflow.jobs.values():
             if job.in_lane("agent"):
@@ -1186,7 +1430,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
         _apply_local_action_detection(workflow, root if is_repo else None, agent_actions, script_cmds,
-                                      unread_actions, action_cache)
+                                      unread_actions, errors, action_cache)
         declared.workflow(workflow, path)
         # What `check` reports as an error for the file (an input given twice under two spellings, an
         # expression too deep for the rules to read) means the file was not fully read, so `--lanes`
