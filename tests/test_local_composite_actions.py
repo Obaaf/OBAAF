@@ -332,7 +332,7 @@ class ManyUsesCostOneReadingTest(unittest.TestCase):
         with TempDir() as tmp:
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("more than 3000 readings of local actions", result.errors[0])
+            self.assertIn("more than 30000 steps of local actions", result.errors[0])
 
 
 class TheReviewersWaysPastTest(unittest.TestCase):
@@ -505,6 +505,60 @@ class TheReviewersSecondPassTest(unittest.TestCase):
             result = check(tmp, job_using(f"./{ACTION_DIR}"), files)
             self.assertEqual(agent_rules(result), [])
             self.assertTrue(any("holds an expression" in n for n in result.notes), result.notes)
+
+
+class TheReviewersThirdPassTest(unittest.TestCase):
+    """What the third review pass of this slice found (2026-11-18)."""
+
+    def caught(self, run, with_="", env="", extra_files=None):
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n"
+        if with_:
+            text += "        with:\n" + "".join(f"          {line}\n" for line in with_.split("\n"))
+        if env:
+            text += "        env:\n" + "".join(f"          {line}\n" for line in env.split("\n"))
+        files = {f"{ACTION_DIR}/action.yml": composite(f"    - run: {run}\n      shell: bash\n"), **(extra_files or {})}
+        with TempDir() as tmp:
+            return agent_rules(check(tmp, text, files))
+
+    def test_a_comparison_inside_a_function_keeps_the_inputs(self):
+        for run in ("${{ fromJSON(inputs.mode == 'ai' && inputs.tool || '\"make\"') }} -p fix",
+                    "${{ fromJSON(!inputs.quiet && inputs.tool || '\"make\"') }} -p fix"):
+            with self.subTest(run=run):
+                self.assertEqual(self.caught(json_quoted(run), with_="mode: ai\ntool: '\"claude\"'"), AGENT_RULES)
+
+    def test_inputs_as_a_whole(self):
+        self.assertEqual(self.caught(json_quoted("${{ fromJSON(toJSON(inputs)).tool }} -p fix"), with_="tool: claude"),
+                         AGENT_RULES)
+
+    def test_the_env_context_is_put_in(self):
+        self.assertEqual(self.caught(json_quoted("${{ inputs.tool || env.AGENT }} -p fix"), env="AGENT: claude"),
+                         AGENT_RULES)
+
+    def test_cd_with_options_a_modifier_or_a_subfolder(self):
+        script = {f"{ACTION_DIR}/agent.sh": "#!/bin/sh\nclaude -p 'fix it'\n",
+                  f"{ACTION_DIR}/bin/agent.sh": "#!/bin/sh\nclaude -p 'fix it'\n"}
+        for run in ('cd -- "$GITHUB_ACTION_PATH" && ./agent.sh', 'cd -P "$GITHUB_ACTION_PATH" && ./agent.sh',
+                    'cd "${GITHUB_ACTION_PATH%/}" && ./agent.sh', 'cd "$GITHUB_ACTION_PATH/bin" && ./agent.sh'):
+            with self.subTest(run=run):
+                self.assertEqual(self.caught(json_quoted(run), extra_files=script), AGENT_RULES)
+
+    def test_the_bound_counts_steps(self):
+        import time
+        steps = 40
+        files = {f".github/actions/a{n}/action.yml": composite(
+            *[f"    - uses: ./.github/actions/a{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
+              for k in range(steps)]) for n in range(5)}
+        files[".github/actions/a5/action.yml"] = composite(*[PLAIN] * steps)
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, job_using("./.github/actions/a0"), files)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertTrue(any("steps of local actions" in e for e in result.errors), result.errors)
+
+
+def json_quoted(text):
+    import json
+    return json.dumps(text)
 
 
 class TheEgressControlSeesTheAgentOutsideTest(unittest.TestCase):

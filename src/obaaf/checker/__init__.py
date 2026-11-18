@@ -201,19 +201,19 @@ def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
 LOCAL_ACTION_DEPTH = 10
 # The largest action file read; a larger one is an error, as a workflow the checker cannot read is.
 LOCAL_ACTION_BYTES = 1_000_000
-# How many readings of local actions one check makes: each folder once for each set of values of
+# How many steps of local actions one check reads: each action's steps once for each set of values of
 # the inputs its expressions read and of the environment it is given, and once more for each place a
 # cycle or the depth cuts a reading short. Beyond it the check stops reading them and fails with an
 # error, so local actions that use each other many times over, with different inputs, can neither make
 # the check slow nor hide an agent in a job read after them.
-LOCAL_ACTION_READINGS = 3_000
+LOCAL_ACTION_STEPS = 30_000
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
 LOCAL_ACTION_TEXT = 200_000
 # Where a composite action's own files are, as a step may write it: the expression in any letter case,
 # with a dot or an index, and the runner's variable as the shell expands it.
 _ACTION_PATH_EXPR_RE = re.compile(r"\$\{\{\s*github\s*(?:\.\s*action_path|\[\s*'action_path'\s*\])\s*\}\}", re.I)
-_ACTION_PATH_VAR_RE = re.compile(r"\$\{GITHUB_ACTION_PATH(?:[:]?[-=?+][^}]*)?\}|\$GITHUB_ACTION_PATH(?![A-Za-z0-9_])")
+_ACTION_PATH_VAR_RE = re.compile(r"\$\{GITHUB_ACTION_PATH(?:[^A-Za-z0-9_}][^}]*)?\}|\$GITHUB_ACTION_PATH(?![A-Za-z0-9_])")
 _SHELL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[:]?[-=?+][^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 # The fields of a step `Step.agent_text` and the script reading read as command lines.
 _COMMAND_FIELDS = ("run", "shell", "env", "with", "working-directory")
@@ -223,7 +223,7 @@ _READINGS = "readings"      # the counter's key in the cache, which no (folders,
 
 
 class _ReadingsExceeded(Exception):
-    """More readings of local actions than one check makes (`LOCAL_ACTION_READINGS`)."""
+    """More steps of local actions than one check reads (`LOCAL_ACTION_STEPS`)."""
 
 
 @dataclass
@@ -377,7 +377,22 @@ def _input_names(toks: list) -> list[str]:
     return names
 
 
-def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0) -> list[str] | None:
+def _top_level_comparison(toks: list) -> bool:
+    """Whether a comparison (`==`, `!=`, `<`, `>`, `!`) stands outside every bracket of `toks`."""
+    depth = 0
+    for kind, text in toks:
+        if kind != "op":
+            continue
+        if text in "([":
+            depth += 1
+        elif text in ")]":
+            depth -= 1
+        elif depth == 0 and text in _COMPARISONS:
+            return True
+    return False
+
+
+def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: dict | None = None) -> list[str] | None:
     """The texts an expression in a composite action's step can give, read the widest way, at most 16.
     An input, `github.action_path` and a literal are worked out; parentheses, `||` and `&&` (any operand
     can be the result) and `format()` are followed; a comparison or a function that gives true or false
@@ -400,7 +415,7 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0) -> list
     if len(parts) > 1:
         out: list = []
         for part in parts:
-            values = _token_values(part, inputs, folder, depth + 1)
+            values = _token_values(part, inputs, folder, depth + 1, env)
             if values is None:
                 return None
             out.extend(values)
@@ -421,9 +436,12 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0) -> list
                 return [inputs.get(wf_mod.input_name(name), "")]
             if head[1].lower() == "github" and name.lower() == "action_path":
                 return [f"./{folder}"]
+            if head[1].lower() == "env" and env:
+                given = {str(k).upper(): v for k, v in env.items() if isinstance(v, (str, int, float, bool))}
+                return [wf_mod.as_text(given.get(name.upper(), ""))]
             return [""]
     if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
-        args = [_token_values(arg, inputs, folder, depth + 1) for arg in _split_top(toks[2:-1], ",")]
+        args = [_token_values(arg, inputs, folder, depth + 1, env) for arg in _split_top(toks[2:-1], ",")]
         if args and all(values for values in args):
 
             def filled(template: str, choice: list) -> str:
@@ -439,8 +457,8 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0) -> list
                     for other in values[1:4]:
                         out.append(filled(template, first[:n] + [other] + first[n + 1:]))
             return list(dict.fromkeys(out))[:16]
-    if any(kind == "op" and text in _COMPARISONS for kind, text in _split_top(toks, ",")[0]) or (
-            head[0] == "id" and head[1].lower() in _BOOLEAN_FUNCTIONS and _wraps(toks[1:])):
+    if _top_level_comparison(toks) or (head[0] == "id" and head[1].lower() in _BOOLEAN_FUNCTIONS
+                                       and _wraps(toks[1:])):
         return ["true", "false"]
     names = _input_names(toks)
     values = list(inputs.values()) if "*" in names else [inputs.get(name, "") for name in names]
@@ -463,7 +481,7 @@ def _action_inputs(raw: dict, given: dict) -> dict:
     return out
 
 
-def _put_in(text: str, inputs: dict, folder: str, problems: list) -> str:
+def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None) -> str:
     """`text` with what the checker can work out put in: each expression that reads the action's
     inputs (every value it can give, one reading per line, when there are several) and the action's
     own folder for `github.action_path`. An expression that reads an input in a way the checker does
@@ -474,9 +492,9 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list) -> str:
     readings = [text]
     for body in dict.fromkeys(expr_mod.bodies(text)):
         whole = "${{" + body + "}}"
-        if whole not in text or not re.search(r"inputs\s*[.\[]|action_path", body, re.I):
+        if whole not in text or not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
-        values = _token_values(expr_mod.tokens(body), inputs, folder)
+        values = _token_values(expr_mod.tokens(body), inputs, folder, env=env)
         if values is None:
             problems.append(f"an expression that reads an input is nested more deeply than the checker works out "
                             f"('{wf_mod.one_line(whole, 60)}')")
@@ -489,23 +507,23 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list) -> str:
     return out
 
 
-def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None):
+def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None):
     """A step of a composite action with `_put_in` applied to every text it holds. A value YAML gives
     many times through an alias is worked on once (a file of a few kilobytes can name a million)."""
     done = {} if _done is None else _done
     if id(value) in done:
         return done[id(value)]
     if isinstance(value, str):
-        out = _put_in(value, inputs, folder, problems)
+        out = _put_in(value, inputs, folder, problems, env)
     elif isinstance(value, dict):
         out = {}
         done[id(value)] = out
         for key, item in value.items():
-            out[key] = _put_inputs(item, inputs, folder, problems, done)
+            out[key] = _put_inputs(item, inputs, folder, problems, done, env)
     elif isinstance(value, list):
         out = []
         done[id(value)] = out
-        out.extend(_put_inputs(item, inputs, folder, problems, done) for item in value)
+        out.extend(_put_inputs(item, inputs, folder, problems, done, env) for item in value)
     else:
         out = value
     done[id(value)] = out
@@ -548,18 +566,32 @@ def _expand_variables(run: str, env: dict, problems: list) -> str:
 
 
 def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: list) -> str | None:
-    """A script in the action's own folder that `run` names relative to it, when the step's
-    `working-directory` is that folder or its script changes to it (`cd "$GITHUB_ACTION_PATH"`), in
-    which an agent CLI is found."""
+    """A script that `run` names relative to the action's own folder, or a folder under it, when the
+    step's `working-directory` is there or its script changes to it (`cd "$GITHUB_ACTION_PATH"`, with
+    `cd`'s options or `pushd`), in which an agent CLI is found."""
     if folder == ".":
         return None
-    here = f"./{folder}"
-    there = isinstance(workdir, str) and posixpath.normpath(workdir.strip().strip("\"'") or ".") in (here[2:], here)
-    if not there and not re.search(r"(?:^|[;&|(\s])(?:cd|pushd)\s+[\"']?" + re.escape(here) + r"/?[\"']?(?:\s|$|[;&|)])",
-                                   run, re.M):
-        return None
-    tok = _script_with_agent(root / folder, run, commands)
-    return f"{folder}/{tok}" if tok else None
+    bases = []
+    if isinstance(workdir, str):
+        bases.append(workdir.strip().strip("\"'"))
+    for match in re.finditer(r"(?:^|[;&|(\s])(?:cd|pushd)(?:\s+-\S*)*\s+[\"']?(\./" + re.escape(folder) +
+                             r"(?:/[^\s\"';&|)]*)?)", run, re.M):
+        bases.append(match.group(1))
+    root_r = root.resolve()
+    for base in dict.fromkeys(bases):
+        where = posixpath.normpath(base.removeprefix("./") or ".")
+        if where != folder and not where.startswith(folder + "/"):
+            continue
+        try:
+            path = (root / where).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root_r not in path.parents:
+            continue
+        tok = _script_with_agent(root / where, run, commands)
+        if tok:
+            return f"{where}/{tok}"
+    return None
 
 
 def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list, depth: int = 0,
@@ -620,9 +652,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     for known in (key, context):
         if known in cache:
             return cache[known]
-    readings = cache.get(_READINGS, 0) + 1
+    cost = 1 + sum(len(raw.get("runs", {}).get("steps") or ()) if isinstance(raw.get("runs"), dict)
+                   and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
+    readings = cache.get(_READINGS, 0) + cost
     cache[_READINGS] = readings
-    if readings > LOCAL_ACTION_READINGS:
+    if readings > LOCAL_ACTION_STEPS:
         raise _ReadingsExceeded()
     if not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
@@ -650,11 +684,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 continue
             problems: list = []
             put, done, ignored = {}, {}, {}
-            for key_name, value in _with_env(step_raw, given_env).items():
+            merged = _with_env(step_raw, given_env)
+            step_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
+            for key_name, value in merged.items():
                 if key_name in _COMMAND_FIELDS:
-                    put[key_name] = _put_inputs(value, inputs, folder, problems, done)
+                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env)
                 else:
-                    put[key_name] = _put_inputs(value, inputs, folder, [], ignored)
+                    put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0))
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
@@ -737,9 +773,9 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
             except _ReadingsExceeded:
                 if not cache.get(_EXCEEDED):
                     cache[_EXCEEDED] = True
-                    errors.append(f"{where} the check needed more than {LOCAL_ACTION_READINGS} readings of local "
-                                  "actions (one for each action and set of inputs and environment it is given), so "
-                                  "it stopped reading them and cannot tell whether an agent runs in them")
+                    errors.append(f"{where} the check needed to read more than {LOCAL_ACTION_STEPS} steps of local "
+                                  "actions (each action's steps once for each set of inputs and environment it is "
+                                  "given), so it stopped reading them and cannot tell whether an agent runs in them")
                 continue
             except (RecursionError, MemoryError):
                 errors.append(f"{where} it is too deeply nested or too large to read, so the checker cannot tell "
