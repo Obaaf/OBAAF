@@ -1881,6 +1881,8 @@ class Job:
     lane_notes: list = field(default_factory=list)
     # Indexes of the steps that run a repository script in which an agent CLI was found.
     agent_script_steps: set = field(default_factory=set)
+    # Of those, the steps whose agent runs inside a local action, with what was found there (slice 2d.4a).
+    agent_step_why: dict = field(default_factory=dict)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:

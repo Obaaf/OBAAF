@@ -164,28 +164,273 @@ def _agent_via_script(job, root: Path, commands: list) -> str | None:
     Every step found doing so is recorded on the job, for the egress control (OBAAF-GHA-020)."""
     if not commands:
         return None
-    root_r = root.resolve()
     found = None
     for step in job.steps:
         run = step.run
         if step.confines and isinstance(step.with_.get("run"), str):
             run = step.with_["run"]     # the command OBAAF's egress action runs
-        for tok in _script_targets(run) + _copied_script_targets(run, root_r):
-            try:
-                path = (root / tok).resolve()
-                if path != root_r and root_r not in path.parents:
-                    continue
-                if not path.is_file():
-                    continue
-                with path.open(encoding="utf-8", errors="replace") as script:
-                    text = script.read(200_000)
-            except (OSError, RuntimeError):
-                continue
-            if any(rx.search(text) for rx in commands):
-                job.agent_script_steps.add(step.index)
-                found = found or f"runs an agent in the script {tok}"
-                break
+        tok = _script_with_agent(root, run, commands)
+        if tok:
+            job.agent_script_steps.add(step.index)
+            found = found or f"runs an agent in the script {tok}"
     return found
+
+
+def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
+    """The first repository script a `run` text calls in which an agent CLI is found, by its path
+    relative to `root`, or None. Only scripts readable under `root` are read."""
+    root_r = root.resolve()
+    for tok in _script_targets(run) + _copied_script_targets(run, root_r):
+        try:
+            path = (root / tok).resolve()
+            if path != root_r and root_r not in path.parents:
+                continue
+            if not path.is_file():
+                continue
+            with path.open(encoding="utf-8", errors="replace") as script:
+                text = script.read(200_000)
+        except (OSError, RuntimeError):
+            continue
+        if any(rx.search(text) for rx in commands):
+            return tok
+    return None
+
+
+# Flagship slice 2d.4a: how deep local actions are followed into each other. A chain deeper than this
+# is named as not read rather than followed further.
+LOCAL_ACTION_DEPTH = 10
+# The largest action file read; a larger one is named as not read.
+LOCAL_ACTION_BYTES = 1_000_000
+# How many times one check reads a local action (each folder once for each set of inputs it is given);
+# beyond it, what is left is named as not read, so local actions that use each other many times over
+# with different inputs cannot make the check slow.
+LOCAL_ACTION_READINGS = 2_000
+_READINGS = "readings"      # the counter's key in the cache, which no (folder, inputs) key can equal
+# Where a composite action's own files are, as its steps may write it.
+_ACTION_PATH_RE = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}|\$\{GITHUB_ACTION_PATH\}|\$GITHUB_ACTION_PATH\b")
+
+
+@dataclass
+class _ActionReading:
+    """What reading a local action found: the agent, if one runs in it, and what could not be read,
+    as (the action as written, why) pairs."""
+    agent: str | None = None
+    unread: list = field(default_factory=list)
+
+
+def _local_action_folder(uses: str) -> str | None:
+    """The folder a local `uses` names, relative to the repository, or None when it leads outside the
+    repository or holds an expression. `./` and `$/` are both the repository's own; what follows an `@`
+    is not part of the path."""
+    path = uses[2:].split("@", 1)[0]
+    if "${{" in path:
+        return None
+    folder = posixpath.normpath(path.strip("/") or ".")
+    if folder == ".." or folder.startswith("../"):
+        return None
+    return folder
+
+
+def _read_local_action(root: Path, folder: str) -> tuple[list | None, str | None]:
+    """([metadata, ...], None) for the action in `folder`, or (None, why it was not read). When both
+    `action.yml` and `action.yaml` are there, both are read: which one GitHub takes is not
+    established, so an agent in either counts."""
+    root_r = root.resolve()
+    prefix = "" if folder == "." else f"{folder}/"
+    found = []
+    for name in (f"{prefix}action.yml", f"{prefix}action.yaml"):
+        try:
+            real = (root / name).resolve()
+            if real != root_r and root_r not in real.parents:
+                return None, f"{name} leads outside the repository"
+            if not real.is_file():
+                continue
+            with real.open("rb") as handle:
+                data = handle.read(LOCAL_ACTION_BYTES + 1)
+        except (OSError, RuntimeError):
+            return None, f"{name} cannot be read"
+        if len(data) > LOCAL_ACTION_BYTES:
+            return None, f"{name} is larger than the checker reads"
+        text = data.decode("utf-8", errors="replace")
+        if any(char in text for char in wf_mod._DISPUTED_BREAKS):
+            return None, f"{name} holds a character YAML readers do not agree is a line break"
+        try:
+            raw = yamlutil.load(text)
+        except Exception:       # YAML errors, duplicate keys
+            return None, f"{name} is not YAML the checker can read"
+        if not isinstance(raw, dict):
+            return None, f"{name} is not a mapping"
+        try:
+            odd = wf_mod._unreadable(raw)
+        except RecursionError:
+            odd = "nesting too deep to read"
+        if odd:
+            return None, f"{name} holds a value the checker does not read ({odd})"
+        found.append(raw)
+    if not found:
+        return None, "the repository has no action.yml or action.yaml there, so an earlier step may make it"
+    return found, None
+
+
+_INPUT_RE = re.compile(r"\$\{\{\s*inputs\s*(?:\.\s*([A-Za-z0-9_-]+)|\[\s*'([^']*)'\s*\]|\[\s*\"([^\"]*)\"\s*\])\s*\}\}",
+                       re.I)
+
+
+def _action_inputs(raw: dict, given: dict) -> dict:
+    """An action's inputs as its steps see them: each `default` the action writes, replaced by what
+    the step that uses it gives in `with:`, by name in lower case (as `Step.with_` gives them)."""
+    out: dict = {}
+    declared = raw.get("inputs")
+    for name, spec in (declared.items() if isinstance(declared, dict) else ()):
+        default = spec.get("default") if isinstance(spec, dict) else None
+        if isinstance(default, (str, int, float, bool)):
+            out[wf_mod.input_name(name)] = wf_mod.as_text(default)
+    for name, value in given.items():
+        if isinstance(value, (str, int, float, bool)):
+            out[wf_mod.input_name(name)] = wf_mod.as_text(value)
+    return out
+
+
+def _put_inputs(value, inputs: dict):
+    """`value` (a step of a composite action) with each `${{ inputs.name }}` that names a known input put
+    in, in every text it holds, so an agent given as an input is read where the step runs it."""
+    if isinstance(value, str):
+        def put(match):
+            name = wf_mod.input_name(next(g for g in match.groups() if g is not None))
+            return inputs.get(name, match.group(0))
+        return _INPUT_RE.sub(put, value) if "inputs" in value.lower() else value
+    if isinstance(value, dict):
+        return {key: _put_inputs(item, inputs) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_put_inputs(item, inputs) for item in value]
+    return value
+
+
+def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list, depth: int = 0,
+                           seen: frozenset = frozenset(), cache: dict | None = None,
+                           given: dict | None = None) -> _ActionReading:
+    """Whether the local action `uses` (`./path` or `$/path`) runs an agent (flagship slice 2d.4a). A
+    composite action's steps are read as a job's steps are for an agent: an agent action, an agent CLI
+    in any command line `Step.agent_text` reads, a repository script a step runs, and another local
+    action, followed in turn, with each `${{ inputs.name }}` put in from the `with:` of the step that uses
+    the action, or else from the action's `default`. A JavaScript or Docker action, a file that cannot be read and a chain too
+    deep or that comes back to itself are named as not read. A `./` path is read in the repository as
+    checked out; an action an earlier step writes or replaces there is not. Each folder is read once
+    per `cache`, so an action used many times through others costs one reading."""
+    out = _ActionReading()
+    shown = wf_mod.one_line(uses, 120)
+    folder = _local_action_folder(uses)
+    if folder is None:
+        out.unread.append((shown, "its path leads outside the repository or holds an expression"))
+        return out
+    if folder in seen:
+        out.unread.append((shown, "it comes back to itself through the local actions it uses"))
+        return out
+    if depth >= LOCAL_ACTION_DEPTH:
+        out.unread.append((shown, f"it is used through more than {LOCAL_ACTION_DEPTH} local actions"))
+        return out
+    given = given or {}
+    cache = {} if cache is None else cache
+    key = (folder, tuple(sorted((name, wf_mod.as_text(value)) for name, value in given.items()
+                                if isinstance(value, (str, int, float, bool)))))
+    if key in cache:
+        return cache[key]
+    readings = cache.get(_READINGS, 0) + 1
+    cache[_READINGS] = readings
+    if readings > LOCAL_ACTION_READINGS:
+        out.unread.append((shown, f"the check had read local actions {LOCAL_ACTION_READINGS} times, with the inputs "
+                                  "each use gives, and reads no more"))
+        return out
+    cache[key] = out
+    raws, why = _read_local_action(root, folder)
+    if raws is None:
+        out.unread.append((shown, why))
+        return out
+    for raw in raws:
+        runs = raw.get("runs")
+        using = runs.get("using") if isinstance(runs, dict) else None
+        kind = using.strip().lower() if isinstance(using, str) else None
+        if kind != "composite":
+            if kind and kind.startswith("node"):
+                what = "a JavaScript action, whose code the checker does not read"
+            elif kind == "docker":
+                what = "a Docker action, whose container the checker does not read"
+            else:
+                what = "an action whose `runs.using` is not one the checker reads"
+            out.unread.append((shown, f"it is {what}"))
+            continue
+        steps = runs.get("steps")
+        if not isinstance(steps, list):
+            out.unread.append((shown, "its `runs.steps` is not a list of steps"))
+            continue
+        inputs = _action_inputs(raw, given)
+        for number, step_raw in enumerate(steps, start=1):
+            if not isinstance(step_raw, dict):
+                out.unread.append((shown, f"its step {number} is not a mapping"))
+                continue
+            step = wf_mod.Step(index=number - 1, raw=_put_inputs(step_raw, inputs), line=getattr(step_raw, "line", 0))
+            where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
+            if out.agent is None:
+                prefix = next((p for p in actions if step.uses_action(p)), None)
+                if prefix is not None:
+                    out.agent = f"uses {step.action} in the local action {shown}"
+            if out.agent is None:
+                text = step.agent_text(commands)
+                if text and any(rx.search(text) for rx in commands):
+                    out.agent = f"runs an agent CLI in {where}"
+            if out.agent is None and step.run:
+                tok = _script_with_agent(root, _ACTION_PATH_RE.sub(f"./{folder}", step.run), commands)
+                if tok:
+                    out.agent = f"runs an agent in the script {tok}, from {where}"
+            if step.is_local:
+                inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1, seen | {folder}, cache,
+                                               step.with_)
+                out.unread.extend(inner.unread)
+                out.agent = out.agent or inner.agent
+    return out
+
+
+def _apply_local_action_detection(workflow, root: Path | None, actions: list, commands: list,
+                                  unread: list, cache: dict | None = None) -> None:
+    """Put a job whose agent runs inside a local action in the agent lane, and record the step for
+    the egress control, as `_apply_script_detection` does for a script (flagship slice 2d.4a). With
+    no `root` (a file checked on its own, whose repository the checker does not know), every local
+    action is named as not read. What could not be read is added to `unread` as (file, job, action,
+    why)."""
+    for job in workflow.jobs.values():
+        for step in job.steps:
+            if not step.is_local:
+                continue
+            if root is None:
+                unread.append((workflow.path, job.id, wf_mod.one_line(step.uses, 120),
+                               "the file was checked on its own, so its repository's actions were not read"))
+                continue
+            reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_)
+            unread.extend((workflow.path, job.id, action, why) for action, why in reading.unread)
+            if reading.agent:
+                job.agent_script_steps.add(step.index)
+                job.agent_step_why.setdefault(step.index, reading.agent)
+                if not job.in_lane("agent"):
+                    job.add_lane("agent", reading.agent)
+
+
+def _local_action_notes(unread: list) -> list[str]:
+    """One advisory note naming the local actions that could not be read through, never a finding:
+    whether such an action runs an agent is not known, and taking every one for an agent would report
+    every job that uses one."""
+    if not unread:
+        return []
+    unique = list(dict.fromkeys(unread))
+    shown = "; ".join(f"{action} in {wf_mod.one_line(path, 120)} job '{wf_mod.one_line(job, 60)}' ({why})"
+                      for path, job, action, why in unique[:5])
+    more = f"; and {len(unique) - 5} more" if len(unique) > 5 else ""
+    return [f"Local actions were not read through in {len(unique)} place(s), so an agent run inside them does not "
+            f"put the job in the agent lane: {shown}{more}. If one runs an AI agent, set OBAAF_LANE: agent on its job, "
+            "or declare the agent's command in agents.commands in .github/obaaf.yml (docs/checker-configuration.md)."]
+
+
+def _agent_actions(catalog: "Catalog", config: "Config") -> list:
+    return list(catalog.detection.get("agent_actions", [])) + list(config.agents.get("actions", ()) or ())
 
 
 def _script_commands(catalog: "Catalog", config: "Config") -> list:
@@ -494,6 +739,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                                              list(config.jenkins.get("exclude") or []),
                                              notes=jenkins_notes, errors=errors)
     script_cmds = _script_commands(catalog, config)
+    agent_actions = _agent_actions(catalog, config)
+    unread_actions: list = []
+    action_cache: dict = {}
     findings: list[Finding] = []
     rels: list[str] = []
     # The CI definitions as a pull request changes them: a workflow that is a link by its own path,
@@ -532,6 +780,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
+        _apply_local_action_detection(workflow, None if on_its_own else root, agent_actions, script_cmds,
+                                      unread_actions, action_cache)
         declared.workflow(workflow, path)
         for job in workflow.jobs.values():
             if job.in_lane("agent"):
@@ -595,7 +845,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     today = today or date.today()
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
-    notes = jenkins_notes + repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+    notes = (jenkins_notes + repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
+             + _local_action_notes(unread_actions))
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -913,6 +1164,9 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                                              list(config.jenkins.get("exclude") or []), notes=notes, errors=errors)
     catalog = load()
     script_cmds = _script_commands(catalog, config)
+    agent_actions = _agent_actions(catalog, config)
+    unread_actions: list = []
+    action_cache: dict = {}
     out = []
     for path in files:
         rel = path.relative_to(root).as_posix()
@@ -931,6 +1185,8 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
+        _apply_local_action_detection(workflow, root if is_repo else None, agent_actions, script_cmds,
+                                      unread_actions, action_cache)
         declared.workflow(workflow, path)
         # What `check` reports as an error for the file (an input given twice under two spellings, an
         # expression too deep for the rules to read) means the file was not fully read, so `--lanes`
@@ -975,4 +1231,5 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
         # (slice 2d.8); the repository rules are run only to find it.
         rules_mod.repo_findings(root, [], catalog, errors, notes)
     notes.extend(declared.notes(catalog))
+    notes.extend(_local_action_notes(unread_actions))
     return out

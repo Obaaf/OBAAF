@@ -116,8 +116,9 @@ rules:
       taken as not written, and a scope name in lower-case letters and hyphens that GitHub does not know is
       read as written. Not followed: the repository's or organization's default token permissions (an
       undeclared job is reported whatever they are); what a calling workflow grants; write access through a
-      token taken from a secret, which OBAAF-GHA-005 reports as a secret; and a local composite action that
-      runs an agent, which does not make the job an agent job.
+      token taken from a secret, which OBAAF-GHA-005 reports as a secret; and an agent inside an action from
+      another repository. An agent inside a local composite action makes the job an agent job (slice 2d.4a);
+      a local action the checker cannot read through is named in a note.
     fix: >-
       Give the agent job `permissions: {contents: read}` (plus other read permissions it needs) and
       apply its proposals in a separate effect job behind a protected environment.
@@ -683,8 +684,10 @@ rules:
       and the default shell, whose first word (after assignments, wrappers such as `sudo -u user`, `npx`,
       `nice -n 10` or `timeout 5m`, and a shell's `-c`) is an agent's, the step's env values also put into
       its run script and read as commands; free text in an input or an env value is not a command, unless a line of it begins with an agent's
-      name and the words its pattern needs. Not followed, and so never a reason the finding clears: an agent run by a
-      package script (`npm run`), a called workflow or a local composite action; code an earlier action
+      name and the words its pattern needs, and in the steps of a local composite action a step uses
+      (slice 2d.4a), which then runs outside the confined command. Not followed, and so never a reason the
+      finding clears: an agent run by a package script (`npm run`), a called workflow, an action from another
+      repository or a local action the checker cannot read through (named in a note); code an earlier action
       runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
       runner with the firewall's label has the firewall, which the label is taken to mean.

@@ -64,7 +64,7 @@ GitHub's documentation was read for: reusable workflows and the token a called w
 - *A called workflow that declares nothing* holds its caller's token, but was reported as "undeclared", the same facts as a job whose repository default is read-only. Now it is the case `inherited`.
 - The permissions spellings above.
 
-**Not fixed, stated as limits.** The repository's default token permissions are not read. An agent wrapped in a local composite action (`uses: ./.github/actions/x`) does not make the job an agent job: slice 2d.4.
+**Not fixed, stated as limits.** The repository's default token permissions are not read. An agent wrapped in a local composite action (`uses: ./.github/actions/x`) did not make the job an agent job: fixed by slice 2d.4a, which reads the action's steps (tests in `tests/test_local_composite_actions.py`).
 
 ### OBAAF-GHA-004 Agent job can request cloud credentials
 
