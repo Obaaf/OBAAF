@@ -221,9 +221,9 @@ LOCAL_ACTION_UNITS = 30_000
 # And this many for each step of a job that uses a local action, spent only on what that step reads
 # and not kept for another, so the bound grows with the repository (400 jobs that each give one action
 # different inputs are not more than a check reads) and many cheap steps cannot buy a long reading for
-# one heavy action. Reading costs about 40 microseconds a unit, so local actions add at most about
-# 1.3 seconds to a check, and 8 milliseconds for each step that uses one.
-LOCAL_ACTION_UNITS_PER_USE = 200
+# one heavy action. What that costs in time is measured in tests/test_local_composite_actions.py and
+# stated in docs/checker-configuration.md.
+LOCAL_ACTION_UNITS_PER_USE = 100
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
 LOCAL_ACTION_TEXT = 200_000
@@ -248,9 +248,10 @@ def _charge(cache: dict, units: int) -> None:
     own = cache.get(_OWN, 0)
     taken = min(own, units)
     cache[_OWN] = own - taken
-    cache[_READINGS] = cache.get(_READINGS, 0) + units - taken
-    if cache[_READINGS] > LOCAL_ACTION_UNITS:
-        raise _ReadingsExceeded()
+    if units > taken:
+        cache[_READINGS] = cache.get(_READINGS, 0) + units - taken
+        if cache[_READINGS] > LOCAL_ACTION_UNITS:
+            raise _ReadingsExceeded()
 
 
 class _ReadingsExceeded(Exception):
@@ -701,8 +702,9 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     for known in (key, context):
         if known in cache:
             return cache[known]
-    cost = 1 + size // _BYTES_PER_UNIT + sum(len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict)
-                                             and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
+    cost = 1 + size // _BYTES_PER_UNIT + _UNITS_PER_STEP * sum(
+        len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict) and isinstance(raw["runs"].get("steps"), list)
+        else 1 for _, raw in raws)
     _charge(cache, cost)
     if not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
@@ -781,8 +783,10 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     return out
 
 
-# A reading costs one unit, one for each step it reads and one for each this many bytes of its files.
+# A reading costs one unit, three for each step it reads (a step costs about three times as much to read
+# as 200 bytes of text, measured by the review) and one for each this many bytes of its files.
 _BYTES_PER_UNIT = 200
+_UNITS_PER_STEP = 3
 
 
 def _text_size(value) -> int:
@@ -859,7 +863,7 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
                     errors.append(f"{where} reading the check's local actions would cost more than the "
                                   f"units the check spends on them ({LOCAL_ACTION_UNITS} for the check, and "
                                   f"{LOCAL_ACTION_UNITS_PER_USE} for each step that uses one, for that step alone; a "
-                                  "reading costs one, one "
+                                  "reading costs one, three "
                                   "for each step read and one for each 200 bytes of its files or of text its caller "
                                   "hands it, and an action is read once for each set of inputs and environment it is "
                                   "given), so the checker stopped reading them and cannot tell whether an agent runs "
