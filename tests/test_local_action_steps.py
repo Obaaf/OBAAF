@@ -330,7 +330,7 @@ class WhatCannotBeReadTest(unittest.TestCase):
         result = check(job(using({"a": "b"})), {f"{ACTION}/action.yml": composite(steps, ["a"])})
         (note,) = [n for n in result.notes if n.startswith("Local actions were not read through")]
         self.assertIn("reads the action's inputs in a way the checker does not work out", note)
-        self.assertIn("not seen by the other rules", note)
+        self.assertIn("the other rules may not see what their steps do", note)
 
     def test_more_steps_than_one_check_reads_is_an_error(self):
         many = composite("".join(f"- run: echo {n}\n  shell: bash\n" for n in range(LOCAL_STEPS + 1)))
@@ -368,6 +368,113 @@ class WhatCannotBeReadTest(unittest.TestCase):
         loop = composite("- uses: ./.github/actions/x\n")
         result = check(job(using()), {f"{ACTION}/action.yml": loop})
         self.assertTrue(any("comes back to itself" in n for n in result.notes), result.notes)
+
+
+class TheReviewersFirstPassTest(unittest.TestCase):
+    """What the first review pass of slice 2d.4b2 got past or through (2026-11-18), each now a test."""
+
+    def test_an_if_yaml_gives_as_false_or_0_is_kept_under_the_using_steps_if(self):
+        for value in ("false", "0"):
+            with self.subTest(value=value):
+                action_text = composite(f"- run: obaaf verify release dist\n  shell: bash\n  if: {value}\n"
+                                        "- run: npm publish\n  shell: bash\n")
+                result = check(job(using(extra="  if: success()\n"), on="push"), {f"{ACTION}/action.yml": action_text})
+                self.assertIn("OBAAF-GHA-016", {f.rule for f in result.findings})
+                self.assertIn("OBAAF-GHA-017", {f.rule for f in result.findings})
+
+    def test_an_if_false_on_the_using_step_reaches_a_check_inside(self):
+        action_text = composite("- run: obaaf verify release dist\n  shell: bash\n- run: npm publish\n  shell: bash\n")
+        result = check(job(using(extra="  if: false\n"), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertIn("OBAAF-GHA-016", {f.rule for f in result.findings})
+
+    def test_a_more_severe_case_of_a_rule_on_the_same_step_is_added(self):
+        text = job(using() + "- run: gh attestation verify dist/x --owner o\n  shell: bash\n"
+                   "- run: npm publish\n  shell: bash\n", on="push")
+        path = composite("- run: echo /tmp/bin >> \"$GITHUB_PATH\"\n  shell: bash\n")
+        found = {(f.kind, f.severity) for f in check(text, {f"{ACTION}/action.yml": path}).findings
+                 if f.rule == "OBAAF-GHA-016"}
+        self.assertIn(("cannot-tell", "high"), found)
+
+    def test_a_text_too_long_once_its_inputs_are_put_in_is_an_error(self):
+        steps = "- run: |\n    echo \"${{ inputs.title }}\"\n" + "".join(
+            "    : ${{ inputs.p }}\n" for _ in range(100)) + "  shell: bash\n"
+        text = ("name: x\ninputs:\n  title: {default: ''}\n  p:\n    default: '" + "p" * 2100 + "'\n"
+                "runs:\n  using: composite\n  steps:\n" + indent(steps, 4))
+        result = check(job(using({"title": "${{ github.event.issue.title }}"}), on="issues"),
+                       {f"{ACTION}/action.yml": text})
+        self.assertTrue(any("200000 characters" in e for e in result.errors), result.errors)
+
+    def test_inputs_read_another_way_are_every_input(self):
+        for form in ("(inputs).title", "inputs.title || toJSON(inputs)", "join(inputs.*, ' ')",
+                     "fromJSON(toJSON(inputs)).title"):
+            with self.subTest(form=form):
+                steps = "- run: echo \"${{ " + form + " }}\"\n  shell: bash\n"
+                result = check(job(using({"title": "${{ github.event.issue.title }}"}), on="issues"),
+                               {f"{ACTION}/action.yml": composite(steps, ["title"])})
+                self.assertIn("OBAAF-GHA-010", {f.rule for f in result.findings})
+
+    def test_an_action_used_many_times_is_read_once(self):
+        import time
+        big = ("name: b\ndescription: |\n" + "  " + ("d" * 70 + "\n  ") * 6000 +
+               "\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n")
+        outer = composite("".join("- uses: ./.github/actions/b\n" for _ in range(200)))
+        start = time.monotonic()
+        result = check(job(using(), on="push"), {f"{ACTION}/action.yml": outer, ".github/actions/b/action.yml": big})
+        self.assertLess(time.monotonic() - start, 15)
+        self.assertEqual(result.errors, [])
+
+    def test_aliases_are_counted_where_they_are_given(self):
+        anchor = "x" * 50_000
+        env = "".join(f"      K{n}: *a\n" for n in range(100))
+        text = (f"name: x\nx-def: &a {anchor}\nruns:\n  using: composite\n  steps:\n"
+                f"    - run: echo hi\n      shell: bash\n      env:\n{env}")
+        result = check(job(using(), on="push"), {f"{ACTION}/action.yml": text})
+        self.assertTrue(any("2000000 characters" in e for e in result.errors), result.errors)
+
+    def test_the_checks_bound_is_one_error_and_later_jobs_are_not_read(self):
+        from unittest import mock
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./{ACTION}\n" for n in range(6))
+        text = "on: push\npermissions: {contents: read}\njobs:\n" + jobs
+        action_text = composite("".join(f"- run: echo {n}\n  shell: bash\n" for n in range(10)) +
+                                "- uses: actions/setup-node@v4\n")
+        with mock.patch.object(checker, "LOCAL_STEPS_CHECK", 25):
+            result = check(text, {f"{ACTION}/action.yml": action_text})
+        self.assertEqual(len([e for e in result.errors if "for the check" in e]), 1, result.errors)
+        self.assertEqual(sorted({f.job for f in result.findings if f.rule == "OBAAF-GHA-008"}), ["j0", "j1"])
+
+    def test_a_lane_the_action_adds_leaves_the_first_passs_reasons_alone(self):
+        """A job declared trusted that publishes, whose action downloads another run's artifacts, is an
+        effect job to the second pass; the first pass's OBAAF-GHA-015 keeps its reason and identity."""
+        from obaaf.checker import baseline
+        text = ("on: workflow_run\npermissions: {contents: write}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                "    env:\n      OBAAF_LANE: trusted\n    steps:\n"
+                + indent(using() + "- run: npm publish\n  shell: bash\n", 6))
+        download = composite("- run: gh run download ${{ github.event.workflow_run.id }}\n  shell: bash\n")
+        plain = composite("- run: echo hi\n  shell: bash\n")
+        before = {baseline.key(f) for f in check(text, {f"{ACTION}/action.yml": plain}).findings}
+        after = {baseline.key(f) for f in check(text, {f"{ACTION}/action.yml": download}).findings}
+        self.assertLessEqual(before, after)
+
+    def test_a_jobs_own_finding_becomes_more_severe_with_its_identity(self):
+        from obaaf.checker import baseline
+        text = job("- uses: actions/setup-node@v4\n" + using(), on="push")
+        plain = check(text, {f"{ACTION}/action.yml": composite("- run: echo hi\n  shell: bash\n")})
+        publish = check(text, {f"{ACTION}/action.yml": composite("- run: npm publish\n  shell: bash\n")})
+        (low,) = [f for f in plain.findings if f.rule == "OBAAF-GHA-008"]
+        (high,) = [f for f in publish.findings if f.rule == "OBAAF-GHA-008"]
+        self.assertEqual(baseline.key(low), baseline.key(high))
+        self.assertEqual((low.severity, high.severity), ("low", "high"))
+
+    def test_the_release_finding_names_the_publishing_step_inside(self):
+        result = check(job(using(), on="pull_request_target"),
+                       {f"{ACTION}/action.yml": composite("- run: npm publish\n  shell: bash\n")})
+        (facts,) = [f.facts for f in result.findings if f.rule == "OBAAF-GHA-015"]
+        self.assertEqual(facts["steps"], ["npm publish"])
+        self.assertEqual(facts["reason"], "uploads or publishes artifacts, in a local action it uses")
+
+    def test_a_step_with_neither_run_nor_uses_is_in_the_note(self):
+        result = check(job(using()), {f"{ACTION}/action.yml": composite("- Run: echo hi\n  shell: bash\n")})
+        self.assertTrue(any("neither `run` nor `uses`" in n for n in result.notes), result.notes)
 
 
 if __name__ == "__main__":

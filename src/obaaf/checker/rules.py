@@ -20,7 +20,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    LANE_ORDER, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -257,19 +257,23 @@ _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-a
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
 
-def _through_view(workflow: Workflow) -> Workflow:
+def _through_view(workflow: Workflow, detection: dict | None = None, agents: dict | None = None) -> Workflow:
     """A copy of `workflow` whose jobs have, after each step that uses a local composite action, the
     steps of that action (`Job.local_steps`), numbered in the order they run (flagship slice 2d.4b2). A
     job's own steps keep their names, so a finding on one is the finding the first pass would give, and
     the steps that run an agent are renumbered with them. Nothing of `workflow` is changed."""
     view = copy.copy(workflow)
-    view.jobs = {job_id: through_job(job, view) if job.local_steps else job for job_id, job in workflow.jobs.items()}
+    view.jobs = {job_id: through_job(job, view, detection, agents) if job.local_steps else job
+                 for job_id, job in workflow.jobs.items()}
     return view
 
 
-def through_job(job: Job, workflow: Workflow) -> Job:
+def through_job(job: Job, workflow: Workflow, detection: dict | None = None, agents: dict | None = None) -> Job:
     """A copy of `job` in `workflow` whose steps are its own, each followed by the steps of the local
-    composite action it uses, numbered in the order they run (flagship slice 2d.4b2)."""
+    composite action it uses, numbered in the order they run (flagship slice 2d.4b2). With `detection`,
+    the copy is also put in each lane those steps put a job in (a step that publishes makes a release
+    job), as the job's own steps would; the job itself is left in its lanes, so its findings and their
+    reasons in the first pass are as they were."""
     copied = copy.copy(job)
     steps: list = []
     renumbered: dict = {}
@@ -283,6 +287,14 @@ def through_job(job: Job, workflow: Workflow) -> Job:
     copied.lanes = dict(job.lanes)
     copied.agent_script_steps = {renumbered[i] for i in job.agent_script_steps if i in renumbered}
     copied.agent_step_why = {renumbered[i]: why for i, why in job.agent_step_why.items() if i in renumbered}
+    if detection is not None:
+        added = False
+        for lane, why in _inferred_lanes(copied, detection, agents or {}).items():
+            if lane not in copied.lanes and lane in LANE_ORDER:
+                copied.lanes[lane] = f"{why}, in a local action it uses"
+                added = True
+        if added:
+            copied.settle_lane()
     return copied
 
 
@@ -365,21 +377,32 @@ class WorkflowRules:
         if getattr(self, "_through", False) or not any(job.local_steps for job in self.wf.jobs.values()):
             return
         from obaaf.checker import baseline as baseline_mod   # baseline imports this module
-        view = _through_view(self.wf)
+        view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
                                firewall=self.firewall)
         second._through = True
         found = second.run()
+        order = {"high": 0, "medium": 1, "low": 2}
         inner = {step.name for job in view.jobs.values() for step in job.steps if step.via is not None}
-        there = {(f.rule, f.job, f.step) for f in self.findings}
-        known = {baseline_mod.key(f) for f in self.findings}
+        first: dict = {}
+        for finding in self.findings:
+            first.setdefault((finding.rule, finding.job, finding.step), []).append(finding)
+        known = {baseline_mod.key(f): f for f in self.findings}
         for finding in found:
-            if finding.step not in inner and (finding.rule, finding.job, finding.step) in there:
-                continue
             key = baseline_mod.key(finding)
-            if key not in known:
-                known.add(key)
-                self.findings.append(finding)
+            same = known.get(key)
+            if same is not None:
+                # The same finding, which the steps of the job's local actions make more severe (a job they
+                # make a release job): the first pass's finding is raised, and an acceptance still names it.
+                if order.get(finding.severity, 3) < order.get(same.severity, 3):
+                    same.severity = finding.severity
+                continue
+            there = first.get((finding.rule, finding.job, finding.step), [])
+            if finding.step not in inner and there and all(
+                    order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
+                continue      # the first pass has this rule here, at least as severe
+            known[key] = finding
+            self.findings.append(finding)
 
     # -------------------------------------------------------------- GHA-023
     def placeholders(self) -> None:

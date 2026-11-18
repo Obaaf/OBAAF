@@ -1050,7 +1050,7 @@ def _local_action_notes(unread: list) -> list[str]:
                       for path, job, action, why in unique[:5])
     more = f"; and {len(unique) - 5} more" if len(unique) > 5 else ""
     return [f"Local actions were not read through in {len(unique)} place(s), so an agent run inside them does not "
-            f"put the job in the agent lane, and what is not read there is not seen by the other rules: {shown}{more}. "
+            f"put the job in the agent lane, and the other rules may not see what their steps do: {shown}{more}. "
             "If one runs an AI agent, set OBAAF_LANE: agent on its job, "
             "or declare the agent's command in agents.commands in .github/obaaf.yml (docs/checker-configuration.md)."]
 
@@ -1059,7 +1059,9 @@ def _local_action_notes(unread: list) -> list[str]:
 # that uses them. Past either, it stops reading that job's local actions and reports an error, which fails
 # the check: what an action's author writes must not be a way to make the rules read less than they say.
 LOCAL_STEPS = 1_000               # steps of local actions in one job, counted once for each use
-LOCAL_STEPS_TEXT = 2_000_000      # characters of those steps' texts, the inputs put in
+LOCAL_STEPS_TEXT = 2_000_000      # characters of those steps' texts, the inputs put in, as the rules read them
+LOCAL_STEPS_CHECK = 10_000        # the same, for every job of one check together
+LOCAL_STEPS_CHECK_TEXT = 10_000_000
 
 
 class _StepsExceeded(Exception):
@@ -1149,9 +1151,18 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
                     and toks[i + 3] == ("op", "]"):
                 name, width = toks[i + 2][1], 4
             if name is None:
-                problems.append("an expression reads the action's inputs in a way the checker does not work out "
-                                f"('{wf_mod.one_line(body, 60)}')")
-                return body
+                # `toJSON(inputs)`, `(inputs).x`, `inputs.*`, a computed index: any input may be what it gives, so
+                # every input's value is put in its place, as arguments of `format()`, the wider reading.
+                problems.append("an expression reads the action's inputs in a way the checker does not work out, so "
+                                f"every input it is given is read in its place ('{wf_mod.one_line(body, 60)}')")
+                values = list(inputs.values()) or [""]
+                out += [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(values))))]
+                for value in values:
+                    out += [("op", ","), *_value_tokens(value)]
+                out.append(("op", ")"))
+                i += 1
+                changed = True
+                continue
             out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), "")))
             i += width
             changed = True
@@ -1177,45 +1188,83 @@ def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: 
                           if re.search(r"\binputs\b", body, re.I) else expr_mod.OPEN + body + expr_mod.CLOSE
                           for kind, body in parts)
     if len(put) > LOCAL_ACTION_TEXT:
-        problems.append("its inputs, put in, make a text longer than the checker reads")
-        put = text
-    state["chars"] = state.get("chars", 0) + len(put)
-    if state["chars"] > LOCAL_STEPS_TEXT:
+        # Left as written, the text would hide what its inputs hold, so this is the error the bounds give.
         raise _StepsExceeded()
     return put
 
 
+def _charge_steps(state: dict, steps: int = 0, chars: int = 0) -> None:
+    """Count steps and characters of local actions read for the rules, for the job and for the check;
+    past a bound, `_StepsExceeded`."""
+    for scope, step_limit, text_limit in ((state, LOCAL_STEPS, LOCAL_STEPS_TEXT),
+                                          (state["check"], LOCAL_STEPS_CHECK, LOCAL_STEPS_CHECK_TEXT)):
+        scope["steps"] = scope.get("steps", 0) + steps
+        scope["chars"] = scope.get("chars", 0) + chars
+        if scope["steps"] > step_limit or scope["chars"] > text_limit:
+            raise _StepsExceeded()
+
+
 def _inputs_put_in_value(value, inputs: dict, folder: str, problems: list, state: dict, done: dict):
     """A step's value with `_inputs_put_in` applied to every text it holds, each value YAML gives many
-    times through an alias worked on once."""
+    times through an alias worked on once, but counted (`_charge_steps`) each time it is given: the rules
+    read it each time (the review found 1,000 aliases of a 900 KB text that took a minute and 1.8 GB)."""
+    out, size = _put_in_sized(value, inputs, folder, problems, state, done)
+    _charge_steps(state, chars=size)
+    return out
+
+
+def _put_in_sized(value, inputs: dict, folder: str, problems: list, state: dict, done: dict):
+    """`_inputs_put_in_value` without the charge: the value put in, and its size as the rules will read it
+    (its characters, and one for each key and item), worked out once for each value however many times it
+    is given. A size past the bound stops the reading at once."""
     if id(value) in done:
         return done[id(value)]
     if isinstance(value, str):
         out = _inputs_put_in(value, inputs, folder, problems, state)
+        found = (out, len(out) + 1)
     elif isinstance(value, dict):
-        out = {}
-        done[id(value)] = out
+        out: Any = {}
+        done[id(value)] = (out, 1)       # a mapping that holds itself is counted once
+        size = 1
         for key, item in value.items():
-            out[key] = _inputs_put_in_value(item, inputs, folder, problems, state, done)
+            out[key], item_size = _put_in_sized(item, inputs, folder, problems, state, done)
+            size += item_size + 1 + (len(key) if isinstance(key, str) else 0)
+            if size > LOCAL_STEPS_TEXT:
+                raise _StepsExceeded()
+        found = (out, size)
     elif isinstance(value, list):
         out = []
-        done[id(value)] = out
-        out.extend(_inputs_put_in_value(item, inputs, folder, problems, state, done) for item in value)
+        done[id(value)] = (out, 1)
+        size = 1
+        for item in value:
+            put, item_size = _put_in_sized(item, inputs, folder, problems, state, done)
+            out.append(put)
+            size += item_size + 1
+            if size > LOCAL_STEPS_TEXT:
+                raise _StepsExceeded()
+        found = (out, size)
     else:
-        out = value
-    done[id(value)] = out
-    return out
+        found = (value, 1)
+    done[id(value)] = found
+    return found
 
 
 def _both_conditions(outer, inner):
     """The `if:` under which a step of a local action runs: its own and that of the step that uses the
     action, both, as one expression. A condition GitHub reads as a string (always true) adds nothing."""
-    outer_body = wf_mod.condition_expression(outer) if isinstance(outer, str) and outer.strip() else None
-    inner_body = wf_mod.condition_expression(inner) if isinstance(inner, str) and inner.strip() else None
+    def body(cond):
+        if cond is None or (isinstance(cond, str) and not cond.strip()):
+            return None
+        if not isinstance(cond, str):
+            # `if: false`, `if: 0`: YAML gives a value that is not text, which GitHub reads as that expression.
+            return wf_mod.as_text(cond).strip() or None
+        return wf_mod.condition_expression(cond)
+
+    outer_body, inner_body = body(outer), body(inner)
     if outer_body is None:
         return inner
     if inner_body is None:
-        return outer
+        return outer if isinstance(outer, str) else f"{expr_mod.OPEN} {outer_body} {expr_mod.CLOSE}"
     return f"{expr_mod.OPEN} ({outer_body}) && ({inner_body}) {expr_mod.CLOSE}"
 
 
@@ -1237,70 +1286,71 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
     shown = wf_mod.one_line(uses, 120)
     prefix = outer_name if outer_name == shown or outer_name.endswith(f": {shown}") else f"{outer_name} > {shown}"
     out: list = []
-    for folder in folders:
-        raws, _ = _read_local_action(root, folder)
-        for raw in raws:
-            runs = raw.get("runs")
-            using = runs.get("using") if isinstance(runs, dict) else None
-            if not (isinstance(using, str) and using.strip().lower() == "composite"):
+    # The action's files are read once for the check: from 2d.4a's reading when it read them, else here.
+    files_key = ("files", tuple(folders))
+    known = state.get("agent") or {}
+    files = state["check"].setdefault("files", {})
+    if files_key in known:
+        pairs = list(known[files_key][0])
+    elif files_key in files:
+        pairs = files[files_key]
+    else:
+        pairs = files[files_key] = [(folder, raw) for folder in folders for raw in _read_local_action(root, folder)[0]]
+    for folder, raw in pairs:
+        runs = raw.get("runs")
+        using = runs.get("using") if isinstance(runs, dict) else None
+        if not (isinstance(using, str) and using.strip().lower() == "composite"):
+            continue
+        steps = runs.get("steps")
+        if not isinstance(steps, list):
+            continue
+        inputs = _action_inputs(raw, given)
+        for number, step_raw in enumerate(steps, start=1):
+            if not isinstance(step_raw, dict):
                 continue
-            steps = runs.get("steps")
-            if not isinstance(steps, list):
-                continue
-            inputs = _action_inputs(raw, given)
-            for number, step_raw in enumerate(steps, start=1):
-                if not isinstance(step_raw, dict):
-                    continue
-                state["steps"] = state.get("steps", 0) + 1
-                if state["steps"] > LOCAL_STEPS:
-                    raise _StepsExceeded()
-                problems: list = []
-                # The step's own fields are in the action's terms, so its inputs are put into them; the using
-                # step's `env`, in the caller's terms, goes under its own `env` after.
-                put = dict(_with_env(_inputs_put_in_value(step_raw, inputs, folder, problems, state, {}), given_env))
-                own_if = put.get("if")
-                if isinstance(own_if, str) and expr_mod.OPEN not in own_if and re.search(r"\binputs\b", own_if, re.I):
-                    # A condition written without `${{ }}` is an expression all the same.
-                    put["if"] = _inputs_put_in_body(own_if, inputs, problems)
-                both = _both_conditions(outer.get("if"), put.get("if"))
-                if both is not None:
-                    put["if"] = both
-                if rules_mod._continues_on_error(outer) and not rules_mod._continues_on_error(put):
-                    put["continue-on-error"] = outer.get("continue-on-error")
-                own = wf_mod.as_text(step_raw.get("name") or step_raw.get("id") or step_raw.get("uses")
-                                     or f"step {number}")
-                name = f"{prefix}: {wf_mod.one_line(own, 120)}"
-                if len(folders) > 1 or len(raws) > 1:
-                    name += f" ({folder})"
-                step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name)
-                out.append(step)
-                unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
-                inner_uses = step_raw.get("uses")
-                if _is_local_like(step.uses) and not (isinstance(inner_uses, str) and expr_mod.OPEN in inner_uses):
-                    out.extend(_local_steps(root, step.uses, step.with_, step.env, put, name, top, depth + 1,
-                                            seen | set(folders), state, unread))
+            _charge_steps(state, steps=1)
+            problems: list = []
+            if "run" not in step_raw and "uses" not in step_raw:
+                problems.append("it has neither `run` nor `uses`, so the checker reads nothing of what it does")
+            # The step's own fields are in the action's terms, so its inputs are put into them; the using
+            # step's `env`, in the caller's terms, goes under its own `env` after.
+            put = dict(_with_env(_inputs_put_in_value(step_raw, inputs, folder, problems, state, {}), given_env))
+            own_if = put.get("if")
+            if isinstance(own_if, str) and expr_mod.OPEN not in own_if and re.search(r"\binputs\b", own_if, re.I):
+                # A condition written without `${{ }}` is an expression all the same.
+                put["if"] = _inputs_put_in_body(own_if, inputs, problems)
+            both = _both_conditions(outer.get("if"), put.get("if"))
+            if both is not None:
+                put["if"] = both
+            if rules_mod._continues_on_error(outer) and not rules_mod._continues_on_error(put):
+                put["continue-on-error"] = outer.get("continue-on-error")
+            own = wf_mod.as_text(step_raw.get("name") or step_raw.get("id") or step_raw.get("uses")
+                                 or f"step {number}")
+            name = f"{prefix}: {wf_mod.one_line(own, 120)}"
+            if len(pairs) > 1:
+                name += f" ({folder})"
+            step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name)
+            out.append(step)
+            unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
+            inner_uses = step_raw.get("uses")
+            if _is_local_like(step.uses) and not (isinstance(inner_uses, str) and expr_mod.OPEN in inner_uses):
+                out.extend(_local_steps(root, step.uses, step.with_, step.env, put, name, top, depth + 1,
+                                        seen | set(folders), state, unread))
     return out
 
 
 def _apply_local_action_steps(workflow, root: Path | None, unread: list, errors: list, state: dict,
                               extra_agents: dict | None = None) -> None:
     """Give each job the steps of the local composite actions its steps use, for the rules to read as its
-    own (flagship slice 2d.4b2), and put it in each lane those steps put a job in (a step there that
-    publishes makes a release job), as the job's own steps would: a job never leaves a lane, so this
-    only adds rules. With no `root` nothing is read: 2d.4a's reader names every local action of such a
+    own (flagship slice 2d.4b2; the lanes those steps put a job in are added to the copy the second pass
+    reads, `rules.through_job`, so the first pass is as it was). With no `root` nothing is read: 2d.4a's reader names every local action of such a
     file as not read. An action file the checker cannot read is an error 2d.4a's reader gives already,
     and is given here only when it did not; more of local actions than one check reads is an error once
     per check."""
     if root is None:
         return
-    detection = load().detection
     for job in workflow.jobs.values():
         _job_local_steps(workflow, job, root, unread, errors, state)
-        if job.local_steps:
-            view = rules_mod.through_job(job, workflow)
-            for lane, why in wf_mod._inferred_lanes(view, detection, extra_agents or {}).items():
-                if not job.in_lane(lane):
-                    job.add_lane(lane, f"{why}, in a local action it uses")
 
 
 def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, state: dict) -> None:
@@ -1308,7 +1358,10 @@ def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, stat
     The bounds are per job; past them the job's local actions are not read for the rules, an error,
     unless 2d.4a's reader already stopped reading this check's local actions, which is an error that
     says so."""
-    state = {"agent": state.get("agent")}
+    if state.get("exceeded"):
+        return          # the check's bound was passed in an earlier job, and its error says so
+    check_state = state
+    state = {"agent": state.get("agent"), "check": state}
     for step in job.steps:
         if not _is_local_like(step.uses) or expr_mod.OPEN in step.uses:
             continue
@@ -1324,10 +1377,15 @@ def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, stat
                 errors.append(f"{said}, so the checker cannot read what its steps do")
             continue
         except _StepsExceeded:
+            if check_state.get("steps", 0) > LOCAL_STEPS_CHECK or check_state.get("chars", 0) > LOCAL_STEPS_CHECK_TEXT:
+                check_state["exceeded"] = True
             if not (state["agent"] or {}).get(_EXCEEDED):
-                errors.append(f"{where} reading the job's local actions as its steps would give more than "
-                              f"{LOCAL_STEPS} steps, or more than {LOCAL_STEPS_TEXT} characters with their inputs "
-                              "put in, so the checker stopped reading them and cannot tell what their steps do")
+                errors.append(f"{where} reading local actions as steps of the jobs that use them would give more than "
+                              f"{LOCAL_STEPS} steps or {LOCAL_STEPS_TEXT} characters for this job, or "
+                              f"{LOCAL_STEPS_CHECK} steps or {LOCAL_STEPS_CHECK_TEXT} characters for the check "
+                              f"(counted with their inputs put in, and one text of more than {LOCAL_ACTION_TEXT} "
+                              "characters), so the checker stopped reading this job's and cannot tell what their "
+                              "steps do")
             job.local_steps.clear()
             return
         except (RecursionError, MemoryError):
@@ -2137,7 +2195,10 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             errors.append(f"{rel}: too deeply nested or too large to read; the checker cannot tell what this "
                           "file does")
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
-        out += [(rel, job.id, job.lane, job.lane_reason) for job in workflow.jobs.values()]
+        # A job's lanes as the rules' second pass reads them, with the steps of its local actions (2d.4b2).
+        shown = [rules_mod.through_job(job, workflow, catalog.detection, config.agents) if job.local_steps else job
+                 for job in workflow.jobs.values()]
+        out += [(rel, job.id, job.lane, job.lane_reason) for job in shown]
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()
         seen.append(rel)

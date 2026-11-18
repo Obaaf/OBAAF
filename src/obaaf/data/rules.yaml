@@ -235,8 +235,9 @@ rules:
       same branch or the default branch, so a poisoned entry would reach the release build. A release
       job with no cache step but no `cache-mode: none` is reported at low severity. Since flagship slice
       2d.2e: an input written as an expression is read as the value that restores, a local action is
-      taken to restore whatever it holds (since slice 2d.4b2 its steps are also read as the job's, so a cache
-      step inside it is reported on that step too), `lookup-only: true` restores nothing, and a release
+      taken to restore whatever it holds (since slice 2d.4b2 its steps are also read as the job's, but the
+      rule gives one finding for a job, on the first step that restores, which is then the using step),
+      `lookup-only: true` restores nothing, and a release
       job that downloads artifacts is reported when a job it needs, directly or not, restores a cache
       (kind `needed-job-restores`; it may name a job whose output the release does not use). Not
       followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), a cache-mode
@@ -371,7 +372,8 @@ rules:
       and for a commit's text on `push`, `merge_group` and a `workflow_run` after a push, where a merged
       pull request's title and branch name are in the merge commit's message; medium otherwise. Not
       followed: values set while the job runs (`GITHUB_ENV`, step outputs), values passed into
-      reusable workflows (`inputs`) and composite actions, the inputs of other actions, a `with:`
+      reusable workflows (`inputs`; slice 2d.4b3), an action's `outputs` read in the job, the inputs of
+      other actions (since slice 2d.4b2 a local composite action's steps are read with its inputs put in), a `with:`
       written as one expression, and the `env` of a `parallel` group. It does not work out whether an
       expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is
       reported too; an acceptance of it names the expression. A matrix that holds one outsider-written
