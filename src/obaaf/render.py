@@ -239,12 +239,12 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
     effort = s["effort"]
     out = ["# Self-assessment checklist", "", GENERATED, "", DRAFT_NOTE, "",
            f"Version {s['version']} ({s['status']}). Source: {s['source']} ([*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802)). For a software "
-           "team without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named "
+           "team without security staff. For each of the 34 questions, answer Yes, No or Not sure using the evidence named "
            "beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that "
            "the pilot will test.", "",
            "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An item "
            "may be marked not applicable (N/A) only when its condition is absent, as noted beside it; N/A counts as "
-           "yes. A tier describes controls in place, not a guarantee of security.", "",
+           "yes. The tier reflects the answers you supplied.", "",
            "Fill it in on paper, in the [offline form](../assessment/obaaf-self-assessment.html), or as a file "
            "scored with `obaaf assess score`. Your answers never leave your machine.", ""]
     for tier_id in sorted(c.tiers):
@@ -256,7 +256,7 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
             if item["tier"] != tier_id:
                 continue
             q = item["question"] + (f" *N/A only if: {item['na_when']}*" if item.get("na_when") else "")
-            boxes = "☐ Yes ☐ No" + (" ☐ N/A" if item.get("na_when") else "")
+            boxes = "☐ Yes ☐ No ☐ Not sure" + (" ☐ N/A" if item.get("na_when") else "")
             profile = ", ".join(item["profile"]) + (f", Tier {item['isolation_tier']}" if item.get("isolation_tier")
                                                      else "")
             out.append(f"| {iid} | {q} | {item['evidence']} | {effort[item['effort']]['label']} | "

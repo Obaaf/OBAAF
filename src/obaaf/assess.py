@@ -241,6 +241,7 @@ def to_text(result: Result, catalog: Catalog | None = None, limit: int = 10) -> 
     who = f" for {result.answers.studio}" if result.answers.studio else ""
     out.append(f"OBAAF self-assessment{who}")
     out.append(f"Tier reached: {result.tier} ({result.tier_name})")
+    out.append("The tier reflects the answers you supplied.")
     for tier, counts in result.per_tier.items():
         satisfied = counts["yes"] + counts["na"]
         out.append(f"  Tier {tier} {catalog.tiers[tier]['name']:<11} {satisfied:>2}/{counts['items']} satisfied")
@@ -256,9 +257,9 @@ def to_text(result: Result, catalog: Catalog | None = None, limit: int = 10) -> 
             label = effort[item["effort"]]["label"].lower()
             out.append(f"{fix.rank:>3}. {item['id']} {item['short']} [tier {item['tier']}, {label}]")
             if fix.prevents:
-                out.append(f"       Would have prevented: {_case_names(fix.prevents)}")
+                out.append(f"       Cases mapped to prevention: {_case_names(fix.prevents)}")
             if fix.limits:
-                out.append(f"       Detects or limits: {_case_names(fix.limits)}")
+                out.append(f"       Cases mapped to detection or containment: {_case_names(fix.limits)}")
             out.append(f"       How: {item['fix'][0]}")
     else:
         out.append("All items satisfied.")
@@ -277,7 +278,7 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     meta.append(f"Scored by obaaf {__version__}")
     out += [" · ".join(meta), ""]
     out.append(f"**Tier reached: {result.tier} ({result.tier_name}).** "
-               "A tier describes controls in place, not a guarantee of security.")
+               "The tier reflects the answers you supplied.")
     out.append("")
     out.append("| Tier | Satisfied | No | Unanswered |")
     out.append("| --- | --- | --- | --- |")
@@ -288,10 +289,9 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     if result.fixes:
         out.append("## What to fix next")
         out.append("")
-        out.append("Ranked lowest tier first, then lowest effort, then by the documented compromises each item "
-                   "addresses.")
+        out.append("Ranked lowest tier first, then lowest effort, then by the documented cases mapped to each item.")
         out.append("")
-        out.append("| # | Item | Tier | Effort | Documented cases it addresses | How to fix |")
+        out.append("| # | Item | Tier | Effort | Mapped cases | How to fix |")
         out.append("| --- | --- | --- | --- | --- | --- |")
         effort = catalog.assessment["effort"]
         for fix in result.fixes:
