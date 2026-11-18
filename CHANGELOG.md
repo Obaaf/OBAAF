@@ -12,7 +12,7 @@ Slice 2d.4a (issue #80, part of 2d.4); decision D-081. A way past OBAAF-GHA-003,
 
 - **A step that uses an action of the repository itself** (`uses: ./.github/actions/run-agent`, or `$/...`) now makes its job an agent job when the action is a composite action and an agent runs in its steps. The checker reads `action.yml` (and `action.yaml`, when both are there). It looks for:
   - an agent action, or an agent CLI in any command line;
-  - each `${{ inputs.name }}` worked out from the using step's `with:` or the action's `default` (also in `( )`, `||`, `&&` and `format()`; any other expression as each input it reads), with the using step's `env`, also as `${{ env.NAME }}`;
+  - each `${{ inputs.name }}` worked out from the using step's `with:` or the action's `default` (also in `( )`, `||`, `&&` and `format()`; any other expression as each input it reads), with the using step's `env`, also as `${{ env.NAME }}` (its own inputs put in);
   - a repository script a step runs, from the repository's root, or from the action's folder when the step goes there with `working-directory`, `cd` or `pushd` (`github.action_path` and `$GITHUB_ACTION_PATH` put in);
   - the further local actions it uses, up to ten deep.
 
@@ -22,13 +22,13 @@ Slice 2d.4a (issue #80, part of 2d.4); decision D-081. A way past OBAAF-GHA-003,
   - a JavaScript or Docker action;
   - a missing action file;
   - a path outside the repository or with an expression;
-  - an expression that reads an input nested more than 64 parentheses, or eight `||`, `&&` or `format()`, deep, or an input or `env` value too long once put in;
+  - an expression that reads an input or the environment nested more than 64 parentheses, or eight `||`, `&&` or `format()`, deep, or that can give more than 16 texts, or an input or `env` value too long once put in;
   - a `runs.using` it does not read, `runs.steps` that is not a list, or a step that is not a mapping;
   - a chain that comes back to itself or is more than ten deep;
   - every local action of a workflow checked on its own.
 
   The note names the first five places by file, job, action and reason, and counts the rest.
-- **An action file it cannot read is an error, which fails the check, as a workflow file is.** That is one that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is over 1 MB. So is a check that needs to read more than 30,000 steps of local actions (each action's steps once for each set of values of the inputs its expressions read and of the environment it is given).
+- **An action file it cannot read is an error, which fails the check, as a workflow file is.** That is one that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is over 1 MB. So is a check whose local actions would cost more than 30,000 units to read (one for each reading of an action, each step read and each 200 bytes; an action is read once for each set of values of the inputs its expressions read and of the environment it is given).
 - **Not changed:**
   - an action from another repository is not read;
   - a called local reusable workflow is read as before (slice 2d.4b);

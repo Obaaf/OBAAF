@@ -201,12 +201,13 @@ def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
 LOCAL_ACTION_DEPTH = 10
 # The largest action file read; a larger one is an error, as a workflow the checker cannot read is.
 LOCAL_ACTION_BYTES = 1_000_000
-# How many steps of local actions one check reads: each action's steps once for each set of values of
-# the inputs its expressions read and of the environment it is given, and once more for each place a
-# cycle or the depth cuts a reading short. Beyond it the check stops reading them and fails with an
+# How much of local actions one check reads, in units: a reading of an action costs one, one for each
+# of its steps and one for each 200 bytes of its files, and an action is read once for each set of
+# values of the inputs its expressions read and of the environment it is given, and once more for each
+# place a cycle or the depth cuts a reading short. Beyond it the check stops reading them and fails with an
 # error, so local actions that use each other many times over, with different inputs, can neither make
 # the check slow nor hide an agent in a job read after them.
-LOCAL_ACTION_STEPS = 30_000
+LOCAL_ACTION_UNITS = 30_000
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
 LOCAL_ACTION_TEXT = 200_000
@@ -223,7 +224,7 @@ _READINGS = "readings"      # the counter's key in the cache, which no (folders,
 
 
 class _ReadingsExceeded(Exception):
-    """More steps of local actions than one check reads (`LOCAL_ACTION_STEPS`)."""
+    """More of local actions than one check reads (`LOCAL_ACTION_UNITS`)."""
 
 
 @dataclass
@@ -377,6 +378,17 @@ def _input_names(toks: list) -> list[str]:
     return names
 
 
+_VALUE_LIMIT = 16      # values an expression is read as, and readings of one text; more is named in the note
+
+
+def _capped(values: list, cut: list) -> list:
+    """`values` without repeats, at most `_VALUE_LIMIT`; `cut` gets an entry when some are left out."""
+    unique = list(dict.fromkeys(values))
+    if len(unique) > _VALUE_LIMIT:
+        cut.append(True)
+    return unique[:_VALUE_LIMIT]
+
+
 def _top_level_comparison(toks: list) -> bool:
     """Whether a comparison (`==`, `!=`, `<`, `>`, `!`) stands outside every bracket of `toks`."""
     depth = 0
@@ -392,7 +404,8 @@ def _top_level_comparison(toks: list) -> bool:
     return False
 
 
-def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: dict | None = None) -> list[str] | None:
+def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: dict | None = None,
+                  cut: list | None = None) -> list[str] | None:
     """The texts an expression in a composite action's step can give, read the widest way, at most 16.
     An input, `github.action_path` and a literal are worked out; parentheses, `||` and `&&` (any operand
     can be the result) and `format()` are followed; a comparison or a function that gives true or false
@@ -415,11 +428,11 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
     if len(parts) > 1:
         out: list = []
         for part in parts:
-            values = _token_values(part, inputs, folder, depth + 1, env)
+            values = _token_values(part, inputs, folder, depth + 1, env, cut)
             if values is None:
                 return None
             out.extend(values)
-        return list(dict.fromkeys(out))[:16]
+        return _capped(out, cut if cut is not None else [])
     head = toks[0]
     if len(toks) == 1 and head[0] in ("str", "num"):
         return [head[1]]
@@ -441,7 +454,7 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
                 return [wf_mod.as_text(given.get(name.upper(), ""))]
             return [""]
     if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
-        args = [_token_values(arg, inputs, folder, depth + 1, env) for arg in _split_top(toks[2:-1], ",")]
+        args = [_token_values(arg, inputs, folder, depth + 1, env, cut) for arg in _split_top(toks[2:-1], ",")]
         if args and all(values for values in args):
 
             def filled(template: str, choice: list) -> str:
@@ -450,19 +463,21 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
                 return template
 
             out = []
+            if len(args[0]) > 4 or any(len(values) > 4 for values in args[1:]):
+                (cut if cut is not None else []).append(True)
             for template in args[0][:4]:
                 first = [values[0] for values in args[1:]]
                 out.append(filled(template, first))
                 for n, values in enumerate(args[1:]):
                     for other in values[1:4]:
                         out.append(filled(template, first[:n] + [other] + first[n + 1:]))
-            return list(dict.fromkeys(out))[:16]
+            return _capped(out, cut if cut is not None else [])
     if _top_level_comparison(toks) or (head[0] == "id" and head[1].lower() in _BOOLEAN_FUNCTIONS
                                        and _wraps(toks[1:])):
         return ["true", "false"]
     names = _input_names(toks)
     values = list(inputs.values()) if "*" in names else [inputs.get(name, "") for name in names]
-    return list(dict.fromkeys(values + [""]))[:16]
+    return _capped(values + [""], cut if cut is not None else [])
 
 
 def _action_inputs(raw: dict, given: dict) -> dict:
@@ -494,12 +509,17 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | No
         whole = "${{" + body + "}}"
         if whole not in text or not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
-        values = _token_values(expr_mod.tokens(body), inputs, folder, env=env)
+        cut: list = []
+        values = _token_values(expr_mod.tokens(body), inputs, folder, env=env, cut=cut)
         if values is None:
-            problems.append(f"an expression that reads an input is nested more deeply than the checker works out "
-                            f"('{wf_mod.one_line(whole, 60)}')")
+            problems.append(f"an expression that reads an input or the environment is nested more deeply than the "
+                            f"checker works out ('{wf_mod.one_line(whole, 60)}')")
             continue
-        readings = [r.replace(whole, value) for r in readings for value in dict.fromkeys(values)][:16]
+        readings = _capped([r.replace(whole, value) for r in readings for value in values], cut)
+        if cut:
+            problems.append(f"an expression that reads an input or the environment can give more than "
+                            f"{_VALUE_LIMIT} texts, and the checker reads only {_VALUE_LIMIT} "
+                            f"('{wf_mod.one_line(whole, 60)}')")
     out = "\n".join(dict.fromkeys(readings))
     if len(out) > LOCAL_ACTION_TEXT:
         problems.append("its inputs, put in, make a text longer than the checker reads")
@@ -637,8 +657,9 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 raws.extend((folder, raw) for raw in found)
             else:
                 missing.append(why)
-        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws))
-    raws, missing, read_names = cache[files_key]
+        size = sum(_action_size(root, folder) for folder in folders)
+        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size)
+    raws, missing, read_names, size = cache[files_key]
 
     def fixed(mapping, names=None):
         return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
@@ -652,11 +673,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     for known in (key, context):
         if known in cache:
             return cache[known]
-    cost = 1 + sum(len(raw.get("runs", {}).get("steps") or ()) if isinstance(raw.get("runs"), dict)
-                   and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
+    cost = 1 + size // _BYTES_PER_UNIT + sum(len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict)
+                                             and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
     readings = cache.get(_READINGS, 0) + cost
     cache[_READINGS] = readings
-    if readings > LOCAL_ACTION_STEPS:
+    if readings > LOCAL_ACTION_UNITS:
         raise _ReadingsExceeded()
     if not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
@@ -685,9 +706,15 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             problems: list = []
             put, done, ignored = {}, {}, {}
             merged = _with_env(step_raw, given_env)
+            # The step's `env` first, with its inputs put in, so `${{ env.T }}` elsewhere reads what GitHub
+            # gives it (`T: ${{ inputs.tool }}`).
             step_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
+            if step_env:
+                step_env = _put_inputs(step_env, inputs, folder, problems, done, step_env)
             for key_name, value in merged.items():
-                if key_name in _COMMAND_FIELDS:
+                if key_name == "env":
+                    put[key_name] = step_env
+                elif key_name in _COMMAND_FIELDS:
                     put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env)
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
@@ -722,6 +749,22 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     # A reading a cycle or the depth cut short is kept only for a use in the same place in a chain.
     cache[context if out.cut else key] = out
     return out
+
+
+# A reading costs one unit, one for each step it reads and one for each this many bytes of its files.
+_BYTES_PER_UNIT = 200
+
+
+def _action_size(root: Path, folder: str) -> int:
+    """The bytes of the action files in `folder`, as `_read_local_action` read them."""
+    prefix = "" if folder == "." else f"{folder}/"
+    total = 0
+    for name in (f"{prefix}action.yml", f"{prefix}action.yaml"):
+        try:
+            total += min((root / name).stat().st_size, LOCAL_ACTION_BYTES)
+        except (OSError, RuntimeError):
+            continue
+    return total
 
 
 def _inputs_read(raws) -> set:
@@ -773,9 +816,11 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
             except _ReadingsExceeded:
                 if not cache.get(_EXCEEDED):
                     cache[_EXCEEDED] = True
-                    errors.append(f"{where} the check needed to read more than {LOCAL_ACTION_STEPS} steps of local "
-                                  "actions (each action's steps once for each set of inputs and environment it is "
-                                  "given), so it stopped reading them and cannot tell whether an agent runs in them")
+                    errors.append(f"{where} reading the check's local actions would cost more than the "
+                                  f"{LOCAL_ACTION_UNITS} units one check spends (one for each reading, each step read "
+                                  "and each 200 bytes; an action is read once for each set of inputs and environment "
+                                  "it is given), so the checker stopped reading them and cannot tell whether an agent "
+                                  "runs in them")
                 continue
             except (RecursionError, MemoryError):
                 errors.append(f"{where} it is too deeply nested or too large to read, so the checker cannot tell "

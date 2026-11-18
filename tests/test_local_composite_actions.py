@@ -332,7 +332,7 @@ class ManyUsesCostOneReadingTest(unittest.TestCase):
         with TempDir() as tmp:
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("more than 30000 steps of local actions", result.errors[0])
+            self.assertIn("more than the 30000 units one check spends", result.errors[0])
 
 
 class TheReviewersWaysPastTest(unittest.TestCase):
@@ -553,7 +553,38 @@ class TheReviewersThirdPassTest(unittest.TestCase):
             started = time.monotonic()
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertLess(time.monotonic() - started, 5)
-            self.assertTrue(any("steps of local actions" in e for e in result.errors), result.errors)
+            self.assertTrue(any("units one check spends" in e for e in result.errors), result.errors)
+
+
+class TheReviewersFourthPassTest(unittest.TestCase):
+    """What the fourth review pass of this slice found (2026-11-18)."""
+
+    def test_an_env_value_set_from_an_input_is_put_in(self):
+        body = composite("    - run: ${{ env.T }} -p fix\n      shell: bash\n      env:\n        T: ${{ inputs.tool }}\n")
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, text, {f"{ACTION_DIR}/action.yml": body})), AGENT_RULES)
+
+    def test_values_left_out_past_the_limit_are_named(self):
+        chain = " && ".join(f"'a{n}'" for n in range(16)) + " && inputs.tool"
+        body = composite(f"    - run: ${{{{ {chain} }}}} -p fix\n      shell: bash\n")
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
+        with TempDir() as tmp:
+            result = check(tmp, text, {f"{ACTION_DIR}/action.yml": body})
+            self.assertTrue(agent_rules(result) == AGENT_RULES
+                            or any("more than 16 texts" in n for n in result.notes), result.notes)
+
+    def test_a_big_step_read_many_times_is_bounded_by_its_size(self):
+        import time
+        files = {f".github/actions/a{n}/action.yml": composite(
+            *[f"    - uses: ./.github/actions/a{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
+              for k in range(20)]) for n in range(2)}
+        files[".github/actions/a2/action.yml"] = composite(
+            "    - run: echo ${{ inputs.n }} " + "x" * 10_000 + "\n      shell: bash\n")
+        with TempDir() as tmp:
+            started = time.monotonic()
+            check(tmp, job_using("./.github/actions/a0"), files)
+            self.assertLess(time.monotonic() - started, 5)
 
 
 def json_quoted(text):

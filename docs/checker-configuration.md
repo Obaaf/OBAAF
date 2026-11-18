@@ -27,7 +27,7 @@ It can trace a simple copy in the same `run:` block back to the original reposit
 
 It also reads the repository's own actions. A step that uses one (`uses: ./.github/actions/run-agent`, or `$/...`) makes the job an agent job when that action is a composite action and an agent runs in its steps. This is so since flagship slice 2d.4a; before it, an agent inside a local action put the job in no agent lane. The action's steps are read for an agent as a job's steps are, with more put in:
 - an agent action, or an agent CLI in any command line of a step;
-- each `${{ inputs.name }}` worked out from the using step's `with:`, or else from the action's `default`, also inside `( )`, `||`, `&&` and `format()`; `${{ env.NAME }}` from the step's environment; any other expression that reads an input is read the widest way, as each input it reads, a comparison at its top level as true or false, and another context as empty;
+- each `${{ inputs.name }}` worked out from the using step's `with:`, or else from the action's `default`, also inside `( )`, `||`, `&&` and `format()`; `${{ env.NAME }}` from the step's environment, with its own inputs put in; any other expression that reads an input is read the widest way, as each input it reads, a comparison at its top level as true or false, and another context as empty;
 - the using step's `env`, under the action step's own;
 - a repository script a step runs, looked for from the repository's root, and from the action's folder or a folder under it when the step's `working-directory` is there or its script changes to it with `cd` or `pushd` (a `cd` the checker does not read is not followed, as it is not from a job's own step; `github.action_path` and `$GITHUB_ACTION_PATH` in any spelling, and a variable the step's `env` sets to it, are put in);
 - the further local actions they use, up to ten deep.
@@ -47,14 +47,14 @@ runs:
 - a JavaScript or Docker action;
 - an action with no `action.yml` or `action.yaml` in the repository (an earlier step may make one);
 - a path that leads outside the repository or holds an expression;
-- an expression that reads an input nested more than 64 parentheses deep, or more than eight `||`, `&&` or `format()` deep, or an input or `env` value that, put in, makes a text longer than 200,000 characters;
+- an expression that reads an input or the environment nested more than 64 parentheses deep, or more than eight `||`, `&&` or `format()` deep, or that can give more than 16 texts; or an input or `env` value that, put in, makes a text longer than 200,000 characters;
 - an action whose `runs.using` is not one it reads, whose `runs.steps` is not a list, or with a step that is not a mapping;
 - a chain of actions that comes back to itself or is more than ten deep;
 - every local action of a workflow checked on its own, whose repository the checker does not know.
 
 These are listed in one note. It names the first five places by file, job, action and reason, and counts the rest. A note is not a finding and does not change the exit status: whether such an action runs an agent is not known, and taking every one for an agent would report every job that uses a JavaScript action of its own.
 
-**Cannot be read at all: an error, which fails the check.** This covers an action file that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is larger than 1 MB. It also covers a check that needs to read more than 30,000 steps of local actions (each action's steps once for each set of values of the inputs its expressions read and of the environment it is given, and once more for each place in a chain where a cycle or the depth cuts a reading short), and nesting too deep for the checker. A workflow file in any of these states is an error too, and the action's author writes it as freely.
+**Cannot be read at all: an error, which fails the check.** This covers an action file that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is larger than 1 MB. It also covers a check whose local actions would cost more than 30,000 units to read, and nesting too deep for the checker. A reading of an action costs one unit, one for each of its steps and one for each 200 bytes of its files. An action is read once for each set of values of the inputs its expressions read and of the environment it is given, and once more for each place in a chain where a cycle or the depth cuts a reading short. A workflow file in any of these states is an error too, and the action's author writes it as freely.
 
 An action from another repository is not read at all. A `./` path is read in the repository as checked out, so an action that an earlier step writes or replaces in the workspace is not what the checker read; OBAAF-GHA-008 reports a `./` action used after a step that checks out another repository at its path, or downloads or restores files over it.
 
