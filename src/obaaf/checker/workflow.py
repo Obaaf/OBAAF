@@ -1719,6 +1719,7 @@ class Step:
     # (`shown_name`), which says where in the action it is. A step of the job keeps its own name.
     via: "Step | None" = field(default=None, repr=False, compare=False)
     shown_name: str | None = field(default=None, compare=False)
+    written: Any = field(default=None, repr=False, compare=False)     # the action's step as its file writes it
 
     @property
     def name(self) -> str:

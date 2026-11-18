@@ -1131,6 +1131,26 @@ def _value_tokens(value: str) -> list:
     return toks + [("op", ")")]
 
 
+# The key under which `_action_inputs_given` keeps a `with:` written as one expression: it may give every input.
+_ANY_INPUT = "\x00any"
+
+
+def _action_inputs_given(raw: dict, using_raw: dict, given: dict, problems: list) -> dict:
+    """The action's inputs as `_action_inputs` gives them, and, where the using step's `with:` is one
+    expression or another value that is not a mapping, that value for every input, declared or not (the
+    second review found such a step read with the action's defaults, and nothing said)."""
+    inputs = _action_inputs(raw, given)
+    written = using_raw.get("with") if isinstance(using_raw, dict) else None
+    if written is not None and not isinstance(written, dict):
+        text = wf_mod.as_text(written)
+        problems.append("the step that uses it gives `with:` as one value, not a mapping, so every input is read as "
+                        f"'{wf_mod.one_line(text, 60)}'")
+        for name in list(inputs):
+            inputs[name] = text
+        inputs[_ANY_INPUT] = text
+    return inputs
+
+
 def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
     """An expression's body with each reference to the action's inputs (`inputs.name`, `inputs['name']`)
     replaced by an expression that gives what the using step hands that input (`_value_tokens`), so a
@@ -1155,7 +1175,7 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
                 # every input's value is put in its place, as arguments of `format()`, the wider reading.
                 problems.append("an expression reads the action's inputs in a way the checker does not work out, so "
                                 f"every input it is given is read in its place ('{wf_mod.one_line(body, 60)}')")
-                values = list(inputs.values()) or [""]
+                values = list(dict.fromkeys(inputs.values())) or [""]
                 out += [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(values))))]
                 for value in values:
                     out += [("op", ","), *_value_tokens(value)]
@@ -1163,7 +1183,7 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
                 i += 1
                 changed = True
                 continue
-            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), "")))
+            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), inputs.get(_ANY_INPUT, ""))))
             i += width
             changed = True
             continue
@@ -1183,14 +1203,24 @@ def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: 
             problems.append(f"an expression in '{wf_mod.one_line(text, 60)}' does not end, so the action's inputs "
                             "were not put into it")
         else:
-            put = "".join(body if kind == "text" else expr_mod.OPEN + " " +
-                          _inputs_put_in_body(body, inputs, problems) + " " + expr_mod.CLOSE
+            put = "".join(body if kind == "text" else _expression_put_in(body, inputs, problems)
                           if re.search(r"\binputs\b", body, re.I) else expr_mod.OPEN + body + expr_mod.CLOSE
                           for kind, body in parts)
-    if len(put) > LOCAL_ACTION_TEXT:
+    if put != text and len(put) > LOCAL_ACTION_TEXT:
         # Left as written, the text would hide what its inputs hold, so this is the error the bounds give.
         raise _StepsExceeded()
     return put
+
+
+def _expression_put_in(body: str, inputs: dict, problems: list) -> str:
+    """One `${{ }}` with the inputs put in. One that is then a string and nothing else is that text, as
+    GitHub gives it (`push: ${{ inputs.push }}` given `false` is `false`, not an expression a rule must
+    take for any value: the second review found a build that does not push read as a publish)."""
+    put = _inputs_put_in_body(body, inputs, problems)
+    toks = expr_mod.tokens(put)
+    if len(toks) == 1 and toks[0][0] == "str":
+        return toks[0][1]
+    return expr_mod.OPEN + " " + put + " " + expr_mod.CLOSE
 
 
 def _charge_steps(state: dict, steps: int = 0, chars: int = 0) -> None:
@@ -1304,7 +1334,9 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
         steps = runs.get("steps")
         if not isinstance(steps, list):
             continue
-        inputs = _action_inputs(raw, given)
+        given_problems: list = []
+        inputs = _action_inputs_given(raw, outer, given, given_problems)
+        unread.extend((shown, problem) for problem in given_problems)
         for number, step_raw in enumerate(steps, start=1):
             if not isinstance(step_raw, dict):
                 continue
@@ -1315,6 +1347,8 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # The step's own fields are in the action's terms, so its inputs are put into them; the using
             # step's `env`, in the caller's terms, goes under its own `env` after.
             put = dict(_with_env(_inputs_put_in_value(step_raw, inputs, folder, problems, state, {}), given_env))
+            if "if" in put and put["if"] is None:
+                put["if"] = "null"     # `if:` with no value is read as a condition, as in a job
             own_if = put.get("if")
             if isinstance(own_if, str) and expr_mod.OPEN not in own_if and re.search(r"\binputs\b", own_if, re.I):
                 # A condition written without `${{ }}` is an expression all the same.
@@ -1329,7 +1363,7 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             name = f"{prefix}: {wf_mod.one_line(own, 120)}"
             if len(pairs) > 1:
                 name += f" ({folder})"
-            step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name)
+            step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw)
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")
@@ -2196,8 +2230,12 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                           "file does")
         errors.extend(f"{rel}: {problem}" for problem in workflow.problems)
         # A job's lanes as the rules' second pass reads them, with the steps of its local actions (2d.4b2).
-        shown = [rules_mod.through_job(job, workflow, catalog.detection, config.agents) if job.local_steps else job
-                 for job in workflow.jobs.values()]
+        shown = []
+        for job in workflow.jobs.values():
+            copy = rules_mod.through_job(job, workflow, catalog.detection, config.agents) if job.local_steps else job
+            if set(copy.lanes) != set(job.lanes):
+                copy.settle_lane()
+            shown.append(copy)
         out += [(rel, job.id, job.lane, job.lane_reason) for job in shown]
     for path in jenkins_paths:
         rel = path.relative_to(root).as_posix()

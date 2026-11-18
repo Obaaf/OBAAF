@@ -2366,6 +2366,33 @@ Reviewer C, at `9b806db`; "After" is what the test holds.
 | C085 | JEN-004 | library "ci-lib@${env.GIT_BRANCH}" in a PR-only stage with credentials | 004 high@8 version from GIT_BRANCH | finding (high) | held |
 
 
+## 2d.4b2: the steps of local composite actions
+
+Slice 2d.4b2 (decision D-083) reads a local composite action's steps as the job's for every rule, in a second pass. Its starting points were ways past recorded above: a checkout of the head given to a local action as an input (2d.2c), a cache and a publish inside one (attempts 015 and 111 of 2d.2e), and an unpinned action inside one (attempt 015 of 2d.2f). Each is now a finding on the action's step, held by `tests/test_local_action_steps.py`, whose main test compares 14 cases with the same steps written in the job.
+
+Two Opus 5.5 sub-agents that did not write it reviewed it in turn, on 2026-11-18.
+
+- **First pass, 115 attempts.** Blocking:
+  1. an `if:` YAML gives as `false` or `0` inside the action was dropped under the using step's `if:`, so a check that never runs cleared OBAAF-GHA-016 and 017;
+  2. a more severe case of a rule on the same step was dropped (`gh attestation verify` after an action that writes `GITHUB_PATH`);
+  3. a text too long once its inputs were put in was left as written, and one reference to `inputs` the checker did not work out kept the whole expression as written (OBAAF-GHA-010 lost, `(inputs).title`);
+  4. costs: an action read again for each use (102.7 s), no bound for the check (77 s for 30 jobs), aliases counted once (57.8 s and 1.8 GB);
+  5. a false claim that a cache inside an action is reported on its own step;
+  6. lanes added to the job changed a first-pass finding's reason (a trusted job made an effect job).
+
+  All fixed by class.
+- **Second pass, 66 attempts and a fuzz of 1,458 malformed actions** (no crash). Blocking:
+  1. steps of an action that share a name collapsed into one finding, so a baseline's count of an entry covered a new risky step;
+  2. a "cannot tell" finding on a job's own step kept the first pass's digest of what feeds its value, which did not cover a `GITHUB_ENV` write inside the action;
+  3. a constant input became an expression, so a docker build with `push: false` was read as a publish;
+  4. a `with:` written as one expression was read with the action's defaults, and nothing said;
+  5. OBAAF-GHA-023 did not read the actions;
+  6. worse control verdicts from the second pass were dropped (OBAAF-GHA-005's "no outsider's input" verified beside a fetch of a pull request's code in the action).
+
+  All fixed by class: a first-pass finding of the same case is now replaced by the second pass's, never less severe or nearer to cleared.
+
+**Left, stated in D-083:** an action's `outputs` read in the job; the secrets rules, which read the job's own text; OBAAF-GHA-015 `capability` (medium) beside the second pass's high finding for a job whose action publishes; OBAAF-GHA-014 and 016 twice for a job that publishes in its own step after an action that publishes; nesting more than ten deep is a note (as in 2d.4a); a `./` path whose letter case differs from the folder's (as in 2d.4a).
+
 ## 2d.2j (open): agent stages, attempts recorded, not yet fixed
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for the run that takes 2d.2j: 71 ways past, 14 false positives, 3 slow cases, 23 held. The classes are in [the plan's entry for 2d.2j](flagship.md). None is fixed; the case files themselves were not kept, so each row says what the file did. OBAAF-JEN-002 and 006 have no recorded attempt yet (reviewer A was stopped by a safety classifier before its first case).

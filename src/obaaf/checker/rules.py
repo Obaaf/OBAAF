@@ -288,13 +288,12 @@ def through_job(job: Job, workflow: Workflow, detection: dict | None = None, age
     copied.agent_script_steps = {renumbered[i] for i in job.agent_script_steps if i in renumbered}
     copied.agent_step_why = {renumbered[i]: why for i, why in job.agent_step_why.items() if i in renumbered}
     if detection is not None:
-        added = False
         for lane, why in _inferred_lanes(copied, detection, agents or {}).items():
             if lane not in copied.lanes and lane in LANE_ORDER:
                 copied.lanes[lane] = f"{why}, in a local action it uses"
-                added = True
-        if added:
-            copied.settle_lane()
+        # The lane the job is shown in is left as it was: it decides which lane's reason carries the job's
+        # lane notes, a fact of the release rules' findings (the first review found a trusted job that an
+        # action made an effect job lose "declared trusted" from its OBAAF-GHA-015). `--lanes` settles it.
     return copied
 
 
@@ -366,43 +365,57 @@ class WorkflowRules:
         slice 2d.4b2). A job's step that uses `./path` runs that action's steps in the job, on its runner,
         with its token, workspace and cache, so a checkout, a cache, a publish or an unpinned action there
         is the job's. Every rule is run again on a copy of the workflow in which each such step is followed
-        by the action's steps (`Job.local_steps`, with the inputs put in), and what that adds is kept:
+        by the action's steps (`Job.local_steps`, with the inputs put in), and the job is in the lanes they
+        put it in. The second pass's findings are taken:
 
-        - a finding on a step of a local action, which names the action and the step;
-        - a finding on a job's own step, or on the job, where the first pass has none of that rule there.
+        - every finding on a step of a local action, which names the action and the step;
+        - a finding on a job's own step, or on the job, of a case the first pass gave there, in its place;
+        - one of another case, where the first pass has none of that rule there as severe.
 
-        What the first pass found is kept as it was, so reading through only adds: what an action's step
-        does (a check, a control, a pin) never clears a finding the first pass gave, and an acceptance of a
-        first-pass finding still matches it."""
+        A first-pass finding replaced so has what the action's steps do in its facts and controls, as for
+        steps written in the job, unless the replacement is less severe or nearer to cleared: reading
+        through never clears a finding, lowers one, or drops one the second pass does not give (a check
+        inside an action does not clear an upload in the job)."""
         if getattr(self, "_through", False) or not any(job.local_steps for job in self.wf.jobs.values()):
             return
-        from obaaf.checker import baseline as baseline_mod   # baseline imports this module
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
                                firewall=self.firewall)
         second._through = True
         found = second.run()
         order = {"high": 0, "medium": 1, "low": 2}
+        standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
         inner = {step.name for job in view.jobs.values() for step in job.steps if step.via is not None}
+        # The first pass's findings by rule, job, step and case, each matched once, in order.
         first: dict = {}
+        at: dict = {}
         for finding in self.findings:
-            first.setdefault((finding.rule, finding.job, finding.step), []).append(finding)
-        known = {baseline_mod.key(f): f for f in self.findings}
+            first.setdefault((finding.rule, finding.job, finding.step, finding.kind), []).append(finding)
+            at.setdefault((finding.rule, finding.job, finding.step), []).append(finding)
+        place = {id(finding): n for n, finding in enumerate(self.findings)}
+        added: list = []
         for finding in found:
-            key = baseline_mod.key(finding)
-            same = known.get(key)
-            if same is not None:
-                # The same finding, which the steps of the job's local actions make more severe (a job they
-                # make a release job): the first pass's finding is raised, and an acceptance still names it.
-                if order.get(finding.severity, 3) < order.get(same.severity, 3):
-                    same.severity = finding.severity
+            if finding.step in inner:
+                # A step of an action: one finding for each step, as for steps written in the job.
+                added.append(finding)
                 continue
-            there = first.get((finding.rule, finding.job, finding.step), [])
-            if finding.step not in inner and there and all(
-                    order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
-                continue      # the first pass has this rule here, at least as severe
-            known[key] = finding
-            self.findings.append(finding)
+            mates = first.get((finding.rule, finding.job, finding.step, finding.kind))
+            if mates:
+                # The same case of the rule on the same step or job. What the action's steps do (a fetch of a
+                # pull request's code, what feeds a value the checker cannot read) is part of it, as for steps
+                # written in the job, unless that would leave it less severe or nearer to cleared.
+                mate = mates.pop(0)
+                if standing.get(finding.state, 2) < standing.get(mate.state, 2):
+                    continue
+                if order.get(finding.severity, 3) > order.get(mate.severity, 3):
+                    finding.severity = mate.severity
+                self.findings[place[id(mate)]] = finding
+                continue
+            there = at.get((finding.rule, finding.job, finding.step), [])
+            if there and all(order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
+                continue      # another case of the rule is there already, at least as severe
+            added.append(finding)
+        self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
     def placeholders(self) -> None:
@@ -457,6 +470,13 @@ class WorkflowRules:
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
+        if getattr(self, "_through", False):
+            # The second pass reads the local actions' steps as the action's file writes them (slice 2d.4b2):
+            # a placeholder the using step hands in is the first pass's finding already.
+            for job in self.wf.jobs.values():
+                for step in job.steps:
+                    if step.via is not None and isinstance(step.written, dict):
+                        visit(step.written, "step", step.line, job, step)
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)

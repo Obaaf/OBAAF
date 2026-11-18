@@ -477,5 +477,77 @@ class TheReviewersFirstPassTest(unittest.TestCase):
         self.assertTrue(any("neither `run` nor `uses`" in n for n in result.notes), result.notes)
 
 
+class TheReviewersSecondPassTest(unittest.TestCase):
+    """What the second review pass of slice 2d.4b2 got past or through (2026-11-18), each now a test."""
+
+    HEAD = "${{ github.event.pull_request.head.sha }}"
+
+    def test_steps_of_an_action_that_share_a_name_are_a_finding_each(self):
+        one = composite(f"- uses: actions/checkout@{SHA}\n  with:\n    ref: {self.HEAD}\n    path: docs\n")
+        two = composite(f"- uses: actions/checkout@{SHA}\n  with:\n    ref: {self.HEAD}\n    path: docs\n"
+                        f"- uses: actions/checkout@{SHA}\n  with:\n    ref: {self.HEAD}\n    path: tools\n")
+        text = job(using(), on="pull_request_target")
+        count = lambda r: len([f for f in r.findings if f.rule == "OBAAF-GHA-002"])
+        self.assertEqual((count(check(text, {f"{ACTION}/action.yml": one})),
+                          count(check(text, {f"{ACTION}/action.yml": two}))), (1, 2))
+
+    def test_what_an_action_feeds_a_later_step_is_in_that_steps_finding(self):
+        """A value the checker cannot read in a job's own step: its `sources` fact covers what the action
+        writes, so an acceptance of it stops matching when the action changes."""
+        from obaaf.checker import baseline
+        text = job(using() + f"- uses: actions/checkout@{SHA}\n  with:\n    ref: ${{{{ env.REF }}}}\n"
+                   "    persist-credentials: false\n", on="pull_request_target")
+        main = composite("- run: echo \"REF=main\" >> \"$GITHUB_ENV\"\n  shell: bash\n")
+        head = composite(f"- run: echo \"REF={self.HEAD}\" >> \"$GITHUB_ENV\"\n  shell: bash\n")
+        keys = lambda r: {baseline.key(f) for f in r.findings if f.rule == "OBAAF-GHA-002"}
+        a, b = keys(check(text, {f"{ACTION}/action.yml": main})), keys(check(text, {f"{ACTION}/action.yml": head}))
+        self.assertTrue(a and b)
+        self.assertNotEqual(a, b)
+
+    def test_a_constant_input_is_its_text(self):
+        action_text = ("name: x\ninputs:\n  push: {default: 'false'}\nruns:\n  using: composite\n  steps:\n"
+                       f"    - uses: docker/build-push-action@{SHA}\n      with:\n        push: ${{{{ inputs.push }}}}\n")
+        result = check(job(using({"push": False}), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertEqual([f.rule for f in result.findings if f.job == "a"], [])
+
+    def test_a_with_written_as_one_expression_is_every_input(self):
+        action_text = composite(f"- uses: actions/checkout@{SHA}\n  with:\n    ref: ${{{{ inputs.ref }}}}\n"
+                                "    persist-credentials: false\n- run: make\n  shell: bash\n", ["ref"])
+        text = job(f"- uses: ./{ACTION}\n  with: ${{{{ fromJSON(github.event.comment.body) }}}}\n", on="issue_comment")
+        result = check(text, {f"{ACTION}/action.yml": action_text})
+        self.assertIn("OBAAF-GHA-002", {f.rule for f in result.findings})
+        self.assertTrue(any("gives `with:` as one value" in n for n in result.notes), result.notes)
+
+    def test_a_placeholder_in_an_action_is_found(self):
+        action_text = composite("- uses: OBAAF_OWNER/tool@" + "0" * 40 + "\n")
+        result = check(job(using(), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertTrue([f for f in result.findings if f.rule == "OBAAF-GHA-023" and f.step == f"./{ACTION}: "
+                         "OBAAF_OWNER/tool@" + "0" * 40])
+
+    def test_a_fetch_in_an_action_is_in_the_agent_jobs_controls(self):
+        text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                "    env:\n      KEY: ${{ secrets.MODEL_KEY }}\n    steps:\n"
+                + indent(using() + "- run: claude -p hi\n  shell: bash\n", 6))
+        action_text = composite("- run: git fetch origin refs/pull/7/head\n  shell: bash\n")
+        written = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                   "    env:\n      KEY: ${{ secrets.MODEL_KEY }}\n    steps:\n"
+                   + indent("- run: git fetch origin refs/pull/7/head\n  shell: bash\n- run: claude -p hi\n"
+                            "  shell: bash\n", 6))
+        verdicts = lambda r: sorted((c.id, c.verdict) for f in r.findings if f.rule == "OBAAF-GHA-005"
+                                    for c in f.controls)
+        self.assertEqual(verdicts(check(text, {f"{ACTION}/action.yml": action_text})), verdicts(check(written)))
+
+    def test_a_long_text_the_action_writes_itself_is_read_as_written(self):
+        action_text = composite("- run: |\n    echo " + "a" * 200_010 + "\n  shell: bash\n")
+        result = check(job(using(), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertEqual(result.errors, [])
+
+    def test_an_if_with_no_value_stays_a_condition(self):
+        action_text = composite("- run: obaaf verify release dist\n  shell: bash\n  if:\n"
+                                "- run: npm publish\n  shell: bash\n")
+        result = check(job(using(extra="  if: true\n"), on="push"), {f"{ACTION}/action.yml": action_text})
+        self.assertIn("OBAAF-GHA-016", {f.rule for f in result.findings})
+
+
 if __name__ == "__main__":
     unittest.main()

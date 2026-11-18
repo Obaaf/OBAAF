@@ -640,7 +640,7 @@ What cannot be read through is named in one note (the first five places, and a c
 ### D-083 Every rule reads a local composite action's steps as the job's own
 
 **Decision.** From flagship slice 2d.4b2 (issue #225). After `obaaf check` reads a workflow, each step of a job that uses a local composite action (`./path`, `$/path` or `.\path`, the folders D-081 reads) is given that action's steps, in the order they run:
-- the action's inputs put into each expression that reads them, as an expression that gives what the using step hands over: a string for plain text, the expression in parentheses for one `${{ }}`, `format()` for text with expressions in it. A reference to another context stays one. A reference to `inputs` the checker does not work out (`toJSON(inputs)`, `(inputs).x`, `inputs.*`, a computed index) is replaced by `format()` of every input's value, the wider reading, and named in the note D-081 gives;
+- the action's inputs put into each expression that reads them, as an expression that gives what the using step hands over: a string for plain text, the expression in parentheses for one `${{ }}`, `format()` for text with expressions in it. A reference to another context stays one. An expression that is then one string is that text (`push: ${{ inputs.push }}` given `false` is `false`). A reference to `inputs` the checker does not work out (`toJSON(inputs)`, `(inputs).x`, `inputs.*`, a computed index) is replaced by `format()` of every input's value, the wider reading, and named in the note D-081 gives. A using step whose `with:` is one expression (or any value that is not a mapping) gives that value to every input, and is named in the note;
 - `${{ github.action_path }}` as the action's folder;
 - the using step's `env` under each step's own;
 - the using step's `if:` and the step's own, both, as one expression. A value YAML gives as `false` or `0` is that expression. A condition GitHub reads as a string is always true and adds nothing;
@@ -650,18 +650,19 @@ What cannot be read through is named in one note (the first five places, and a c
 
 A step that uses another local action is followed by that action's steps. A step with neither `run` nor `uses` is named in the note.
 
-Every rule then runs a second time on a copy of the workflow. In the copy, each such step is followed by the steps it was given, and each job is put in the lanes those steps put a job in (the release lane, for a step that publishes). The job itself stays in its own lanes for the first pass. A second-pass finding is kept:
-- when it is on a step of an action;
-- or when it is on a step of the job, or on the job, and the first pass has no finding of that rule there at the same or a higher severity.
+Every rule then runs a second time on a copy of the workflow. In the copy, each such step is followed by the steps it was given, and each job is put in the lanes those steps put a job in (the release lane, for a step that publishes), without changing the lane it is shown in, which decides where its lane notes go. The job itself stays in its own lanes for the first pass. OBAAF-GHA-023 reads the actions' steps as their files write them. The second pass's findings are taken:
+- every finding on a step of an action, one for each step, as for steps written in the job;
+- a finding on a step of the job, or on the job, of a case (rule, step and kind) the first pass gave there, in place of the first pass's, matched one for one. Its facts, controls and severity then say what the action's steps do, as for steps written in the job, with two limits: it is never less severe than the first pass's, and it is not taken when it is nearer to cleared (fixed before cannot tell before new). Reading through never clears a finding or lowers one;
+- a finding of another case on a step of the job, or on the job, when the first pass has none of that rule there at the same or a higher severity.
 
-A second-pass finding identical to a first-pass one (rule, file, job, step, case and facts) but more severe raises the first-pass finding's severity. Nothing else of the first pass changes. `obaaf check --lanes` shows the lanes of the copy.
+A first-pass finding the second pass does not give is kept as it was. `obaaf check --lanes` shows the lanes of the copy.
 
 Bounds:
 - for one job, 1,000 steps of local actions and 2,000,000 characters of their text, counted as the rules read them: with the inputs put in, each alias once for each place it is given, and one for each key and item;
 - for the check, 10,000 steps and 10,000,000 characters;
 - one text of more than 200,000 characters once the inputs are put in.
 
-Past any of these, the job's actions are not read for the rules and the check has an error, once. There is no error when 2d.4a's reader has already stopped reading the check's local actions: its own error says so. Past the check's bound, later jobs are not read. An action's files are read once for the check. An action file the checker cannot read is the error 2d.4a's reader gives; one that only this reading reaches is an error of its own.
+Past any of these, the job's actions are not read for the rules and the check has an error for that job; past the check's bound there is one error, and later jobs are not read. There is no error when 2d.4a's reader has already stopped reading the check's local actions: its own error says so. A long text the action writes itself, with no input put in, is read as written. An action's files are read once for the check. An action file the checker cannot read is the error 2d.4a's reader gives; one that only this reading reaches is an error of its own.
 
 **Reason.** Slices 2d.2c, 2d.2e and 2d.2f recorded ways past OBAAF-GHA-002, 006, 008, 014, 015, 016 and 017 through a local action:
 - a checkout of the pull request's head given as an input (2d.2c);
@@ -671,7 +672,7 @@ Past any of these, the job's actions are not read for the rules and the check ha
 
 GitHub runs a composite action's steps in the job that uses it. Running every rule again on a fuller copy, rather than teaching each rule to look inside, fixes the class for every rule that reads a job's steps. It also means the rules that weigh what came before (a check before an upload, a step that changes the `PATH` before a check) see the order the steps run in.
 
-The first pass is kept as it was, apart from a severity the second pass raises, so that no finding is lost and no acceptance stops matching. Reading through can then only add, and what an action's author writes cannot clear a finding the first pass gave. Lanes are added to the copy only, because adding one to the job can change the reason a first-pass finding gives for another lane, and with it the finding's identity. The review found this: a job declared trusted that an action made an effect job.
+A first-pass finding with no counterpart is kept, so that no finding is lost. A counterpart replaces it: the second review showed that keeping the first pass's version let an acceptance survive what the action does. A "cannot tell" finding's digest of what feeds a value did not cover a `GITHUB_ENV` write inside the action, and OBAAF-GHA-005's control "no outsider's input" said verified beside a fetch of a pull request's code inside the action. A replacement is never less severe and never nearer to cleared, so what an action's author writes cannot clear a finding. Lanes are added to the copy only, and its shown lane is left as it was. Adding one to the job, or settling the copy's lane, changed the reason a release finding gives: the first review found a job declared trusted that an action made an effect job, whose OBAAF-GHA-015 lost "declared trusted".
 
 Inputs are put in as expressions because putting in their values (as 2d.4a does for an agent) turns `inputs.ref || github.event.pull_request.head.ref` into the first operand alone and loses the head. A text that would be too long is an error, not left as written: left as written, it hides what its inputs hold. Aliases are counted for each place because the rules read them there.
 
@@ -683,7 +684,7 @@ The bounds are per job and per check. The first adopter's 27 workflow files alre
 
 These are examples, not a proven worst case.
 
-**Consequence.** A job whose local action checks out a pull request's head, caches, publishes, uses an unpinned action or image, keeps the checkout's token, or expands an outsider's text through an input now gets the findings the same steps written in the job get. A test holds this for 14 cases. A job whose local action publishes gets the release rules, and a job's own finding can become more severe for it (OBAAF-GHA-008 low to high in a release job). A check after a local action whose steps write `GITHUB_PATH` can no longer be vouched for: OBAAF-GHA-016 "cannot tell" is added beside what the first pass said. This repository's release job is one, accepted in `.github/obaaf.yml` in Sean's name for him to confirm. Any of these can turn a gate red (`docs/upgrading.md` has the row).
+**Consequence.** A job whose local action checks out a pull request's head, publishes, uses an unpinned action or image, keeps the checkout's token, holds a template placeholder, or expands an outsider's text through an input now gets the findings the same steps written in the job get. A test holds this for 14 cases. A job whose local action publishes gets the release rules, and a job's own finding can become more severe for it (OBAAF-GHA-008 low to high in a release job); a baseline entry written at the lower severity then no longer accepts it. A job's own finding whose facts or controls depend on the steps before it changes when a local action before it matters, and an acceptance of it no longer matches. A check after a local action whose steps write `GITHUB_PATH` can no longer be vouched for: OBAAF-GHA-016 "cannot tell" is added beside what the first pass said. This repository's release job is one, accepted in `.github/obaaf.yml` in Sean's name for him to confirm. Any of these can turn a gate red (`docs/upgrading.md` has the row).
 
 Not changed:
 - A local action is still taken to restore a cache whatever it holds (D-062). OBAAF-GHA-006 gives one finding for a job, on the first step that restores, so a cache step inside the action adds no finding to it.
@@ -693,6 +694,7 @@ Not changed:
 - `steps.<id>` inside an action is read as the job's. GitHub's metadata page suggests, by an example and without saying so, that it means the action's own steps.
 - The secrets rules read the job's own text, so `secrets.X` in an action's step gives no secrets finding. GitHub's contexts page, as the session read it through a summary and not word for word, says the `secrets` context is not available to composite actions.
 - The pages read did not say whether the using step's `env` reaches the action's steps, or whether its `if:` and `continue-on-error` cover them. Each is read the way that finds more.
-- Names longer than 120 characters are cut, so two steps of one action that share a long name share their findings.
+- Rules that read the job's or the workflow's own text, not its steps (the secrets rules), and a release rule's case for a job that holds what publishing needs (OBAAF-GHA-015 `capability`, medium), which the first pass gives and which stays beside the second pass's high finding for a job whose action publishes.
+- A job that publishes in its own step after an action that publishes gets OBAAF-GHA-014 and 016 for each.
 
 Left to slice 2d.4b3: what a called local workflow is given and does. The first adopter's report (27 files, 730 steps of local actions) is byte-identical before and after.

@@ -10,27 +10,31 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 Slice 2d.4b2 (issue #225, the rest of 2d.4b with 2d.4b3); decision D-083. Ways past OBAAF-GHA-002, 006, 008, 014, 015, 016 and 017 recorded by slices 2d.2c, 2d.2e and 2d.2f (attempts 015 and 111, and a checkout of the head given as an input).
 
-- **Every rule reads the steps of a local composite action as steps of the job that uses it.** Before, only the agent lane looked inside `uses: ./.github/actions/x` (slice 2d.4a). The other rules saw one step with a local path, so any of these could sit inside an action of the repository's own and give nothing: a checkout of a pull request's head, a cache, a publish, an unpinned action, a kept checkout token, or an outsider's text in a script.
+- **Every rule that reads a job's steps reads the steps of a local composite action as steps of the job that uses it.** Before, only the agent lane looked inside `uses: ./.github/actions/x` (slice 2d.4a). The other rules saw one step with a local path, so any of these could sit inside an action of the repository's own and give nothing: a checkout of a pull request's head, a publish, an unpinned action, a kept checkout token, a template placeholder, or an outsider's text in a script. (A cache was already reported: a local action is taken to restore one.)
   - The using step's `with:` is put into the expressions that read the action's inputs, as expressions:
     - `ref: ${{ inputs.ref }}` given `${{ github.event.pull_request.head.sha }}` is a checkout of the head;
     - `${{ inputs.ref || github.event.pull_request.head.ref }}` keeps the head too;
     - a script that echoes `${{ inputs.title }}` given an issue's title is OBAAF-GHA-010;
-    - `toJSON(inputs)`, `(inputs).x` or `inputs.*` is read as every input it is given.
+    - `toJSON(inputs)`, `(inputs).x` or `inputs.*` is read as every input it is given, and a `with:` written as one expression as every input;
+    - an input that comes out as plain text is that text: `push: ${{ inputs.push }}` given `false` does not push.
   - The using step's `env`, `if:` and `continue-on-error` reach the action's steps (an `if: false` inside too). A local action inside a local action is followed.
   - A finding on a step of an action names it after the action, `./.github/actions/x: actions/checkout@v4`, with the using step's name before it when it has one, at the workflow line of the using step.
   - A job whose action publishes gets the release rules, and `obaaf check --lanes` shows it as a release job.
   - A test holds 14 cases to the findings the same steps get when written in the job.
-- **Reading through only adds.**
-  - The findings the checker gave before are kept, with the same identity, so the acceptances that name them still match. One can become more severe: OBAAF-GHA-008 on a job's own action is high once the job's local action makes it a release job.
-  - Where the steps of an action make a finding of the same rule on the same step more severe in another case, that finding is added beside it. For example, `gh attestation verify` after an action that writes `GITHUB_PATH` is OBAAF-GHA-016 "cannot tell", high, beside "provenance only", medium.
+- **Reading through never clears a finding or lowers one.**
+  - A finding of a job's own step that the action's steps change is the finding the same steps written in the job would give: its facts, controls and severity say what the action does. So an acceptance of it can stop matching. Examples: a "cannot tell" finding whose value a `GITHUB_ENV` write in the action feeds; OBAAF-GHA-005's control "no outsider's input" beside a fetch of a pull request's code in the action; OBAAF-GHA-008 on a job's own action, high once the job's local action makes it a release job (a baseline entry at the lower severity no longer accepts it). It is never less severe, or nearer to cleared, than before.
+  - A finding the second reading does not give is kept as it was.
+  - Where the steps of an action make another case of a rule on the same step more severe, that case is added beside it. For example, `gh attestation verify` after an action that writes `GITHUB_PATH` is OBAAF-GHA-016 "cannot tell", high, beside "provenance only", medium.
   - A check, a monitor, a pin or OBAAF's egress action inside a local action clears no finding of the job's own steps. A check inside an action still counts for an upload later in the same action.
   - A local action is still taken to restore a cache whatever it holds, and OBAAF-GHA-006 gives one finding for the job.
-- **What cannot be read** is named in the note 2d.4a added. Its wording now says the other rules may not see it either. New reasons: an expression that reads `inputs` in a way the checker does not work out, and a step with neither `run` nor `uses`.
+- **What cannot be read** is named in the note 2d.4a added. Its wording now says the other rules may not see it either. New reasons: an expression that reads `inputs` in a way the checker does not work out, a `with:` written as one value, and a step with neither `run` nor `uses`.
 - **Errors, which fail the check:**
   - more than 1,000 steps of local actions in one job;
   - more than 2,000,000 characters of their text, with the inputs put in and each alias counted where it is given;
   - more than 10,000 steps or 10,000,000 characters for the check;
-  - one text of more than 200,000 characters.
+  - one text of more than 200,000 characters once its inputs are put in.
+
+  The error is given for each job past its bound, and once past the check's.
 - **A check after an action whose steps write `GITHUB_PATH`** can no longer be vouched for: OBAAF-GHA-016 "cannot tell". This repository's release job is one, because its `setup-obaaf` puts its own virtual environment on the `PATH`. The finding is accepted in `.github/obaaf.yml`, in Sean's name for him to confirm.
 - **Faster:** whether an earlier step changes the shell or the `PATH` is worked out once per job. Before, each check of each upload read every earlier step again, so a job of 990 steps took 98 s; it now takes under a second. No finding changes from this.
 - **Not changed:**
