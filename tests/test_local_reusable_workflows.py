@@ -247,6 +247,19 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
             result = check(tmp, {".github/workflows/one.yml": one, ".github/workflows/two.yml": two})
         self.assertIn("OBAAF-GHA-002", rules_on(result, ".github/workflows/two.yml"))
 
+    def test_every_event_a_rule_names_is_passed_on_as_itself(self):
+        # From the fourth review: `commit_comment`, which OBAAF-GHA-010 names, was folded into the stand-in.
+        from obaaf.checker import rules as rules_mod
+        from obaaf.checker import workflow as wf_mod
+        sets = [value for module in (wf_mod, rules_mod) for value in vars(module).values()
+                if isinstance(value, (set, frozenset)) and value and all(isinstance(v, str) for v in value)]
+        sets += [value for value in vars(rules_mod.WorkflowRules).values()
+                 if isinstance(value, (set, frozenset)) and value and all(isinstance(v, str) for v in value)]
+        named = set().union(*[s for s in sets if s & {"push", "pull_request", "workflow_run", "issue_comment",
+                                                         "merge_group", "pull_request_target"}])
+        self.assertTrue(named)
+        self.assertEqual(sorted(named - wf_mod.GITHUB_EVENTS), [])
+
     def test_a_workflow_that_cannot_be_called_gets_no_events(self):
         # GitHub refuses to call a workflow without `on: workflow_call`, so its jobs never run from the call.
         with TempDir() as tmp:

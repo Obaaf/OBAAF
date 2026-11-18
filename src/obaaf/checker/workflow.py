@@ -41,12 +41,14 @@ RELEASE_TRIGGERS = {"push", "release", "workflow_dispatch", "workflow_call", "sc
 # access can cause them) is not outsider-triggerable. It is listed under this name instead.
 TRUSTED_WORKFLOW_RUN = "workflow_run (after push, release, dispatch or schedule)"
 # The events GitHub's page "Events that trigger workflows" names (as known to flagship slice 2d.4b1; the
-# page was not read again in that slice), with the stand-in above. A caller's event outside them is
+# page was not read again in that slice), every event a rule names (a test holds them to it:
+# `commit_comment`, which OBAAF-GHA-010 reads as an outsider's, may not be on the page), and the stand-in
+# above. A caller's event outside them is
 # passed on to the workflows it calls as OTHER_EVENT, which no rule names, as no rule names the event
 # itself, so a chain of files that each invent an event cannot make every file hold every name (the
 # third review of the slice: 4,800 such files took 1.1 GB).
 GITHUB_EVENTS = frozenset({
-    "branch_protection_rule", "check_run", "check_suite", "create", "delete", "deployment",
+    "branch_protection_rule", "check_run", "check_suite", "commit_comment", "create", "delete", "deployment",
     "deployment_status", "discussion", "discussion_comment", "fork", "gollum", "image_version",
     "issue_comment", "issues", "label", "merge_group", "milestone", "page_build", "project", "project_card",
     "project_column", "public", "pull_request", "pull_request_review", "pull_request_review_comment",
