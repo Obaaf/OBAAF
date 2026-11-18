@@ -489,7 +489,11 @@ class TheReviewersSecondPassTest(unittest.TestCase):
                  for n in range(5)}
         files[".github/actions/a5/action.yml"] = composite(PLAIN, "    - uses: ./.github/actions/a0\n      if: false\n")
         result = self.timed(files, text=job_using("./.github/actions/a0"))
-        self.assertEqual(result.errors, [])
+        # Slice 2d.4b2 reads the same actions as steps of the job: four uses at each of five levels are
+        # 2,388 steps that would run, past the 1,000 it reads for one job, which is an error of its own.
+        # The readings this test is about (2d.4a's budget) are not exhausted.
+        self.assertEqual([e for e in result.errors if "would give more than 1000 steps" not in e], [])
+        self.assertEqual(len(result.errors), 1, result.errors)
 
     def test_the_actions_folder_is_searched_only_when_the_step_goes_there(self):
         files = {f"{ACTION_DIR}/action.yml": composite("    - run: ./build.sh\n      shell: bash\n"),

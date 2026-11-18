@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import bisect
+import copy
 import fnmatch
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from obaaf.catalog import Catalog
@@ -19,7 +20,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
-    UNKNOWN_EXPRESSION, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    LANE_ORDER, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -256,6 +257,46 @@ _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-a
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
 
+def _through_view(workflow: Workflow, detection: dict | None = None, agents: dict | None = None) -> Workflow:
+    """A copy of `workflow` whose jobs have, after each step that uses a local composite action, the
+    steps of that action (`Job.local_steps`), numbered in the order they run (flagship slice 2d.4b2). A
+    job's own steps keep their names, so a finding on one is the finding the first pass would give, and
+    the steps that run an agent are renumbered with them. Nothing of `workflow` is changed."""
+    view = copy.copy(workflow)
+    view.jobs = {job_id: through_job(job, view, detection, agents) if job.local_steps else job
+                 for job_id, job in workflow.jobs.items()}
+    return view
+
+
+def through_job(job: Job, workflow: Workflow, detection: dict | None = None, agents: dict | None = None) -> Job:
+    """A copy of `job` in `workflow` whose steps are its own, each followed by the steps of the local
+    composite action it uses, numbered in the order they run (flagship slice 2d.4b2). With `detection`,
+    the copy is also put in each lane those steps put a job in (a step that publishes makes a release
+    job), as the job's own steps would; the job itself is left in its lanes, so its findings and their
+    reasons in the first pass are as they were."""
+    copied = copy.copy(job)
+    steps: list = []
+    renumbered: dict = {}
+    for step in job.steps:
+        renumbered[step.index] = len(steps)
+        steps.append(replace(step, index=len(steps), shown_name=step.name))
+        for inner in job.local_steps.get(step.index, ()):
+            steps.append(replace(inner, index=len(steps)))
+    copied.steps = steps
+    copied.workflow = workflow
+    copied.lanes = dict(job.lanes)
+    copied.agent_script_steps = {renumbered[i] for i in job.agent_script_steps if i in renumbered}
+    copied.agent_step_why = {renumbered[i]: why for i, why in job.agent_step_why.items() if i in renumbered}
+    if detection is not None:
+        for lane, why in _inferred_lanes(copied, detection, agents or {}).items():
+            if lane not in copied.lanes and lane in LANE_ORDER:
+                copied.lanes[lane] = f"{why}, in a local action it uses"
+        # The lane the job is shown in is left as it was: it decides which lane's reason carries the job's
+        # lane notes, a fact of the release rules' findings (the first review found a trusted job that an
+        # action made an effect job lose "declared trusted" from its OBAAF-GHA-015). `--lanes` settles it.
+    return copied
+
+
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
@@ -315,7 +356,73 @@ class WorkflowRules:
             self.signing_keys(job)
             self.effect_rules(job)
         self.provenance_missing()
+        self.through_local_actions()
         return self.findings
+
+    # ------------------------------------------------- the steps of local composite actions
+    def through_local_actions(self) -> None:
+        """Read the steps of the local composite actions the jobs use as the jobs' own steps (flagship
+        slice 2d.4b2). A job's step that uses `./path` runs that action's steps in the job, on its runner,
+        with its token, workspace and cache, so a checkout, a cache, a publish or an unpinned action there
+        is the job's. Every rule is run again on a copy of the workflow in which each such step is followed
+        by the action's steps (`Job.local_steps`, with the inputs put in), and the job is in the lanes they
+        put it in. The second pass's findings are taken:
+
+        - every finding on a step of a local action, which names the action and the step;
+        - a finding on a job's own step, or on the job, of a case the first pass gave there, in its place;
+        - a finding of another case, where the first pass has none of that rule there as severe, or where
+          the action's steps put the job in a lane it was not in.
+
+        A first-pass finding replaced so has what the action's steps do in its facts and controls, as for
+        steps written in the job, unless the replacement is less severe or nearer to cleared: reading
+        through never clears a finding, lowers one, or drops one the second pass does not give (a check
+        inside an action does not clear an upload in the job)."""
+        if getattr(self, "_through", False) or not any(job.local_steps for job in self.wf.jobs.values()):
+            return
+        view = _through_view(self.wf, self.detection, self.agents)
+        second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
+                               firewall=self.firewall)
+        second._through = True
+        found = second.run()
+        order = {"high": 0, "medium": 1, "low": 2}
+        standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
+        inner = {step.name for job in view.jobs.values() for step in job.steps if step.via is not None}
+        # The first pass's findings by rule, job, step and case, each matched once, in order.
+        first: dict = {}
+        at: dict = {}
+        for finding in self.findings:
+            first.setdefault((finding.rule, finding.job, finding.step, finding.kind), []).append(finding)
+            at.setdefault((finding.rule, finding.job, finding.step), []).append(finding)
+        # The jobs the action's steps put in a lane they were not in: their other cases are the new lane's.
+        relaned = {job_id for job_id, job in view.jobs.items() if set(job.lanes) != set(self.wf.jobs[job_id].lanes)}
+        place = {id(finding): n for n, finding in enumerate(self.findings)}
+        added: list = []
+        for finding in found:
+            if finding.step in inner:
+                # A step of an action: one finding for each step, as for steps written in the job.
+                added.append(finding)
+                continue
+            mates = first.get((finding.rule, finding.job, finding.step, finding.kind))
+            if mates:
+                # The same case of the rule on the same step or job. What the action's steps do (a fetch of a
+                # pull request's code, what feeds a value the checker cannot read) is part of it, as for steps
+                # written in the job, unless that would leave it less severe or nearer to cleared.
+                mate = mates.pop(0)
+                if standing.get(finding.state, 2) < standing.get(mate.state, 2):
+                    continue
+                if order.get(finding.severity, 3) > order.get(mate.severity, 3):
+                    finding.severity = mate.severity
+                self.findings[place[id(mate)]] = finding
+                continue
+            # Another case of the rule: added where the first pass has none of that rule there as severe, or
+            # where the action's steps put the job in a lane it was not in (the third review found the release
+            # case dropped beside the first pass's "cannot tell whether it releases").
+            there = at.get((finding.rule, finding.job, finding.step), [])
+            if finding.job not in relaned and there and all(
+                    order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
+                continue
+            added.append(finding)
+        self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
     def placeholders(self) -> None:
@@ -370,6 +477,14 @@ class WorkflowRules:
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
+        if getattr(self, "_through", False):
+            # The second pass reads the local actions' steps as the action's file writes them (slice 2d.4b2):
+            # a placeholder the using step hands in is the first pass's finding already.
+            for job in self.wf.jobs.values():
+                for step in job.steps:
+                    if step.via is not None and isinstance(step.written, dict):
+                        seen.clear()      # each use of an action is read, as each step written in a job is
+                        visit(step.written, "step", step.line, job, step)
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)
@@ -2890,13 +3005,36 @@ class WorkflowRules:
             if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
                                              or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
                 return True
-        return any(re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", s.scripts() + " " + str(s.raw.get("env", "")))
-                   for s in job.steps[: step.index])
+        return self._first_shell_change(job) < step.index
+
+    def _first_shell_change(self, job: Job) -> int:
+        """Where the first step of `job` whose script or `env` names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`
+        is, or the number of its steps when none does, worked out once per job: each check of each upload
+        read every earlier step again, which took a job of 1,000 steps (as slice 2d.4b2's reading of
+        local actions can give one) a minute and a half."""
+        memo = self.__dict__.setdefault("_shell_changes", {})
+        found = memo.get(id(job))
+        if found is None or found[0] is not job:
+            first = len(job.steps)
+            for position, earlier in enumerate(job.steps):
+                if re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", earlier.scripts() + " " + str(earlier.raw.get("env", ""))):
+                    first = position
+                    break
+            found = memo[id(job)] = (job, first)
+        return found[1]
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
         provenance-only one (`gh attestation verify`, or `obaaf verify release --pre-approval`, which
-        skips the approvals), None otherwise (including checks whose failure is ignored)."""
+        skips the approvals), None otherwise (including checks whose failure is ignored). Worked out once
+        for each step (flagship slice 2d.4b2)."""
+        memo = self.__dict__.setdefault("_verify_kinds", {})
+        found = memo.get((id(job), id(step)))
+        if found is None or found[0] is not step:
+            found = memo[(id(job), id(step))] = (step, self._verify_kind_of(job, step))
+        return found[1]
+
+    def _verify_kind_of(self, job: Job, step: Step) -> str | None:
         kind = None
         for words in self._binding_matches(job, step, self.detection.get("verify_commands", [])):
             joined = " ".join(words)

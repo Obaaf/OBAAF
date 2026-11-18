@@ -90,8 +90,9 @@ rules:
       job's strategy, its earlier steps, and the jobs it needs). The job's and step's `if:` are part of
       the finding. Not followed: values passed between steps through `GITHUB_ENV`, `GITHUB_OUTPUT` or
       files; shell functions, arrays and aliases, and a variable set in a `while read` loop fed from its
-      end; actions other than actions/checkout that check out code (local, composite or marketplace
-      actions); a reusable workflow of another repository called from such a workflow; a ref a caller
+      end; actions other than actions/checkout that check out code (composite or marketplace actions of
+      other repositories; since slice 2d.4b2 the steps of a local composite action are read as the job's,
+      with the inputs the using step gives put in); a reusable workflow of another repository called from such a workflow; a ref a caller
       passes to a local reusable workflow as an input (since slice 2d.4b1 its jobs are read with the
       events that start the jobs of the repository that call it, so a checkout of `inputs.ref` there is
       "cannot tell" at medium; the input itself is not put in, slice 2d.4b3); and commands the list above
@@ -234,7 +235,9 @@ rules:
       same branch or the default branch, so a poisoned entry would reach the release build. A release
       job with no cache step but no `cache-mode: none` is reported at low severity. Since flagship slice
       2d.2e: an input written as an expression is read as the value that restores, a local action is
-      taken to restore (it is not read; slice 2d.4b2), `lookup-only: true` restores nothing, and a release
+      taken to restore whatever it holds (since slice 2d.4b2 its steps are also read as the job's, but the
+      rule gives one finding for a job, on the first step that restores, which is then the using step),
+      `lookup-only: true` restores nothing, and a release
       job that downloads artifacts is reported when a job it needs, directly or not, restores a cache
       (kind `needed-job-restores`; it may name a job whose output the release does not use). Not
       followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), a cache-mode
@@ -310,8 +313,9 @@ rules:
       code merged or patched into the workspace (`git fetch` and `git merge`, `git am`, `git apply`), a
       download whose target is on another line or in `working-directory`, downloads before an action at
       the workspace root (`uses: ./`), an artifact of the same run, a cache restored at a path written
-      with `~`, an absolute path, a glob or an expression, the actions a local composite action or a called workflow uses (they are
-      checked where their own files are), whether a pinned commit is on the repository's own branches or
+      with `~`, an absolute path, a glob or an expression, the actions a called workflow uses (they are
+      checked where its own file is; since slice 2d.4b2 the actions and images a local composite action's
+      steps use are read as the job's steps and reported on them), whether a pinned commit is on the repository's own branches or
       only in a fork of it, and what a pinned action fetches or runs when it runs.
     fix: >-
       Pin the reference to a full 40-character commit SHA, or an image to its sha256 digest, and keep
@@ -368,7 +372,8 @@ rules:
       and for a commit's text on `push`, `merge_group` and a `workflow_run` after a push, where a merged
       pull request's title and branch name are in the merge commit's message; medium otherwise. Not
       followed: values set while the job runs (`GITHUB_ENV`, step outputs), values passed into
-      reusable workflows (`inputs`) and composite actions, the inputs of other actions, a `with:`
+      reusable workflows (`inputs`; slice 2d.4b3), an action's `outputs` read in the job, the inputs of
+      other actions (since slice 2d.4b2 a local composite action's steps are read with its inputs put in), a `with:`
       written as one expression, and the `env` of a `parallel` group. It does not work out whether an
       expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is
       reported too; an acceptance of it names the expression. A matrix that holds one outsider-written
@@ -492,9 +497,10 @@ rules:
       (`packages: write`, a publishing action, a secret whose name says it publishes). Not read: whether
       the environment has required reviewers (`obaaf audit` reads it), a deployment to GitHub Pages or a
       cloud service (not counted as publishing unless the job is declared a release job), a command
-      built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local action or
-      reusable workflow counted for the job that uses or calls it (slices 2d.4b2 and 2d.4b3; since slice
-      2d.4b1 a called workflow's own job is checked with its callers' events).
+      built from a variable (`$D push`), `rsync`, `scp`, `rclone` and `skopeo`, a dry run (`--dry-run`, `--snapshot`, `publishToMavenLocal`) or a push to `localhost`, and a publish inside a local
+      reusable workflow counted for the job that calls it (slice 2d.4b3; since slice 2d.4b1 a called
+      workflow's own job is checked with its callers' events). Since slice 2d.4b2 a publish in a local
+      composite action's steps makes the job that uses it a release job.
     fix: >-
       Reference an environment (for example `environment: release`) configured with required reviewers,
       self-review prevention and no administrator bypass.
@@ -529,8 +535,8 @@ rules:
       name says it publishes, a step using an action under `publishing_actions`, or an environment name
       the checker cannot read, is reported at medium (low on pull request events only) as one that may
       release. Not followed: `id-token: write` on its own (it also signs and attests), publishing through
-      a local reusable workflow or composite action counted for the job that calls or uses it (plan slices 2d.4b2 and
-      2d.4b3; since slice 2d.4b1 the called workflow's own job is checked with its callers' events), commands not in the lists, and the
+      a local reusable workflow counted for the job that calls it (plan slice 2d.4b3; since slice 2d.4b2 a
+      local composite action's steps are read as the job's; since slice 2d.4b1 the called workflow's own job is checked with its callers' events), commands not in the lists, and the
       repository's default token permissions. A command named in an `echo` is still taken for one that runs.
     fix: >-
       Start release workflows only from pushes to protected branches or tags, published releases, or
