@@ -242,9 +242,9 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
            "team without security staff. For each of the 34 questions, answer Yes, No or Not sure using the evidence named "
            "beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that "
            "the pilot will test.", "",
-           "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An item "
-           "may be marked not applicable (N/A) only when its condition is absent, as noted beside it; N/A counts as "
-           "yes. The tier reflects the answers you supplied.", "",
+           "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An allowed "
+           "N/A also counts as yes. Choose N/A only if the item offers it and its “N/A only if” statement is true "
+           "for your team. The tier reflects the answers you supplied.", "",
            "Fill it in on paper, in the [offline form](../assessment/obaaf-self-assessment.html), or as a file "
            "scored with `obaaf assess score`. Your answers never leave your machine.", ""]
     for tier_id in sorted(c.tiers):
