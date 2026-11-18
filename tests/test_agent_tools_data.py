@@ -456,3 +456,5 @@ class JoinedPatternsTest(unittest.TestCase):
         self.assertTrue(wf.matches_any(commands, "bbb"))
         commands.append(re.compile("ccc", re.M))
         self.assertTrue(wf.matches_any(commands, "ccc"))
+        # An iterator is read once (found by the review).
+        self.assertTrue(wf.matches_any((rx for rx in [re.compile(r"(a)\1")]), "aa"))

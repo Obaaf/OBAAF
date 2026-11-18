@@ -2503,9 +2503,13 @@ class Job:
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
         commands = [re.compile(p, re.M) for p in list(detection.get("agent_commands", [])) + list(extra_commands)]
+        # As `Step.uses_action` reads each prefix, with the step's action lowered once (slice 2d.5b's cost).
+        lowered = [prefix.lower() for prefix in actions]
         for step in self.steps:
-            for prefix in actions:
-                if step.uses_action(prefix):
+            action = step.action
+            if action:
+                low = action.lower()
+                if any(low == prefix or low.startswith(prefix + "/") for prefix in lowered):
                     return f"uses {step.action}"
             text = step.agent_text(commands)
             if text and matches_any(commands, text):
@@ -2599,12 +2603,11 @@ def any_of(commands) -> "re.Pattern | None":
     cannot be joined (then each must be tried)."""
     # The same list is asked about many times in a row (each command line of each step): it is kept, with
     # a copy of what it held, and answered again while it holds the same patterns.
+    key = tuple(commands)
     last = _LAST_JOINED[0]
-    if last is not None and last[0] is commands and last[1] == len(commands) and all(
-            a is b for a, b in zip(last[2], commands)):
+    if last is not None and last[0] is commands and last[2] == key:
         return last[3]
     # Compiled patterns compare and hash by their text and flags, so the tuple is the key.
-    key = tuple(commands)
     joined = _JOINED.get(key, _UNSET_JOINED)
     if joined is not _UNSET_JOINED:
         if isinstance(commands, list):
@@ -2627,6 +2630,8 @@ def any_of(commands) -> "re.Pattern | None":
 def matches_any(commands, text: str, anchored: bool = False) -> bool:
     """Whether one of the compiled `commands` matches `text`: searched for, or at its start when
     `anchored`, as `re.search` and `re.match` do."""
+    if not isinstance(commands, (list, tuple)):
+        commands = tuple(commands)      # read twice below (found by the review)
     joined = any_of(commands)
     if joined is not None:
         return (joined.match(text) if anchored else joined.search(text)) is not None
