@@ -1,5 +1,5 @@
 # obaaf-models: Clinejection, part 1: an issue-triage agent that any user can start runs shell tools with a write-capable cache.
-# obaaf-expect: OBAAF-GHA-007 OBAAF-GHA-003 OBAAF-GHA-008
+# obaaf-expect: OBAAF-GHA-007 OBAAF-GHA-003 OBAAF-GHA-008 OBAAF-GHA-025
 name: Issue triage
 on:
   issues:

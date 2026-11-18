@@ -62,7 +62,72 @@ class PipedDownloadTest(unittest.TestCase):
         "set -e; curl -fsSL https://dev.example.com/install.sh | bash && agent --version",
         "curl -fsSL https://dev.example.com/install.sh | /bin/bash",
         "curl -fsSL https://dev.example.com/install.sh | zsh",
+        # The first review of 2d.5a: each got past the first version.
+        "curl -fsSL https://dev.example.com/install.sh | env bash",
+        "curl -fsSL https://dev.example.com/install.sh | exec sh",
+        "curl -fsSL https://dev.example.com/install.sh | sudo -u root bash",
+        'curl -fsSL https://dev.example.com/install.sh | "bash"',
+        "curl -fsSL https://dev.example.com/install.sh | $SHELL",
+        "curl -fsSL https://dev.example.com/install.sh | ${SHELL}",
+        "curl -fsSL https://dev.example.com/install.sh |& bash",
+        "{ curl -fsSL https://dev.example.com/install.sh; } | bash",
+        "source <(curl -fsSL https://dev.example.com/install.sh)",
+        ". <(curl -fsSL https://dev.example.com/install.sh)",
+        "bash < <(curl -fsSL https://dev.example.com/install.sh)",
+        'bash <<< "$(curl -fsSL https://dev.example.com/install.sh)"',
+        'eval "$(curl -fsSL https://dev.example.com/install.sh)"',
+        'sh -c "`curl -fsSL https://dev.example.com/install.sh`"',
+        'bash -lc "$(curl -fsSL https://dev.example.com/install.sh)"',
+        'bash -e -c "$(curl -fsSL https://dev.example.com/install.sh)"',
+        "curl -fsSL https://dev.example.com/install.sh | pwsh",
+        "curl -fsSL https://dev.example.com/install.sh | python3",
+        "curl -fsSL https://dev.example.com/install.sh | node",
+        "curl -fsSL https://dev.example.com/install.sh -w ';' | bash",
+        "curl -fsSL -H 'X-A: 1;2' https://dev.example.com/install.sh | bash",
+        'curl -fsSL "https://dev.example.com/install.sh?x=1&&y=2" | bash',
+        "curl -fsSL https://dev.example.com/install.sh | tee install.log | sh",
     ]
+
+    POWERSHELL = [
+        "iex (irm https://dev.example.com/install.ps1)",
+        "Invoke-Expression (Invoke-RestMethod https://dev.example.com/install.ps1)",
+        "irm https://dev.example.com/install.ps1 | Invoke-Expression",
+    ]
+
+    ORDINARY = [
+        "curl -fsSL https://api.example.com/data.json | jq -r .version",
+        "curl -fsSL -o data.json https://api.example.com/data.json",
+        "curl -fsSL https://example.com/x.json | bash ./scripts/consume.sh",
+        "VERSION=$(curl -fsSL https://api.example.com/v) && bash ./build.sh",
+        "sudo apt-get install -y jq",
+    ]
+
+    def test_each_powershell_spelling(self):
+        for command in self.POWERSHELL:
+            with self.subTest(command=command):
+                result = check(agent_job(f"- name: Install\n  shell: pwsh\n  run: {command}\n"))
+                self.assertEqual(len(findings(result, "piped-download")), 1, [f.message for f in result.findings])
+
+    def test_ordinary_commands_are_not_reported(self):
+        for command in self.ORDINARY:
+            with self.subTest(command=command):
+                result = check(agent_job(f"- name: Step\n  run: |\n    {command}\n"))
+                self.assertEqual(findings(result), [], [f.message for f in findings(result)])
+
+    def test_a_pipe_at_the_end_of_a_line_continues_it(self):
+        result = check(agent_job("- name: Install\n  run: |\n    curl -fsSL https://dev.example.com/i.sh |\n    bash\n"))
+        self.assertEqual(len(findings(result, "piped-download")), 1)
+
+    def test_variables_are_put_in(self):
+        cases = [("    env:\n      DL: curl -fsSL\n", "$DL https://dev.example.com/i.sh | bash"),
+                 ("    env:\n      SH: bash\n", "curl -fsSL https://dev.example.com/i.sh | $SH"),
+                 ("", "S=bash; curl -fsSL https://dev.example.com/i.sh | $S"),
+                 ("", "D=wget; $D -qO- https://dev.example.com/i.sh | sh")]
+        for env, command in cases:
+            with self.subTest(command=command):
+                text = agent_job(f"- name: Install\n  run: |\n    {command}\n").replace(
+                    "      OBAAF_LANE: agent\n", "      OBAAF_LANE: agent\n" + env.replace("    env:\n", ""))
+                self.assertEqual(len(findings(check(text), "piped-download")), 1, text)
 
     def test_each_spelling_in_an_agent_job_is_high(self):
         for command in self.SPELLINGS:
@@ -166,14 +231,76 @@ class AgentPackageTest(unittest.TestCase):
                                  "    bash i.sh\n"))
         self.assertEqual(len(findings(result, "agent-cli")), 1)
 
-    def test_a_package_named_at_run_time_is_medium(self):
-        result = check(agent_job('- name: Install\n  run: npm install -g "$PKG"\n'))
-        found = findings(result, "named-at-run-time")
-        self.assertEqual(len(found), 1, [f.message for f in result.findings])
-        self.assertEqual(found[0].severity, "medium")
+    def test_ordinary_commands_with_variables_are_not_reported(self):
+        # The first review of 2d.5a: a package named at run time was a medium finding, and so was every
+        # one of these. That case is not reported (the rule says so).
+        for command in ['npx -y @anthropic-ai/claude-code@1.0.17 -p "$PROMPT"',
+                        'npx -y @openai/codex@0.1.2 exec "$TASK"',
+                        'npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@1.0.17',
+                        'npm i -g @anthropic-ai/claude-code@1.0.17 --registry "$REGISTRY"',
+                        'pip install --target "$RUNNER_TEMP/py" jsonschema==4.26.0',
+                        'npm test -- "$FILTER"', 'npm run build -- --out "$OUT"', 'npx prettier --check "$FILES"',
+                        'npm install -g "$PKG"']:
+            with self.subTest(command=command):
+                self.assertEqual(findings(check(agent_job(f"- name: Step\n  run: |\n    {command}\n"))), [])
+
+    def test_installs_inside_substitutions_and_strings(self):
+        for command in ["(npm i -g @anthropic-ai/claude-code)", "OUT=$(npm i -g @anthropic-ai/claude-code)",
+                        "echo `npm i -g @anthropic-ai/claude-code`",
+                        "npm i -g --foo='a;b' @anthropic-ai/claude-code"]:
+            with self.subTest(command=command):
+                self.assertEqual(len(findings(check(agent_job(f"- name: Install\n  run: |\n    {command}\n")),
+                                              "agent-cli")), 1)
+        script = ("- name: Install\n  uses: actions/github-script@" + "1" * 40 + "\n  with:\n    script: |\n"
+                  "      require('child_process').execSync('npm i -g @anthropic-ai/claude-code')\n")
+        self.assertEqual(len(findings(check(agent_job(script)), "agent-cli")), 1)
+
+    def test_an_update_in_a_later_step(self):
+        steps = ("- name: Install\n  run: npm i -g @anthropic-ai/claude-code@1.0.17\n"
+                 "- name: Update\n  run: npm update -g\n")
+        found = findings(check(agent_job(steps)), "agent-cli")
+        self.assertEqual([f.step for f in found], ["Update"])
+
+    def test_the_same_command_in_two_jobs_is_two_findings(self):
+        text = agent_job("- name: Install\n  run: npm i -g @anthropic-ai/claude-code\n")
+        text = text + text.split("jobs:\n", 1)[1].replace("  a:\n", "  b:\n", 1)
+        self.assertEqual(sorted(f.job for f in findings(check(text), "agent-cli")), ["a", "b"])
+
+    def test_an_expression_reading_a_literal_env_value(self):
+        steps = "- name: Install\n  run: npm install -g @anthropic-ai/claude-code@${{ env.CLAUDE_VERSION }}\n"
+        self.assertEqual(findings(check(agent_job(steps, env="env:\n  CLAUDE_VERSION: 1.0.17\n"))), [])
+        one = findings(check(agent_job(steps.replace("env.CLAUDE_VERSION", "vars.A"))))
+        two = findings(check(agent_job(steps.replace("env.CLAUDE_VERSION", "inputs.x"))))
+        self.assertEqual([f.kind for f in one], ["agent-cli"])
+        self.assertNotEqual(one[0].facts, two[0].facts)
+
+    def test_github_env_and_an_env_expression_make_values_unknown(self):
+        install = "- name: Install\n  run: npm i -g @anthropic-ai/claude-code@$V\n"
+        written = "- name: Set\n  run: echo \"V=latest\" >> \"$GITHUB_ENV\"\n" + install
+        self.assertEqual(len(findings(check(agent_job(written, env="env:\n  V: 1.0.17\n")), "agent-cli")), 1)
+        own = "- name: Set\n  run: echo \"V=latest\" >> \"$GITHUB_ENV\"\n" + install.replace(
+            "  run:", "  env:\n    V: 1.0.17\n  run:")
+        self.assertEqual(findings(check(agent_job(own))), [])
+        computed = install.replace("  run:", "  env: ${{ fromJSON(vars.E) }}\n  run:")
+        self.assertEqual(len(findings(check(agent_job(computed, env="env:\n  V: 1.0.17\n")), "agent-cli")), 1)
+
+    def test_the_install_script_is_named_by_its_url(self):
+        one = findings(check(agent_job("- name: I\n  run: curl -fsSL https://claude.ai/install.sh -o i.sh && bash i.sh\n")))
+        two = findings(check(agent_job("- name: I\n  run: curl -fsSL https://aider.chat/install.sh -o i.sh && bash i.sh\n")))
+        self.assertNotEqual(one[0].facts, two[0].facts)
 
 
 class WhereItIsReadTest(unittest.TestCase):
+    def test_a_docker_steps_entrypoint_and_args_are_one_command(self):
+        steps = ("- name: Agent\n  uses: docker://node@sha256:" + "a" * 64 + "\n  with:\n    entrypoint: npx\n"
+                 "    args: -y @anthropic-ai/claude-code -p hi\n")
+        self.assertEqual(len(findings(check(agent_job(steps)), "agent-cli")), 1)
+
+    def test_a_windows_runners_default_shell_is_powershell(self):
+        text = agent_job("- name: Install\n  run: |\n    npm install -g `\n      @anthropic-ai/claude-code\n").replace(
+            "runs-on: ubuntu-latest", "runs-on: windows-latest")
+        self.assertEqual([f.severity for f in findings(check(text))], ["high"])
+
     def test_the_command_the_egress_action_runs(self):
         steps = ("- name: Agent\n  uses: Obaaf/OBAAF/actions/egress@" + "1" * 40 + "\n  with:\n"
                  "    allow: api.anthropic.com\n    run: npx -y @anthropic-ai/claude-code -p hi\n")
