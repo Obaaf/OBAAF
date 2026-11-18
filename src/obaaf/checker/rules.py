@@ -317,7 +317,12 @@ class CallSummary:
 
     @classmethod
     def of(cls, entries: list) -> "CallSummary":
-        return cls() + cls(tuple(dict.fromkeys(entries))[:CALL_EFFECTS_KEPT], frozenset(entries)) if entries else cls()
+        distinct = list(dict.fromkeys(entries))
+        if len(distinct) <= CALL_EFFECTS_DISTINCT:
+            return cls(tuple(distinct[:CALL_EFFECTS_KEPT]), frozenset(distinct))
+        rest = cls(entries=frozenset(distinct[CALL_EFFECTS_DISTINCT:]))
+        return cls(tuple(distinct[:CALL_EFFECTS_KEPT]), frozenset(distinct[:CALL_EFFECTS_DISTINCT]),
+                   frozenset({rest.digest}))
 
     @property
     def count(self) -> int:
@@ -345,8 +350,12 @@ class CallSummary:
         entries = self.entries | other.entries
         overflow = self.overflow | other.overflow
         if len(entries) > CALL_EFFECTS_DISTINCT:
-            overflow = overflow | {other.digest}
-            entries = self.entries if len(self.entries) <= CALL_EFFECTS_DISTINCT else frozenset()
+            # The larger part's entries are kept (each part holds at most CALL_EFFECTS_DISTINCT), so the
+            # count stays a true lower bound; the other part is kept by its digest, so past the bound the
+            # digest can depend on the order the parts were added in.
+            bigger, smaller = (self, other) if len(self.entries) >= len(other.entries) else (other, self)
+            entries = bigger.entries
+            overflow = overflow | {smaller.digest}
         return CallSummary(kept, entries, overflow)
 
 
@@ -356,13 +365,15 @@ class CallEffects:
     in turn (flagship slice 2d.4b3b). `releasing` names each called job in the release lane, and why;
     `restoring` each step that may restore a cache in a called job that is not a release job (a release
     job's own are its own finding), where neither that job's cache-mode nor that of a calling job between
-    forbids it; `downloads` is whether a called job downloads the run's artifacts. `lane_given` is whether
-    the call is what put the calling job in the release lane."""
+    forbids it; `downloads` is whether a called release job downloads the run's artifacts, and
+    `downloads_any` whether any called job does. `lane_given` is whether the call is what put the calling
+    job in the release lane."""
     releasing: CallSummary = field(default_factory=CallSummary)
     restoring: CallSummary = field(default_factory=CallSummary)
     downloads: bool = False
     first_release: tuple = ()          # (called workflow's path, path, job id, reason) of the first releasing job
     lane_given: bool = False
+    downloads_any: bool = False
 
 
 def _forbids_restores(mode) -> bool:
@@ -370,11 +381,13 @@ def _forbids_restores(mode) -> bool:
     return mode in ("none", "write-only")
 
 
-_NO_PARTS = (CallSummary(), CallSummary(), False, ())
+# What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
+# release, any job downloads).
+_NO_PARTS = (CallSummary(), CallSummary(), False, (), False)
 
 
 def _joined(a: tuple, b: tuple) -> tuple:
-    return (a[0] + b[0], a[1] + b[1], a[2] or b[2], a[3] or b[3])
+    return (a[0] + b[0], a[1] + b[1], a[2] or b[2], a[3] or b[3], a[4] or b[4])
 
 
 def give_call_effects(groups: list, detection: dict, agents: dict | None = None) -> None:
@@ -386,8 +399,12 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
     `checker._give_callers` returns them; they are worked out callees first, so a chain of calls is one
     pass. The files of a cycle, which GitHub refuses, are read as one: each calling job in it is given
     everything any of them does, the wider reading, and a calling job's cache-mode inside it forbids
-    nothing. Only the jobs of a workflow some job calls are read for it."""
-    summaries: dict = {}            # id(workflow) -> (releasing, restoring, downloads, first release)
+    nothing. Only the jobs of a workflow some job calls are read for it.
+
+    A job in the release lane only through a call passes up what the jobs it calls restore, which nothing
+    reports for it; a job declared a release job does not, because those restores are its own finding
+    (`called-restores`), and every job it calls counts as part of the release it declares."""
+    summaries: dict = {}
 
     def own(workflow, job) -> tuple:
         view = through_job(job, workflow, detection, agents) if job.local_steps else job
@@ -395,13 +412,13 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
         if view.in_lane("release"):
             reason = one_line(view.reason_for("release"), 200)
             entry = f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)} ({reason})"
-            return CallSummary.of([entry]), CallSummary(), downloads, (workflow.path, job.id, reason)
+            return CallSummary.of([entry]), CallSummary(), downloads, (workflow.path, job.id, reason), downloads
         restoring = CallSummary()
         if not _forbids_restores(job.cache_mode):
             restoring = CallSummary.of([
                 f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)}, {WorkflowRules._cache_step(step)}"
                 for step in view.steps if WorkflowRules._restores_cache(step)])
-        return CallSummary(), restoring, downloads, ()
+        return CallSummary(), restoring, False, (), downloads
 
     for group in reversed(groups):
         members = {id(workflow) for workflow in group}
@@ -435,6 +452,7 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     effects.releasing = effects.releasing + got[0]
                     effects.restoring = effects.restoring + got[1]
                     effects.downloads = effects.downloads or got[2]
+                    effects.downloads_any = effects.downloads_any or got[4]
                     if not effects.first_release and got[3]:
                         effects.first_release = (target.path, *got[3])
                 job.call_effects = effects
@@ -447,20 +465,19 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     job.add_lane("release", one_line(f"calls {one_line(target_path, 120)}, {where} "
                                                      f"'{one_line(job_id, 60)}' is a release job ({reason})", 300))
                     effects.lane_given = True
-                if job.in_lane("release"):
-                    if effects.releasing:
-                        part = (effects.releasing, CallSummary(), effects.downloads,
-                                effects.first_release[1:] if effects.first_release else ())
-                    else:
-                        reason = one_line(job.reason_for("release"), 200)
-                        part = (CallSummary.of([f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)} "
-                                                f"({reason})"]), CallSummary(), effects.downloads,
-                                (workflow.path, job.id, reason))
-                    # A release job's restores are its own finding (`called-restores`, when it is declared).
-                    summary = _joined(summary, part)
+                restoring = effects.restoring if not _forbids_restores(job.cache_mode) or cycle else CallSummary()
+                if job.in_lane("release") and not effects.lane_given:
+                    # Declared a release job: what it calls is the release it declares, and its restores are its
+                    # own finding (`called-restores`).
+                    reason = one_line(job.reason_for("release"), 200)
+                    releasing = effects.releasing or CallSummary.of(
+                        [f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)} ({reason})"])
+                    first = effects.first_release[1:] if effects.first_release else (workflow.path, job.id, reason)
+                    part = (releasing, CallSummary(), effects.downloads_any, first, effects.downloads_any)
                 else:
-                    restoring = effects.restoring if not _forbids_restores(job.cache_mode) or cycle else CallSummary()
-                    summary = _joined(summary, (effects.releasing, restoring, effects.downloads, ()))
+                    first = effects.first_release[1:] if effects.first_release else ()
+                    part = (effects.releasing, restoring, effects.downloads, first, effects.downloads_any)
+                summary = _joined(summary, part)
             summaries[id(workflow)] = summary
 
 
@@ -3393,7 +3410,12 @@ class WorkflowRules:
         """The jobs a release job needs, followed transitively, that restore a cache while their
         cache-mode does not forbid it, when the release job downloads artifacts: what they built can
         carry a poisoned cache entry into the release (Clinejection). Outputs are not followed."""
-        called = job.call_effects is not None and job.called and job.call_effects.downloads
+        # Flagship slice 2d.4b3b: a job that calls workflows of the repository downloads what a called job
+        # downloads: a called release job's, for a job the call makes a release job, and any called job's, for
+        # one declared a release job, whose call is the release it declares. A needed job that calls a workflow
+        # restores what the jobs it calls restore.
+        effects = job.call_effects if job.called else None
+        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
         if not called and not any(s.uses_action("actions/download-artifact") for s in job.steps):
             return []
         out, seen, todo = [], {job.id}, list(job.needs)
@@ -3403,7 +3425,9 @@ class WorkflowRules:
                 continue
             seen.add(name)
             dep = self.wf.jobs[name]
-            if dep.cache_mode not in ("none", "write-only") and any(self._restores_cache(s) for s in dep.steps):
+            through = dep.call_effects is not None and dep.called and bool(dep.call_effects.restoring)
+            if dep.cache_mode not in ("none", "write-only") and (
+                    through or any(self._restores_cache(s) for s in dep.steps)):
                 out.append(name)
             todo += dep.needs
         return sorted(out)

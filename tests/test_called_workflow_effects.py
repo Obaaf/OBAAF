@@ -529,6 +529,81 @@ class FirstReviewTest(unittest.TestCase):
         self.assertEqual(found(result, "OBAAF-GHA-006", CALLER), [])
 
 
+class SecondReviewTest(unittest.TestCase):
+    """What the second review of slice 2d.4b3b found, each a test."""
+
+    BUILD_JOB = ("  build:\n    runs-on: ubuntu-latest\n    steps:\n" + RESTORE + BUILD
+                 + f"      - uses: actions/upload-artifact@{SHA}\n        with:\n          name: dist\n"
+                 "          path: dist\n")
+    DOWNLOAD = f"      - uses: actions/download-artifact@{SHA}\n        with:\n          name: dist\n"
+
+    def test_a_called_job_that_does_not_release_and_downloads_gives_nothing(self):
+        # `e2e` downloads what `build` made and tests it; `publish` publishes from a fresh checkout. In one
+        # workflow that gives nothing; through the call it must not either.
+        own = ("on: push\npermissions: {}\njobs:\n" + self.BUILD_JOB + "  release:\n    needs: build\n"
+               "    cache-mode: none\n    uses: ./.github/workflows/called.yml\n")
+        more = ("  publish:\n    needs: e2e\n    runs-on: ubuntu-latest\n    cache-mode: none\n    steps:\n"
+                f"      - uses: actions/checkout@{SHA}\n        with:\n          persist-credentials: false\n" + PUBLISH)
+        files = {CALLER: own, CALLED: called(self.DOWNLOAD + "      - run: npm test\n", job="e2e", more=more)}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        self.assertEqual(found(result, "OBAAF-GHA-006", CALLER), [])
+
+    def test_a_declared_release_job_is_held_to_restores_beyond_a_workflow_between(self):
+        middle = ".github/workflows/middle.yml"
+        more = "  publish:\n    runs-on: ubuntu-latest\n    cache-mode: none\n    steps:\n" + PUBLISH
+        files = {CALLER: caller(uses="./.github/workflows/middle.yml"),
+                 middle: "on: workflow_call\njobs:\n  hop:\n    uses: ./.github/workflows/called.yml\n",
+                 CALLED: called(RESTORE + BUILD, job="build", more=more),
+                 CONFIG: "lanes:\n  .github/workflows/caller.yml#release: release\n"}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER)
+        self.assertEqual(finding.kind, "called-restores")
+        self.assertEqual(finding.facts["steps"], ["job 'build' of .github/workflows/called.yml, actions/cache"])
+        self.assertEqual(found(result, "OBAAF-GHA-006", middle), [])
+
+    def test_a_needed_job_that_rules_the_event_out_for_an_outside_caller_narrows_it(self):
+        body = ("on: workflow_call\npermissions: {}\njobs:\n  a:\n    if: github.event_name == 'push'\n"
+                "    runs-on: ubuntu-latest\n    steps:\n" + BUILD
+                + "  b:\n    needs: a\n    if: github.event_name == 'pull_request_target'\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: make\n        env:\n"
+                "          TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLED: body})
+        self.assertEqual(found(result, "OBAAF-GHA-001", CALLED, job="b"), [])
+
+    def test_a_needed_job_that_calls_a_workflow_that_restores_feeds_the_release(self):
+        # The usual split: build.yml builds (restoring a cache) and uploads; the release job downloads it.
+        build_wf = ".github/workflows/build.yml"
+        own = ("on: push\npermissions: {}\njobs:\n  build:\n    uses: ./.github/workflows/build.yml\n"
+               "  release:\n    needs: build\n    runs-on: ubuntu-latest\n    cache-mode: none\n    steps:\n"
+               + self.DOWNLOAD + PUBLISH)
+        files = {CALLER: own, build_wf: "on: workflow_call\njobs:\n" + self.BUILD_JOB}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER, job="release")
+        self.assertEqual((finding.kind, finding.facts["jobs"]), ("needed-job-restores", ["build"]))
+
+    def test_past_the_bound_the_count_is_a_true_lower_bound(self):
+        steps = "".join(f"      - uses: actions/cache@{SHA}\n        with:\n          path: p{n}\n          key: k{n}\n"
+                        "        name: r" + str(n) + "\n" for n in range(rules_mod.CALL_EFFECTS_DISTINCT + 1))
+        files = {CALLER: caller(), CALLED: called(steps, job="build"),
+                 CONFIG: "lanes:\n  .github/workflows/caller.yml#release: release\n"}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER)
+        self.assertNotIn("more than 0", finding.message)
+        self.assertIn(f"(more than {rules_mod.CALL_EFFECTS_DISTINCT} entries)", finding.facts["steps"][-1])
+
+    def test_the_summary_past_the_bound_keeps_the_larger_part(self):
+        big = rules_mod.CallSummary.of([f"a{n}" for n in range(rules_mod.CALL_EFFECTS_DISTINCT)])
+        small = rules_mod.CallSummary.of(["b0", "b1"])
+        for joined in (big + small, small + big):
+            self.assertTrue(joined.more)
+            self.assertEqual(joined.count, rules_mod.CALL_EFFECTS_DISTINCT)
+
+
 class CostTest(unittest.TestCase):
 
     def test_a_long_chain_of_calls_each_restoring_is_linear(self):
