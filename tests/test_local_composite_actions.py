@@ -575,16 +575,20 @@ class TheReviewersFourthPassTest(unittest.TestCase):
                             or any("more than 16 texts" in n for n in result.notes), result.notes)
 
     def test_a_big_step_read_many_times_is_bounded_by_its_size(self):
+        """8,000 readings of a 10 KB step: before the size counted, about 40 s and no error; now the
+        bound is reached after a few hundred (slice 2d.4a-timing made it a test of the bound)."""
         import time
         files = {f".github/actions/a{n}/action.yml": composite(
             *[f"    - uses: ./.github/actions/a{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
-              for k in range(20)]) for n in range(2)}
-        files[".github/actions/a2/action.yml"] = composite(
+              for k in range(20)]) for n in range(3)}
+        files[".github/actions/a3/action.yml"] = composite(
             "    - run: echo ${{ inputs.n }} " + "x" * 10_000 + "\n      shell: bash\n")
         with TempDir() as tmp:
             started = time.monotonic()
-            check(tmp, job_using("./.github/actions/a0"), files)
-            self.assertLess(time.monotonic() - started, 5)
+            result = check(tmp, job_using("./.github/actions/a0"), files)
+            # About 2.5 s locally; the limit leaves room for a slow CI runner.
+            self.assertLess(time.monotonic() - started, 12)
+            self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
 
 class TheReviewersFifthPassTest(unittest.TestCase):
@@ -607,8 +611,11 @@ class TheReviewersFifthPassTest(unittest.TestCase):
                                                            "      shell: bash\n")}
         with TempDir() as tmp:
             started = time.monotonic()
-            check(tmp, job_using("./.github/actions/p"), files)
-            self.assertLess(time.monotonic() - started, 6)
+            result = check(tmp, job_using("./.github/actions/p"), files)
+            # About 1.5 s locally; before the text was charged, about 3 s and no error. The error is the
+            # main check (slice 2d.4a-timing), and the limit leaves room for a slow CI runner.
+            self.assertLess(time.monotonic() - started, 12)
+            self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
     def test_an_alias_shared_by_env_and_run_is_read_for_each(self):
         body = ("runs:\n  using: composite\n  steps:\n    - env:\n        T: ${{ inputs.tool }}\n"
@@ -658,9 +665,13 @@ class TheReviewersSeventhPassTest(unittest.TestCase):
     def test_cheap_uses_buy_nothing_for_another_step(self):
         import time
         files = {".github/actions/t/action.yml": composite(PLAIN)}
+        # A fan-out sized so that it fits the shared bound plus what 500 cheap uses would add if their
+        # units were pooled, and not the shared bound alone: with the allowance pooled (as before the fix)
+        # it ends with no error; with each use's units its own, it stops at the bound (found by the review
+        # of slice 2d.4a-timing, which tried both).
         files.update({f".github/actions/f{n}/action.yml": composite(
             *[f"    - uses: ./.github/actions/f{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
-              for k in range(20)]) for n in range(3)})
+              for k in range(20 if n < 2 else 2)]) for n in range(3)})
         files[".github/actions/f3/action.yml"] = composite(
             *["    - run: echo '${{ inputs.n }}'\n      shell: bash\n"] * 20)
         cheap = "".join("      - uses: ./.github/actions/t\n" for _ in range(500))
@@ -670,7 +681,9 @@ class TheReviewersSeventhPassTest(unittest.TestCase):
         with TempDir() as tmp:
             started = time.monotonic()
             result = check(tmp, text, files)
-            self.assertLess(time.monotonic() - started, 4)
+            # About 1.2 s locally; the error is the main check, and the limit leaves room for a slow CI
+            # runner (slice 2d.4a-timing: the first version of this case took 5.0 s on CI once).
+            self.assertLess(time.monotonic() - started, 8)
             self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
 
