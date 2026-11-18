@@ -198,7 +198,7 @@ def _script_with_agent(root: Path, run: str, commands: list, memo: dict | None =
                 text = script.read(200_000)
         except (OSError, RuntimeError):
             continue
-        found = any(rx.search(text) for rx in commands)
+        found = wf_mod.matches_any(commands, text)
         if memo is not None:
             memo[("script", str(path))] = found
         if found:
@@ -1566,7 +1566,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                     out.agent = f"uses {step.action} in the local action {shown}"
             if out.agent is None:
                 text = step.agent_text(commands)
-                if text and any(rx.search(text) for rx in commands):
+                if text and wf_mod.matches_any(commands, text):
                     out.agent = f"runs an agent CLI in {where}"
             if out.agent is None and step.run:
                 expand_problems: list = []

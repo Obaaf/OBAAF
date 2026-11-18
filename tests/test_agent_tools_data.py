@@ -417,3 +417,42 @@ class ReviewFindingsTest(unittest.TestCase):
         for entry in agent_tools.tools(raw_detection()):
             for fact in entry.get("carried", []):
                 self.assertIsInstance(fact, str)
+
+
+class JoinedPatternsTest(unittest.TestCase):
+    """The agent patterns are asked about as one joined pattern (slice 2d.5b's cost, found when CI's
+    large-repository test went over its limit); the answer must be the one each pattern gives."""
+
+    def test_the_joined_pattern_answers_as_each_would(self):
+        import random
+
+        from obaaf.checker import workflow as wf
+        commands = [re.compile(p, re.M) for p in catalog.load().detection["agent_commands"]]
+        words = ["claude", "-p", "--print", "codex", "exec", "qwen", "--prompt", "goose", "run", "kilo", "cn",
+                 "amp", "-x", "npx", "@github/copilot", "@github/copilot-language-server", "sudo", "'", '"', ";",
+                 "|", "\n", "aider", "cline", "echo", "sweagent", "kiro-cli", "--no-interactive", "x"]
+        rng = random.Random(25)
+        for _ in range(3000):
+            text = " ".join(rng.choice(words) for _ in range(rng.randint(1, 8)))
+            for anchored in (False, True):
+                expected = any((rx.match(text) if anchored else rx.search(text)) for rx in commands)
+                self.assertEqual(wf.matches_any(commands, text, anchored=anchored), expected, (text, anchored))
+
+    def test_patterns_that_cannot_be_joined_are_tried_one_by_one(self):
+        from obaaf.checker import workflow as wf
+        for patterns in ([r"(a)\1", r"b"], [r"(?i)claude", r"x"], [r"(?P<n>a)", r"(?P<n>b)"], [r"(x)?(?(1)a|b)", r"c"]):
+            with self.subTest(patterns):
+                commands = [re.compile(p, re.M) for p in patterns]
+                self.assertIsNone(wf.any_of(commands))
+        commands = [re.compile(r"(?i)claude", re.M), re.compile("x", re.M)]
+        self.assertTrue(wf.matches_any(commands, "CLAUDE"))
+        self.assertFalse(wf.matches_any(commands, "y"))
+
+    def test_a_list_changed_in_place_is_read_again(self):
+        from obaaf.checker import workflow as wf
+        commands = [re.compile("aaa", re.M)]
+        self.assertFalse(wf.matches_any(commands, "bbb"))
+        commands[0] = re.compile("bbb", re.M)
+        self.assertTrue(wf.matches_any(commands, "bbb"))
+        commands.append(re.compile("ccc", re.M))
+        self.assertTrue(wf.matches_any(commands, "ccc"))

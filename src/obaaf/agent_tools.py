@@ -219,8 +219,11 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
     steps = list(job.steps)
     for inner in (getattr(job, "local_steps", None) or {}).values():
         steps.extend(inner)
+    from obaaf.checker.workflow import matches_any     # the checker is loaded by now; the catalogue is not
     for step in steps:
         text = step.agent_text(every) if every else ""
+        if text and not matches_any(every, text):
+            text = ""       # no pattern matches anywhere: each tool's need not be tried (slice 2d.5b's cost)
         for tool, actions, rxs in entries:
             if any(step.uses_action(a) for a in actions) or (text and any(rx.search(text) for rx in rxs)):
                 found.add(tool)

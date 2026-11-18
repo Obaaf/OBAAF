@@ -1885,8 +1885,8 @@ class Step:
         lines.extend(v for v in self.env.values() if isinstance(v, str))
         for value in lines:
             for variant in _readings(value):
-                if any(rx.match(candidate) for segment in command_segments(variant)
-                       for candidate in _first_word_forms(segment) for rx in commands):
+                if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
+                       for candidate in _first_word_forms(segment)):
                     # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
                     found.append(variant)
                     break
@@ -1897,8 +1897,8 @@ class Step:
             put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
             if put != own:
                 for variant in _readings(put):
-                    if any(rx.match(candidate) for segment in command_segments(variant)
-                           for candidate in _first_word_forms(segment) for rx in commands):
+                    if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
+                           for candidate in _first_word_forms(segment)):
                         found.append(variant)
                         break
         text = "\n".join(p for p in [own, *found] if p)
@@ -2508,12 +2508,11 @@ class Job:
                 if step.uses_action(prefix):
                     return f"uses {step.action}"
             text = step.agent_text(commands)
-            for rx in commands:
-                if text and rx.search(text):
-                    return f"runs an agent CLI in '{step.name}'"
+            if text and matches_any(commands, text):
+                return f"runs an agent CLI in '{step.name}'"
         # The default shell a `run` step is given (flagship slice 2d.2f, from its review): `shell: claude -p
         # {0}` under `defaults.run` runs the agent with every script.
-        if any(rx.match(form) for form in self.default_shell_forms() for rx in commands):
+        if any(matches_any(commands, form, anchored=True) for form in self.default_shell_forms()):
             return "runs an agent CLI as the default shell"
         if self.reusable:
             for prefix in actions:
@@ -2582,6 +2581,56 @@ class Job:
             elif step.text() and any(rx.search(step.text()) for rx in rxs):
                 out.append(step)
         return out
+
+
+# Patterns joined into one, for asking whether any of a list matches (flagship slice 2d.5b, whose 23
+# agent tools made the list of agent patterns 2.6 times as long and a large repository's check slower):
+# `(?:a)|(?:b)` matches where `a` or `b` does, at the same place, so one search or match answers what a
+# search or match with each would. A list is not joined when its flags differ, or when a pattern holds a
+# back-reference, a conditional group or a flag for the whole pattern, which joining would change.
+_NOT_JOINED_RE = re.compile(r"\\[1-9]|\(\?P=|\(\?\(|\(\?[aiLmsux]+\)")
+_JOINED: dict = {}
+_UNSET_JOINED = object()
+_LAST_JOINED: list = [None]
+
+
+def any_of(commands) -> "re.Pattern | None":
+    """One pattern that matches exactly where one of the compiled `commands` does, or None when they
+    cannot be joined (then each must be tried)."""
+    # The same list is asked about many times in a row (each command line of each step): it is kept, with
+    # a copy of what it held, and answered again while it holds the same patterns.
+    last = _LAST_JOINED[0]
+    if last is not None and last[0] is commands and last[1] == len(commands) and all(
+            a is b for a, b in zip(last[2], commands)):
+        return last[3]
+    # Compiled patterns compare and hash by their text and flags, so the tuple is the key.
+    key = tuple(commands)
+    joined = _JOINED.get(key, _UNSET_JOINED)
+    if joined is not _UNSET_JOINED:
+        if isinstance(commands, list):
+            _LAST_JOINED[0] = (commands, len(commands), key, joined)
+        return joined
+    joined = None
+    if key and len({rx.flags for rx in key}) == 1 and not any(_NOT_JOINED_RE.search(rx.pattern) for rx in key):
+        try:
+            joined = re.compile("|".join(f"(?:{rx.pattern})" for rx in key), key[0].flags)
+        except (re.error, RecursionError, OverflowError):
+            joined = None
+    if len(_JOINED) >= 64:
+        _JOINED.clear()
+    _JOINED[key] = joined
+    if isinstance(commands, list):
+        _LAST_JOINED[0] = (commands, len(commands), key, joined)
+    return joined
+
+
+def matches_any(commands, text: str, anchored: bool = False) -> bool:
+    """Whether one of the compiled `commands` matches `text`: searched for, or at its start when
+    `anchored`, as `re.search` and `re.match` do."""
+    joined = any_of(commands)
+    if joined is not None:
+        return (joined.match(text) if anchored else joined.search(text)) is not None
+    return any((rx.match(text) if anchored else rx.search(text)) for rx in commands)
 
 
 def _readings(text: str) -> list[str]:
