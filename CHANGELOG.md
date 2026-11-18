@@ -28,7 +28,7 @@ Slice 2d.4a (issue #80, part of 2d.4); decision D-081. A way past OBAAF-GHA-003,
   - every local action of a workflow checked on its own.
 
   The note names the first five places by file, job, action and reason, and counts the rest.
-- **An action file it cannot read is an error, which fails the check, as a workflow file is.** That is one that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is over 1 MB. So is a check whose local actions would cost more units to read than it spends on them (30,000, and 200 more for each step of a job that uses one; a reading of an action costs one, one for each step read, and one for each 200 bytes of its files or characters its caller's inputs add; an action is read once for each set of values of the inputs its expressions read and of the environment it is given).
+- **An action file it cannot read is an error, which fails the check, as a workflow file is.** That is one that is not YAML the checker reads (a parse error, a duplicate key, a tag, a disputed line break), is not a mapping, cannot be opened or is over 1 MB. So is a check whose local actions would cost more units to read than it spends on them (30,000 for the check, and 200 for each step of a job that uses one, which only that step may spend; a reading of an action costs one, one for each step read, and one for each 200 bytes of its files or characters its caller's inputs add; an action is read once for each set of values of the inputs its expressions read and of the environment it is given).
 - **Not changed:**
   - an action from another repository is not read;
   - a called local reusable workflow is read as before (slice 2d.4b);

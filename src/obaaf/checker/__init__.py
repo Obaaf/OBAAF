@@ -218,8 +218,11 @@ LOCAL_ACTION_BYTES = 1_000_000
 # actions that use each other many times over, with different inputs, cannot make the check run long
 # or hide an agent in a job read after them.
 LOCAL_ACTION_UNITS = 30_000
-# And this many more for each step of a job that uses a local action, so the bound grows with the
-# repository: 400 jobs that each give one action different inputs are not more than a check reads.
+# And this many for each step of a job that uses a local action, spent only on what that step reads
+# and not kept for another, so the bound grows with the repository (400 jobs that each give one action
+# different inputs are not more than a check reads) and many cheap steps cannot buy a long reading for
+# one heavy action. Reading costs about 40 microseconds a unit, so local actions add at most about
+# 1.3 seconds to a check, and 8 milliseconds for each step that uses one.
 LOCAL_ACTION_UNITS_PER_USE = 200
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
@@ -234,11 +237,20 @@ _COMMAND_FIELDS = ("run", "shell", "env", "with", "working-directory")
 
 
 _READINGS = "readings"      # the counter's key in the cache, which no (folders, inputs, env) key can equal
-_USES = "uses"              # how many steps of jobs that use a local action the check has read
 
 
-def _units_allowed(cache: dict) -> int:
-    return LOCAL_ACTION_UNITS + LOCAL_ACTION_UNITS_PER_USE * cache.get(_USES, 0)
+_OWN = "own"                # what is left of the units of the step being read, which no other step may spend
+
+
+def _charge(cache: dict, units: int) -> None:
+    """Spend `units`: first from the step being read (`LOCAL_ACTION_UNITS_PER_USE`, which is not kept
+    for another step), then from the check's shared `LOCAL_ACTION_UNITS`, past which reading stops."""
+    own = cache.get(_OWN, 0)
+    taken = min(own, units)
+    cache[_OWN] = own - taken
+    cache[_READINGS] = cache.get(_READINGS, 0) + units - taken
+    if cache[_READINGS] > LOCAL_ACTION_UNITS:
+        raise _ReadingsExceeded()
 
 
 class _ReadingsExceeded(Exception):
@@ -691,10 +703,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             return cache[known]
     cost = 1 + size // _BYTES_PER_UNIT + sum(len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict)
                                              and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
-    readings = cache.get(_READINGS, 0) + cost
-    cache[_READINGS] = readings
-    if readings > _units_allowed(cache):
-        raise _ReadingsExceeded()
+    _charge(cache, cost)
     if not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
     for folder, raw in raws:
@@ -739,9 +748,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             # so it is paid for too; the action's own text is in the size of its files.
             added = (sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
                      - sum(_text_size(merged.get(name)) for name in _COMMAND_FIELDS))
-            cache[_READINGS] = cache.get(_READINGS, 0) + max(0, added) // _BYTES_PER_UNIT
-            if cache[_READINGS] > _units_allowed(cache):
-                raise _ReadingsExceeded()
+            _charge(cache, max(0, added) // _BYTES_PER_UNIT)
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
             if out.agent is None:
@@ -838,7 +845,7 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
                                "the file was checked on its own, so its repository's actions were not read"))
                 continue
             where = f"{workflow.path}: job '{wf_mod.one_line(job.id, 60)}' uses the local action {shown}, and"
-            cache[_USES] = cache.get(_USES, 0) + 1
+            cache[_OWN] = LOCAL_ACTION_UNITS_PER_USE
             try:
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
                                                  given_env=step.env)
@@ -850,8 +857,9 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
                 if not cache.get(_EXCEEDED):
                     cache[_EXCEEDED] = True
                     errors.append(f"{where} reading the check's local actions would cost more than the "
-                                  f"{_units_allowed(cache)} units the check spends on them ({LOCAL_ACTION_UNITS}, and "
-                                  f"{LOCAL_ACTION_UNITS_PER_USE} for each step that uses one; a reading costs one, one "
+                                  f"units the check spends on them ({LOCAL_ACTION_UNITS} for the check, and "
+                                  f"{LOCAL_ACTION_UNITS_PER_USE} for each step that uses one, for that step alone; a "
+                                  "reading costs one, one "
                                   "for each step read and one for each 200 bytes of its files or of text its caller "
                                   "hands it, and an action is read once for each set of inputs and environment it is "
                                   "given), so the checker stopped reading them and cannot tell whether an agent runs "

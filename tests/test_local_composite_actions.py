@@ -652,6 +652,28 @@ class TheReviewersSixthPassTest(unittest.TestCase):
             self.assertEqual([e for e in result.errors if "units" in e], [])
 
 
+class TheReviewersSeventhPassTest(unittest.TestCase):
+    """Many cheap uses of a local action cannot buy a long reading for a heavy one (2026-11-18)."""
+
+    def test_cheap_uses_buy_nothing_for_another_step(self):
+        import time
+        files = {".github/actions/t/action.yml": composite(PLAIN)}
+        files.update({f".github/actions/f{n}/action.yml": composite(
+            *[f"    - uses: ./.github/actions/f{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
+              for k in range(20)]) for n in range(3)})
+        files[".github/actions/f3/action.yml"] = composite(
+            *["    - run: echo '${{ inputs.n }}'\n      shell: bash\n"] * 20)
+        cheap = "".join("      - uses: ./.github/actions/t\n" for _ in range(500))
+        text = ("on: workflow_dispatch\njobs:\n  buy:\n    runs-on: ubuntu-latest\n    permissions: {}\n"
+                f"    steps:\n{cheap}  heavy:\n    runs-on: ubuntu-latest\n    permissions: {{}}\n    steps:\n"
+                "      - uses: ./.github/actions/f0\n")
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, text, files)
+            self.assertLess(time.monotonic() - started, 4)
+            self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
+
+
 def json_quoted(text):
     import json
     return json.dumps(text)
