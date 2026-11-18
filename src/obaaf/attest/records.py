@@ -184,9 +184,10 @@ def isolation_from_workflow(workflow_file: str | Path, job_id: str, declared_tie
             raise RecordError(f"job {job_id!r} runs on a self-hosted runner; set OBAAF_TIER to A (ephemeral) or B "
                               "(persistent, release-only, reimaged on a schedule) in its env")
     elif job.runner_kind == "github-hosted":
-        # The checker's reading (`HOSTED_LABELS`, one label per set, matrices resolved), not a pattern of
-        # its own: `ubuntu-gpu` or `[ubuntu-latest, gpu]` may be a self-hosted runner and must declare
-        # its tier (flagship slice 2d.9; before, any `ubuntu-*` label was Tier A).
+        # The checker's reading (`HOSTED_LABELS`, one label per set, written once or more in any letter
+        # case, matrices resolved), not a pattern of its own: `ubuntu-gpu` or `[ubuntu-latest, gpu]` may be
+        # a self-hosted runner and must declare its tier (flagship slice 2d.9; before, any `ubuntu-*` label
+        # was Tier A).
         runner_env, tier = "github-hosted", "A"
         if env_tier and env_tier != "A":
             raise RecordError(f"job {job_id!r} runs on GitHub-hosted runners, which are Tier A, but OBAAF_TIER says {env_tier}")
