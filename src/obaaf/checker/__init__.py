@@ -319,7 +319,11 @@ def _call_candidates(uses: str) -> list[str]:
     return out
 
 
-def _give_callers(read: list) -> None:
+# A call of a workflow of a repository by name: `owner/repo/.github/workflows/<file>@ref` (slice 2d.4b3b).
+_NAMED_CALL_RE = re.compile(r"[^/\s]+/[^/\s]+/(\.github/workflows/[^@\s]+)@\S+\Z")
+
+
+def _give_callers(read: list) -> list:
     """Give each workflow that a job of the repository calls by its path (`uses:
     ./.github/workflows/x.yml`) those calls, and the events that can start each calling job (flagship
     slice 2d.4b1). `read` is (the file's path in the repository as found, workflow) for every workflow
@@ -333,7 +337,11 @@ def _give_callers(read: list) -> None:
 
     A path is matched as git stores it, letter case included, by the path the file was found at (a link
     is matched by its own name, not its target's). A workflow without `on: workflow_call` is given
-    nothing: GitHub refuses to call it, so the call never runs its jobs."""
+    nothing: GitHub refuses to call it, so the call never runs its jobs.
+
+    Each calling job is given the workflows it calls (`Job.called`, flagship slice 2d.4b3b), and the
+    groups of workflows that call each other are returned, callers' groups first, for
+    `rules.give_call_effects` once every file is classified."""
     by_path: dict[str, list] = {}
     for found, workflow in read:
         by_path.setdefault(found, [])
@@ -344,6 +352,12 @@ def _give_callers(read: list) -> None:
         for job in workflow.jobs.values():
             uses = job.raw.get("uses")
             if not _is_local_like(uses):
+                # A call written `owner/repo/<path>@ref` is another repository's file to the checker, even
+                # when it names this one, which the checker cannot tell offline; where this repository
+                # has a workflow at that path, a note says it was not read as this call's (slice 2d.4b3b).
+                named = _NAMED_CALL_RE.match(uses.strip()) if isinstance(uses, str) else None
+                if named and any(target.callable for target in by_path.get(posixpath.normpath(named.group(1)), [])):
+                    workflow.named_calls.append((job.id, uses.strip(), posixpath.normpath(named.group(1))))
                 continue
             targets: list = []
             for candidate in _call_candidates(uses):
@@ -352,6 +366,7 @@ def _give_callers(read: list) -> None:
                         targets.append(target)
             for target in targets:
                 target.callers.append(wf_mod.Call(workflow.path, job.id, job.line, job.raw.get("secrets"), workflow))
+            job.called = targets
             if targets:
                 calls.setdefault(id(workflow), []).append((job, targets))
     # The calls, as a graph of workflows, taken apart into groups that call each other (strongly
@@ -363,7 +378,8 @@ def _give_callers(read: list) -> None:
     workflows = {id(workflow): workflow for _, workflow in read}
     edges = {key: list(dict.fromkeys(id(t) for _, targets in calls.get(key, []) for t in targets)) for key in nodes}
     budget = {"chars": 0}
-    for group in _strongly_connected(nodes, edges):
+    groups = _strongly_connected(nodes, edges)
+    for group in groups:
         members = set(group)
         # The inputs its callers give (slice 2d.4b3a) are put in before its own calls are followed, so a
         # calling job's `if:` and `with:` are read with them, and a chain carries the first caller's
@@ -384,6 +400,7 @@ def _give_callers(read: list) -> None:
                 for target in targets:
                     if id(target) not in members:
                         target.give_caller_events(events)
+    return [[workflows[key] for key in group] for group in groups]
 
 
 def _strongly_connected(nodes: list, edges: dict) -> list[list]:
@@ -443,6 +460,15 @@ def _caller_notes(workflows: list) -> list[str]:
     counted."""
     out = []
     for workflow in workflows:
+        # A call by `owner/repo/...@ref` of a path this repository has a workflow at (slice 2d.4b3b).
+        for job_id, uses, path in workflow.named_calls[:20]:
+            out.append(f"{wf_mod.one_line(workflow.path, 120)} job '{wf_mod.one_line(job_id, 60)}' calls "
+                       f"'{wf_mod.one_line(uses, 160)}', which names a path this repository has a workflow at "
+                       f"({wf_mod.one_line(path, 120)}); a call written with a repository's name is not read as a "
+                       "call of this repository's file, so that file's jobs are not read with this job's events, "
+                       "inputs or secrets, and nothing is read at that ref")
+        if len(workflow.named_calls) > 20:
+            out.append(f"{wf_mod.one_line(workflow.path, 120)}: {len(workflow.named_calls) - 20} more such calls")
         # What the checker could not work out of what callers give its inputs (slice 2d.4b3a).
         out.extend(f"{wf_mod.one_line(workflow.path, 120)}: {note}" for note in dict.fromkeys(workflow.caller_input_notes))
         extra = sorted(workflow.caller_events - set(workflow.triggers))
@@ -2411,9 +2437,15 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
         read.append((path, rel, workflow))
     readable = [workflow for _, _, workflow in read if isinstance(workflow, wf_mod.Workflow) and not workflow.error]
-    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
-                   if any(workflow is other for other in readable)])
-    for path, rel, workflow in read:
+    groups = _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
+                            if any(workflow is other for other in readable)])
+    # Every file is classified, with its local actions read, before any is checked, so that a job that
+    # calls a workflow of the repository is checked with what that workflow's jobs do (flagship slice
+    # 2d.4b3b). What this reports for a file is kept and reported with the file, in the same order.
+    prepared = _prepare_workflows(read, root, None if on_its_own else root, config, declared, script_cmds,
+                                  agent_actions, unread_actions, action_cache, steps_state)
+    rules_mod.give_call_effects(groups, catalog.detection, config.agents)
+    for path, rel, workflow, reported in prepared:
         rels.append(rel)
         owned_paths.extend(_as_found(path, root))
         if isinstance(workflow, OSError):
@@ -2425,18 +2457,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
-        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
-                        aliases=declared.aliases(rel, path))
-        _apply_script_detection(workflow, root, script_cmds)
-        _apply_local_action_detection(workflow, None if on_its_own else root, agent_actions, script_cmds,
-                                      unread_actions, errors, action_cache)
-        marks = _local_steps_marks(steps_state, unread_actions, errors)
-        _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
-                                  config.agents)
-        if _check_caller_input_reads(workflow):
-            _back_to_marks(marks, steps_state, unread_actions, errors)
-            _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
-                                      config.agents)
+        errors.extend(reported)
         declared.workflow(workflow, path)
         for job in workflow.jobs.values():
             if job.in_lane("agent"):
@@ -2509,6 +2530,33 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
                        jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
+
+
+def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",
+                       declared: "_LaneDeclarations", script_cmds: list, agent_actions: list, unread_actions: list,
+                       action_cache: dict, steps_state: dict) -> list:
+    """Classify every workflow read without error, and read the repository's scripts and local actions it
+    uses, in the order the files were read. Returns (path, rel, workflow, what was reported) for every
+    file: what classifying and reading the actions of a file adds to the errors is held back and returned
+    with it, so that `check` reports it where it did when each file was checked in turn."""
+    prepared = []
+    for path, rel, workflow in read:
+        if isinstance(workflow, OSError) or workflow.error:
+            prepared.append((path, rel, workflow, []))
+            continue
+        reported: list = []
+        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
+                        aliases=declared.aliases(rel, path))
+        _apply_script_detection(workflow, root, script_cmds)
+        _apply_local_action_detection(workflow, actions_root, agent_actions, script_cmds,
+                                      unread_actions, reported, action_cache)
+        marks = _local_steps_marks(steps_state, unread_actions, reported)
+        _apply_local_action_steps(workflow, actions_root, unread_actions, reported, steps_state, config.agents)
+        if _check_caller_input_reads(workflow):
+            _back_to_marks(marks, steps_state, unread_actions, reported)
+            _apply_local_action_steps(workflow, actions_root, unread_actions, reported, steps_state, config.agents)
+        prepared.append((path, rel, workflow, reported))
+    return prepared
 
 
 def _as_found(path: Path, root: Path, strict: bool = False) -> list[str]:
@@ -2835,9 +2883,14 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             read.append((path, rel, exc))
             continue
         read.append((path, rel, wf_mod.parse(rel, text)))
-    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
-                   if isinstance(workflow, wf_mod.Workflow) and not workflow.error])
-    for path, rel, workflow in read:
+    groups = _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
+                            if isinstance(workflow, wf_mod.Workflow) and not workflow.error])
+    # Classified first, as `check` does (flagship slice 2d.4b3b), so a calling job is in the lanes of what
+    # the workflows it calls do.
+    prepared = _prepare_workflows(read, root, root if is_repo else None, config, declared, script_cmds,
+                                  agent_actions, unread_actions, action_cache, steps_state)
+    rules_mod.give_call_effects(groups, catalog.detection, config.agents)
+    for path, rel, workflow, reported in prepared:
         seen.append(rel)
         if isinstance(workflow, OSError):
             errors.append(f"{rel}: cannot be read: {workflow}")
@@ -2847,18 +2900,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
-        wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
-                        aliases=declared.aliases(rel, path))
-        _apply_script_detection(workflow, root, script_cmds)
-        _apply_local_action_detection(workflow, root if is_repo else None, agent_actions, script_cmds,
-                                      unread_actions, errors, action_cache)
-        marks = _local_steps_marks(steps_state, unread_actions, errors)
-        _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
-                                  config.agents)
-        if _check_caller_input_reads(workflow):
-            _back_to_marks(marks, steps_state, unread_actions, errors)
-            _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
-                                      config.agents)
+        errors.extend(reported)
         declared.workflow(workflow, path)
         # What `check` reports as an error for the file (an input given twice under two spellings, an
         # expression too deep for the rules to read) means the file was not fully read, so `--lanes`

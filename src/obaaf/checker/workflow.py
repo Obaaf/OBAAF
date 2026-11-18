@@ -1454,7 +1454,8 @@ _RUN_EVENT = ("github", "event", "workflow_run", "event")
 _MAX_CONDITION_DEPTH = 200
 
 
-def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, depth: int = 0) -> frozenset:
+def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, depth: int = 0,
+              named: set | None = None) -> frozenset:
     """The events, out of `events`, on which the condition toks[lo:hi] can be true.
 
     It is read as GitHub evaluates it: `||` binds loosest, then `&&`, then a comparison. Only a
@@ -1462,6 +1463,7 @@ def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, dept
     `github.event.workflow_run.event == '<event>'`, rules an event out. Any other part (a function,
     a negation, a comparison of a comparison, text inside a string) is taken to be true on every
     event, so the answer can name an event the job never runs on and cannot leave out one it does.
+    With `named`, every event a part `github.event_name == '<event>'` names is added to it.
     """
     if depth > _MAX_CONDITION_DEPTH:
         return events
@@ -1469,20 +1471,22 @@ def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, dept
     if len(parts) > 1:
         out: frozenset = frozenset()
         for a, b in parts:
-            out |= _admitted(toks, close, a, b, events, depth + 1)
+            out |= _admitted(toks, close, a, b, events, depth + 1, named)
         return out
     parts = _split(toks, close, lo, hi, "&")
     if len(parts) > 1:
         out = events
         for a, b in parts:
-            out &= _admitted(toks, close, a, b, events, depth + 1)
+            out &= _admitted(toks, close, a, b, events, depth + 1, named)
         return out
     if hi - lo >= 2 and toks[lo] == ("op", "(") and close[lo] == hi - 1:
-        return _admitted(toks, close, lo + 1, hi - 1, events, depth + 1)
+        return _admitted(toks, close, lo + 1, hi - 1, events, depth + 1, named)
     test = _event_test(toks, lo, hi)
     if test is None:
         return events
     path, equal, value = test
+    if path == _EVENT_NAME and equal and named is not None:
+        named.add(value)
     if path == _EVENT_NAME:
         named = {"workflow_run", TRUSTED_WORKFLOW_RUN} if value == "workflow_run" else {value}
         # In a workflow another workflow calls, `github.event_name` is the caller's event, which the
@@ -1519,7 +1523,18 @@ def _narrowed(cond: str, events: frozenset) -> frozenset:
         if not _balanced(toks):
             return events
         atoms = events | ({TRUSTED_WORKFLOW_RUN} if "workflow_run" in events else frozenset())
-        out = _admitted(toks, expr_mod._closers(toks), 0, len(toks), atoms)
+        close = expr_mod._closers(toks)
+        if "workflow_call" in events:
+            # Flagship slice 2d.4b3b: `workflow_call` stands for a caller in another repository, whose event
+            # the checker does not know. A test `github.event_name == '<event>'` says the job is written to
+            # run on that event, and such a caller can raise it, so each event GitHub documents that a test
+            # names is one the job can run on: the wider reading. A test with `!=` adds nothing.
+            named: set = set()
+            _admitted(toks, close, 0, len(toks), atoms, named=named)
+            extra = frozenset(name for name in named if name in GITHUB_EVENTS) - atoms
+            if extra:
+                atoms |= extra | ({TRUSTED_WORKFLOW_RUN} if "workflow_run" in extra else frozenset())
+        out = _admitted(toks, close, 0, len(toks), atoms)
     except (expr_mod.TooComplex, RecursionError):
         return events
     # A run that follows another run is one event with two origins. When both can start the job it
@@ -1911,6 +1926,11 @@ class Job:
     # each, in the order they run, with the using step's inputs put in (slice 2d.4b2). The rules read
     # them as the job's own steps in a second pass (`WorkflowRules.through_local_actions`).
     local_steps: dict = field(default_factory=dict)
+    # For a job that calls workflows of the same repository by their path: those workflows, and what
+    # their jobs do counted for this job (flagship slice 2d.4b3b; `rules.CallEffects`). Set by the
+    # checker once every file is read and classified.
+    called: list = field(default_factory=list, repr=False, compare=False)
+    call_effects: Any = field(default=None, repr=False, compare=False)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:
@@ -2649,6 +2669,10 @@ class Workflow:
     # inputs, as notes; and whether their values were put into its `inputs` references.
     caller_input_notes: list = field(default_factory=list)
     caller_inputs_put_in: bool = False
+    # Flagship slice 2d.4b3b: jobs of this workflow that call, by `owner/repo/<path>@ref`, a path at which
+    # this repository has a workflow that can be called: (job id, the `uses` as written, that path). Such a
+    # call is not read as a call of this repository's file, and a note says so.
+    named_calls: list = field(default_factory=list)
 
     def give_caller_events(self, events) -> bool:
         """Add events that can start a job calling this workflow; True if any was new. Forgets every
