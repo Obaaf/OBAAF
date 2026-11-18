@@ -2405,12 +2405,22 @@ class Job:
         `scope` (`id-token`), each entry gives that scope's level; without, the write scopes as
         OBAAF-GHA-003 counts them. A caller that declares none and is itself called holds what its own
         callers grant, so the chain is followed to the first caller that declares, each workflow once;
-        one that declares none and can be started on its own grants the repository's default, which
-        this check does not read. Empty for a job that declares permissions, or whose workflow no job
-        of the repository calls."""
+        one that declares none and can be started by its own triggers grants the repository's default,
+        which this check does not read, and one that only another repository can call grants what that
+        caller grants. A workflow that can also start by its own triggers holds the default then, and
+        says so. Empty for a job that declares permissions, or whose workflow no job of the repository
+        calls. Worked out once per workflow and scope (the review found it quadratic in agent jobs times
+        callers)."""
         if self.permissions is not None or not self.workflow.callers:
             return []
+        memo = self.workflow.__dict__.setdefault("_granted", {})
+        if scope in memo:
+            return list(memo[scope])
         out: set[str] = set()
+        own = sorted(set(self.workflow.triggers) - {"workflow_call"})
+        if own:
+            out.add(f"its workflow can also start on {bounded(one_line(', '.join(own)))}, with the repository's "
+                    "default, which this check does not read")
         seen: set[int] = set()
         todo = [self.workflow]
         while todo:
@@ -2430,13 +2440,20 @@ class Job:
                         out.add(f"{where} grants " + (", ".join(f"{s}: write" if s != "write-all" else s
                                                                 for s in scopes) if scopes else "no write scope"))
                     continue
-                if call.workflow is not None and call.workflow.callers:
-                    todo.append(call.workflow)
-                if call.workflow is None or not call.workflow.callers or \
-                        set(call.workflow.triggers) - {"workflow_call"}:
+                caller = call.workflow
+                if caller is None:
+                    out.add(f"{where} declares no permissions, and the checker cannot tell what it grants")
+                    continue
+                if set(caller.triggers) - {"workflow_call"} or not caller.triggers:
                     out.add(f"{where} declares no permissions, so it grants the repository's default, which this "
                             "check does not read")
-        return sorted(out)
+                if caller.callable and caller.callers:
+                    todo.append(caller)
+                elif caller.callable:
+                    out.add(f"{where} declares no permissions, so it grants what the job that calls its workflow "
+                            "grants, which is not in this repository")
+        memo[scope] = sorted(out)
+        return list(memo[scope])
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)

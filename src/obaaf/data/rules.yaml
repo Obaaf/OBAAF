@@ -96,9 +96,11 @@ rules:
       passes to a reusable workflow of another repository as an input; and commands the list above does
       not name. A local reusable workflow's jobs are read with the events that start the jobs of the
       repository that call it (slice 2d.4b1), and each `inputs` reference in it with what each of those
-      jobs hands the input (slice 2d.4b3a), so a checkout of `inputs.ref` given the pull request's head is
-      high; the reference as written stays among the values, for a caller the checker cannot see, so one
-      given only the base is still "cannot tell".
+      jobs hands the input (slice 2d.4b3a): its `with:` or the input's default, with the caller's own
+      contexts as `caller.<context>` and what its matrix lists and the jobs it needs output, one level
+      deep. A checkout of `inputs.ref` given the pull request's head is high; the reference as written
+      stays among the values, for a caller the checker cannot see, so one given only the base is still
+      "cannot tell".
     fix: >-
       Build pull-request code in a pull_request workflow, which runs with a read-only token and no
       secrets. If a privileged step must follow, pass results through artifacts and treat them as
@@ -379,7 +381,8 @@ rules:
       pull request's title and branch name are in the merge commit's message; medium otherwise. Not
       followed: values set while the job runs (`GITHUB_ENV`, step outputs), values a reusable workflow of
       another repository is given (since slice 2d.4b3a a local reusable workflow's `inputs` are read with
-      what the jobs of the repository that call it hand them), an action's `outputs` read in the job, the inputs of
+      what the jobs of the repository that call it hand them, their matrix's values and the outputs of
+      the jobs they need included, one level deep), an action's `outputs` read in the job, the inputs of
       other actions (since slice 2d.4b2 a local composite action's steps are read with its inputs put in), a `with:`
       written as one expression, and the `env` of a `parallel` group. It does not work out whether an
       expression gives text or only true or false, so `contains(github.event.issue.title, 'bug')` is

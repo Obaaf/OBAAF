@@ -259,6 +259,87 @@ class BoundsTest(unittest.TestCase):
         self.assertEqual([e for e in result.errors if "inputs" in e], [])
 
 
+class FromTheFirstReviewTest(unittest.TestCase):
+
+    def test_aliases_of_a_long_value_given_many_times_end_quickly(self):
+        # 100 jobs each giving 100 aliases of a 100 KB value took 128 s before each value was read once.
+        keys = "".join(f"        k{n}: *v\n" for n in range(1, 100))
+        jobs = "".join(f"  c{n}:\n    uses: ./.github/workflows/called.yml\n    with: *w\n" for n in range(1, 100))
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  c0:\n    uses: ./.github/workflows/called.yml\n"
+                "    with: &w\n        k0: &v \"${{ github.event.comment.body || '" + "a" * 100_000 + "' }}\"\n"
+                + keys + jobs)
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, {CALLER: text, CALLED: called('      - run: echo "${{ inputs.k0 }}"\n', inputs="k0")})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 20)
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_many_inputs_sharing_a_long_default_end_quickly(self):
+        # 10,000 inputs sharing a 200 KB default took 1.9 GB before.
+        specs = "".join(f"      i{n}: *spec\n" for n in range(1, 10_000))
+        text = ("on:\n  workflow_call:\n    inputs:\n      i0: &spec {type: string, default: '" + "a" * 200_000 + "'}\n"
+                + specs + "permissions: {}\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: echo \"${{ inputs.i0 }}\"\n")
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, {CALLER: caller(), CALLED: text})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 20)
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_a_workflow_that_reads_no_input_is_not_worked_on(self):
+        specs = "".join(f"      i{n}: *spec\n" for n in range(1, 10_000))
+        text = ("on:\n  workflow_call:\n    inputs:\n      i0: &spec {type: string, default: '" + "a" * 200_000 + "'}\n"
+                + specs + "permissions: {}\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(), CALLED: text})
+        self.assertEqual([e for e in result.errors if "inputs" in e], [])
+
+    def test_an_outsiders_text_in_the_callers_matrix_is_followed(self):
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  call:\n    strategy:\n      matrix:\n"
+                "        b: ['${{ github.event.comment.body }}']\n    uses: ./.github/workflows/called.yml\n"
+                "    with:\n      x: ${{ matrix.b }}\n")
+        for form in ("matrix.b", "matrix['b']", "MATRIX.B", "toJSON(matrix)"):
+            with self.subTest(form=form), TempDir() as tmp:
+                result = check(tmp, {CALLER: text.replace("matrix.b }}", form + " }}"),
+                                     CALLED: called('      - run: echo "${{ inputs.x }}"\n', inputs="x")})
+                self.assertEqual([f.severity for f in found(result, "OBAAF-GHA-010")], ["high"])
+
+    def test_an_outsiders_text_in_the_callers_matrix_include_is_followed(self):
+        text = ("on: issue_comment\npermissions: {}\njobs:\n  call:\n    strategy:\n      matrix:\n"
+                "        include:\n          - b: '${{ github.event.comment.body }}'\n"
+                "    uses: ./.github/workflows/called.yml\n    with:\n      x: ${{ matrix.b }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: text, CALLED: called('      - run: echo "${{ inputs.x }}"\n', inputs="x")})
+        self.assertEqual([f.severity for f in found(result, "OBAAF-GHA-010")], ["high"])
+
+    def test_a_needed_jobs_output_is_followed_one_level(self):
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  pre:\n    runs-on: ubuntu-latest\n"
+                "    outputs:\n      sha: ${{ github.event.pull_request.head.sha }}\n    steps:\n      - run: echo\n"
+                "  call:\n    needs: pre\n    uses: ./.github/workflows/called.yml\n    with:\n"
+                "      ref: ${{ needs.pre.outputs.sha }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: text, CALLED: called(checkout("${{ inputs.ref }}"))})
+        self.assertEqual([f.severity for f in found(result, "OBAAF-GHA-002")], ["high"])
+
+    def test_a_name_with_a_letter_outside_ascii_gives_every_input(self):
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(on="issue_comment", given="\u017f: ${{ github.event.comment.body }}"),
+                                 CALLED: called('      - run: echo "${{ inputs.s }}"\n', inputs="s")})
+        self.assertEqual([f.severity for f in found(result, "OBAAF-GHA-010")], ["high"])
+        self.assertTrue(any("outside ASCII" in note for note in result.notes), result.notes)
+
+    def test_a_value_at_the_top_of_the_workflow_is_put_in(self):
+        from obaaf.checker import workflow as wf_mod
+        called_wf = wf_mod.parse(CALLED, "on: workflow_call\nrun-name: ${{ inputs.x }}\nconcurrency: ${{ inputs.x }}\n"
+                                         "jobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n")
+        caller_wf = wf_mod.parse(CALLER, caller(given="x: ${{ github.event.pull_request.head.sha }}"))
+        checker._give_callers([(CALLER, caller_wf), (CALLED, called_wf)])
+        for key in ("run-name", "concurrency"):
+            self.assertIn("github.event.pull_request.head.sha", called_wf.raw[key])
+
+
 class TheCallersGrantTest(unittest.TestCase):
 
     AGENT = "      - run: claude -p 'review'\n"
@@ -315,6 +396,31 @@ class TheCallersGrantTest(unittest.TestCase):
         found_ = self.agent_findings({CALLER: caller(on="push", job_perms="    permissions:\n      contents: write\n"),
                                       CALLED: called(self.AGENT, inputs="")})
         self.assertNotIn("OBAAF-GHA-003", found_)
+
+    def test_a_caller_only_another_repository_calls_grants_what_that_caller_grants(self):
+        middle = ".github/workflows/middle.yml"
+        middle_text = "on: workflow_call\njobs:\n  pass:\n    uses: ./.github/workflows/called.yml\n"
+        found_ = self.agent_findings({middle: middle_text, CALLED: called(self.AGENT, inputs="", perms="")})
+        (entry,) = found_["OBAAF-GHA-003"].facts["granted"]
+        self.assertIn("not in this repository", entry)
+
+    def test_a_workflow_that_can_also_start_on_its_own_says_so(self):
+        text = called(self.AGENT, inputs="", perms="").replace("on: workflow_call", "on: [workflow_call, push]")
+        found_ = self.agent_findings({CALLER: caller(on="push", job_perms="    permissions:\n      contents: read\n"),
+                                      CALLED: text})
+        self.assertTrue(any("can also start on push" in e for e in found_["OBAAF-GHA-003"].facts["granted"]))
+
+    def test_many_agent_jobs_and_callers_are_quick(self):
+        # The review found it quadratic: 1,000 agent jobs and 2,000 callers took 22 s.
+        jobs = "".join(f"  a{n}:\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p x\n" for n in range(1000))
+        calls = "".join(f"  c{n}:\n    permissions:\n      contents: write\n    uses: ./.github/workflows/called.yml\n"
+                        for n in range(2000))
+        with TempDir() as tmp:
+            start = time.monotonic()
+            check(tmp, {CALLER: f"on: push\npermissions: {{}}\njobs:\n{calls}",
+                        CALLED: f"on: workflow_call\njobs:\n{jobs}"})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 30)
 
 
 if __name__ == "__main__":
