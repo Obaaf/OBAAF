@@ -1945,7 +1945,8 @@ class WorkflowRules:
                                   "script the checker reads as neither an install it can vouch for nor a run")
                     continue
             if why or step.index in job.agent_script_steps:
-                agents_outside.append(f"step '{one_line(step.name, 80)}' {why or 'runs an agent in a script'}")
+                agents_outside.append(f"step '{one_line(step.name, 80)}' "
+                                      f"{why or job.agent_step_why.get(step.index, 'runs an agent in a script')}")
         # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
         # makes it refuse to run; a credential that reaches the command or AWF's API proxy is the
         # evidence that the agent is the confined command.
@@ -2515,7 +2516,8 @@ class WorkflowRules:
                     why = None
             if why or step.index in job.agent_script_steps:
                 agent_seen = True
-                problems.append(f"{where} {why or 'runs an agent in a script'}, outside the sandbox, before or beside "
+                problems.append(f"{where} {why or job.agent_step_why.get(step.index, 'runs an agent in a script')}, "
+                                "outside the sandbox, before or beside "
                                 "the step that holds the key, as the same user, and can reach the key through what "
                                 "it leaves for that step (its environment, its PATH, a process left running)")
                 continue
