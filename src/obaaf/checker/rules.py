@@ -374,6 +374,7 @@ class CallEffects:
     first_release: tuple = ()          # (called workflow's path, path, job id, reason) of the first releasing job
     lane_given: bool = False
     downloads_any: bool = False
+    restores_any: bool = False      # whether any called job, release job or not, may restore a cache
 
 
 def _forbids_restores(mode) -> bool:
@@ -382,12 +383,12 @@ def _forbids_restores(mode) -> bool:
 
 
 # What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
-# release, any job downloads).
-_NO_PARTS = (CallSummary(), CallSummary(), False, (), False)
+# release, any job downloads, any job may restore a cache).
+_NO_PARTS = (CallSummary(), CallSummary(), False, (), False, False)
 
 
 def _joined(a: tuple, b: tuple) -> tuple:
-    return (a[0] + b[0], a[1] + b[1], a[2] or b[2], a[3] or b[3], a[4] or b[4])
+    return (a[0] + b[0], a[1] + b[1], a[2] or b[2], a[3] or b[3], a[4] or b[4], a[5] or b[5])
 
 
 def give_call_effects(groups: list, detection: dict, agents: dict | None = None) -> None:
@@ -409,16 +410,18 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
     def own(workflow, job) -> tuple:
         view = through_job(job, workflow, detection, agents) if job.local_steps else job
         downloads = any(step.uses_action("actions/download-artifact") for step in view.steps)
+        restores = not _forbids_restores(job.cache_mode) and any(WorkflowRules._restores_cache(s) for s in view.steps)
         if view.in_lane("release"):
             reason = one_line(view.reason_for("release"), 200)
             entry = f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)} ({reason})"
-            return CallSummary.of([entry]), CallSummary(), downloads, (workflow.path, job.id, reason), downloads
+            return (CallSummary.of([entry]), CallSummary(), downloads, (workflow.path, job.id, reason), downloads,
+                    restores)
         restoring = CallSummary()
-        if not _forbids_restores(job.cache_mode):
+        if restores:
             restoring = CallSummary.of([
                 f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)}, {WorkflowRules._cache_step(step)}"
                 for step in view.steps if WorkflowRules._restores_cache(step)])
-        return CallSummary(), restoring, False, (), downloads
+        return CallSummary(), restoring, False, (), downloads, restores
 
     for group in reversed(groups):
         members = {id(workflow) for workflow in group}
@@ -453,6 +456,7 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     effects.restoring = effects.restoring + got[1]
                     effects.downloads = effects.downloads or got[2]
                     effects.downloads_any = effects.downloads_any or got[4]
+                    effects.restores_any = effects.restores_any or got[5]
                     if not effects.first_release and got[3]:
                         effects.first_release = (target.path, *got[3])
                 job.call_effects = effects
@@ -465,7 +469,9 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     job.add_lane("release", one_line(f"calls {one_line(target_path, 120)}, {where} "
                                                      f"'{one_line(job_id, 60)}' is a release job ({reason})", 300))
                     effects.lane_given = True
-                restoring = effects.restoring if not _forbids_restores(job.cache_mode) or cycle else CallSummary()
+                open_ = not _forbids_restores(job.cache_mode) or cycle
+                restoring = effects.restoring if open_ else CallSummary()
+                restores_any = effects.restores_any and open_
                 if job.in_lane("release") and not effects.lane_given:
                     # Declared a release job: what it calls is the release it declares, and its restores are its
                     # own finding (`called-restores`).
@@ -473,10 +479,10 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     releasing = effects.releasing or CallSummary.of(
                         [f"job '{one_line(job.id, 60)}' of {one_line(workflow.path, 120)} ({reason})"])
                     first = effects.first_release[1:] if effects.first_release else (workflow.path, job.id, reason)
-                    part = (releasing, CallSummary(), effects.downloads_any, first, effects.downloads_any)
+                    part = (releasing, CallSummary(), effects.downloads_any, first, effects.downloads_any, restores_any)
                 else:
                     first = effects.first_release[1:] if effects.first_release else ()
-                    part = (effects.releasing, restoring, effects.downloads, first, effects.downloads_any)
+                    part = (effects.releasing, restoring, effects.downloads, first, effects.downloads_any, restores_any)
                 summary = _joined(summary, part)
             summaries[id(workflow)] = summary
 
@@ -2968,8 +2974,8 @@ class WorkflowRules:
             workflows = list(dict.fromkeys(target.path for target in job.called))
             self.add("OBAAF-GHA-015", job.line,
                      "Job '{job}' can be started by {triggers}, holds what publishing needs ({capabilities}) and "
-                     "calls {workflows}, where a job releases; the called release jobs are held to the release "
-                     "rules with these triggers.", job, severity=severity, kind="capability-call",
+                     "calls {workflows}, where a job releases; the called release jobs are read with these "
+                     "triggers, after their own if:.", job, severity=severity, kind="capability-call",
                      triggers=sorted(bad), capabilities=capabilities, workflows=self._workflows_fact(workflows),
                      environment=Fact(value_identity(self._environment_written(job)), ""))
             return
@@ -3001,7 +3007,8 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-006", job.line,
                          "Release job '{job}' downloads artifacts and needs {jobs}, which restore caches and whose "
                          "cache-mode does not forbid it, so a poisoned cache entry can reach what it releases.",
-                         job, kind="needed-job-restores", controls=self._callers_cache_controls(),
+                         job, kind="needed-job-restores",
+                         controls=self._callers_cache_controls("on the jobs it needs that restore"),
                          jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
             return
         triggers = job.triggers()
@@ -3068,7 +3075,8 @@ class WorkflowRules:
             self.add("OBAAF-GHA-006", job.line,
                      "Release job '{job}' downloads artifacts and needs {jobs}, which restore caches and whose "
                      "cache-mode does not forbid it, so a poisoned cache entry can reach what it releases.",
-                     job, kind="needed-job-restores", controls=callers,
+                     job, kind="needed-job-restores",
+                     controls=self._callers_cache_controls("on the jobs it needs that restore"),
                      jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
 
         uploads = job.upload_steps(self.detection)
@@ -3147,8 +3155,10 @@ class WorkflowRules:
         """Entries a called workflow's jobs give, as one bounded fact (flagship slice 2d.4b3b): every entry
         when there are at most PASSED_NAMED and they fit in 1,000 characters; otherwise the first few that
         fit and a digest of all."""
-        entries = list(summary.kept)
-        if (not summary.more and summary.count == len(entries) and len(entries) <= PASSED_NAMED
+        # Sorted, so that the order of the jobs, which changes nothing on GitHub, does not change the finding
+        # (the third review); past CALL_EFFECTS_DISTINCT entries it still can, through which part was kept.
+        entries = sorted(summary.entries)
+        if (not summary.more and len(entries) <= PASSED_NAMED
                 and sum(map(len, entries)) <= 1000):
             return Fact(entries, "; ".join(entries))
         named: list = []
@@ -3161,33 +3171,32 @@ class WorkflowRules:
         shown = "; ".join([*named, f"{tail}, by digest sha256:{summary.digest}"])
         return Fact([*named, f"sha256:{summary.digest} ({count} entries)"], shown)
 
-    def _callers_cache_controls(self) -> list:
+    def _callers_cache_controls(self, fix: str = "on this job") -> list:
         """For a job of a workflow that only jobs of this repository can be seen to call (its `on` names
         nothing but `workflow_call`), and every one of them forbids restoring caches, directly or through
         its own callers: a control that cannot be told, because a caller in another repository is not seen
         (flagship slice 2d.4b3b). GitHub gives a called workflow no more cache access than its caller, so
         for the callers the checker sees the job restores nothing. Nothing otherwise."""
-        if "_callers_cache" in self.__dict__:
-            return list(self.__dict__["_callers_cache"])
-        self.__dict__["_callers_cache"] = []
-        if not self._only_called_forbidding(self.wf, {}, 0):
+        memo = self.__dict__.setdefault("_callers_cache", {})
+        if "forbids" not in memo:
+            memo["forbids"] = self._only_called_forbidding(self.wf, {}, 0)
+        if not memo["forbids"]:
             return []
         names = sorted({f"{call.path} job '{call.job}'" for call in self.wf.callers})
         shown = ", ".join(one_line(n, 120) for n in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-        self.__dict__["_callers_cache"] = [Control(
+        return [Control(
             "Every job that calls it forbids restoring caches", CANNOT_TELL,
             f"every job of this repository that calls its workflow sets cache-mode: none or write-only, or is "
             f"called only by such jobs ({shown}), and GitHub gives a called workflow no more cache access than its "
-            "caller; a caller in another repository is not seen. Set cache-mode: none on this job to clear it",
+            f"caller; a caller in another repository is not seen. Set cache-mode: none {fix} to clear it",
             "callers-cache-mode")]
-        return list(self.__dict__["_callers_cache"])
 
     @staticmethod
     def _only_called_forbidding(workflow: Workflow, memo: dict, depth: int) -> bool:
         """Whether `workflow` can be started only by jobs of this repository that call it, each of which
         forbids restoring caches by its own cache-mode or is itself in such a workflow. A workflow some job
-        calls by a repository's name (`owner/repo/<path>@ref`, which may be this repository) is not, nor a
-        caller the checker did not read. A workflow reached again while it is being worked out (a cycle) is
+        calls by a repository's name (`owner/repo/<path>@ref`, which may be this repository) is not. A caller
+        in a file the checker could not read is not seen (the check fails on that file's error anyway). A workflow reached again while it is being worked out (a cycle) is
         taken there as not forbidding, and so is one more than ten calls up; each answer is kept from the
         first time it is worked out, so a cycle can make the answer depend on where the walk began, in the
         direction of not forbidding."""
@@ -3425,7 +3434,9 @@ class WorkflowRules:
                 continue
             seen.add(name)
             dep = self.wf.jobs[name]
-            through = dep.call_effects is not None and dep.called and bool(dep.call_effects.restoring)
+            # Any called job's restores, release job or not, as for a needed job written in the workflow
+            # (the third review found a called release job's left out).
+            through = dep.call_effects is not None and dep.called and dep.call_effects.restores_any
             if dep.cache_mode not in ("none", "write-only") and (
                     through or any(self._restores_cache(s) for s in dep.steps)):
                 out.append(name)

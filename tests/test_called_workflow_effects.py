@@ -604,6 +604,72 @@ class SecondReviewTest(unittest.TestCase):
             self.assertEqual(joined.count, rules_mod.CALL_EFFECTS_DISTINCT)
 
 
+class ThirdReviewTest(unittest.TestCase):
+    """What the third review of slice 2d.4b3b found, each a test."""
+
+    def test_events_named_for_an_outside_caller_against_many_needed_jobs_are_quick(self):
+        # Every event GitHub documents, against 128 needed jobs with conditions of their own: more pairs than
+        # the condition reader's cache holds, which took 399 s for a 79 KB file before each pair was kept.
+        from obaaf.checker.workflow import GITHUB_EVENTS
+        events = sorted(e for e in GITHUB_EVENTS if " " not in e)
+        names = " || ".join(f"github.event_name == '{e}'" for e in events)
+        condition = " && ".join(f"github.actor != 'u{{i}}-{n}'" for n in range(20))
+        jobs = "".join(f"  n{i}:\n    if: {condition.format(i=i)}\n    runs-on: ubuntu-latest\n    steps:\n{BUILD}"
+                       for i in range(128))
+        needs = ", ".join(f"n{i}" for i in range(128))
+        jobs += "".join(f"  w{k}:\n    needs: [{needs}]\n    if: {names}\n    runs-on: ubuntu-latest\n"
+                        f"    steps:\n{BUILD}" for k in range(64))
+        with TempDir() as tmp:
+            start = time.monotonic()
+            check(tmp, {CALLED: "on: workflow_call\njobs:\n" + jobs})
+            took = time.monotonic() - start
+        self.assertLess(took, 20)
+
+    def test_a_needed_job_whose_called_release_job_restores_feeds_the_release(self):
+        build_wf = ".github/workflows/build.yml"
+        build = ("on: workflow_call\njobs:\n  image:\n    runs-on: ubuntu-latest\n    steps:\n" + RESTORE + BUILD
+                 + "      - run: docker push example/app\n"
+                 + f"      - uses: actions/upload-artifact@{SHA}\n        with:\n          name: dist\n"
+                   "          path: dist\n")
+        own = ("on: push\npermissions: {}\njobs:\n  build:\n    uses: ./.github/workflows/build.yml\n"
+               "  publish:\n    needs: build\n    runs-on: ubuntu-latest\n    cache-mode: none\n    steps:\n"
+               f"      - uses: actions/download-artifact@{SHA}\n        with:\n          name: dist\n" + PUBLISH)
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: own, build_wf: build})
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER, job="publish")
+        self.assertEqual((finding.kind, finding.facts["jobs"]), ("needed-job-restores", ["build"]))
+
+    def test_the_order_of_the_called_jobs_does_not_change_the_finding(self):
+        def files(order):
+            jobs = {name: f"  {name}:\n    runs-on: ubuntu-latest\n    steps:\n{RESTORE}" for name in ("ta", "tb")}
+            return {CALLER: caller(), CALLED: "on: workflow_call\njobs:\n" + "".join(jobs[n] for n in order),
+                    CONFIG: "lanes:\n  .github/workflows/caller.yml#release: release\n"}
+        with TempDir() as tmp:
+            first = found(check(tmp, files(("ta", "tb"))), "OBAAF-GHA-006", CALLER)[0]
+        with TempDir() as tmp:
+            second = found(check(tmp, files(("tb", "ta"))), "OBAAF-GHA-006", CALLER)[0]
+        self.assertEqual(first.facts, second.facts)
+
+    def test_the_callers_control_on_needed_job_restores_names_the_needed_jobs(self):
+        steps = f"      - uses: actions/download-artifact@{SHA}\n        with:\n          name: dist\n" + PUBLISH
+        more = ("  build:\n    runs-on: ubuntu-latest\n    steps:\n" + RESTORE
+                + f"      - uses: actions/upload-artifact@{SHA}\n        with:\n          name: dist\n"
+                  "          path: dist\n")
+        files = {CALLER: caller(extra="    cache-mode: none\n"),
+                 CALLED: called(steps, extra_job="    needs: build\n    cache-mode: none\n", more=more)}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLED, job="publish")
+        self.assertEqual((finding.kind, finding.state), ("needed-job-restores", "cannot-tell"))
+        self.assertIn("on the jobs it needs that restore", finding.controls[0].detail)
+
+    def test_a_call_by_name_with_a_dot_in_its_path_has_the_note(self):
+        files = {CALLER: caller(uses=f"me/repo/./.github/workflows/called.yml@{SHA}"), CALLED: called(PUBLISH)}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        self.assertTrue([n for n in result.notes if "names a path this repository has a workflow at" in n])
+
+
 class CostTest(unittest.TestCase):
 
     def test_a_long_chain_of_calls_each_restoring_is_linear(self):

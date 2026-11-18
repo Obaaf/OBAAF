@@ -1500,14 +1500,18 @@ def _admitted(toks: list, close: list, lo: int, hi: int, events: frozenset, dept
     return events
 
 
-def _outside_caller_runs(job: "Job", event: str) -> bool:
+def _outside_caller_runs(job: "Job", event: str, workflow: "Workflow") -> bool:
     """Whether a caller in another repository raising `event` may run `job` (flagship slice 2d.4b3b): it
     is one `workflow_call` can start, and its own `if:` does not rule the event out for such a caller.
-    The jobs it needs in turn are not followed, the wider reading."""
-    if "workflow_call" not in job.triggers():
-        return False
-    cond = job.raw.get("if")
-    return not isinstance(cond, str) or event in _narrow({"workflow_call", event}, cond)
+    The jobs it needs in turn are not followed, the wider reading. Worked out once for each job and event,
+    in the workflow's memo of triggers."""
+    memo = workflow.__dict__["_job_triggers"][2]
+    key = (job.id, event)
+    if key not in memo:
+        cond = job.raw.get("if")
+        memo[key] = "workflow_call" in job.triggers() and (
+            not isinstance(cond, str) or event in _narrow({"workflow_call", event}, cond))
+    return memo[key]
 
 
 def condition_expression(cond: str) -> str | None:
@@ -2299,7 +2303,10 @@ class Job:
         wider answer, so a finding is never lost to the order in which the cycle was walked."""
         memo = self.workflow.__dict__.get("_job_triggers")
         if memo is None or memo[0] != len(self.workflow.jobs):
-            memo = (len(self.workflow.jobs), {})
+            # The second mapping keeps whether a caller in another repository raising an event may run a
+            # needed job (slice 2d.4b3b), once for each job and event: worked out afresh for every job that
+            # needs it, a 79 KB file took 399 s (the third review).
+            memo = (len(self.workflow.jobs), {}, {})
             self.workflow.__dict__["_job_triggers"] = memo
         known = memo[1]
         if self.id not in known:
@@ -2344,7 +2351,7 @@ class Job:
             allowed = dep.triggers()
             narrowed = set()
             for event in events:
-                if event in allowed or (event in outside and _outside_caller_runs(dep, event)):
+                if event in allowed or (event in outside and _outside_caller_runs(dep, event, self.workflow)):
                     narrowed.add(event)
                 elif event == "workflow_run" and TRUSTED_WORKFLOW_RUN in allowed:
                     narrowed.add(TRUSTED_WORKFLOW_RUN)

@@ -320,7 +320,7 @@ def _call_candidates(uses: str) -> list[str]:
 
 
 # A call of a workflow of a repository by name: `owner/repo/.github/workflows/<file>@ref` (slice 2d.4b3b).
-_NAMED_CALL_RE = re.compile(r"[^/\s]+/[^/\s]+/(\.github/workflows/[^@\s]+)@\S+\Z")
+_NAMED_CALL_RE = re.compile(r"[^/\s]+/[^/\s]+/([^@\s]+)@\S+\Z")
 
 
 def _give_callers(read: list) -> list:
@@ -356,7 +356,7 @@ def _give_callers(read: list) -> list:
                 # when it names this one, which the checker cannot tell offline; where this repository
                 # has a workflow at that path, a note says it was not read as this call's (slice 2d.4b3b).
                 named = _NAMED_CALL_RE.match(uses.strip()) if isinstance(uses, str) else None
-                if named:
+                if named and posixpath.normpath(named.group(1)).startswith(".github/workflows/"):
                     path = posixpath.normpath(named.group(1))
                     found = [target for target in by_path.get(path, []) if target.callable]
                     if found:
