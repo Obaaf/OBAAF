@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
@@ -19,7 +20,7 @@ from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
-    digest_of, environment_match, expressions, input_name, one_line, pr_code, pr_fetch, runs_after_failure,
+    digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
@@ -136,8 +137,9 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
     The message can only show the template's own words, the job, the step and `values`; each value
     is a fact unless it is a `Note`. So what the message says about a finding is in what identifies
     it, apart from line and column numbers, and the template's wording can change without changing
-    which finding it is. Two facts are themselves text the checker wrote, and rewording them does
-    change the finding: why a job is an agent job (OBAAF-GHA-003), until agents are named data.
+    which finding it is. One fact is itself text the checker wrote, and rewording it does change the
+    finding: why a job is an agent job (`why`, in OBAAF-GHA-003 and 025). Since flagship slice 2d.5b the
+    agents a job runs are also named, as the fact `agents`, by the catalogue's entries.
     """
     if TEMPLATES.setdefault((rule, kind), template) != template and (rule, kind) not in CONFLICTS:
         CONFLICTS.append((rule, kind))
@@ -1401,6 +1403,19 @@ class WorkflowRules:
 
 
     # -------------------------------------------------------------- GHA-003/004/005/012/020
+    def _agents_fact(self, job: Job) -> dict:
+        """The agents the job runs that the checker can name (flagship slice 2d.5b), as the fact `agents`:
+        each catalogue entry's `id`, and `agents.actions: ...` or `agents.commands: ...` for a configured
+        one, sorted. It is a fact of every agent rule's finding, so an acceptance stops covering a job when
+        another named agent is added to it or takes the place of the one it ran. A job that runs no agent
+        the checker can name (one declared an agent job, or one whose agent is in a repository script) has
+        no such fact, so its findings are the ones they were before the slice."""
+        cache = self.__dict__.setdefault("_agents_cache", {})
+        if id(job) not in cache:
+            named = agent_tools.named_agents(job, self.detection, self.agents)
+            cache[id(job)] = (job, {"agents": named} if named else {})
+        return dict(cache[id(job)][1])
+
     def agent_rules(self, job: Job) -> None:
         if not job.in_lane("agent"):
             return
@@ -1408,9 +1423,11 @@ class WorkflowRules:
         # Why the job is an agent job is part of the finding, as the text the checker shows for it,
         # so that an acceptance stops covering the job when the recognised action, the step or the
         # declaration changes. The text does not tell every agent apart (another command in a step
-        # of the same name, any agent in a declared job), and rewording it changes the finding;
-        # both end when agents are named data.
+        # of the same name, any agent in a declared job), and rewording it changes the finding. Since
+        # flagship slice 2d.5b the agents the checker can name are a fact of their own, `agents`, so
+        # adding or swapping a named agent changes the finding whatever the text says.
         why = job.reason_for('agent')
+        agents = self._agents_fact(job)
         if perms is None and self.wf.callable:
             # A called workflow's job holds what the calling job grants (it can only be narrowed), so
             # what it holds is not read from this file at all.
@@ -1418,23 +1435,25 @@ class WorkflowRules:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, and its workflow can be called "
                      "by another (workflow_call), so it holds whatever the calling job grants, write access "
-                     "included{granted}.", job, kind="inherited", why=why, granted=self._granted_fact(job))
+                     "included{granted}.", job, kind="inherited", why=why, granted=self._granted_fact(job),
+                     **agents)
         elif perms is None:
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) does not declare permissions, so it may inherit "
-                     "write access.", job, kind="undeclared", why=why)
+                     "write access.", job, kind="undeclared", why=why, **agents)
         elif perms.write_scopes():
             self.add("OBAAF-GHA-003", job.line,
                      "Agent job '{job}' ({why}) holds write permissions: "
-                     "{scopes}.", job, kind="write", why=why, scopes=perms.write_scopes())
+                     "{scopes}.", job, kind="write", why=why, scopes=perms.write_scopes(), **agents)
         if perms is not None and perms.oidc:
             self.add("OBAAF-GHA-004", job.line,
-                     "Agent job '{job}' can request OIDC tokens (id-token: write).", job)
+                     "Agent job '{job}' can request OIDC tokens (id-token: write).", job, **agents)
         elif perms is None and self.wf.callable:
             self.add("OBAAF-GHA-004", job.line,
                      "Agent job '{job}' does not declare permissions, and its workflow can be called by another "
                      "(workflow_call), so it can request OIDC tokens whenever the calling job grants "
-                     "id-token: write{granted}.", job, kind="inherited", granted=self._granted_fact(job, "id-token"))
+                     "id-token: write{granted}.", job, kind="inherited", granted=self._granted_fact(job, "id-token"),
+                     **agents)
         names = job.secret_names()
         if names:
             shown = ", ".join(sorted(n.replace("*inherit", "all secrets (secrets: inherit)").replace("*", "all secrets")
@@ -1446,11 +1465,11 @@ class WorkflowRules:
                      kind="secrets", secrets=Fact(sorted(names), shown), passed=self._passed_fact(job, names),
                      environment=self._environment_fact(job),
                      controls=[*self._secret_controls(job, names), self._input_control(job), egress,
-                               self._key_control(job)])
+                               self._key_control(job)], **agents)
         elif job.environment:
             self.add("OBAAF-GHA-005", job.line,
                      "Agent job '{job}' uses environment '{environment}', whose secrets it receives "
-                     "after approval.", job, kind="environment", environment=job.environment)
+                     "after approval.", job, kind="environment", environment=job.environment, **agents)
 
         # GHA-012: instructions from the change under review.
         triggers = job.triggers()
@@ -1466,14 +1485,15 @@ class WorkflowRules:
                              "instruction files come from the change under review.", job, step, kind="head",
                              reads=reading.reads, triggers=outside, condition=self._condition(job, step),
                              legacy="Agent job '{job}' checks out the pull request's code in step '{step}', so "
-                                    "instruction files come from the change under review.")
+                                    "instruction files come from the change under review.", **agents)
                 elif reading.state == "unresolved" and outside:
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' can be started by {triggers} and step '{step}' checks out a ref or "
                              "repository taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code, whose instruction files the agent would then read.", job, step,
                              severity="medium", kind="unresolved", reads=reading.reads, triggers=outside,
-                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads))
+                             condition=self._condition(job, step), sources=self._sources(job, step, reading.reads),
+                             **agents)
                 elif merge_events and self._merge_commit(step, ref, repository):
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' runs on {triggers} and step '{step}' checks out the "
@@ -1481,21 +1501,21 @@ class WorkflowRules:
                              kind="merge-commit", triggers=merge_events, condition=self._condition(job, step),
                              legacy="Agent job '{job}' runs on pull_request and step '{step}' checks out the merge "
                                     "commit, which includes the pull request's instruction files."
-                             if "pull_request" in merge_events else "")
+                             if "pull_request" in merge_events else "", **agents)
             else:
                 reading = pr_fetch(step, self._env_for(job, step), self._shell(job, step))
                 if reading.state == "head":
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' fetches the pull request's code ({reads}) in step '{step}'.", job, step,
                              kind="fetch", reads=reading.reads, triggers=outside, condition=self._condition(job, step),
-                             legacy="Agent job '{job}' fetches the pull request's code in step '{step}'.")
+                             legacy="Agent job '{job}' fetches the pull request's code in step '{step}'.", **agents)
                 elif reading.state == "unresolved" and outside:
                     self.add("OBAAF-GHA-012", step.line,
                              "Agent job '{job}' can be started by {triggers} and step '{step}' fetches or checks out "
                              "code with a value taken from {reads}. The checker cannot tell whether that is the pull "
                              "request's code.", job, step, severity="medium", kind="fetch-unresolved",
                              reads=reading.reads, triggers=outside, condition=self._condition(job, step),
-                             sources=self._sources(job, step, reading.reads))
+                             sources=self._sources(job, step, reading.reads), **agents)
 
         # GHA-020: egress restriction. The finding is always there for an agent job; what was
         # established about the one control that clears it decides where the finding stands.
@@ -1521,7 +1541,7 @@ class WorkflowRules:
             "awf": "Agent job '{job}' runs a command under the Agent Workflow Firewall in step '{where}' "
                    "(workflow file sha256 {written}).",
         }
-        self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
+        self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values, **agents)
 
     # -------------------------------------------------------------- GHA-025
     _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts, after variables are put in
@@ -1697,6 +1717,7 @@ class WorkflowRules:
             return
         from obaaf.checker.jenkins.rules import JenkinsRules
         why = job.reason_for("agent")
+        agents = self._agents_fact(job)
         reader = self._install_reader()
         reader._agent_installed = False       # an update counts after an install in an earlier step of the job
         install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
@@ -1747,7 +1768,7 @@ class WorkflowRules:
                          "Agent job '{job}' ({why}): step '{step}' runs scripts too long for the checker to read "
                          "(more than {limit} characters with their variables put in), so it cannot tell whether "
                          "they install a tool at a version that can change.", job, step, severity="medium",
-                         kind="too-long", why=why, limit=Note(str(self._INSTALL_SCRIPT_LIMIT)))
+                         kind="too-long", why=why, limit=Note(str(self._INSTALL_SCRIPT_LIMIT)), **agents)
                 continue
             piped: dict = {}
             installs: set = set()
@@ -1775,11 +1796,13 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) runs a script downloaded while the job runs, in step '{step}': "
                          "{commands}. Whatever it installs runs with what the agent job holds.",
-                         job, step, kind="piped-download", why=why, commands=Fact(sorted(piped), shown))
+                         job, step, kind="piped-download", why=why, commands=Fact(sorted(piped), shown),
+                         **agents)
             if installs:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
-                         "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs))
+                         "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
+                         **agents)
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
@@ -2037,7 +2060,7 @@ class WorkflowRules:
         for prefix in actions:
             if step.uses_action(prefix):
                 return f"uses {one_line(step.action, 80)}"
-        if text and any(rx.search(text) for rx in commands):
+        if text and matches_any(commands, text):
             return "runs an agent CLI"
         return None
 
@@ -2137,7 +2160,10 @@ class WorkflowRules:
         if any(f"{name}/" in text for name in packages):
             return False        # a path into the package (`…/claude-code/cli.js`) runs it
         patterns = list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())
-        others = [re.compile(p, re.M) for p in patterns if p not in packages]
+        # A package's own pattern is its name, or its name with `(?![\w-])` after it so that a longer name
+        # (`@github/copilot-language-server`) is not it (slice 2d.5b).
+        own = packages | {name + r"(?![\w-])" for name in packages}
+        others = [re.compile(p, re.M) for p in patterns if p not in own]
         return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
 
     def _reads_output(self, step: Step, ids: set) -> list[str]:

@@ -1885,8 +1885,8 @@ class Step:
         lines.extend(v for v in self.env.values() if isinstance(v, str))
         for value in lines:
             for variant in _readings(value):
-                if any(rx.match(candidate) for segment in command_segments(variant)
-                       for candidate in _first_word_forms(segment) for rx in commands):
+                if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
+                       for candidate in _first_word_forms(segment)):
                     # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
                     found.append(variant)
                     break
@@ -1897,8 +1897,8 @@ class Step:
             put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
             if put != own:
                 for variant in _readings(put):
-                    if any(rx.match(candidate) for segment in command_segments(variant)
-                           for candidate in _first_word_forms(segment) for rx in commands):
+                    if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
+                           for candidate in _first_word_forms(segment)):
                         found.append(variant)
                         break
         text = "\n".join(p for p in [own, *found] if p)
@@ -2503,28 +2503,48 @@ class Job:
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
         commands = [re.compile(p, re.M) for p in list(detection.get("agent_commands", [])) + list(extra_commands)]
+        # As `Step.uses_action` reads each prefix, with the step's action lowered once (slice 2d.5b's cost).
+        lowered = [prefix.lower() for prefix in actions]
         for step in self.steps:
-            for prefix in actions:
-                if step.uses_action(prefix):
+            action = step.action
+            if action:
+                low = action.lower()
+                if any(low == prefix or low.startswith(prefix + "/") for prefix in lowered):
                     return f"uses {step.action}"
             text = step.agent_text(commands)
-            for rx in commands:
-                if text and rx.search(text):
-                    return f"runs an agent CLI in '{step.name}'"
+            if text and matches_any(commands, text):
+                return f"runs an agent CLI in '{step.name}'"
         # The default shell a `run` step is given (flagship slice 2d.2f, from its review): `shell: claude -p
         # {0}` under `defaults.run` runs the agent with every script.
-        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
-            run = defaults.get("run") if isinstance(defaults, dict) else None
-            shell = run.get("shell") if isinstance(run, dict) else None
-            if isinstance(shell, str) and any(self.steps_run()) and any(
-                    rx.match(form) for variant in _readings(shell) for segment in command_segments(variant)
-                    for form in _first_word_forms(segment) for rx in commands):
-                return "runs an agent CLI as the default shell"
+        if any(matches_any(commands, form, anchored=True) for form in self.default_shell_forms()):
+            return "runs an agent CLI as the default shell"
         if self.reusable:
             for prefix in actions:
                 if self.reusable.lower().startswith(prefix.lower()):
                     return f"calls {self.reusable}"
         return None
+
+    def default_shell_forms(self) -> list[str]:
+        """The command lines the default shell (`defaults.run.shell`, the job's and the workflow's) is read
+        as for an agent, each from its first word after assignments and wrappers, when a step of the job
+        runs a script with it; empty when none does. `runs_agent` and the agents named in the agent rules'
+        facts (flagship slice 2d.5b) match the agent patterns against these."""
+        if not any(self.steps_run()):
+            return []
+        out: list[str] = []
+        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
+            run = defaults.get("run") if isinstance(defaults, dict) else None
+            if not isinstance(run, dict) or "shell" not in run:
+                continue
+            shell = run.get("shell")
+            if isinstance(shell, str):
+                out.extend(form for variant in _readings(shell) for segment in command_segments(variant)
+                           for form in _first_word_forms(segment))
+            # The job's own `shell` is the one its steps get: GitHub uses the most specific default
+            # (found by the review of slice 2d.5b). One that is not text is read with the workflow's too.
+            if isinstance(shell, str) and defaults is self.raw.get("defaults"):
+                break
+        return out
 
     def steps_run(self) -> list[Step]:
         """The steps that run a script (`run:`), which the default shell runs."""
@@ -2566,6 +2586,89 @@ class Job:
                 out.append(step)
         return out
 
+
+# Asking whether any of a list of patterns matches (flagship slice 2d.5b, whose 23 agent tools made the
+# list of agent patterns 2.6 times as long, and a large repository's check slower: by 40 % and more on
+# Python 3.10 and 3.11, whose regular expressions are slower than 3.13's, where it went over CI's limit).
+# Each pattern is tried only where the text holds a piece of literal text the pattern cannot match
+# without (its "needle": the longest run of plain characters at its top level, read from Python's own
+# parse of it); where every pattern of the list has one, one search for any needle answers first, and most
+# command lines hold none. A pattern with no needle (one that ignores case, or holds no such run) is always
+# tried. Each answer is the one trying every pattern gives.
+try:
+    from re import _parser as _re_parser          # Python 3.11 and later
+except ImportError:                                 # pragma: no cover - Python 3.10
+    import sre_parse as _re_parser                  # type: ignore[no-redef]
+_NEEDLES: dict = {}
+_LISTS: dict = {}
+_LAST_LIST: list = [None]
+
+
+def _needle(rx) -> "str | None":
+    """The longest run of two or more literal characters at the top level of `rx`, which every match of
+    it holds; None when there is none or the pattern ignores case."""
+    key = (rx.pattern, rx.flags)
+    if key in _NEEDLES:
+        return _NEEDLES[key]
+    needle = None
+    try:
+        parsed = _re_parser.parse(rx.pattern, rx.flags)
+        flags = getattr(getattr(parsed, "state", None), "flags", rx.flags)
+        if not (flags | rx.flags) & re.IGNORECASE:
+            runs, run = [], []
+            for op, arg in parsed.data:
+                if op is _re_parser.LITERAL:
+                    run.append(chr(arg))
+                else:
+                    runs.append("".join(run))
+                    run = []
+            runs.append("".join(run))
+            best = max(runs, key=len)
+            needle = best if len(best) >= 2 else None
+    except Exception:       # anything the parser does not take is tried as it is
+        needle = None
+    if len(_NEEDLES) >= 4096:
+        _NEEDLES.clear()
+    _NEEDLES[key] = needle
+    return needle
+
+
+def _prepared(commands) -> tuple:
+    """For a list of compiled patterns: each with its needle, and one pattern that finds any needle, or
+    None when a pattern has none."""
+    key = tuple(commands)
+    last = _LAST_LIST[0]
+    if last is not None and last[0] is commands and last[1] == key:
+        return last[2]
+    prepared = _LISTS.get(key)
+    if prepared is None:
+        pairs = tuple((_needle(rx), rx) for rx in key)
+        needles = [n for n, _rx in pairs]
+        gate = (re.compile("|".join(re.escape(n) for n in sorted(set(needles), key=len, reverse=True)))
+                if pairs and all(n is not None for n in needles) else None)
+        prepared = (pairs, gate)
+        if len(_LISTS) >= 64:
+            _LISTS.clear()
+        _LISTS[key] = prepared
+    if isinstance(commands, list):
+        _LAST_LIST[0] = (commands, key, prepared)
+    return prepared
+
+
+def matches_any(commands, text: str, anchored: bool = False) -> bool:
+    """Whether one of the compiled `commands` matches `text`: searched for, or at its start when
+    `anchored`, as `re.search` and `re.match` do."""
+    if not isinstance(commands, (list, tuple)):
+        commands = tuple(commands)      # read more than once below (found by the review)
+    pairs, gate = _prepared(commands)
+    if gate is not None and gate.search(text) is None:
+        return False
+    for needle, rx in pairs:
+        if needle is not None and needle not in text:
+            continue
+        if (rx.match(text) if anchored else rx.search(text)) is not None:
+            return True
+    return False
 
 def _readings(text: str) -> list[str]:
     """`upload_readings`, and the last of them with each backslash before a character taken out, as the
