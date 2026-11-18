@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import bisect
+import copy
 import fnmatch
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from obaaf.catalog import Catalog
@@ -256,6 +257,35 @@ _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-a
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
 
+def _through_view(workflow: Workflow) -> Workflow:
+    """A copy of `workflow` whose jobs have, after each step that uses a local composite action, the
+    steps of that action (`Job.local_steps`), numbered in the order they run (flagship slice 2d.4b2). A
+    job's own steps keep their names, so a finding on one is the finding the first pass would give, and
+    the steps that run an agent are renumbered with them. Nothing of `workflow` is changed."""
+    view = copy.copy(workflow)
+    view.jobs = {job_id: through_job(job, view) if job.local_steps else job for job_id, job in workflow.jobs.items()}
+    return view
+
+
+def through_job(job: Job, workflow: Workflow) -> Job:
+    """A copy of `job` in `workflow` whose steps are its own, each followed by the steps of the local
+    composite action it uses, numbered in the order they run (flagship slice 2d.4b2)."""
+    copied = copy.copy(job)
+    steps: list = []
+    renumbered: dict = {}
+    for step in job.steps:
+        renumbered[step.index] = len(steps)
+        steps.append(replace(step, index=len(steps), shown_name=step.name))
+        for inner in job.local_steps.get(step.index, ()):
+            steps.append(replace(inner, index=len(steps)))
+    copied.steps = steps
+    copied.workflow = workflow
+    copied.lanes = dict(job.lanes)
+    copied.agent_script_steps = {renumbered[i] for i in job.agent_script_steps if i in renumbered}
+    copied.agent_step_why = {renumbered[i]: why for i, why in job.agent_step_why.items() if i in renumbered}
+    return copied
+
+
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
@@ -315,7 +345,41 @@ class WorkflowRules:
             self.signing_keys(job)
             self.effect_rules(job)
         self.provenance_missing()
+        self.through_local_actions()
         return self.findings
+
+    # ------------------------------------------------- the steps of local composite actions
+    def through_local_actions(self) -> None:
+        """Read the steps of the local composite actions the jobs use as the jobs' own steps (flagship
+        slice 2d.4b2). A job's step that uses `./path` runs that action's steps in the job, on its runner,
+        with its token, workspace and cache, so a checkout, a cache, a publish or an unpinned action there
+        is the job's. Every rule is run again on a copy of the workflow in which each such step is followed
+        by the action's steps (`Job.local_steps`, with the inputs put in), and what that adds is kept:
+
+        - a finding on a step of a local action, which names the action and the step;
+        - a finding on a job's own step, or on the job, where the first pass has none of that rule there.
+
+        What the first pass found is kept as it was, so reading through only adds: what an action's step
+        does (a check, a control, a pin) never clears a finding the first pass gave, and an acceptance of a
+        first-pass finding still matches it."""
+        if getattr(self, "_through", False) or not any(job.local_steps for job in self.wf.jobs.values()):
+            return
+        from obaaf.checker import baseline as baseline_mod   # baseline imports this module
+        view = _through_view(self.wf)
+        second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
+                               firewall=self.firewall)
+        second._through = True
+        found = second.run()
+        inner = {step.name for job in view.jobs.values() for step in job.steps if step.via is not None}
+        there = {(f.rule, f.job, f.step) for f in self.findings}
+        known = {baseline_mod.key(f) for f in self.findings}
+        for finding in found:
+            if finding.step not in inner and (finding.rule, finding.job, finding.step) in there:
+                continue
+            key = baseline_mod.key(finding)
+            if key not in known:
+                known.add(key)
+                self.findings.append(finding)
 
     # -------------------------------------------------------------- GHA-023
     def placeholders(self) -> None:
@@ -2890,13 +2954,36 @@ class WorkflowRules:
             if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
                                              or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
                 return True
-        return any(re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", s.scripts() + " " + str(s.raw.get("env", "")))
-                   for s in job.steps[: step.index])
+        return self._first_shell_change(job) < step.index
+
+    def _first_shell_change(self, job: Job) -> int:
+        """Where the first step of `job` whose script or `env` names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`
+        is, or the number of its steps when none does, worked out once per job: each check of each upload
+        read every earlier step again, which took a job of 1,000 steps (as slice 2d.4b2's reading of
+        local actions can give one) a minute and a half."""
+        memo = self.__dict__.setdefault("_shell_changes", {})
+        found = memo.get(id(job))
+        if found is None or found[0] is not job:
+            first = len(job.steps)
+            for position, earlier in enumerate(job.steps):
+                if re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", earlier.scripts() + " " + str(earlier.raw.get("env", ""))):
+                    first = position
+                    break
+            found = memo[id(job)] = (job, first)
+        return found[1]
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
         provenance-only one (`gh attestation verify`, or `obaaf verify release --pre-approval`, which
-        skips the approvals), None otherwise (including checks whose failure is ignored)."""
+        skips the approvals), None otherwise (including checks whose failure is ignored). Worked out once
+        for each step (flagship slice 2d.4b2)."""
+        memo = self.__dict__.setdefault("_verify_kinds", {})
+        found = memo.get((id(job), id(step)))
+        if found is None or found[0] is not step:
+            found = memo[(id(job), id(step))] = (step, self._verify_kind_of(job, step))
+        return found[1]
+
+    def _verify_kind_of(self, job: Job, step: Step) -> str | None:
         kind = None
         for words in self._binding_matches(job, step, self.detection.get("verify_commands", [])):
             joined = " ".join(words)

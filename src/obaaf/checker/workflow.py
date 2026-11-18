@@ -1714,9 +1714,16 @@ class Step:
     line: int
     group: int | None = None      # parallel group it belongs to, if any
     background: bool = False      # runs concurrently with later steps (background: true or parallel)
+    # Flagship slice 2d.4b2: a step of a local composite action, read by the rules as a step of the job
+    # that uses the action, has the job's step that uses it (`via`) and the name its findings give it
+    # (`shown_name`), which says where in the action it is. A step of the job keeps its own name.
+    via: "Step | None" = field(default=None, repr=False, compare=False)
+    shown_name: str | None = field(default=None, compare=False)
 
     @property
     def name(self) -> str:
+        if self.shown_name is not None:
+            return self.shown_name
         return as_text(self.raw.get("name") or self.raw.get("id") or self.uses or f"step {self.index + 1}")
 
     @property
@@ -1899,6 +1906,10 @@ class Job:
     agent_script_steps: set = field(default_factory=set)
     # Of those, the steps whose agent runs inside a local action, with what was found there (slice 2d.4a).
     agent_step_why: dict = field(default_factory=dict)
+    # The steps of the local composite actions the job's steps use, by the index of the step that uses
+    # each, in the order they run, with the using step's inputs put in (slice 2d.4b2). The rules read
+    # them as the job's own steps in a second pass (`WorkflowRules.through_local_actions`).
+    local_steps: dict = field(default_factory=dict)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:
