@@ -203,6 +203,37 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
         self.assertIn(f"and {count - 1 - 10} more", last[0])
         self.assertLess(spent, 30)
 
+    def test_a_long_chain_behind_a_cycle_is_quick(self):
+        # From the second review: a chain behind a self-call was worked out again for each event.
+        count = 300
+        files = {".github/workflows/a00000.yml": (
+            "on: [workflow_call, pull_request_target]\npermissions: {}\njobs:\n"
+            "  self:\n    uses: ./.github/workflows/a00000.yml\n  next:\n    uses: ./.github/workflows/w00001.yml\n")}
+        for level in range(1, count):
+            event = "".join(chr(97 + int(d)) for d in f"{level:04d}")
+            name = f".github/workflows/w{level:05d}.yml"
+            if level == count - 1:
+                files[name] = called(on=f"[workflow_call, ev_{event}]")
+            else:
+                files[name] = (f"on: [workflow_call, ev_{event}]\npermissions: {{}}\njobs:\n  call:\n"
+                               f"    uses: ./.github/workflows/w{level + 1:05d}.yml\n")
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, files)
+            spent = time.monotonic() - start
+        self.assertIn("OBAAF-GHA-002", rules_on(result, f".github/workflows/w{count - 1:05d}.yml"))
+        self.assertLess(spent, 30)
+
+    def test_every_file_of_a_cycle_gets_every_event_that_reaches_it(self):
+        # From the second review: an `if:` on a call inside the cycle kept an event from a file of it.
+        one = ("on: [workflow_call, push, pull_request_target]\npermissions: {}\njobs:\n"
+               "  call:\n    if: github.event_name == 'push'\n    uses: ./.github/workflows/two.yml\n")
+        two = ("on: workflow_call\npermissions: {}\njobs:\n  back:\n    uses: ./.github/workflows/one.yml\n"
+               "  work:\n    runs-on: ubuntu-latest\n    steps:\n" + HEAD_CHECKOUT)
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/one.yml": one, ".github/workflows/two.yml": two})
+        self.assertIn("OBAAF-GHA-002", rules_on(result, ".github/workflows/two.yml"))
+
     def test_a_workflow_that_cannot_be_called_gets_no_events(self):
         # GitHub refuses to call a workflow without `on: workflow_call`, so its jobs never run from the call.
         with TempDir() as tmp:
@@ -397,6 +428,32 @@ class WhatTheCallerPassesIsPartOfTheFindingTest(unittest.TestCase):
             again = check(tmp, {".github/workflows/caller.yml": changed, CALLED: many})
         other = [f for f in again.findings if f.rule == "OBAAF-GHA-005"]
         self.assertNotEqual(baseline_mod.key(found[0]), baseline_mod.key(other[0]))
+
+    def test_one_long_entry_is_bounded_too(self):
+        # From the second review: one value naming 2,000 secrets made each entry 14 KB, for every job.
+        value = "".join(f"${{{{ secrets.A{i} }}}}" for i in range(2000))
+        text = mapping_caller(f'"{value}"')
+        jobs = "".join(f"  j{i}:\n    runs-on: ubuntu-latest\n    steps:\n{AGENT_STEPS}" for i in range(20))
+        many = "on: workflow_call\npermissions:\n  contents: read\njobs:\n" + jobs
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/caller.yml": text, CALLED: many})
+        found = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
+        self.assertEqual(len(found), 20)
+        self.assertLess(max(len(f.message) for f in found), 1500)
+        self.assertLess(max(sum(len(e) for e in f.facts["passed"]) for f in found), 1500)
+        with TempDir() as tmp:
+            again = check(tmp, {".github/workflows/caller.yml": text.replace("A1999", "B1999"), CALLED: many})
+        other = [f for f in again.findings if f.rule == "OBAAF-GHA-005"]
+        self.assertNotEqual(baseline_mod.key(found[0]), baseline_mod.key(other[0]))
+
+    def test_gha018_every_secret_names_what_is_passed(self):
+        steps = "      - run: make sign\n        env:\n          K: ${{ toJSON(secrets) }}\n"
+        text = mapping_caller("${{ secrets.PROD_RELEASE }}").replace("MODEL_KEY:", "SIGN:")
+        with TempDir() as tmp:
+            result = check(tmp, {".github/workflows/caller.yml": text, CALLED: called(steps=steps)})
+        found = [f for f in result.findings if f.rule == "OBAAF-GHA-018" and f.path == CALLED]
+        self.assertEqual([f.kind for f in found], ["any-secret"])
+        self.assertIn("PROD_RELEASE", found[0].message)
 
     def test_gha018_names_what_is_passed(self):
         steps = "      - run: make sign\n        env:\n          K: ${{ secrets.SIGNING_KEY }}\n"

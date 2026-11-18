@@ -619,7 +619,8 @@ rules:
       the job can read it. A job that can read every secret (a reference that is not one literal name, such as
       toJSON(secrets) or a computed index, or `secrets: inherit`) is reported as able to read any signing key
       stored for it, because which secrets exist is not in the workflow. The job's environment is part of a
-      finding about its secrets. Not followed: a signing secret whose name matches none of the patterns in the
+      finding about its secrets, and so, in a workflow a job of the same repository calls by its path, is what
+      each such caller passes for them (slice 2d.4b1). Not followed: a signing secret whose name matches none of the patterns in the
       detection data (names are guesses, and a key can be stored under any name); a signing command or action
       not in that data (commands are matched in `run` and `actions/github-script` scripts, with a line
       continued by a backslash, a PowerShell backtick or a cmd caret joined first); keys fetched at run time

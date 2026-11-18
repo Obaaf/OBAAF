@@ -2308,13 +2308,11 @@ class Job:
         the repository calls. Names are compared as GitHub compares them, in any letter case; a job that
         reads every secret (`toJSON(secrets)`) reads every one passed. A key with space round it is read
         without it, and a key that is not text (`null:`, `true:`, a number) is taken for every name the
-        job reads, since how GitHub spells it is not established: the wider readings. Worked out once
-        for each set of names."""
-        memo = self.workflow.__dict__.setdefault("_passed_secrets", {})
-        asked_for = frozenset(names)
-        if asked_for not in memo:
-            memo[asked_for] = self._passed_secrets(asked_for)
-        return list(memo[asked_for])
+        job reads, since how GitHub spells it is not established: the wider readings. Each caller's
+        mapping is indexed by name once, and each of its entries worked out once, so a walk costs what it
+        visits (the review of slice 2d.4b1 found walks that went through every key again for each name).
+        A finding keeps only its bounded fact (`_passed_fact` in the rules), never the whole list."""
+        return self._passed_secrets(frozenset(names))
 
     def _passed_secrets(self, names) -> list[str]:
         out: set[str] = set()
@@ -2345,24 +2343,31 @@ class Job:
                                 "the checker cannot read, so any secret it can read")
                         todo.append((call.workflow, set(), True))
                     continue
-                for key, value in passed.items():
-                    param = as_text(key)
-                    if not every and isinstance(key, str) and param.strip().upper() not in wanted:
-                        continue
-                    refs: set[str] = set()
-                    for body in expressions(value):
-                        refs |= expr_mod.secret_refs(body)
-                    if "*" in refs:
-                        source = "a secret it computes, so any secret it can read"
-                    elif refs:
-                        source = ", ".join(sorted({r.upper() for r in refs}))
-                    else:
-                        source = one_line(value_identity(value))
-                    shown = bounded(one_line(param.strip().upper())) if isinstance(key, str) else \
-                        f"{one_line(value_identity(key))} (a key that is not text)"
-                    out.add(f"{where} passes {shown} as {source}")
-                    if refs:
-                        todo.append((call.workflow, {r.upper() for r in refs if r != "*"}, "*" in refs))
+                named, odd = call.by_name()
+                pairs = [pair for found in named.values() for pair in found] if every else \
+                    [pair for name in wanted for pair in named.get(name, [])]
+                for key, value in pairs + odd:
+                    marker = (id(key), id(value)) if not isinstance(key, str) else key
+                    cached = call._entries.get(marker)
+                    if cached is None:
+                        refs: set[str] = set()
+                        for body in expressions(value):
+                            refs |= expr_mod.secret_refs(body)
+                        if "*" in refs:
+                            source = "a secret it computes, so any secret it can read"
+                        elif refs:
+                            source = bounded(", ".join(sorted({r.upper() for r in refs})))
+                        else:
+                            source = one_line(value_identity(value))
+                        shown = bounded(one_line(key.strip().upper())) if isinstance(key, str) else \
+                            f"{one_line(value_identity(key))} (a key that is not text)"
+                        cached = (f"{where} passes {shown} as {source}", {r.upper() for r in refs if r != "*"},
+                                  "*" in refs)
+                        call._entries[marker] = cached
+                    entry, upstream, computed = cached
+                    out.add(entry)
+                    if upstream or computed:
+                        todo.append((call.workflow, upstream, computed))
         return sorted(out)
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
@@ -2521,6 +2526,23 @@ class Call:
     line: int
     secrets: Any       # what the calling job's `secrets` holds as written: a mapping, `inherit`, or None
     workflow: Any = field(default=None, compare=False, repr=False)   # the calling workflow
+    # What `secrets` passes, indexed once by name (upper case, without space round it), the keys that are
+    # not text apart; and each entry once worked out. Neither is part of what the call is.
+    _index: dict = field(default_factory=dict, compare=False, repr=False)
+    _entries: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def by_name(self) -> tuple[dict, list]:
+        if "index" not in self._index:
+            named: dict = {}
+            odd: list = []
+            if isinstance(self.secrets, dict):
+                for key, value in self.secrets.items():
+                    if isinstance(key, str):
+                        named.setdefault(key.strip().upper(), []).append((key, value))
+                    else:
+                        odd.append((key, value))
+            self._index["index"] = (named, odd)
+        return self._index["index"]
 
 
 @dataclass

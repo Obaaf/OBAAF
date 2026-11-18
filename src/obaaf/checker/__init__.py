@@ -328,9 +328,8 @@ def _give_callers(read: list) -> None:
     A called workflow's jobs run on whatever starts the job that calls it, and `github.event` there is
     the caller's event, so without this a `pull_request_target` workflow could check out a pull
     request's head through a local workflow it calls and no rule saw it. Workflows are taken callers
-    first (a topological order of the calls), so a chain carries the first caller's events to the last
-    in one pass; what is left is in or behind a cycle, which GitHub refuses, and is worked out from a
-    queue until nothing changes, every file in it given all the events that reach it: the wider reading.
+    first, so a chain carries the first caller's events to the last in one pass; the files of a cycle,
+    which GitHub refuses, are each given every event that reaches any of them: the wider reading.
 
     A path is matched as git stores it, letter case included, by the path the file was found at (a link
     is matched by its own name, not its target's). A workflow without `on: workflow_call` is given
@@ -341,7 +340,6 @@ def _give_callers(read: list) -> None:
         if all(workflow is not other for other in by_path[found]):
             by_path[found].append(workflow)
     calls: dict[int, list] = {}           # id of the calling workflow -> [(job, targets)]
-    waiting: dict[int, int] = {}          # id of a workflow -> calls into it from workflows not yet taken
     for _, workflow in read:
         for job in workflow.jobs.values():
             uses = job.raw.get("uses")
@@ -354,34 +352,81 @@ def _give_callers(read: list) -> None:
                         targets.append(target)
             for target in targets:
                 target.callers.append(wf_mod.Call(workflow.path, job.id, job.line, job.raw.get("secrets"), workflow))
-                waiting[id(target)] = waiting.get(id(target), 0) + 1
             if targets:
                 calls.setdefault(id(workflow), []).append((job, targets))
+    # The calls, as a graph of workflows, taken apart into groups that call each other (strongly
+    # connected components, found without recursion), callers' groups first. A group of one that does
+    # not call itself is a plain workflow; any other group is a cycle, which GitHub refuses, and each of
+    # its files is given every event that reaches any of them, the wider reading, in one step, so a
+    # chain behind a cycle is still one pass (the review of slice 2d.4b1 found a queue that was cubic).
+    nodes = list(dict.fromkeys(id(w) for _, w in read))
     workflows = {id(workflow): workflow for _, workflow in read}
-    ready = [key for key in dict.fromkeys(id(w) for _, w in read) if not waiting.get(key)]
-    taken: set[int] = set()
-    while ready:
-        key = ready.pop()
-        taken.add(key)
-        for job, targets in calls.get(key, []):
-            events = job.triggers()
-            for target in targets:
-                target.give_caller_events(events)
-                waiting[id(target)] -= 1
-                if not waiting[id(target)]:
-                    ready.append(id(target))
-    # In or behind a cycle: from a queue, each call again whenever its workflow is given new events.
-    queue = [key for key in workflows if key not in taken and key in calls]
-    queued = set(queue)
-    while queue:
-        key = queue.pop()
-        queued.discard(key)
-        for job, targets in calls[key]:
-            events = job.triggers()
-            for target in targets:
-                if target.give_caller_events(events) and id(target) in calls and id(target) not in queued:
-                    queue.append(id(target))
-                    queued.add(id(target))
+    edges = {key: list(dict.fromkeys(id(t) for _, targets in calls.get(key, []) for t in targets)) for key in nodes}
+    for group in _strongly_connected(nodes, edges):
+        members = set(group)
+        if len(group) > 1 or group[0] in edges[group[0]]:
+            union: set = set()
+            for key in group:
+                union |= set(workflows[key].triggers) | workflows[key].caller_events
+            for key in group:
+                if workflows[key].callable:
+                    workflows[key].give_caller_events(union)
+        for key in group:
+            for job, targets in calls.get(key, []):
+                events = job.triggers()
+                for target in targets:
+                    if id(target) not in members:
+                        target.give_caller_events(events)
+
+
+def _strongly_connected(nodes: list, edges: dict) -> list[list]:
+    """The strongly connected components of a graph (Tarjan's algorithm, without recursion), each a
+    list of nodes, in topological order: a component comes before every component it has an edge to."""
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    found: list[list] = []
+    counter = 0
+    for start in nodes:
+        if start in index:
+            continue
+        index[start] = low[start] = counter
+        counter += 1
+        stack.append(start)
+        on_stack.add(start)
+        work = [(start, iter(edges.get(start, ())))]
+        while work:
+            node, it = work[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in index:
+                    index[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, iter(edges.get(nxt, ()))))
+                    advanced = True
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], index[nxt])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                group = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    group.append(member)
+                    if member == node:
+                        break
+                found.append(group)
+    found.reverse()       # Tarjan finds a component after every component it reaches
+    return found
 
 
 def _caller_notes(workflows: list) -> list[str]:

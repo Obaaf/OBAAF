@@ -3500,9 +3500,9 @@ class WorkflowRules:
             shown = " and ".join("secrets: inherit" if n == "*inherit" else "a reference that is not one literal name"
                                  for n in every)
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' can read every secret ({how}){environment}, so any signing key stored for it "
-                     "is available to what it runs.", job, severity=severity, kind="any-secret",
-                     how=Fact(every, shown), environment=environment)
+                     "Job '{job}' can read every secret ({how}){passed}{environment}, so any signing key stored "
+                     "for it is available to what it runs.", job, severity=severity, kind="any-secret",
+                     how=Fact(every, shown), passed=self._passed_fact(job, every), environment=environment)
         commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
         actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
@@ -3541,11 +3541,16 @@ class WorkflowRules:
                 # of slice 2d.4b1 made a 290 KB repository print 249 MB). The first few entries are named,
                 # and every one is in the digest, so a change to any changes the finding.
                 digest = hashlib.sha256("\n".join(passed).encode("utf-8", "surrogatepass")).hexdigest()
-                named = passed[:PASSED_SHOWN]
+                # Entries are named while they fit in the budget, at most PASSED_SHOWN of them; an entry is
+                # itself bounded (a long list of secrets in one value is its digest).
+                named: list = []
+                for entry in passed[:PASSED_SHOWN]:
+                    if sum(len(e) for e in named) + len(entry) > 1000:
+                        break
+                    named.append(entry)
+                rest = f"{len(passed) - len(named)} more, {len(passed)} in all, by digest sha256:{digest}"
                 memo[asked_for] = Fact([*named, f"sha256:{digest} ({len(passed)} entries)"],
-                                       f" (from the jobs that call its workflow: {'; '.join(named)}; and "
-                                       f"{len(passed) - len(named)} more, {len(passed)} in all, by digest "
-                                       f"sha256:{digest})")
+                                       f" (from the jobs that call its workflow: {'; '.join([*named, rest])})")
         found = memo[asked_for]
         return Fact(list(found.value), found.shown) if isinstance(found, Fact) else found
 
