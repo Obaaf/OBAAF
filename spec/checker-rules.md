@@ -36,6 +36,7 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
 | [OBAAF-GHA-024](#obaaf-gha-024) | high | authority | Protected secret used outside its environment | G3.4, G9.1 |
+| [OBAAF-GHA-025](#obaaf-gha-025) | high | hygiene | Agent tool installed at a version that can change | G2.1, R6 |
 | [OBAAF-CFG-001](#obaaf-cfg-001) | high | authority | Lane declaration that does nothing | - |
 | [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
 | [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
@@ -306,6 +307,16 @@ The checker configuration lists the secret under protected_secrets, but a job re
 
 **Fix.** Keep the secret only in the environment named in protected_secrets, limit that environment's deployment branches to the default branch, delete any repository or organization copy, and add `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+## OBAAF-GHA-025
+
+**Agent tool installed at a version that can change** (high). Requirements: G2.1, R6. Supports: FR10, FR12.
+
+**Why it matters.** Whoever controls the download or the registry entry chooses the code that then runs with everything the agent job holds.
+
+An agent job installs or runs a tool at a version it does not fix (flagship slice 2d.5a). Three cases. A script downloaded while the job runs is given to a shell (`curl ... | bash`, `wget -O- ... | sh`, `bash <(curl ...)`, `sh -c "$(curl ...)"`, `irm ... | iex`), whatever tool it installs: the checker cannot tell what the script fetches, and in an agent job it runs with the job's keys and token. An agent CLI the catalogue names (`agent_packages` in the detection data) is installed or run by a package manager (npm, pnpm, yarn, bun, npx, pip, pipx, uv, uvx) without an exact version, at a range, a tag or a version set at run time, is updated, or is installed by its downloaded install script (`agent_install_urls`). And a package manager is given a package named at run time, so the checker cannot tell whether it is an agent CLI at a fixed version (medium). Read in every script a step runs, as OBAAF-GHA-010 reads them, local composite actions' steps included, with the lines a backslash continues joined and whole-line comments dropped; a variable the script, the step, the job or the workflow sets to one literal is put in, and any other is taken for a version set at run time. The package-manager cases use the same reader as OBAAF-JEN-008. Only agent jobs are read: the same pattern in another job is poutine's to report. Not followed: a script downloaded to a file and run in a later command, except an agent's own install script; what the downloaded script itself installs; an agent the catalogue does not name, installed by a package manager; and an agent action's own input that chooses its CLI's version. Quotes are not read, so a pipe inside quoted text (an `echo` of such a command) is reported as if it ran.
+
+**Fix.** Install the agent CLI from its registry at an exact version (for example `npm install -g @anthropic-ai/claude-code@1.2.3`, or `pip install aider-chat==0.86.1`), better with its hash from a lockfile, and move the version through reviewed changes. If the tool ships only an install script, download a release by its fixed version and check its checksum before running it.
+
 ## OBAAF-CFG-001
 
 **Lane declaration that does nothing** (high). Requirements: -. Supports: FR12.
@@ -504,6 +515,7 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 
 | Test file | Models | Expected rules |
 | --- | --- | --- |
+| `tests/fixtures/workflows/risky/agent-cli-unpinned.yml` | An agent job installs its CLI by piping a downloaded script into a shell, and another CLI from npm with no version, while it holds a model key. | OBAAF-GHA-005, OBAAF-GHA-020, OBAAF-GHA-025 |
 | `tests/fixtures/workflows/risky/agent-lane-misspelled.yml` | Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed. | OBAAF-CFG-001 |
 | `tests/fixtures/workflows/risky/claude-action-toctou.yml` | Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk. | OBAAF-GHA-012, OBAAF-GHA-011, OBAAF-GHA-020 |
 | `tests/fixtures/workflows/risky/clinejection-release.yml` | Clinejection, part 2: the release workflow restores the shared cache and publishes with a long-lived token, unchecked. | OBAAF-GHA-006, OBAAF-GHA-014, OBAAF-GHA-016, OBAAF-GHA-017, OBAAF-GHA-008 |

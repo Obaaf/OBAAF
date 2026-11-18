@@ -842,6 +842,40 @@ rules:
       deployment branches to the default branch, delete any repository or organization copy, and add
       `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+  - id: OBAAF-GHA-025
+    title: Agent tool installed at a version that can change
+    severity: high
+    category: hygiene
+    requirements: [G2.1]
+    agent_controls: [R6]
+    supports: [FR10, FR12]
+    why: >-
+      Whoever controls the download or the registry entry chooses the code that then runs with everything the agent
+      job holds.
+    description: >-
+      An agent job installs or runs a tool at a version it does not fix (flagship slice 2d.5a). Three cases.
+      A script downloaded while the job runs is given to a shell (`curl ... | bash`, `wget -O- ... | sh`,
+      `bash <(curl ...)`, `sh -c "$(curl ...)"`, `irm ... | iex`), whatever tool it installs: the checker
+      cannot tell what the script fetches, and in an agent job it runs with the job's keys and token. An agent
+      CLI the catalogue names (`agent_packages` in the detection data) is installed or run by a package manager
+      (npm, pnpm, yarn, bun, npx, pip, pipx, uv, uvx) without an exact version, at a range, a tag or a version
+      set at run time, is updated, or is installed by its downloaded install script (`agent_install_urls`).
+      And a package manager is given a package named at run time, so the checker cannot tell whether it is an
+      agent CLI at a fixed version (medium). Read in every script a step runs, as OBAAF-GHA-010 reads them,
+      local composite actions' steps included, with the lines a backslash continues joined and whole-line
+      comments dropped; a variable the script, the step, the job or the workflow sets to one literal is put
+      in, and any other is taken for a version set at run time. The package-manager cases use the same reader
+      as OBAAF-JEN-008. Only agent jobs are read: the same pattern in another job is poutine's to report.
+      Not followed: a script downloaded to a file and run in a later command, except an agent's own install
+      script; what the downloaded script itself installs; an agent the catalogue does not name, installed by
+      a package manager; and an agent action's own input that chooses its CLI's version. Quotes are not
+      read, so a pipe inside quoted text (an `echo` of such a command) is reported as if it ran.
+    fix: >-
+      Install the agent CLI from its registry at an exact version (for example `npm install -g
+      @anthropic-ai/claude-code@1.2.3`, or `pip install aider-chat==0.86.1`), better with its hash from a
+      lockfile, and move the version through reviewed changes. If the tool ships only an install script,
+      download a release by its fixed version and check its checksum before running it.
+
   # The checker's own configuration. A declaration that tells the checker which rules a job gets
   # is a control like any other: one that does nothing is reported, never dropped without a word.
   - id: OBAAF-CFG-001

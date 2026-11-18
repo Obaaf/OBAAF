@@ -207,7 +207,7 @@ requirements:
     github_native: "Referencing actions by full commit digest"
     github_gap: "No native verification of an action's provenance when it is consumed"
     obaaf:
-      checks: [OBAAF-GHA-008, OBAAF-JEN-008]
+      checks: [OBAAF-GHA-008, OBAAF-GHA-025, OBAAF-JEN-008]
 
   - id: R7
     name: Isolation and egress control

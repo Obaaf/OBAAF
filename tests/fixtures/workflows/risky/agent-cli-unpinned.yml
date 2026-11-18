@@ -1,0 +1,24 @@
+# obaaf-models: An agent job installs its CLI by piping a downloaded script into a shell, and another CLI from npm with no version, while it holds a model key.
+# obaaf-expect: OBAAF-GHA-005 OBAAF-GHA-020 OBAAF-GHA-025
+name: Nightly agent
+on:
+  schedule:
+    - cron: "17 3 * * *"
+permissions:
+  contents: read
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Install the agent CLI
+        run: curl -fsSL https://agent.example.com/install.sh | bash
+      - name: Install a second agent CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Run the agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: claude -p "Summarise yesterday's failed builds"

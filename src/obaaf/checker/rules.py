@@ -538,6 +538,7 @@ class WorkflowRules:
             self.untrusted_checkout(job)
             self.script_injection(job)
             self.agent_rules(job)
+            self.agent_tool_installs(job)
             self.release_rules(job)
             self.unpinned(job)
             self.persisted_credentials(job)
@@ -1521,6 +1522,99 @@ class WorkflowRules:
                    "(workflow file sha256 {written}).",
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
+
+    # -------------------------------------------------------------- GHA-025
+    _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts; the Jenkins reader's own bound
+
+    def _install_reader(self):
+        """The reader OBAAF-JEN-008 uses for agent CLI installs (flagship slice 2d.2k), with no Jenkinsfile
+        behind it: only the script and the variables given to it are read. Imported here because the
+        Jenkins rules import this module."""
+        if getattr(self, "_jenkins_installs", None) is None:
+            from obaaf.checker.jenkins.model import Pipeline
+            from obaaf.checker.jenkins.rules import JenkinsRules
+            self._jenkins_installs = JenkinsRules(self.wf.path, Pipeline(), self.catalog, None)
+        reader = self._jenkins_installs
+        reader.unknowns = []
+        reader._agent_installed = False
+        return reader
+
+    def _literal_env(self, job: Job, step: Step) -> dict:
+        """The env names the step's scripts can read that the workflow, the job or the step sets to one
+        literal (the nearest wins), as the shell variables the install reader puts in. A value with an
+        expression, or that is not text, is None: set at run time."""
+        out: dict = {}
+        for scope in (self.wf.env, job.env, step.env):
+            if not isinstance(scope, dict):
+                continue
+            for name, value in scope.items():
+                if not isinstance(name, str):
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                    out[name] = None
+                    continue
+                text = str(value)
+                out[name] = None if "${{" in text or "$" in text or len(text) > 10_000 else text
+        return out
+
+    def agent_tool_installs(self, job: Job) -> None:
+        """OBAAF-GHA-025: an agent job installs or runs a tool at a version it does not fix (flagship slice
+        2d.5a, control R6). One finding per step and case, with what was found as its facts."""
+        if not job.in_lane("agent"):
+            return
+        from obaaf.checker.jenkins.rules import (
+            JenkinsRules, _DOWNLOAD, _SEGMENTS, _TO_SHELL, _shown as jenkins_shown)
+        why = job.reason_for("agent")
+        for step in job.steps:
+            texts = self._script_texts(job, step)
+            if not texts:
+                continue
+            shell = self._shell(job, step).strip().lower()
+            dialect = "pwsh" if shell.startswith(("pwsh", "powershell")) else "bat" if shell.startswith("cmd") \
+                else "sh"
+            scripts = [JenkinsRules._prepared(text, dialect) for text in texts]
+            total = sum(len(s) for s in scripts)
+            if total > self._INSTALL_SCRIPT_LIMIT:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}): step '{step}' runs scripts too long for the checker to read "
+                         "({size} characters), so it cannot tell whether they install a tool at a version that "
+                         "can change.", job, step, severity="medium", kind="too-long", why=why,
+                         size=Note(str(total)))
+                continue
+            piped: set = set()
+            installs: set = set()
+            named: set = set()
+            reader = self._install_reader()
+            shell_vars = self._literal_env(job, step)
+            for script in scripts:
+                for line in script.splitlines():
+                    if line.lstrip().startswith("#"):
+                        continue
+                    for segment in _SEGMENTS.split(line):
+                        if _DOWNLOAD.search(segment) and _TO_SHELL.search(segment):
+                            piped.add(jenkins_shown(segment.strip(), 160))
+                for message in reader._install_problems(script, shell_vars=shell_vars):
+                    if message.startswith("An agent CLI is installed by piping a downloaded script"):
+                        continue        # the first case, reported for any download
+                    installs.add(message)
+                for unknown in reader.unknowns:
+                    reason = getattr(unknown, "reason", None) or str(unknown)
+                    if "package is named at run time" in reason:
+                        named.add(reason)
+                reader.unknowns = []
+            if piped:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}) runs a script downloaded while the job runs in a shell, in step "
+                         "'{step}': {commands}. Whatever it installs runs with what the agent job holds.",
+                         job, step, kind="piped-download", why=why, commands=sorted(piped))
+            if installs:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
+                         "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs))
+            if named:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}): in step '{step}', {named}.", job, step, severity="medium",
+                         kind="named-at-run-time", why=why, named=sorted(named))
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
