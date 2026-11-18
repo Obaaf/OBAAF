@@ -10,8 +10,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 Slice 2d.4c (issue #80, the rest of 2d.4). Nothing about the checker changes.
 
-- **The eleven findings zizmor and Octoscan reported on this repository on 2026-11-11 are judged** in `docs/landscape.md`, "Triage, 2026-11-18": one was right and is fixed, the other ten are kept with the reason for each. zizmor's `github-env` on `actions/setup-obaaf/action.yml` is the same fact the checker now reports as an accepted OBAAF-GHA-016 "cannot tell" on the release job.
-- **Dependabot waits seven days before proposing a version** (`cooldown: default-days: 7` on both updaters in `.github/dependabot.yml`), where GitHub's default is three; security updates are not delayed. A test holds it.
+- **The eleven findings zizmor and Octoscan reported on this repository on 2026-11-11 are judged** in `docs/landscape.md`, "Triage, 2026-11-18": two were right and are fixed, the other nine are kept with the reason for each. zizmor's `github-env` on `actions/setup-obaaf/action.yml` is about a `GITHUB_PATH` line no outsider can steer; its effect on the release job is what the checker reports there as an accepted OBAAF-GHA-016 "cannot tell".
+- **Dependabot is set to wait seven days before proposing a version** (`cooldown: default-days: 7` on both updaters in `.github/dependabot.yml`), where GitHub's default is three; security updates are not delayed. GitHub reads the file on the default branch only, so it takes effect when this reaches `main`. A test holds it.
 - **Found:** an outsider's text written to `GITHUB_ENV` or `GITHUB_PATH` through an environment variable gets no finding and is not named in OBAAF-GHA-010's limits (issue #232).
 
 ### What a called local workflow does counts for the job that calls it
