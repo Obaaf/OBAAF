@@ -665,9 +665,13 @@ class TheReviewersSeventhPassTest(unittest.TestCase):
     def test_cheap_uses_buy_nothing_for_another_step(self):
         import time
         files = {".github/actions/t/action.yml": composite(PLAIN)}
+        # A fan-out sized so that it fits the shared bound plus what 500 cheap uses would add if their
+        # units were pooled, and not the shared bound alone: with the allowance pooled (as before the fix)
+        # it ends with no error; with each use's units its own, it stops at the bound (found by the review
+        # of slice 2d.4a-timing, which tried both).
         files.update({f".github/actions/f{n}/action.yml": composite(
             *[f"    - uses: ./.github/actions/f{n + 1}\n      with:\n        n: '${{{{ inputs.n }}}}{k}'\n"
-              for k in range(20)]) for n in range(3)})
+              for k in range(20 if n < 2 else 2)]) for n in range(3)})
         files[".github/actions/f3/action.yml"] = composite(
             *["    - run: echo '${{ inputs.n }}'\n      shell: bash\n"] * 20)
         cheap = "".join("      - uses: ./.github/actions/t\n" for _ in range(500))
@@ -677,8 +681,8 @@ class TheReviewersSeventhPassTest(unittest.TestCase):
         with TempDir() as tmp:
             started = time.monotonic()
             result = check(tmp, text, files)
-            # About 1.6 s locally (9.6 s before the fix, with no error); the error is the main check,
-            # and the limit leaves room for a slow CI runner (slice 2d.4a-timing: 5.0 s on CI once).
+            # About 1.2 s locally; the error is the main check, and the limit leaves room for a slow CI
+            # runner (slice 2d.4a-timing: the first version of this case took 5.0 s on CI once).
             self.assertLess(time.monotonic() - started, 8)
             self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
