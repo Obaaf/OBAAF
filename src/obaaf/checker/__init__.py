@@ -471,6 +471,10 @@ CALLER_INPUT_TEXT = 1_000_000
 CALLER_INPUTS_CHECK_TEXT = 5_000_000
 # The places (values in mappings and lists, an alias's each time it is given) looked at in one workflow.
 CALLER_INPUTS_PLACES = 1_000_000
+# The characters of all the values handed to one input: every reference to it is given them all, and
+# the rules read some places once for each step (the fourth review found a 400 KB value, made by a short
+# list of aliases, read through `env` by 250 steps of a local action take 30 s).
+CALLER_INPUT_VALUES = 50_000
 _INPUTS_WORD = re.compile(r"\binputs\b", re.I)
 
 
@@ -487,6 +491,7 @@ def _too_much_given(exc: "_CallerInputsExceeded") -> str:
     """The problem a called workflow has when putting in its callers' inputs passes a bound, naming it."""
     which = {"text": f"make one text of more than {CALLER_INPUT_TEXT} characters",
              "places": f"look at more than {CALLER_INPUTS_PLACES} places in it, each alias counted each time it is given",
+             "values": f"hand one of its inputs more than {CALLER_INPUT_VALUES} characters of values",
              }.get(exc.reason, f"make more than {CALLER_INPUTS_CHECK_TEXT} characters of such values and texts for the "
                                "check, each value counted each time it is given")
     return (f"putting in what the jobs that call it give its inputs would {which}, so its inputs are read as written "
@@ -808,6 +813,8 @@ class _CallerInputs:
             given = self.everything() if name is None else self.values.get(name, []) + self.every
             if not given:
                 self._tails[name] = ([], [], 0)
+            elif sum(len(_written_tokens(value)) for value in given) > CALLER_INPUT_VALUES:
+                raise _CallerInputsExceeded("values")
             else:
                 head = [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(given) + 1))),
                         ("op", ",")]
@@ -945,15 +952,27 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
     # is counted once for each (the review found 200 steps reading five such values take 57 s).
     conditions: set = set()
     kept: set = {(id(workflow.raw), "name")}
+    unread: set = set()         # containers left as written, whatever holds them (a list or mapping `runs-on`)
     reads: dict = {}
     steps_in_all = sum(len(job.steps) for job in workflow.jobs.values())
-    if isinstance(workflow.raw.get("env"), dict):
-        reads[id(workflow.raw["env"])] = steps_in_all + 1
+
+    def read_per_step(scope, steps):
+        # `env` and `defaults` (its `run.shell` and `run.working-directory`) are read again by each step.
+        for name in ("env", "defaults"):
+            todo_ = [scope.get(name)] if isinstance(scope, dict) else []
+            while todo_:
+                node_ = todo_.pop()
+                if isinstance(node_, dict):
+                    reads[id(node_)] = max(reads.get(id(node_), 0), steps + 1)
+                    todo_.extend(v for v in node_.values() if isinstance(v, dict))
+
+    read_per_step(workflow.raw, steps_in_all)
     for job in workflow.jobs.values():
         conditions.add((id(job.raw), "if"))
         kept.update({(id(job.raw), "name"), (id(job.raw), "runs-on")})
-        if isinstance(job.raw.get("env"), dict):
-            reads[id(job.raw["env"])] = max(reads.get(id(job.raw["env"]), 0), len(job.steps) + 1)
+        if isinstance(job.raw.get("runs-on"), (dict, list)):
+            unread.add(id(job.raw["runs-on"]))
+        read_per_step(job.raw, len(job.steps))
         for step in job.steps:
             conditions.add((id(step.raw), "if"))
             kept.add((id(step.raw), "name"))
@@ -966,6 +985,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
         # Every place is looked at, an alias's each time, so that a text is counted where the rules read it.
         while todo:
             node = todo.pop()
+            if id(node) in unread:
+                continue
             places += len(node) + 1
             if places > CALLER_INPUTS_PLACES:
                 raise _CallerInputsExceeded("places")
@@ -1664,12 +1685,19 @@ def _value_tokens(value: str) -> list:
         return [("str", value.replace(expr_mod.OPEN, "${ {"))]
     exprs = [body for kind, body in parts if kind == "expr"]
     if len(exprs) == 1 and all(kind == "expr" or not body.strip() for kind, body in parts):
-        return [("op", "("), *expr_mod.tokens(exprs[0]), ("op", ")")]
+        return [("op", "("), *_unopened(expr_mod.tokens(exprs[0])), ("op", ")")]
     toks: list = [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(parts))))]
     for kind, body in parts:
         toks.append(("op", ","))
-        toks += [("str", body)] if kind == "text" else [("op", "("), *expr_mod.tokens(body), ("op", ")")]
+        toks += [("str", body)] if kind == "text" else [("op", "("), *_unopened(expr_mod.tokens(body)), ("op", ")")]
     return toks + [("op", ")")]
+
+
+def _unopened(toks: list) -> list:
+    """Expression tokens with `${{` in a string written `${ {` (`${{ '${{' }}` is GitHub's way to write
+    one): put into a condition without `${{ }}`, it would make the condition text (the fourth review)."""
+    return [(kind, text.replace(expr_mod.OPEN, "${ {")) if kind == "str" and expr_mod.OPEN in text else (kind, text)
+            for kind, text in toks]
 
 
 # The key under which `_action_inputs_given` keeps a `with:` written as one expression: it may give every input.

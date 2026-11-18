@@ -512,6 +512,44 @@ class FromTheThirdReviewTest(unittest.TestCase):
         self.assertEqual(keys("ubuntu-latest, windows-latest, macos-latest"), alone)
 
 
+class FromTheFourthReviewTest(unittest.TestCase):
+
+    SELECTOR = ("${{ github.event.pull_request.head.repo.full_name == github.repository && inputs.runner "
+                "|| 'ubuntu-latest' }}")
+
+    def test_the_fork_safe_selector_in_a_list_or_a_mapping_is_still_recognised(self):
+        for runs_on in (f'["{self.SELECTOR}"]', f'{{labels: "{self.SELECTOR}"}}'):
+            text = called("      - run: make\n", inputs="runner").replace("runs-on: ubuntu-latest", f"runs-on: {runs_on}")
+            with self.subTest(runs_on=runs_on), TempDir() as tmp:
+                result = check(tmp, {CALLER: caller(on="[pull_request, push]", given="runner: self-hosted"),
+                                     CALLED: text})
+                self.assertEqual([(f.severity, f.kind) for f in found(result, "OBAAF-GHA-013")],
+                                 [("info", "runtime-choice")])
+
+    def test_a_long_value_read_through_env_by_a_local_actions_steps_ends_quickly(self):
+        doubling = "[&a0 [xxxxxxxxxxxxxxxx, xxxxxxxxxxxxxxxx], " + ", ".join(
+            f"&a{n} [*a{n - 1}, *a{n - 1}]" for n in range(1, 14)) + "]"
+        text = called("      - uses: ./.github/actions/a\n", inputs="v",
+                      extra_job='    env:\n      V0: "${{ inputs.v }}"\n      V1: "${{ inputs.v }}"\n')
+        action = ("runs:\n  using: composite\n  steps:\n"
+                  + '    - run: git fetch origin "$V0" "$V1"\n      shell: bash\n' * 250)
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, {CALLER: caller(given=f"v: {doubling}"), CALLED: text,
+                                 ".github/actions/a/action.yml": action})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 20)
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_an_opening_written_in_a_string_keeps_a_bare_condition_narrowing(self):
+        extra = "    if: github.event_name == 'push' && inputs.tag != ''\n"
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(on="[pull_request_target, push]",
+                                                given="tag: \"${{ '${{' }} github.sha }}\""),
+                                 CALLED: called(checkout(HEAD) + "      - run: make\n", inputs="tag", extra_job=extra)})
+        self.assertEqual(found(result, "OBAAF-GHA-002"), [])
+
+
 class TheCallersGrantTest(unittest.TestCase):
 
     AGENT = "      - run: claude -p 'review'\n"
