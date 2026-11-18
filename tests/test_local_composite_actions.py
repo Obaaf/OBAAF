@@ -217,9 +217,9 @@ class WhatIsNotReadIsNamedTest(unittest.TestCase):
                                  "not a list"),
             "a step not a mapping": ({f"{ACTION_DIR}/action.yml": "runs:\n  using: composite\n  steps: [x]\n"},
                                      "step 1 is not a mapping"),
-            "an input read in a way not worked out": (
-                {f"{ACTION_DIR}/action.yml": composite("    - run: ${{ fromJSON(inputs.tool)[0] }} -p x\n"
-                                                       "      shell: bash\n")}, "does not work out"),
+            "an input nested too deeply to work out": (
+                {f"{ACTION_DIR}/action.yml": composite("    - run: ${{ " + "(" * 65 + "inputs.tool" + ")" * 65
+                                                       + " }} -p x\n      shell: bash\n")}, "nested more deeply"),
         }
         for label, (files, why) in cases.items():
             with self.subTest(label):
@@ -332,7 +332,7 @@ class ManyUsesCostOneReadingTest(unittest.TestCase):
         with TempDir() as tmp:
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("more than 1000 times over", result.errors[0])
+            self.assertIn("more than 3000 readings of local actions", result.errors[0])
 
 
 class TheReviewersWaysPastTest(unittest.TestCase):
@@ -427,6 +427,84 @@ class TheReviewersWaysPastTest(unittest.TestCase):
             result = check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
             self.assertLess(time.monotonic() - started, 5)
             self.assertTrue(any("longer than the checker reads" in n for n in result.notes), result.notes)
+
+
+class TheReviewersSecondPassTest(unittest.TestCase):
+    """What the second review pass of this slice found (2026-11-18)."""
+
+    def timed(self, files, text=None, limit=3):
+        import time
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, text or job_using(f"./{ACTION_DIR}"), files)
+            self.assertLess(time.monotonic() - started, limit)
+            return result
+
+    def test_an_environment_put_into_a_script_is_capped(self):
+        body = composite("    - run: echo " + "$P " * 2000 + "\n      shell: bash\n      env:\n        P: " + "a" * 2000 + "\n")
+        result = self.timed({f"{ACTION_DIR}/action.yml": body})
+        self.assertTrue(any("longer than the checker reads" in n for n in result.notes), result.notes)
+
+    def test_deep_parentheses_are_quick(self):
+        body = composite("    - run: ${{ " + "(" * 6000 + "inputs.a" + ")" * 6000 + " }} -p x\n      shell: bash\n")
+        result = self.timed({f"{ACTION_DIR}/action.yml": body})
+        self.assertTrue(any("nested more deeply" in n for n in result.notes), result.notes)
+
+    def test_a_large_repository_with_a_different_input_in_each_job_passes(self):
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n    steps:\n"
+                       f"      - uses: ./.github/actions/setup\n        with: {{key: job-{n}}}\n" for n in range(400))
+        files = {".github/actions/setup/action.yml": composite(
+                     "    - uses: ./.github/actions/cache\n      with: {key: '${{ inputs.key }}'}\n",
+                     "    - uses: ./.github/actions/tools\n      with: {key: '${{ inputs.key }}'}\n"),
+                 ".github/actions/cache/action.yml": composite(PLAIN),
+                 ".github/actions/tools/action.yml": composite(PLAIN)}
+        result = self.timed(files, text="on: push\njobs:\n" + jobs, limit=20)
+        self.assertEqual([e for e in result.errors if "readings" in e], [])
+
+    def test_common_expressions_give_no_note(self):
+        for expression in ("${{ inputs.token || github.token }}", "${{ inputs.verbose == 'true' && '--debug' || '' }}",
+                           "${{ fromJSON(inputs.matrix).os }}", "${{ github.event.inputs.ref }}",
+                           "${{ contains(inputs.tags, 'x') }}", "${{ inputs.ref != '' && inputs.ref || github.ref }}"):
+            with self.subTest(expression=expression):
+                body = composite(f"    - run: echo \"{expression}\"\n      shell: bash\n")
+                result = self.timed({f"{ACTION_DIR}/action.yml": body})
+                self.assertEqual([n for n in result.notes if n.startswith("Local actions")], [])
+
+    def test_an_input_inside_a_function_is_read_the_widest_way(self):
+        given = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          cmd: claude -p x\n"
+        body = composite("    - run: ${{ fromJSON(inputs.cmd) }}\n      shell: bash\n")
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, given, {f"{ACTION_DIR}/action.yml": body})), AGENT_RULES)
+
+    def test_a_line_break_in_the_path_is_escaped_in_the_error(self):
+        folder = ".github/actions/x\nFORGED: everything passed"
+        text = job_using('"./.github/actions/x\\nFORGED: everything passed"')
+        with TempDir() as tmp:
+            result = check(tmp, text, {f"{folder}/action.yml": "runs: [\n"})
+            self.assertEqual(len(result.errors), 1, result.errors)
+            self.assertNotIn("\n", result.errors[0])
+
+    def test_a_cycle_under_a_fan_out_does_not_exhaust_the_readings(self):
+        files = {f".github/actions/a{n}/action.yml": composite(*[f"    - uses: ./.github/actions/a{n + 1}\n"] * 4)
+                 for n in range(5)}
+        files[".github/actions/a5/action.yml"] = composite(PLAIN, "    - uses: ./.github/actions/a0\n      if: false\n")
+        result = self.timed(files, text=job_using("./.github/actions/a0"))
+        self.assertEqual(result.errors, [])
+
+    def test_the_actions_folder_is_searched_only_when_the_step_goes_there(self):
+        files = {f"{ACTION_DIR}/action.yml": composite("    - run: ./build.sh\n      shell: bash\n"),
+                 f"{ACTION_DIR}/build.sh": "#!/bin/sh\nclaude -p 'fix it'\n",
+                 "build.sh": "#!/bin/sh\nmake\n"}
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, job_using(f"./{ACTION_DIR}"), files)), [])
+
+    def test_an_expression_in_a_nested_uses_is_a_note(self):
+        files = {f"{ACTION_DIR}/action.yml": composite("    - uses: ./${{ inputs.dir }}\n"),
+                 "action.yml": composite(CLI)}
+        with TempDir() as tmp:
+            result = check(tmp, job_using(f"./{ACTION_DIR}"), files)
+            self.assertEqual(agent_rules(result), [])
+            self.assertTrue(any("holds an expression" in n for n in result.notes), result.notes)
 
 
 class TheEgressControlSeesTheAgentOutsideTest(unittest.TestCase):
