@@ -2513,18 +2513,29 @@ class Job:
                     return f"runs an agent CLI in '{step.name}'"
         # The default shell a `run` step is given (flagship slice 2d.2f, from its review): `shell: claude -p
         # {0}` under `defaults.run` runs the agent with every script.
-        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
-            run = defaults.get("run") if isinstance(defaults, dict) else None
-            shell = run.get("shell") if isinstance(run, dict) else None
-            if isinstance(shell, str) and any(self.steps_run()) and any(
-                    rx.match(form) for variant in _readings(shell) for segment in command_segments(variant)
-                    for form in _first_word_forms(segment) for rx in commands):
-                return "runs an agent CLI as the default shell"
+        if any(rx.match(form) for form in self.default_shell_forms() for rx in commands):
+            return "runs an agent CLI as the default shell"
         if self.reusable:
             for prefix in actions:
                 if self.reusable.lower().startswith(prefix.lower()):
                     return f"calls {self.reusable}"
         return None
+
+    def default_shell_forms(self) -> list[str]:
+        """The command lines the default shell (`defaults.run.shell`, the job's and the workflow's) is read
+        as for an agent, each from its first word after assignments and wrappers, when a step of the job
+        runs a script with it; empty when none does. `runs_agent` and the agents named in the agent rules'
+        facts (flagship slice 2d.5b) match the agent patterns against these."""
+        if not any(self.steps_run()):
+            return []
+        out: list[str] = []
+        for defaults in (self.raw.get("defaults"), self.workflow.raw.get("defaults")):
+            run = defaults.get("run") if isinstance(defaults, dict) else None
+            shell = run.get("shell") if isinstance(run, dict) else None
+            if isinstance(shell, str):
+                out.extend(form for variant in _readings(shell) for segment in command_segments(variant)
+                           for form in _first_word_forms(segment))
+        return out
 
     def steps_run(self) -> list[Step]:
         """The steps that run a script (`run:`), which the default shell runs."""

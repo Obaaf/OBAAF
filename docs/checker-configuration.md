@@ -4,7 +4,48 @@
 
 ## Telling the checker about your agents
 
-The checker puts each job in every lane it belongs to (untrusted, agent, effect, release; a job in none of them is trusted) and runs each lane's rules on the jobs in that lane. A job that runs an agent and publishes is in the agent lane and in the release lane, and gets the rules of both. The agent controls run only on jobs in the agent lane. It recognizes an agent by the action a job `uses:`, or by an agent CLI in a `run:` script. The recognized actions and commands live in `src/obaaf/data/detection.yaml`.
+The checker puts each job in every lane it belongs to (untrusted, agent, effect, release; a job in none of them is trusted) and runs each lane's rules on the jobs in that lane. A job that runs an agent and publishes is in the agent lane and in the release lane, and gets the rules of both. The agent controls run only on jobs in the agent lane. It recognizes an agent by the action a job `uses:`, or by an agent CLI in a `run:` script. The recognized actions and commands are the entries of `agent_tools` in `src/obaaf/data/detection.yaml`, one for each tool ([below](#the-agent-tools-the-checker-knows)).
+
+### The agent tools the checker knows
+
+Since flagship slice 2d.5b (decision D-087) each agent tool the checker knows is one entry in `agent_tools`, read from the tool's own action file, README or documentation, with the addresses it was read from and the date. An entry gives the actions that run the tool, the command lines that run it without a person (the program and the option or subcommand its documentation gives for that), the npm and PyPI packages that install it, its install scripts, and the inputs and options that carry its prompt. The checker's lists of agent actions, commands, packages and install scripts are built from the entries when it loads them, so a list cannot disagree with them.
+
+Every tool that ci-agent-audit recognised at its commit `4a88ee6` (2026-11-07) has an entry; its list was used to know which tools to look at, and each fact was read from the tool's own source. On 2026-11-18 the entries were:
+
+| Entry (`id`) | Found by |
+| --- | --- |
+| `claude-code` | `anthropics/claude-code-action`, `anthropics/claude-code-base-action`; `claude -p`; `@anthropic-ai/claude-code`; `claude.ai/install` |
+| `claude-code-security-review` | `anthropics/claude-code-security-review` |
+| `gemini-cli` | `google-github-actions/run-gemini-cli`, `google-gemini/gemini-cli-action`; `gemini -p`; `@google/gemini-cli` |
+| `codex` | `openai/codex-action`; `codex exec`; `@openai/codex`; `chatgpt.com/codex/install` |
+| `github-models` | `actions/ai-inference` |
+| `copilot-cli` | `copilot -p`; `@github/copilot` |
+| `pr-agent` | `qodo-ai/pr-agent`, `Codium-ai/pr-agent`, `The-PR-Agent/pr-agent`; `pr-agent --pr_url`; PyPI `pr-agent` |
+| `coderabbit` | `coderabbitai/ai-pr-reviewer` |
+| `openhands` | `All-Hands-AI/OpenHands` and five `OpenHands/extensions/plugins/...` actions; `openhands --headless` |
+| `opencode` | `sst/opencode`, `anomalyco/opencode`; `opencode run`; `opencode-ai`, `@opencode/cli`; `opencode.ai/install` |
+| `cline` | `cline/cline`; `cline` |
+| `aider` | `aider`; PyPI `aider-chat`, `aider-install`; `aider.chat/install` |
+| `qodo` | `qodo-ai/command`; `@qodo/command`, `@qodo/cli` |
+| `auggie` | `augmentcode/augment-action`, `augmentcode/augment-agent`; `auggie --print`; `@augmentcode/auggie` |
+| `continue` | `continuedev/continue/actions/general-review`; `cn -p`; `@continuedev/cli` |
+| `jules` | `google-labs-code/jules-action` |
+| `goose` | `goose run`; its `download_cli.sh` |
+| `kilo` | `Kilo-Org/kilocode/github`; `kilo run`; `@kilocode/cli` |
+| `kiro` | `kiro-cli ... --no-interactive`; `cli.kiro.dev/install` |
+| `qwen-code` | `QwenLM/qwen-code-action`; `qwen -p`; `@qwen-code/qwen-code` |
+| `swe-agent` | `sweagent run` |
+| `warp` | `warpdotdev/oz-agent-action`, `warpdotdev/warp-agent-action` |
+| `amp` | `amp -x` |
+
+**Each agent rule names the agent.** The findings of OBAAF-GHA-003, 004, 005, 012, 020 and 025 have a fact `agents`: the `id` of each entry the job runs, and `agents.actions: <prefix>` or `agents.commands: <pattern>` for each entry of your own configuration that matches, sorted. They are read in the job's steps, in the steps of the local actions it uses, in a workflow it calls by an agent action's name, and in its default shell. So an acceptance of one of those findings stops covering the job when another agent is added to it, or takes the place of the one it ran. A job that runs no agent the checker can name (one you declared an agent job, or one whose agent runs in a repository script) has no such fact. The fact is not shown in the text report or in SARIF; the JSON report has it with the finding's other facts.
+
+**What the entries do not cover**, as read on 2026-11-18:
+- Docker images that run an agent (`docker://...pr-agent`, Amp's review image): an image is not matched to an entry.
+- A form of a tool's command its documentation did not give where it was read: Auggie's `-p`, Kiro's `kiro` and `q` programs, OpenHands' and SWE-agent's packages, Amp's package, and any command of Cline but its program name.
+- CodeRabbit's other actions: their repositories asked for a sign-in, so nothing could be read.
+- The settings each tool's documentation warns about (`settings` in each entry), which slice 2d.5c is to fill and report.
+- An agent that no entry names, such as a project's own model entry points: name it in `agents.actions` or `agents.commands`, or declare the job an agent job.
 
 The checker also reads repository `.sh` and `.bash` wrappers to find an agent CLI:
 

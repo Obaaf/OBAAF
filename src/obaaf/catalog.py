@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
-from obaaf import yamlutil
+from obaaf import agent_tools, yamlutil
 
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
 # The longest a rule's `why` may be: one line of the text report (slice 3.2b).
@@ -54,6 +54,9 @@ class Catalog:
     tiers: dict = field(default_factory=dict)         # tier number -> tier
     agent_requirements: dict = field(default_factory=dict)  # R-id -> requirement
     rules: dict = field(default_factory=dict)         # rule id -> rule
+    # Faults in the agent tools' entries as written (flagship slice 2d.5b): `detection` holds the lists
+    # built from them, so the entries are checked as they were read.
+    agent_tool_problems: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         for fam in self.profile["families"]:
@@ -242,6 +245,7 @@ class Catalog:
                 checks = (self.agent_requirements.get(rid, {}).get("obaaf") or {}).get("checks") or []
                 if rid in self.agent_requirements and rule_id not in checks:
                     out.append(f"{rule_id} lists {rid}, but {rid} does not list {rule_id}")
+        out.extend(self.agent_tool_problems)
         return out
 
 
@@ -255,5 +259,6 @@ def load() -> Catalog:
         compromises=data["compromises"],
         frameworks=data["frameworks"],
         rules_data=data["rules"],
-        detection=data["detection"],
+        detection=agent_tools.expand(data["detection"]),
+        agent_tool_problems=agent_tools.problems(data["detection"]),
     )

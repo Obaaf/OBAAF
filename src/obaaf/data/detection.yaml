@@ -10,46 +10,463 @@
 
 version: 0.1.0
 
-# Actions that run an AI agent or model with tools. Matched as a prefix of the
-# `uses:` value, before the `@`.
-agent_actions:
-  - anthropics/claude-code-action
-  - anthropics/claude-code-base-action
-  - google-github-actions/run-gemini-cli
-  - openai/codex-action
-  - actions/ai-inference
-  - qodo-ai/pr-agent
-  - Codium-ai/pr-agent
-  - coderabbitai/ai-pr-reviewer
-  - All-Hands-AI/OpenHands
-  - sst/opencode
-  - cline/cline
+# Agent tools, one entry per tool (flagship slice 2d.5b, agent control R6). Agent products change faster
+# than the controls, so what the checker knows about each one is data, read from the tool's own
+# repository or documentation and dated. Every tool ci-agent-audit recognised at its commit 4a88ee6
+# (2026-11-07) has an entry; that list was used to know which tools to look at, and each fact below was
+# read from the source the entry names, not copied from it. The checker reads, for each entry:
+#
+#   id            a short name, used in findings' facts (`agents`) and never changed once released
+#   name          the tool's own name for itself
+#   read          the date the sources were read
+#   sources       where the entry's facts were read: the tool's action file, README or documentation
+#   actions       actions that run the agent, matched as a prefix of the `uses:` value before the `@`
+#                 (`owner/repo` also matches `owner/repo/path`); each with the inputs that carry a prompt
+#   commands      Python regular expressions that find the agent run in a command line (`run:`, an
+#                 action's input, a `docker://` step's arguments); options may come before the prompt flag
+#   programs      the command-line programs the tool installs
+#   prompt_flags  the options that carry a prompt to those programs
+#   packages      the packages that install the tool, by registry (npm, pypi); an install without an exact
+#                 version runs whatever was published last (OBAAF-GHA-025, OBAAF-JEN-008)
+#   installs      of those packages, the ones a step before OBAAF's egress action may install, in the exact
+#                 forms docs/checker-configuration.md gives, without being taken for running the agent
+#                 (flagship slice 2c.8), with the program each installs
+#   install_urls  install scripts, as regular expressions matched anywhere in a script line, however the
+#                 script is fetched and run; each installs the version the script chooses
+#   settings      the settings the tool's own documentation warns about, each with the sentence it rests
+#                 on (filled by flagship slice 2d.5c; empty until then)
+#
+# The checker builds its lists from these entries when it loads them (obaaf/agent_tools.py):
+# `agent_actions`, `agent_commands`, `agent_packages`, `agent_installs` and `agent_install_urls`, in the
+# order the entries give them. A repository's own agents go in `agents.actions` and `agents.commands` of
+# its checker configuration, and a job can always be declared an agent job.
+agent_tools:
+  - id: claude-code
+    name: Claude Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/base-action/action.yml
+      - https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml
+      - https://github.com/anthropics/claude-code/blob/154c06539c4309e172b8ce6f2b07388987617d68/README.md
+    actions:
+      anthropics/claude-code-action: {prompt_inputs: [prompt]}
+      anthropics/claude-code-base-action: {prompt_inputs: [prompt, prompt_file]}
+    commands:
+      - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
+      - '@anthropic-ai/claude-code'
+    programs: [claude]
+    prompt_flags: [-p, --print]
+    packages:
+      npm: ["@anthropic-ai/claude-code"]
+    installs: {"@anthropic-ai/claude-code": claude}
+    install_urls:
+      - 'claude\.ai/install\.(sh|ps1|cmd)\b'
+    settings: []
 
-# Commands in `run:` scripts that start an agent CLI. Python regular
-# expressions, matched against each line. Options may come before the
-# prompt flag or subcommand (claude --model x -p ...).
-agent_commands:
-  - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
-  - '@anthropic-ai/claude-code'
-  - '(^|[\s;&|(/"''`])gemini["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '@google/gemini-cli'
-  - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
-  - '@openai/codex'
-  - '(^|[\s;&|(])aider\s'
-  - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
-  - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '(^|[\s;&|(])cline\s'
+  - id: gemini-cli
+    name: Gemini CLI
+    read: 2026-11-18
+    sources:
+      - https://github.com/google-github-actions/run-gemini-cli/blob/387c8ddb7a72078825da941758b811b9153c71e8/action.yml
+      - https://github.com/google-gemini/gemini-cli-action/blob/a2b9c0548a45588c2e82fa67fb15e6b050ced328/action.yml
+      - https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/README.md
+    actions:
+      google-github-actions/run-gemini-cli: {prompt_inputs: [prompt]}
+      google-gemini/gemini-cli-action: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])gemini["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@google/gemini-cli'
+    programs: [gemini]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@google/gemini-cli"]
+    installs: {"@google/gemini-cli": gemini}
+    install_urls: []
+    settings: []
 
-# Packages that install an agent's CLI, with the command each installs (flagship slice 2c.8). The
-# patterns above match their names, so a step that installs one is taken for running an agent. Before
-# OBAAF's egress action, a step whose script does nothing but install these packages globally (and
-# print the CLI's version) is not taken for running the agent outside the confined command; one that
-# names them in any other way is "cannot tell", unless it also runs an agent. The exact forms are in
-# docs/checker-configuration.md. (`agent_packages`, below, is the list OBAAF-JEN-008 and OBAAF-GHA-025 read.)
-agent_installs:
-  "@anthropic-ai/claude-code": claude
-  "@openai/codex": codex
-  "@google/gemini-cli": gemini
+  - id: codex
+    name: Codex
+    read: 2026-11-18
+    sources:
+      - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml
+      - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/README.md
+    actions:
+      openai/codex-action: {prompt_inputs: [prompt, prompt-file]}
+    commands:
+      - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
+      - '@openai/codex'
+    programs: [codex]
+    prompt_flags: []
+    packages:
+      npm: ["@openai/codex"]
+    installs: {"@openai/codex": codex}
+    install_urls:
+      - 'chatgpt\.com/codex/install\.(sh|ps1)\b'
+    settings: []
+
+  - id: github-models
+    name: GitHub Models AI Inference
+    read: 2026-11-18
+    sources:
+      - https://github.com/actions/ai-inference/blob/41caef41a74eb26f6d0c6b1e9941d691588e0b2b/action.yml
+    actions:
+      actions/ai-inference: {prompt_inputs: [prompt, prompt-file, system-prompt, system-prompt-file, input, file_input]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: pr-agent
+    name: PR-Agent
+    read: 2026-11-18
+    sources:
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/action.yaml
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/README.md
+    # The-PR-Agent/pr-agent and qodo-ai/pr-agent served the same repository (the same commit) when read.
+    actions:
+      qodo-ai/pr-agent: {prompt_inputs: []}
+      Codium-ai/pr-agent: {prompt_inputs: []}
+      The-PR-Agent/pr-agent: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])pr-agent["''`]?\s+([^\n;&|]*\s)?--pr_url\b'
+    programs: [pr-agent]
+    prompt_flags: []
+    packages:
+      pypi: [pr-agent]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: coderabbit
+    name: CodeRabbit AI PR Reviewer
+    read: 2026-11-18
+    # In OBAAF's list before slice 2d.5b. Its repository could not be read on 2026-11-18 (git asked
+    # for a sign-in, as it does for a repository that is private or gone), so nothing was added.
+    sources: []
+    actions:
+      coderabbitai/ai-pr-reviewer: {prompt_inputs: []}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: openhands
+    name: OpenHands
+    read: 2026-11-18
+    sources:
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/pr-review/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/qa-changes/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/release-notes/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/vulnerability-remediation/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/issue-duplicate-checker/action.yml
+      - https://docs.openhands.dev/openhands/usage/cli/headless
+    # All-Hands-AI/OpenHands was in OBAAF's list before slice 2d.5b; its default branch had no action
+    # file when read, so it is kept for workflows pinned to an older commit.
+    actions:
+      All-Hands-AI/OpenHands: {prompt_inputs: []}
+      OpenHands/extensions/plugins/pr-review: {prompt_inputs: []}
+      OpenHands/extensions/plugins/qa-changes: {prompt_inputs: []}
+      OpenHands/extensions/plugins/release-notes: {prompt_inputs: []}
+      OpenHands/extensions/plugins/vulnerability-remediation: {prompt_inputs: []}
+      OpenHands/extensions/plugins/issue-duplicate-checker: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])openhands["''`]?\s+([^\n;&|]*\s)?--headless\b'
+    programs: [openhands]
+    prompt_flags: [-t, -f]
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: opencode
+    name: OpenCode
+    read: 2026-11-18
+    sources:
+      - https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/README.md
+    # sst/opencode and anomalyco/opencode served the same repository (the same commit) when read. Its
+    # default branch had no action file then; sst/opencode was in OBAAF's list before slice 2d.5b.
+    actions:
+      sst/opencode: {prompt_inputs: []}
+      anomalyco/opencode: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [opencode]
+    prompt_flags: []
+    packages:
+      npm: [opencode-ai, "@opencode/cli"]
+    installs: {}
+    install_urls:
+      - 'opencode\.ai/(v2/)?install\b'
+    settings: []
+
+  - id: cline
+    name: Cline
+    read: 2026-11-18
+    sources:
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/README.md
+    # In OBAAF's list before slice 2d.5b. The README read documents no form for CI, so nothing was added.
+    actions:
+      cline/cline: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(])cline\s'
+    programs: [cline]
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: aider
+    name: Aider
+    read: 2026-11-18
+    sources:
+      - https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/README.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(])aider\s'
+    programs: [aider]
+    prompt_flags: []
+    packages:
+      pypi: [aider-chat, aider-install]
+    installs: {}
+    install_urls:
+      - 'aider\.chat/install\.(sh|ps1)\b'
+    settings: []
+
+  - id: copilot-cli
+    name: GitHub Copilot CLI
+    read: 2026-11-18
+    sources:
+      - https://github.com/github/copilot-cli/blob/020bbc0a39e97deaf58327cb880167f845461690/README.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@github/copilot(?![\w-])'
+    programs: [copilot]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@github/copilot"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: qodo
+    name: Qodo Command
+    read: 2026-11-18
+    sources:
+      - https://github.com/qodo-ai/command/blob/e08f6fc8ad97a26bac17023e7a80eb4998a7e730/action.yml
+      - https://github.com/qodo-ai/command/blob/e08f6fc8ad97a26bac17023e7a80eb4998a7e730/README.md
+    # The README read says the action and `@qodo/command` are retired and that the current CLI is
+    # `@qodo/cli`; a workflow may still use either.
+    actions:
+      qodo-ai/command: {prompt_inputs: [prompt]}
+    commands:
+      - '@qodo/(command|cli)(?![\w-])'
+    programs: []
+    prompt_flags: []
+    packages:
+      npm: ["@qodo/command", "@qodo/cli"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: claude-code-security-review
+    name: Claude Code Security Reviewer
+    read: 2026-11-18
+    sources:
+      - https://github.com/anthropics/claude-code-security-review/blob/0c6a49f1fa56a1d472575da86a94dbc1edb78eda/action.yml
+    actions:
+      anthropics/claude-code-security-review:
+        prompt_inputs: [custom-security-scan-instructions, false-positive-filtering-instructions]
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: auggie
+    name: Augment Auggie
+    read: 2026-11-18
+    sources:
+      - https://github.com/augmentcode/augment-action/blob/a2c41eb7e60fc44e2d269468cbcdeb651b8bd680/action.yml
+      - https://github.com/augmentcode/augment-agent/blob/cd94b92e0971d54781546c5889f28e24d5efee77/action.yml
+      - https://github.com/augmentcode/auggie/blob/8bd7186ea04e77d11f63e5850482643c8767666b/README.md
+    actions:
+      augmentcode/augment-action: {prompt_inputs: [prompt]}
+      augmentcode/augment-agent: {prompt_inputs: [instruction, instruction_file, custom_context]}
+    commands:
+      - '(^|[\s;&|(/"''`])auggie["''`]?\s+([^\n;&|]*\s)?--print\b'
+      - '@augmentcode/auggie(?![\w-])'
+    programs: [auggie]
+    prompt_flags: [--print]
+    packages:
+      npm: ["@augmentcode/auggie"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: continue
+    name: Continue
+    read: 2026-11-18
+    sources:
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/actions/general-review/action.yml
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/extensions/cli/README.md
+    actions:
+      continuedev/continue/actions/general-review: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])cn["''`]?\s+([^\n;&|]*\s)?-p\b'
+      - '@continuedev/cli(?![\w-])'
+    programs: [cn]
+    prompt_flags: [-p]
+    packages:
+      npm: ["@continuedev/cli"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: jules
+    name: Jules
+    read: 2026-11-18
+    sources:
+      - https://github.com/google-labs-code/jules-action/blob/bff7875eaa123cac6742b7cfc51005b95ba4d566/action.yaml
+    actions:
+      google-labs-code/jules-action: {prompt_inputs: [prompt]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: goose
+    name: goose
+    read: 2026-11-18
+    sources:
+      - https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/README.md
+      - https://goose-docs.ai/docs/guides/running-tasks
+      - https://www.mankier.com/1/goose-run
+    actions: {}
+    # `goose run` only: another tool named goose (database migrations) has no `run` command.
+    commands:
+      - '(^|[\s;&|(/"''`])goose["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [goose]
+    prompt_flags: [-t, --text, -i, --instructions, --recipe]
+    packages: {}
+    installs: {}
+    install_urls:
+      - 'github\.com/(block|aaif-goose)/goose/releases/download/\S*/download_cli\.sh\b'
+    settings: []
+
+  - id: kilo
+    name: Kilo Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/github/action.yml
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/README.md
+    actions:
+      Kilo-Org/kilocode/github: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])kilo["''`]?\s+([^\n;&|]*\s)?run\b'
+      - '@kilocode/cli(?![\w-])'
+    programs: [kilo]
+    prompt_flags: []
+    packages:
+      npm: ["@kilocode/cli"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: kiro
+    name: Kiro CLI
+    read: 2026-11-18
+    sources:
+      - https://kiro.dev/docs/cli/headless/
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])kiro-cli["''`]?\s+([^\n;&|]*\s)?--no-interactive\b'
+    programs: [kiro-cli]
+    prompt_flags: [--no-interactive]
+    packages: {}
+    installs: {}
+    install_urls:
+      - 'cli\.kiro\.dev/install\b'
+    settings: []
+
+  - id: qwen-code
+    name: Qwen Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/QwenLM/qwen-code-action/blob/05f81718976f3b7da657422e6e8e4d372b8621d7/action.yml
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/README.md
+    actions:
+      QwenLM/qwen-code-action: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])qwen["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@qwen-code/qwen-code(?![\w-])'
+    programs: [qwen]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@qwen-code/qwen-code"]
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: swe-agent
+    name: SWE-agent
+    read: 2026-11-18
+    sources:
+      - https://github.com/SWE-agent/SWE-agent/blob/3ea751c087f32b16e039a2233dd6eefecef325d5/docs/usage/cli.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])sweagent["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [sweagent]
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: warp
+    name: Warp Oz
+    read: 2026-11-18
+    sources:
+      - https://github.com/warpdotdev/oz-agent-action/blob/b0c640eb560d1f2fc283244c582830aa16cefd8c/action.yml
+      - https://github.com/warpdotdev/warp-agent-action/blob/fee7dc8441f64d14a4ae22596eb68167ced24a1a/action.yml
+    actions:
+      warpdotdev/oz-agent-action: {prompt_inputs: [prompt, saved_prompt, skill]}
+      warpdotdev/warp-agent-action: {prompt_inputs: [prompt, saved_prompt]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+
+  - id: amp
+    name: Amp
+    read: 2026-11-18
+    sources:
+      - https://ampcode.com/docs/cli/execute-mode
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])amp["''`]?\s+([^\n;&|]*\s)?(-x|--execute)\b'
+    programs: [amp]
+    prompt_flags: [-x, --execute]
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
 
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.
@@ -194,26 +611,6 @@ jenkins_upload_commands:
   - '(^|[\s;&|(])(crane|skopeo)\s+(push|copy)\b'
   - '(^|[\s;&|(])curl\b[^\n;&|]*\s(-T|--upload-file)\s'
   - '(^|[\s;&|(])az\s+artifacts\s+universal\s+publish\b'
-
-# Agent CLIs installed from a package registry (R6). An install without a version, or with
-# a moving tag such as @latest, runs whatever was published last. npm and PyPI names.
-agent_packages:
-  - "@anthropic-ai/claude-code"
-  - "@google/gemini-cli"
-  - "@openai/codex"
-  - "@github/copilot"
-  - opencode-ai
-  - aider-chat
-  - aider-install
-  - "@qodo/command"
-
-# Install scripts of agent CLIs (R6), as regular expressions matched anywhere in a script line, however
-# the script is fetched and run (flagship slice 2d.2k: only `curl ... | sh` on one line was read). Each
-# installs the version the script chooses.
-agent_install_urls:
-  - 'claude\.ai/install\.(sh|ps1|cmd)\b'
-  - 'aider\.chat/install\.(sh|ps1)\b'
-  - 'opencode\.ai/install\b'
 
 # Steps that sign provenance or other attestations (G7.1, FR5).
 provenance_actions:

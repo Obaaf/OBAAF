@@ -945,7 +945,9 @@ class IdentityTest(unittest.TestCase):
                 self.assertEqual(f["state"], "new")
                 self.assertNotIn("acceptance", f)
             one = next(f for f in data["findings"] if f["rule"] == "OBAAF-GHA-005" and f["job"] == "triage")
-            self.assertEqual((one["kind"], one["facts"]), ("secrets", {"secrets": ["ANTHROPIC_API_KEY", "TRIAGE_TOKEN"]}))
+            # Since flagship slice 2d.5b the facts also name the agent the job runs.
+            self.assertEqual((one["kind"], one["facts"]), ("secrets", {"secrets": ["ANTHROPIC_API_KEY", "TRIAGE_TOKEN"],
+                                                                     "agents": ["claude-code"]}))
             self.assertNotIn("fixed", data)
 
 
