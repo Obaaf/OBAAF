@@ -86,6 +86,9 @@ class PipedDownloadTest(unittest.TestCase):
         "curl -fsSL -H 'X-A: 1;2' https://dev.example.com/install.sh | bash",
         'curl -fsSL "https://dev.example.com/install.sh?x=1&&y=2" | bash',
         "curl -fsSL https://dev.example.com/install.sh | tee install.log | sh",
+        # The second review of 2d.5a.
+        "curl -fsSL https://dev.example.com/install.sh | timeout 60 bash",
+        "curl -fsSL https://dev.example.com/install.sh | busybox sh",
     ]
 
     POWERSHELL = [
@@ -294,6 +297,16 @@ class WhereItIsReadTest(unittest.TestCase):
     def test_a_docker_steps_entrypoint_and_args_are_one_command(self):
         steps = ("- name: Agent\n  uses: docker://node@sha256:" + "a" * 64 + "\n  with:\n    entrypoint: npx\n"
                  "    args: -y @anthropic-ai/claude-code -p hi\n")
+        self.assertEqual(len(findings(check(agent_job(steps)), "agent-cli")), 1)
+
+    def test_a_docker_steps_args_as_a_list(self):
+        steps = ("- name: Agent\n  uses: docker://node@sha256:" + "a" * 64 + "\n  with:\n    entrypoint: npx\n"
+                 "    args: [-y, '@anthropic-ai/claude-code', -p, hi]\n")
+        self.assertEqual(len(findings(check(agent_job(steps)), "agent-cli")), 1)
+
+    def test_a_command_written_in_text_is_read_as_one_as_the_rule_states(self):
+        steps = ('- name: Install\n  run: |\n    echo "Usage: npm install -g @anthropic-ai/claude-code"\n'
+                 "    npm install -g @anthropic-ai/claude-code@1.2.3\n")
         self.assertEqual(len(findings(check(agent_job(steps)), "agent-cli")), 1)
 
     def test_a_windows_runners_default_shell_is_powershell(self):

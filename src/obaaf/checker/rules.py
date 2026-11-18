@@ -1533,7 +1533,7 @@ class WorkflowRules:
     _EVALUATES = frozenset({"eval", "source", ".", "iex", "invoke-expression"})
     # What may stand before the program in one element of a pipeline, and is not the program.
     _WRAPPERS = frozenset({"sudo", "env", "exec", "command", "builtin", "nice", "nohup", "time", "stdbuf",
-                           "timeout", "doas", "xargs", "unbuffer", "setsid", "chroot", "su"})
+                           "timeout", "doas", "xargs", "unbuffer", "setsid", "chroot", "su", "busybox"})
     _WRAPPER_VALUE_OPTIONS = frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "-R", "-n", "-k",
                                         "-s", "-o", "-e", "-i", "-c", "--user", "--group", "--chdir"})
     _DOWNLOADER_RE = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|invoke-webrequest|invoke-restmethod|aria2c)"
@@ -1628,6 +1628,8 @@ class WorkflowRules:
                 i += 1
                 while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_]\w*=\S*", words[i])):
                     i += 2 if words[i] in cls._WRAPPER_VALUE_OPTIONS else 1
+                if base == "timeout" and i < len(words) and re.fullmatch(r"[\d.]+[smhd]?", words[i]):
+                    i += 1          # `timeout 60 bash`: the duration
                 continue
             if re.fullmatch(r"[A-Za-z_]\w*=\S*", word):
                 i += 1
@@ -1705,8 +1707,14 @@ class WorkflowRules:
             texts = list(self._script_texts(job, step))
             if step.uses and step.uses.strip().lower().startswith("docker://"):
                 # GitHub starts the container with its entrypoint and then its args, as one command line.
-                parts = [step.with_.get(k) for k in ("entrypoint", "args")]
-                texts.append(" ".join(str(x) for x in parts if isinstance(x, (str, int, float)) and x != ""))
+                parts = []
+                for key in ("entrypoint", "args"):
+                    given = step.with_.get(key)
+                    if isinstance(given, list):
+                        parts += [str(x) for x in given if isinstance(x, (str, int, float))]
+                    elif isinstance(given, (str, int, float)) and given != "":
+                        parts.append(str(given))
+                texts.append(" ".join(parts))
             texts = [t for t in texts if t]
             if not texts:
                 continue
