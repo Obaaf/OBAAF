@@ -2398,6 +2398,46 @@ class Job:
                         todo.append((call.workflow, upstream, computed))
         return sorted(out)
 
+    def granted_by_callers(self, scope: str | None = None) -> list[str]:
+        """What the jobs of this repository that call the job's workflow grant its token, where neither
+        the job nor its workflow declares permissions (flagship slice 2d.4b3a): GitHub gives such a
+        called job the calling job's token, so which scopes it holds is written in the caller. With
+        `scope` (`id-token`), each entry gives that scope's level; without, the write scopes as
+        OBAAF-GHA-003 counts them. A caller that declares none and is itself called holds what its own
+        callers grant, so the chain is followed to the first caller that declares, each workflow once;
+        one that declares none and can be started on its own grants the repository's default, which
+        this check does not read. Empty for a job that declares permissions, or whose workflow no job
+        of the repository calls."""
+        if self.permissions is not None or not self.workflow.callers:
+            return []
+        out: set[str] = set()
+        seen: set[int] = set()
+        todo = [self.workflow]
+        while todo:
+            workflow = todo.pop()
+            if id(workflow) in seen:
+                continue
+            seen.add(id(workflow))
+            for call in workflow.callers:
+                where = f"{bounded(one_line(call.path))} job '{bounded(one_line(call.job))}'"
+                job = call.workflow.jobs.get(call.job) if call.workflow is not None else None
+                perms = job.permissions if job is not None else None
+                if perms is not None:
+                    if scope is not None:
+                        out.add(f"{where} grants {scope}: {perms.level(scope)}")
+                    else:
+                        scopes = perms.write_scopes()
+                        out.add(f"{where} grants " + (", ".join(f"{s}: write" if s != "write-all" else s
+                                                                for s in scopes) if scopes else "no write scope"))
+                    continue
+                if call.workflow is not None and call.workflow.callers:
+                    todo.append(call.workflow)
+                if call.workflow is None or not call.workflow.callers or \
+                        set(call.workflow.triggers) - {"workflow_call"}:
+                    out.add(f"{where} declares no permissions, so it grants the repository's default, which this "
+                            "check does not read")
+        return sorted(out)
+
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
         commands = [re.compile(p, re.M) for p in list(detection.get("agent_commands", [])) + list(extra_commands)]
@@ -2588,6 +2628,10 @@ class Workflow:
     # jobs too. Set by the checker once every file is read; empty for a file read on its own.
     callers: list = field(default_factory=list)          # Call
     caller_events: frozenset = frozenset()
+    # Flagship slice 2d.4b3a: what the checker could not work out of what those jobs give the workflow's
+    # inputs, as notes; and whether their values were put into its `inputs` references.
+    caller_input_notes: list = field(default_factory=list)
+    caller_inputs_put_in: bool = False
 
     def give_caller_events(self, events) -> bool:
         """Add events that can start a job calling this workflow; True if any was new. Forgets every

@@ -362,8 +362,15 @@ def _give_callers(read: list) -> None:
     nodes = list(dict.fromkeys(id(w) for _, w in read))
     workflows = {id(workflow): workflow for _, workflow in read}
     edges = {key: list(dict.fromkeys(id(t) for _, targets in calls.get(key, []) for t in targets)) for key in nodes}
+    budget = {"chars": 0}
     for group in _strongly_connected(nodes, edges):
         members = set(group)
+        # The inputs its callers give (slice 2d.4b3a) are put in before its own calls are followed, so a
+        # calling job's `if:` and `with:` are read with them, and a chain carries the first caller's
+        # values to the last. A caller is in an earlier group, or in this one (a cycle, which GitHub
+        # refuses: its values are taken as they stand, in one pass).
+        for key in group:
+            _put_in_caller_inputs(workflows[key], budget)
         if len(group) > 1 or group[0] in edges[group[0]]:
             union: set = set()
             for key in group:
@@ -436,6 +443,8 @@ def _caller_notes(workflows: list) -> list[str]:
     counted."""
     out = []
     for workflow in workflows:
+        # What the checker could not work out of what callers give its inputs (slice 2d.4b3a).
+        out.extend(f"{wf_mod.one_line(workflow.path, 120)}: {note}" for note in dict.fromkeys(workflow.caller_input_notes))
         extra = sorted(workflow.caller_events - set(workflow.triggers))
         if not workflow.callers or not extra:
             continue
@@ -449,6 +458,270 @@ def _caller_notes(workflows: list) -> list[str]:
         out.append(f"{wf_mod.one_line(workflow.path, 120)} is called by {shown}, so its jobs are also read as "
                    f"started by what can start the calling jobs: {events}")
     return out
+
+
+# Flagship slice 2d.4b3a: what the jobs of the repository that call a workflow give its inputs. A calling
+# job's `with:` is evaluated where the caller runs, and these contexts there are not the called
+# workflow's: each is put in as `caller.<context>`, a context no rule reads as anything but a value the
+# checker cannot work out (`github` and `vars` are the same in both, and stay as written).
+_CALLER_ONLY_CONTEXTS = frozenset({"matrix", "strategy", "needs", "inputs", "job", "steps", "runner", "env"})
+# The longest text of a called workflow that putting its callers' inputs in may make, and every such
+# text for the check together; past either, the workflow's inputs are left as written, an error.
+CALLER_INPUT_TEXT = 100_000
+CALLER_INPUTS_CHECK_TEXT = 10_000_000
+_INPUTS_WORD = re.compile(r"\binputs\b", re.I)
+
+
+class _CallerInputsExceeded(Exception):
+    """Putting callers' inputs into a called workflow would make more text than the checker reads."""
+
+
+def _caller_value_tokens(value) -> list:
+    """The tokens of an expression that gives what a calling job's `with:` hands an input, with each
+    reference to a context of the caller's own (`_CALLER_ONLY_CONTEXTS`) moved under `caller.`, so the
+    called workflow's rules do not read the caller's `matrix.ref` as its own matrix's."""
+    toks = _value_tokens(value if isinstance(value, str) else wf_mod.as_text(value))
+    out: list = []
+    for i, tok in enumerate(toks):
+        before = toks[i - 1] if i else None
+        after = toks[i + 1] if i + 1 < len(toks) else None
+        if tok[0] == "id" and tok[1].lower() in _CALLER_ONLY_CONTEXTS and before != ("op", ".") \
+                and after != ("op", "("):
+            out += [("id", "caller"), ("op", "."), tok]
+        else:
+            out.append(tok)
+    return out
+
+
+def _caller_input_values(workflow) -> tuple[dict, list]:
+    """What the jobs of the repository that call `workflow` hand each of its inputs: (input name as
+    `wf_mod.input_name` gives it -> the token lists of the values, without repeats; the values handed to
+    every input). A caller that does not hand a declared input gives its `default` (as written, in the
+    called workflow's own terms), or '' when there is none. A name the caller gives that the workflow
+    does not declare is put in too (GitHub refuses such a call; the wider reading). A `with:` that is
+    not a mapping, and a key that is not text (`null:`, `true:`), give every input their value, and a
+    note says so."""
+    declared = workflow.triggers.get("workflow_call")
+    declared = declared.get("inputs") if isinstance(declared, dict) else None
+    defaults: dict = {}
+    for name, spec in (declared.items() if isinstance(declared, dict) else ()):
+        default = spec.get("default") if isinstance(spec, dict) else None
+        defaults[wf_mod.input_name(wf_mod.as_text(name).strip())] = "" if default is None else default
+    values: dict[str, dict] = {}
+    every: dict = {}
+    for call in workflow.callers:
+        job = call.workflow.jobs.get(call.job) if call.workflow is not None else None
+        given = job.raw.get("with") if job is not None else None
+        where = f"{wf_mod.one_line(call.path, 120)} job '{wf_mod.one_line(call.job, 60)}'"
+        named: dict = {}
+        if isinstance(given, dict):
+            for key, value in given.items():
+                if isinstance(key, str):
+                    named.setdefault(wf_mod.input_name(key.strip()), []).append(value)
+                else:
+                    toks = _caller_value_tokens(value)
+                    every.setdefault(_written_tokens(toks), toks)
+                    workflow.caller_input_notes.append(
+                        f"{where} gives an input under a key written as {wf_mod.shown_value(key)}, which is not "
+                        "text, so its value is read as given to every input")
+        elif given is not None:
+            toks = _caller_value_tokens(given)
+            every.setdefault(_written_tokens(toks), toks)
+            workflow.caller_input_notes.append(
+                f"{where} gives `with:` as one value, not a mapping, so every input is read as "
+                f"'{wf_mod.one_line(wf_mod.as_text(given), 60)}'")
+        for name in list(defaults) + [n for n in named if n not in defaults]:
+            if name in named:
+                for value in named[name]:
+                    toks = _caller_value_tokens(value)
+                    values.setdefault(name, {}).setdefault(_written_tokens(toks), toks)
+            else:
+                toks = _value_tokens(wf_mod.as_text(defaults[name]))
+                values.setdefault(name, {}).setdefault(_written_tokens(toks), toks)
+    return {name: list(found.values()) for name, found in values.items()}, list(every.values())
+
+
+class _CallerInputs:
+    """What the jobs of the repository that call a workflow give its inputs (`_caller_input_values`), and
+    for each input the tokens that follow the reference as written in `_alternatives`, worked out once
+    with their length, so a text's size is known before it is made."""
+
+    def __init__(self, values: dict, every: list) -> None:
+        self.values, self.every = values, every
+        self._tails: dict = {}
+        self._everything: list | None = None
+
+    def everything(self) -> list:
+        if self._everything is None:
+            seen: dict = {}
+            for found in [*self.values.values(), self.every]:
+                for value in found:
+                    seen.setdefault(_written_tokens(value), value)
+            self._everything = list(seen.values())
+        return self._everything
+
+    def tail(self, name: str | None) -> tuple[list, list, int]:
+        """(the `format()` that opens, the values and the closing parenthesis, their written length) for
+        input `name`, or for a reference the checker does not work out (None); ([], [], 0) for an input
+        no caller gives anything."""
+        if name not in self._tails:
+            given = self.everything() if name is None else self.values.get(name, []) + self.every
+            if not given:
+                self._tails[name] = ([], [], 0)
+            else:
+                head = [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(given) + 1))),
+                        ("op", ",")]
+                rest: list = []
+                for value in given:
+                    rest += [("op", ","), *value]
+                rest.append(("op", ")"))
+                self._tails[name] = (head, rest, len(_written_tokens(head)) + len(_written_tokens(rest)) + 2)
+        return self._tails[name]
+
+
+def _caller_inputs_in_body(body: str, given: "_CallerInputs", notes: list) -> str:
+    """An expression's body with each reference to the workflow's inputs (`inputs.name`, `inputs['name']`,
+    in any letter case) replaced by `format()` of the reference as written and each value a caller gives
+    it, so a rule reads every one of them in its place: the reference stays for a caller the checker
+    cannot see (another repository's, or the workflow's own trigger). A reference the checker does not
+    work out (`toJSON(inputs)`, `inputs.*`, a computed index) gets every value given to any input, and a
+    note says so. A body that would be longer than `CALLER_INPUT_TEXT` raises `_CallerInputsExceeded`
+    before it is made."""
+    toks = expr_mod.tokens(body)
+    out: list = []
+    i, changed, size = 0, False, len(body)
+    while i < len(toks):
+        kind, text = toks[i]
+        before = toks[i - 1] if i else None
+        if kind == "id" and text.lower() == "inputs" and before != ("op", ".") and \
+                (i + 1 >= len(toks) or toks[i + 1] != ("op", "(")):
+            name, width = None, 1
+            if i + 2 < len(toks) and toks[i + 1] == ("op", ".") and toks[i + 2][0] == "id":
+                name, width = toks[i + 2][1], 3
+            elif i + 3 < len(toks) and toks[i + 1] == ("op", "[") and toks[i + 2][0] == "str" \
+                    and toks[i + 3] == ("op", "]"):
+                name, width = toks[i + 2][1], 4
+            if name is None:
+                notes.append("an expression reads its inputs in a way the checker does not work out, so every value "
+                             f"its callers give is read in its place ('{wf_mod.one_line(body, 60)}')")
+            head, rest, length = given.tail(None if name is None else wf_mod.input_name(name.strip()))
+            if head:
+                size += length
+                if size > CALLER_INPUT_TEXT:
+                    raise _CallerInputsExceeded()
+                out += [*head, *toks[i:i + width], *rest]
+                changed = True
+            else:
+                out.extend(toks[i:i + width])
+            i += width
+            continue
+        out.append(toks[i])
+        i += 1
+    return _written_tokens(out) if changed else body
+
+
+def _caller_inputs_in_text(text: str, given: "_CallerInputs", notes: list, condition: bool = False) -> str:
+    """`text` with the callers' inputs put into each `${{ }}` that reads them; with `condition`, a text
+    with no `${{` is one expression (an `if:`). An expression that does not end is left as written,
+    with a note."""
+    if not _INPUTS_WORD.search(text):
+        return text
+    if expr_mod.OPEN not in text:
+        return _caller_inputs_in_body(text, given, notes) if condition else text
+    parts = _expression_parts(text)
+    if parts is None:
+        notes.append(f"an expression in '{wf_mod.one_line(text, 60)}' does not end, so its callers' inputs were not "
+                     "put into it")
+        return text
+    out: list = []
+    size = 0
+    for kind, body in parts:
+        piece = body if kind == "text" else expr_mod.OPEN + " " + _caller_inputs_in_body(body, given, notes) + " " + \
+            expr_mod.CLOSE if _INPUTS_WORD.search(body) else expr_mod.OPEN + body + expr_mod.CLOSE
+        size += len(piece)
+        if size > CALLER_INPUT_TEXT:
+            raise _CallerInputsExceeded()
+        out.append(piece)
+    return "".join(out)
+
+
+def _put_in_caller_inputs(workflow, budget: dict) -> None:
+    """Put what the jobs of the repository that call `workflow` hand its inputs into every `inputs`
+    reference of the workflow outside `on` (flagship slice 2d.4b3a): its `env`, `defaults`,
+    `concurrency`, `run-name` and jobs, an `if:` without `${{ }}` included. A called workflow's `inputs`
+    are what the calling job's `with:` gives (or the default), so a checkout of `${{ inputs.ref }}` is
+    a checkout of whatever a `pull_request_target` caller hands it, the pull request's head included.
+    Each reference becomes `_alternatives` of the values, the reference as written among them. The
+    values are worked out where the caller runs; a caller that is itself called has had its own
+    callers' values put in first (callers come first), so a chain carries the first caller's.
+
+    The workflow's YAML values are replaced where they are, so every rule and its line numbers read
+    them; a value YAML gives in two places through an alias is one value, and the inputs context is
+    the same for the whole workflow, so it is worked on once. Nothing is replaced until every
+    replacement is worked out: past `CALLER_INPUT_TEXT` for one text, or `CALLER_INPUTS_CHECK_TEXT`
+    for the check, nothing is, and the file has a problem, which is an error of the check."""
+    if not workflow.callers or workflow.caller_inputs_put_in:
+        return
+    workflow.caller_inputs_put_in = True
+    values, every = _caller_input_values(workflow)
+    if not values and not every:
+        return
+    given = _CallerInputs(values, every)
+    notes: list = []
+    changes: list = []
+    made = 0
+    done: set = set()
+
+    def put(container, key, value, condition=False):
+        nonlocal made
+        found = _caller_inputs_in_text(value, given, notes, condition)
+        if found != value:
+            if len(found) > CALLER_INPUT_TEXT:
+                raise _CallerInputsExceeded()
+            made += len(found)
+            if budget["chars"] + made > CALLER_INPUTS_CHECK_TEXT:
+                raise _CallerInputsExceeded()
+            changes.append((container, key, found))
+
+    conditions: set = set()
+    for job in workflow.jobs.values():
+        conditions.add((id(job.raw), "if"))
+        for step in job.steps:
+            conditions.add((id(step.raw), "if"))
+    try:
+        todo = [value for key, value in workflow.raw.items() if key != "on"]
+        while todo:
+            node = todo.pop()
+            if id(node) in done:
+                continue
+            if isinstance(node, dict):
+                done.add(id(node))
+                for key, value in node.items():
+                    if isinstance(value, str):
+                        put(node, key, value, (id(node), key) in conditions)
+                    elif isinstance(value, (dict, list)):
+                        todo.append(value)
+            elif isinstance(node, list):
+                done.add(id(node))
+                for index, value in enumerate(node):
+                    if isinstance(value, str):
+                        put(node, index, value)
+                    elif isinstance(value, (dict, list)):
+                        todo.append(value)
+    except _CallerInputsExceeded:
+        workflow.problems.append(
+            f"putting in what the jobs that call it give its inputs would make a text of more than {CALLER_INPUT_TEXT} "
+            f"characters, or more than {CALLER_INPUTS_CHECK_TEXT} for the check, so its inputs are read as written "
+            "and the checker cannot tell what its jobs are given")
+        return
+    budget["chars"] += made
+    for container, key, found in changes:
+        container[key] = found
+    workflow.caller_input_notes.extend(dict.fromkeys(notes))
+    # What was worked out from the values as they were written is worked out again.
+    workflow.__dict__.pop("_job_triggers", None)
+    for job in workflow.jobs.values():
+        job._secret_names = None
 
 
 class _ActionFileError(ValueError):

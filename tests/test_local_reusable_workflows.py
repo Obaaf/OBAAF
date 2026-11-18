@@ -155,15 +155,15 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
                                      CALLED: called()})
                 self.assertNotIn("OBAAF-GHA-002", rules_on(result, CALLED))
 
-    def test_a_ref_the_caller_passes_as_an_input_is_cannot_tell(self):
-        # The caller's `with:` is not put in (left to slice 2d.4b3); an input in a checkout of a job an
-        # outsider's event can start is "cannot tell" at medium, never nothing.
+    def test_a_ref_the_caller_passes_as_an_input_is_the_head(self):
+        # Until slice 2d.4b3a the caller's `with:` was not put in, and this was "cannot tell" at medium;
+        # now the head the caller hands the input is read in its place (tests/test_called_workflow_inputs.py).
         steps = HEAD_CHECKOUT.replace("github.event.pull_request.head.sha", "inputs.ref")
         text = caller("pull_request_target") + "    with:\n      ref: ${{ github.event.pull_request.head.sha }}\n"
         with TempDir() as tmp:
             result = check(tmp, {".github/workflows/caller.yml": text, CALLED: called(steps=steps)})
         (found,) = [f for f in result.findings if f.rule == "OBAAF-GHA-002"]
-        self.assertEqual((found.path, found.severity, found.kind), (CALLED, "medium", "checkout-unresolved"))
+        self.assertEqual((found.path, found.severity, found.kind), (CALLED, "high", "checkout"))
 
     def test_an_at_reading_outside_the_repository_does_not_drop_the_one_inside(self):
         # From the review: the path as written leads outside, the path before the `@` does not.
