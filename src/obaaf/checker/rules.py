@@ -538,6 +538,7 @@ class WorkflowRules:
             self.untrusted_checkout(job)
             self.script_injection(job)
             self.agent_rules(job)
+            self.agent_tool_installs(job)
             self.release_rules(job)
             self.unpinned(job)
             self.persisted_credentials(job)
@@ -1521,6 +1522,264 @@ class WorkflowRules:
                    "(workflow file sha256 {written}).",
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values)
+
+    # -------------------------------------------------------------- GHA-025
+    _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts, after variables are put in
+    # Programs that run what they are given on standard input, or as the text of `-c`, as code.
+    _RUNS_CODE = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "pwsh",
+                            "powershell", "powershell.exe", "pwsh.exe", "python", "python2", "python3", "node",
+                            "nodejs", "deno", "bun", "perl", "ruby", "php", "lua", "iex", "invoke-expression"})
+    # Words that run the text they are given (`eval "$(curl ...)"`, `source <(curl ...)`, `iex (irm ...)`).
+    _EVALUATES = frozenset({"eval", "source", ".", "iex", "invoke-expression"})
+    # What may stand before the program in one element of a pipeline, and is not the program.
+    _WRAPPERS = frozenset({"sudo", "env", "exec", "command", "builtin", "nice", "nohup", "time", "stdbuf",
+                           "timeout", "doas", "xargs", "unbuffer", "setsid", "chroot", "su", "busybox"})
+    _WRAPPER_VALUE_OPTIONS = frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "-R", "-n", "-k",
+                                        "-s", "-o", "-e", "-i", "-c", "--user", "--group", "--chdir"})
+    _DOWNLOADER_RE = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|invoke-webrequest|invoke-restmethod|aria2c)"
+                                r"(?:\.exe)?(?![\w-])", re.I)
+    _EXPRESSION_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+
+    def _install_reader(self):
+        """The reader OBAAF-JEN-008 uses for agent CLI installs (flagship slice 2d.2k), with no Jenkinsfile
+        behind it: only the script and the variables given to it are read. Imported here because the
+        Jenkins rules import this module. One per check; `_agent_installed` is set per job by the caller."""
+        if getattr(self, "_jenkins_installs", None) is None:
+            from obaaf.checker.jenkins.model import Pipeline
+            from obaaf.checker.jenkins.rules import JenkinsRules
+            self._jenkins_installs = JenkinsRules(self.wf.path, Pipeline(), self.catalog, None)
+        return self._jenkins_installs
+
+    def _literal_env(self, job: Job, step: Step, written: bool) -> dict:
+        """The env names the step's scripts can read that the workflow, the job or the step sets to one
+        literal (the nearest wins), as the shell variables the install reader puts in; None for a name
+        set to anything else. A scope written as one expression may set any name, so every name from the
+        scopes outside it is unknown (`"*"`). When an earlier step writes `GITHUB_ENV` (`written`), which
+        outranks the job's and the workflow's env and not the step's own, their values are unknown too."""
+        out: dict = {}
+
+        def unknown_so_far() -> None:
+            for name in list(out):
+                out[name] = None
+            out["*"] = None
+
+        for n, scope in enumerate((self.wf.raw.get("env"), job.raw.get("env"), step.raw.get("env"))):
+            if n == 2 and written:
+                unknown_so_far()
+            if scope is None:
+                continue
+            if not isinstance(scope, dict):
+                unknown_so_far()
+                continue
+            for name, value in scope.items():
+                if not isinstance(name, str):
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                    out[name] = None
+                    continue
+                text = str(value)
+                out[name] = None if "$" in text or len(text) > 10_000 else text
+        return out
+
+    @staticmethod
+    def _quotes_neutral(text: str) -> str:
+        """The text with `;`, `&` and `|` inside single or double quotes made spaces, so that a quoted
+        separator does not split one command in two for the install reader (the review of 2d.5a). Linear."""
+        if "'" not in text and '"' not in text:
+            return text
+        out, quote = [], ""
+        for c in text:
+            if quote:
+                if c == quote:
+                    quote = ""
+                elif c in ";&|":
+                    c = " "
+            elif c in "'\"":
+                quote = c
+            elif c == "\n":
+                quote = ""
+            out.append(c)
+        return "".join(out)
+
+    def _expressions_put_in(self, text: str, env: dict) -> str:
+        """A script with each `${{ ... }}` as the runner hands it to the shell: `${{ env.NAME }}` is the
+        literal the env sets, where it sets one, and any other expression a value set at run time, written
+        as `$` and its text without spaces so that a version shows which expression gives it."""
+        def sub(m):
+            body = m.group(1).strip()
+            name = re.fullmatch(r"env\.([A-Za-z_][A-Za-z0-9_]*)", body)
+            if name and env.get(name.group(1)) is not None:
+                return env[name.group(1)]
+            # No braces or spaces, which the install reader takes for the end of a version.
+            return "$__OBAAF_EXPR__" + re.sub(r"[^\w.\-\[\]]", "_", body)[:200]
+        return self._EXPRESSION_RE.sub(sub, text) if "${{" in text else text
+
+    @classmethod
+    def _program(cls, element: str) -> tuple[str, list]:
+        """The program one element of a pipeline runs, after wrappers (`sudo -u root`, `env A=1`, `exec`)
+        and their options, as a lower-case base name with its quotes taken off, and the words after it.
+        A program written as a variable is returned as written (`$SHELL`)."""
+        words = element.split()
+        i = 0
+        while i < len(words):
+            word = words[i].strip("\"'")
+            base = word.rsplit("/", 1)[-1].lower()
+            if base in cls._WRAPPERS:
+                i += 1
+                while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_]\w*=\S*", words[i])):
+                    i += 2 if words[i] in cls._WRAPPER_VALUE_OPTIONS else 1
+                if base == "timeout" and i < len(words) and re.fullmatch(r"[\d.]+[smhd]?", words[i]):
+                    i += 1          # `timeout 60 bash`: the duration
+                continue
+            if re.fullmatch(r"[A-Za-z_]\w*=\S*", word):
+                i += 1
+                continue
+            return base, words[i + 1:]
+        return "", []
+
+    @classmethod
+    def _runs_input(cls, program: str, rest: list) -> bool:
+        """Whether a program given a download on standard input runs it: a shell or another interpreter
+        with no script file named (`bash`, `bash -s`, `bash -`, `python3 -`), PowerShell's `iex`, or a
+        program the checker cannot name (a variable, a substitution). `bash ./consume.sh` runs the file and
+        reads the download as data."""
+        if not program or program.startswith(("$", "`", "(")) or "$(" in program:
+            return True
+        if program not in cls._RUNS_CODE:
+            return False
+        if program in ("iex", "invoke-expression"):
+            return True
+        for word in rest:
+            if word in ("-", "-s", "--"):
+                return True
+            if word.startswith("-"):
+                continue
+            return False      # a script file: the download is its input
+        return True
+
+    def _downloads_run(self, line: str) -> bool:
+        """Whether one line of a script runs, as code, what it downloads: the download's output piped to a
+        program that runs its input, or the download inside `$(...)`, backticks, `<(...)` or `(...)` on a
+        line that evaluates or interprets (`eval`, `source`, `.`, `iex`, `bash -c`, `bash <(...)`). Quotes
+        are not read: the line is taken as a whole, so a download and a shell another command feeds on the
+        same line are taken together, the wider reading."""
+        m = self._DOWNLOADER_RE.search(line)
+        if not m:
+            return False
+        after = line[m.start():]
+        # Piped: every element after a `|` (not `||`), `|&` included; `tee` passes its input on.
+        elements = re.split(r"\|&?(?!\|)", after.replace("||", "\x00"))
+        for element in elements[1:]:
+            # The element ends where its command does: at `;`, `&&`, `||`, `&` or a closing bracket.
+            program, rest = self._program(re.split(r"&&|;|\x00|&|[)}]", element, maxsplit=1)[0])
+            if program == "tee":
+                continue
+            if self._runs_input(program, rest):
+                return True
+        # Substituted: the download is inside a substitution, a process substitution or parentheses.
+        # Substituted: the download is inside a substitution, a process substitution, parentheses or a
+        # here-string, and what stands before it on the line evaluates or interprets.
+        for n, m in enumerate(self._DOWNLOADER_RE.finditer(line)):
+            if n >= 100:
+                return True         # more downloads on one line than are read: the wider reading
+            before = line[max(0, m.start() - 4000):m.start()]
+            if not re.search(r"(\$\(|`|<\(|\(|<<<)[^)`]*$", before):
+                continue
+            words = {w.strip("\"'").rsplit("/", 1)[-1].lower() for w in re.split(r"[\s;&|(){}<>=\"']+", before) if w}
+            if words & self._EVALUATES or words & self._RUNS_CODE:
+                return True
+        return False
+
+    def agent_tool_installs(self, job: Job) -> None:
+        """OBAAF-GHA-025: an agent job installs or runs a tool at a version it does not fix (flagship slice
+        2d.5a, control R6). One finding per step and case, with what was found as its facts."""
+        if not job.in_lane("agent"):
+            return
+        from obaaf.checker.jenkins.rules import JenkinsRules
+        why = job.reason_for("agent")
+        reader = self._install_reader()
+        reader._agent_installed = False       # an update counts after an install in an earlier step of the job
+        install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
+        windows = any("windows" in str(label).lower()
+                      for labels in (job.runner_label_sets() or []) for label in (labels or []))
+        env_written = False
+        for step in job.steps:
+            texts = list(self._script_texts(job, step))
+            if step.uses and step.uses.strip().lower().startswith("docker://"):
+                # GitHub starts the container with its entrypoint and then its args, as one command line.
+                parts = []
+                for key in ("entrypoint", "args"):
+                    given = step.with_.get(key)
+                    if isinstance(given, list):
+                        parts += [str(x) for x in given if isinstance(x, (str, int, float))]
+                    elif isinstance(given, (str, int, float)) and given != "":
+                        parts.append(str(given))
+                texts.append(" ".join(parts))
+            texts = [t for t in texts if t]
+            if not texts:
+                continue
+            shell = self._shell(job, step).strip().lower()
+            dialect = "pwsh" if shell.startswith(("pwsh", "powershell")) or (not shell and windows) \
+                else "bat" if shell.startswith("cmd") else "sh"
+            shell_vars = self._literal_env(job, step, env_written)
+            if any(re.search(r"github_env|exportvariable", t, re.I) for t in texts):
+                env_written = True
+            # As the shell reads it: expressions put in, comments dropped, continued lines joined (a line
+            # that ends with `|` continues too), then each command's variables put in, within the bound.
+            scripts = []
+            total = 0
+            for text in texts:
+                text = JenkinsRules._prepared(self._expressions_put_in(text, shell_vars), dialect)
+                text = re.sub(r"\|[ \t]*\r?\n[ \t]*", "| ", text)
+                variables = dict(shell_vars)
+                lines = []
+                for line in text.splitlines():
+                    if total > self._INSTALL_SCRIPT_LIMIT:
+                        break
+                    resolved = reader._resolve_line(line, variables) if "$" in line else line
+                    total += len(resolved) + 1
+                    lines.append(resolved)
+                scripts.append((text, "\n".join(lines)))
+                if total > self._INSTALL_SCRIPT_LIMIT:
+                    break
+            if total > self._INSTALL_SCRIPT_LIMIT:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}): step '{step}' runs scripts too long for the checker to read "
+                         "(more than {limit} characters with their variables put in), so it cannot tell whether "
+                         "they install a tool at a version that can change.", job, step, severity="medium",
+                         kind="too-long", why=why, limit=Note(str(self._INSTALL_SCRIPT_LIMIT)))
+                continue
+            piped: dict = {}
+            installs: set = set()
+            for raw, resolved in scripts:
+                for line in resolved.splitlines():
+                    if not line.lstrip().startswith("#") and self._downloads_run(line):
+                        command = line.strip()
+                        key = command if len(command) <= 1000 else (
+                            command[:1000] + " sha256:" + hashlib.sha256(command.encode()).hexdigest()[:16])
+                        piped[key] = command
+                # Installs from inside `$(...)`, backticks, parentheses and a script's string read as commands.
+                spaced = re.sub(r"\$\(|[`(){}]", " ; ", self._quotes_neutral(raw))
+                reader._seen = set()
+                for message in reader._install_problems(spaced, shell_vars=shell_vars):
+                    if message.startswith("An agent CLI is installed by piping a downloaded script"):
+                        continue        # the first case, read above for any download
+                    if message.startswith("An agent CLI is installed by a downloaded install script"):
+                        urls = sorted({m.group(0) for rx in install_urls for m in rx.finditer(raw)})
+                        message = "An agent CLI's own install script is downloaded and run (" + ", ".join(urls) + \
+                            "), which installs whatever version the script chooses"
+                    installs.add(message)
+                reader.unknowns = []
+            if piped:
+                shown = "; ".join(sorted(c if len(c) <= 160 else c[:160] + "..." for c in piped.values()))
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}) runs a script downloaded while the job runs, in step '{step}': "
+                         "{commands}. Whatever it installs runs with what the agent job holds.",
+                         job, step, kind="piped-download", why=why, commands=Fact(sorted(piped), shown))
+            if installs:
+                self.add("OBAAF-GHA-025", step.line,
+                         "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
+                         "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs))
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"

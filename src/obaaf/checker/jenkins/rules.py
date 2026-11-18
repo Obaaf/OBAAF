@@ -183,7 +183,9 @@ _NPM_INSTALL = re.compile(r"(?<![\w-])(?:npm[ \t]+(?:install|i|ci|add)|pnpm[ \t]
                           r"yarn(?:[ \t]+install)?|bun[ \t]+(?:install|i))(?=$|[ \t;&|])", re.M)
 LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
 _DOWNLOAD = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|Invoke-WebRequest|Invoke-RestMethod)(?![\w-])", re.I)
-_TO_SHELL = re.compile(r"\|[ \t]*(?:sudo[ \t]+(?:-\S+[ \t]+)*)?(?:\S*/)?(?:ba|z|da|k)?sh\b|\|[ \t]*iex\b|"
+# `[^\s|]`, not `\S`, before the shell's name: `\S*` ran on through every later `|` of the line, so a line of
+# many pipes was quadratic (the review of slice 2d.5a: 400 KB took 97 s). A path holds no `|`.
+_TO_SHELL = re.compile(r"\|[ \t]*(?:sudo[ \t]+(?:-[^\s|]+[ \t]+)*)?(?:[^\s|]*/)?(?:ba|z|da|k)?sh\b|\|[ \t]*iex\b|"
                        r"(?:ba|z)?sh[ \t]+<\(|(?:ba|z)?sh[ \t]+-c[ \t]+[\"']?\$\(", re.I)
 _HEREDOC = re.compile(r"(?:^|(?<=\s))<<(-?)[\"']?([A-Za-z_]\w*)[\"']?")
 
@@ -1630,11 +1632,12 @@ class JenkinsRules:
                     reason = " at a version set at run time" if "$" in ver else " without a fixed version"
                     out.append(f"Agent CLI {pkg} is installed{reason}{shown}" + where)
         # A package named at run time, given to an installer that installs it.
-        for k in installer_at:
+        for n_at, k in enumerate(installer_at):
             if actions[k] != "install":
                 continue
-            following = installer_at[installer_at.index(k) + 1] if installer_at.index(k) + 1 < len(installer_at) \
-                else len(words)
+            # By position, not `installer_at.index(k)`, which made a line of many installers quadratic (the
+            # review of slice 2d.5a: 75,000 `npm` words took 35 s).
+            following = installer_at[n_at + 1] if n_at + 1 < len(installer_at) else len(words)
             named = []
             args = words[k + 1: following]
             for n, w in enumerate(args):

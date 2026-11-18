@@ -136,7 +136,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** The manifest file and the build step that checks it.
 
-**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
+**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008`, `OBAAF-GHA-025`, `OBAAF-JEN-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
 
 ### G2.2 Quarantine third-party assets and plugins
 

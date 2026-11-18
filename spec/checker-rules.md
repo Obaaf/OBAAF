@@ -36,6 +36,7 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-022](#obaaf-gha-022) | high | authority | Agent output applied without an approval gate | G8.1, R4 |
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
 | [OBAAF-GHA-024](#obaaf-gha-024) | high | authority | Protected secret used outside its environment | G3.4, G9.1 |
+| [OBAAF-GHA-025](#obaaf-gha-025) | high | hygiene | Agent tool installed at a version that can change | G2.1, R6 |
 | [OBAAF-CFG-001](#obaaf-cfg-001) | high | authority | Lane declaration that does nothing | - |
 | [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
 | [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
@@ -306,6 +307,16 @@ The checker configuration lists the secret under protected_secrets, but a job re
 
 **Fix.** Keep the secret only in the environment named in protected_secrets, limit that environment's deployment branches to the default branch, delete any repository or organization copy, and add `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+## OBAAF-GHA-025
+
+**Agent tool installed at a version that can change** (high). Requirements: G2.1, R6. Supports: FR10, FR12.
+
+**Why it matters.** Whoever controls the download or the registry entry chooses the code that then runs with everything the agent job holds.
+
+An agent job installs or runs a tool at a version it does not fix (flagship slice 2d.5a). Two cases. A script downloaded while the job runs is run as code, whatever tool it installs: a download (`curl`, `wget`, `irm`, `iwr`, `Invoke-WebRequest`, `Invoke-RestMethod`, `aria2c`) piped to a program that runs its input (a shell, PowerShell, `iex`, Python, Node, Perl, Ruby and others, after `sudo`, `env`, `exec` and the like, or a program named by a variable; `tee` passes it on; a program given a script file reads the download as data), or a download inside `$(...)`, backticks, `<(...)`, `(...)` or after `<<<` where what stands before it on the line evaluates or interprets (`eval`, `source`, `.`, `iex`, `bash -c`). The checker cannot tell what a downloaded script fetches, and in an agent job it runs with the job's keys and token. Or an agent CLI the catalogue names (`agent_packages` in the detection data) is installed or run by a package manager (npm, pnpm, yarn, bun, npx, pip, pipx, uv, uvx) without an exact version, at a range, a tag or a version set at run time, is updated (in the same step or a later one), or its own install script (`agent_install_urls`) is downloaded and run. Read in every script a step runs, as OBAAF-GHA-010 reads them, local composite actions' steps included, and a `docker://` step's entrypoint and args as one command line; expressions are put in as the runner puts them in (`${{ env.NAME }}` as the literal the env sets, any other as a value set at run time); whole-line comments are dropped and continued lines joined (a line ending in `|` too); a variable the script, the step, the job or the workflow sets to one literal is put in, unless a scope nearer the step is written as one expression, or an earlier step writes `GITHUB_ENV`, which makes the job's and the workflow's values unknown. Quotes are not read, in either case: a download and a program that runs its input on one line are taken together, and a package manager's command written in text (an `echo`, a `grep`, a message, a heredoc) is read as one, so either is reported as if it ran; a quoted `;`, `&` or `|` does not split a command. The package-manager case uses the same reader as OBAAF-JEN-008. A step whose scripts are over 400,000 characters with their variables put in is medium: the checker cannot read them. Only agent jobs are read: the same pattern in another job is poutine's to report. Not followed: a script downloaded to a file and run in a later command, except an agent's own install script; what the downloaded script itself installs; a package named at run time; an agent the catalogue does not name, installed by a package manager; installers other than those listed (`brew`, `volta`, `deno`, an agent CLI's own `install` or `--upgrade`), and an install from a git URL; and an agent action's own input that chooses its CLI's version.
+
+**Fix.** Install the agent CLI from its registry at an exact version (for example `npm install -g @anthropic-ai/claude-code@1.2.3`, or `pip install aider-chat==0.86.1`), better with its hash from a lockfile, and move the version through reviewed changes. If the tool ships only an install script, download the release it would install, at a fixed version, check its checksum, and install that instead.
+
 ## OBAAF-CFG-001
 
 **Lane declaration that does nothing** (high). Requirements: -. Supports: FR12.
@@ -504,10 +515,11 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 
 | Test file | Models | Expected rules |
 | --- | --- | --- |
+| `tests/fixtures/workflows/risky/agent-cli-unpinned.yml` | An agent job installs its CLI by piping a downloaded script into a shell, and another CLI from npm with no version, while it holds a model key. | OBAAF-GHA-005, OBAAF-GHA-020, OBAAF-GHA-025 |
 | `tests/fixtures/workflows/risky/agent-lane-misspelled.yml` | Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed. | OBAAF-CFG-001 |
 | `tests/fixtures/workflows/risky/claude-action-toctou.yml` | Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk. | OBAAF-GHA-012, OBAAF-GHA-011, OBAAF-GHA-020 |
 | `tests/fixtures/workflows/risky/clinejection-release.yml` | Clinejection, part 2: the release workflow restores the shared cache and publishes with a long-lived token, unchecked. | OBAAF-GHA-006, OBAAF-GHA-014, OBAAF-GHA-016, OBAAF-GHA-017, OBAAF-GHA-008 |
-| `tests/fixtures/workflows/risky/clinejection-triage.yml` | Clinejection, part 1: an issue-triage agent that any user can start runs shell tools with a write-capable cache. | OBAAF-GHA-007, OBAAF-GHA-003, OBAAF-GHA-008 |
+| `tests/fixtures/workflows/risky/clinejection-triage.yml` | Clinejection, part 1: an issue-triage agent that any user can start runs shell tools with a write-capable cache. | OBAAF-GHA-007, OBAAF-GHA-003, OBAAF-GHA-008, OBAAF-GHA-025 |
 | `tests/fixtures/workflows/risky/effect-without-checks.yml` | An effect job that applies an agent's output with write access, without verifying it or waiting for approval. | OBAAF-GHA-021, OBAAF-GHA-022 |
 | `tests/fixtures/workflows/risky/expression-spellings.yml` | Spellings that a text match misses: a wildcard over the secrets context, a secret after "}}" inside a string, event text reached through a group, a wildcard and env. Checked with the configuration `{"protected_secrets": {"*_API_KEY": "main-only"}}`. | OBAAF-GHA-010, OBAAF-GHA-001, OBAAF-GHA-005, OBAAF-GHA-024 |
 | `tests/fixtures/workflows/risky/nx-title-injection.yml` | Nx "s1ngularity": a pull-request title expanded inside a shell step of a privileged workflow. | OBAAF-GHA-010, OBAAF-GHA-001 |

@@ -135,7 +135,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Tool descriptions treated as untrusted input.
 
-**In this repository.** Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008`
+**In this repository.** Checker rules: `OBAAF-GHA-008`, `OBAAF-GHA-025`, `OBAAF-JEN-008`
 
 ### R7 Isolate the run and constrain egress
 

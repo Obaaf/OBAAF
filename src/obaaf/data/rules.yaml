@@ -842,6 +842,52 @@ rules:
       deployment branches to the default branch, delete any repository or organization copy, and add
       `environment: <name>` to every job that uses it (see docs/github-settings.md#secrets).
 
+  - id: OBAAF-GHA-025
+    title: Agent tool installed at a version that can change
+    severity: high
+    category: hygiene
+    requirements: [G2.1]
+    agent_controls: [R6]
+    supports: [FR10, FR12]
+    why: >-
+      Whoever controls the download or the registry entry chooses the code that then runs with everything the agent
+      job holds.
+    description: >-
+      An agent job installs or runs a tool at a version it does not fix (flagship slice 2d.5a). Two cases.
+      A script downloaded while the job runs is run as code, whatever tool it installs: a download (`curl`,
+      `wget`, `irm`, `iwr`, `Invoke-WebRequest`, `Invoke-RestMethod`, `aria2c`) piped to a program that runs
+      its input (a shell, PowerShell, `iex`, Python, Node, Perl, Ruby and others, after `sudo`, `env`, `exec`
+      and the like, or a program named by a variable; `tee` passes it on; a program given a script file
+      reads the download as data), or a download inside `$(...)`, backticks, `<(...)`, `(...)` or after `<<<`
+      where what stands before it on the line evaluates or interprets (`eval`, `source`, `.`, `iex`,
+      `bash -c`). The checker cannot tell what a downloaded script fetches, and in an agent job it runs with
+      the job's keys and token. Or an agent CLI the catalogue names (`agent_packages` in the detection data)
+      is installed or run by a package manager (npm, pnpm, yarn, bun, npx, pip, pipx, uv, uvx) without an
+      exact version, at a range, a tag or a version set at run time, is updated (in the same step or a later
+      one), or its own install script (`agent_install_urls`) is downloaded and run. Read in every script a
+      step runs, as OBAAF-GHA-010 reads them, local composite actions' steps included, and a `docker://`
+      step's entrypoint and args as one command line; expressions are put in as the runner puts them in
+      (`${{ env.NAME }}` as the literal the env sets, any other as a value set at run time); whole-line
+      comments are dropped and continued lines joined (a line ending in `|` too); a variable the script, the
+      step, the job or the workflow sets to one literal is put in, unless a scope nearer the step is written
+      as one expression, or an earlier step writes `GITHUB_ENV`, which makes the job's and the workflow's
+      values unknown. Quotes are not read, in either case: a download and a program that runs its input on
+      one line are taken together, and a package manager's command written in text (an `echo`, a `grep`, a
+      message, a heredoc) is read as one, so either is reported as if it ran; a quoted `;`, `&` or `|`
+      does not split a command. The package-manager case uses the same reader as
+      OBAAF-JEN-008. A step whose scripts are over 400,000 characters with their variables put in is
+      medium: the checker cannot read them. Only agent jobs are read: the same pattern in another job is
+      poutine's to report. Not followed: a script downloaded to a file and run in a later command, except
+      an agent's own install script; what the downloaded script itself installs; a package named at run
+      time; an agent the catalogue does not name, installed by a package manager; installers other than
+      those listed (`brew`, `volta`, `deno`, an agent CLI's own `install` or `--upgrade`), and an install
+      from a git URL; and an agent action's own input that chooses its CLI's version.
+    fix: >-
+      Install the agent CLI from its registry at an exact version (for example `npm install -g
+      @anthropic-ai/claude-code@1.2.3`, or `pip install aider-chat==0.86.1`), better with its hash from a
+      lockfile, and move the version through reviewed changes. If the tool ships only an install script,
+      download the release it would install, at a fixed version, check its checksum, and install that instead.
+
   # The checker's own configuration. A declaration that tells the checker which rules a job gets
   # is a control like any other: one that does nothing is reported, never dropped without a word.
   - id: OBAAF-CFG-001

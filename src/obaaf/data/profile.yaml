@@ -122,7 +122,7 @@ families:
           source, version, and digest. On a scratch branch, change one byte of a covered file without
           updating the manifest. Pass if the build fails.
         evidence: "The manifest file and the build step that checks it."
-        checks: [OBAAF-GHA-008, OBAAF-JEN-008]
+        checks: [OBAAF-GHA-008, OBAAF-GHA-025, OBAAF-JEN-008]
         tools: ["obaaf manifest create", "obaaf manifest check"]
 
       - id: G2.2
