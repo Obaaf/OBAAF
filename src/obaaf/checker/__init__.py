@@ -218,6 +218,9 @@ LOCAL_ACTION_BYTES = 1_000_000
 # actions that use each other many times over, with different inputs, cannot make the check run long
 # or hide an agent in a job read after them.
 LOCAL_ACTION_UNITS = 30_000
+# And this many more for each step of a job that uses a local action, so the bound grows with the
+# repository: 400 jobs that each give one action different inputs are not more than a check reads.
+LOCAL_ACTION_UNITS_PER_USE = 200
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
 LOCAL_ACTION_TEXT = 200_000
@@ -231,6 +234,11 @@ _COMMAND_FIELDS = ("run", "shell", "env", "with", "working-directory")
 
 
 _READINGS = "readings"      # the counter's key in the cache, which no (folders, inputs, env) key can equal
+_USES = "uses"              # how many steps of jobs that use a local action the check has read
+
+
+def _units_allowed(cache: dict) -> int:
+    return LOCAL_ACTION_UNITS + LOCAL_ACTION_UNITS_PER_USE * cache.get(_USES, 0)
 
 
 class _ReadingsExceeded(Exception):
@@ -466,14 +474,18 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
     if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
         args = [_token_values(arg, inputs, folder, depth + 1, env, cut) for arg in _split_top(toks[2:-1], ",")]
         if args and all(values for values in args):
-            out = []
-            for choice in itertools.product(*args):
-                if len(out) > _VALUE_LIMIT:
+            out: list = []
+            distinct: set = set()
+            for count, choice in enumerate(itertools.product(*args)):
+                if count >= 16 * _VALUE_LIMIT or len(distinct) > _VALUE_LIMIT:
+                    # Combinations not made are values left out, whether or not the ones made repeat.
+                    (cut if cut is not None else []).append(True)
                     break
                 template = choice[0]
                 for n, value in enumerate(choice[1:]):
                     template = template.replace("{" + str(n) + "}", value)
                 out.append(template)
+                distinct.add(template)
             return _capped(out, cut if cut is not None else [])
     if _top_level_comparison(toks) or (head[0] == "id" and head[1].lower() in _BOOLEAN_FUNCTIONS
                                        and _wraps(toks[1:])):
@@ -681,7 +693,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                                              and isinstance(raw["runs"].get("steps"), list) else 1 for _, raw in raws)
     readings = cache.get(_READINGS, 0) + cost
     cache[_READINGS] = readings
-    if readings > LOCAL_ACTION_UNITS:
+    if readings > _units_allowed(cache):
         raise _ReadingsExceeded()
     if not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
@@ -723,10 +735,12 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0))
-            # What a caller hands the action is worked on again at each reading, so it is paid for too.
-            worked = sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
-            cache[_READINGS] = cache.get(_READINGS, 0) + worked // _BYTES_PER_UNIT
-            if cache[_READINGS] > LOCAL_ACTION_UNITS:
+            # What a caller hands the action (the text its inputs add) is worked on again at each reading,
+            # so it is paid for too; the action's own text is in the size of its files.
+            added = (sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
+                     - sum(_text_size(merged.get(name)) for name in _COMMAND_FIELDS))
+            cache[_READINGS] = cache.get(_READINGS, 0) + max(0, added) // _BYTES_PER_UNIT
+            if cache[_READINGS] > _units_allowed(cache):
                 raise _ReadingsExceeded()
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
@@ -824,6 +838,7 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
                                "the file was checked on its own, so its repository's actions were not read"))
                 continue
             where = f"{workflow.path}: job '{wf_mod.one_line(job.id, 60)}' uses the local action {shown}, and"
+            cache[_USES] = cache.get(_USES, 0) + 1
             try:
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
                                                  given_env=step.env)
@@ -835,10 +850,12 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: list, co
                 if not cache.get(_EXCEEDED):
                     cache[_EXCEEDED] = True
                     errors.append(f"{where} reading the check's local actions would cost more than the "
-                                  f"{LOCAL_ACTION_UNITS} units one check spends (one for each reading, each step read "
-                                  "and each 200 bytes; an action is read once for each set of inputs and environment "
-                                  "it is given), so the checker stopped reading them and cannot tell whether an agent "
-                                  "runs in them")
+                                  f"{_units_allowed(cache)} units the check spends on them ({LOCAL_ACTION_UNITS}, and "
+                                  f"{LOCAL_ACTION_UNITS_PER_USE} for each step that uses one; a reading costs one, one "
+                                  "for each step read and one for each 200 bytes of its files or of text its caller "
+                                  "hands it, and an action is read once for each set of inputs and environment it is "
+                                  "given), so the checker stopped reading them and cannot tell whether an agent runs "
+                                  "in them")
                 continue
             except (RecursionError, MemoryError):
                 errors.append(f"{where} it is too deeply nested or too large to read, so the checker cannot tell "

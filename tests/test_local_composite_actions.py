@@ -332,7 +332,7 @@ class ManyUsesCostOneReadingTest(unittest.TestCase):
         with TempDir() as tmp:
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertEqual(len(result.errors), 1, result.errors)
-            self.assertIn("more than the 30000 units one check spends", result.errors[0])
+            self.assertIn("units the check spends on them", result.errors[0])
 
 
 class TheReviewersWaysPastTest(unittest.TestCase):
@@ -553,7 +553,7 @@ class TheReviewersThirdPassTest(unittest.TestCase):
             started = time.monotonic()
             result = check(tmp, job_using("./.github/actions/a0"), files)
             self.assertLess(time.monotonic() - started, 5)
-            self.assertTrue(any("units one check spends" in e for e in result.errors), result.errors)
+            self.assertTrue(any("units the check spends on them" in e for e in result.errors), result.errors)
 
 
 class TheReviewersFourthPassTest(unittest.TestCase):
@@ -616,6 +616,40 @@ class TheReviewersFifthPassTest(unittest.TestCase):
         text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
         with TempDir() as tmp:
             self.assertEqual(agent_rules(check(tmp, text, {f"{ACTION_DIR}/action.yml": body})), AGENT_RULES)
+
+
+class TheReviewersSixthPassTest(unittest.TestCase):
+    """What the sixth review pass of this slice found (2026-11-18)."""
+
+    def test_combinations_format_did_not_make_are_named(self):
+        second = " || ".join(f"'w{n}'" for n in range(16))
+        body = composite(f"    - run: ${{{{ format('{{0}} -p fix', false || 0 || 0.0 || inputs.tool, {second}) }}}}\n"
+                         "      shell: bash\n")
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
+        with TempDir() as tmp:
+            result = check(tmp, text, {f"{ACTION_DIR}/action.yml": body})
+            self.assertTrue(agent_rules(result) == AGENT_RULES
+                            or any("more than 16 texts" in n for n in result.notes), result.notes)
+
+    def test_a_large_repository_with_realistic_actions_passes(self):
+        def padded(steps, name):
+            body = "".join(f"    - name: {name} step {n}\n      run: echo \"$KEY\" {'x' * 600}\n      shell: bash\n"
+                           f"      env:\n        KEY: ${{{{ inputs.key }}}}\n" for n in range(steps))
+            return f"name: {name}\ninputs:\n  key:\n    default: ''\nruns:\n  using: composite\n  steps:\n" + body
+        setup = padded(10, "setup") + "".join(
+            f"    - uses: ./.github/actions/{inner}\n      with:\n        key: ${{{{ inputs.key }}}}\n"
+            for inner in ("cache", "tools"))
+        files = {".github/actions/setup/action.yml": setup,
+                 ".github/actions/cache/action.yml": padded(4, "cache"),
+                 ".github/actions/tools/action.yml": padded(4, "tools")}
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n    steps:\n"
+                       f"      - uses: ./.github/actions/setup\n        with: {{key: pkg-{n}}}\n" for n in range(400))
+        import time
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, "on: push\njobs:\n" + jobs, files)
+            self.assertLess(time.monotonic() - started, 30)
+            self.assertEqual([e for e in result.errors if "units" in e], [])
 
 
 def json_quoted(text):
