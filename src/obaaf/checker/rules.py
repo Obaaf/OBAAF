@@ -158,7 +158,8 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
 
 
 # How many entries of what callers pass a secrets finding names in full (flagship slice 2d.4b1): up to
-# PASSED_NAMED (and 1,000 characters), every one; beyond that, the first PASSED_SHOWN and a digest of all.
+# PASSED_NAMED (and 1,000 characters), every one; beyond that, at most the first PASSED_SHOWN that fit in
+# 1,000 characters, and a digest of all.
 PASSED_NAMED = 5
 PASSED_SHOWN = 3
 
@@ -3548,7 +3549,8 @@ class WorkflowRules:
                     if sum(len(e) for e in named) + len(entry) > 1000:
                         break
                     named.append(entry)
-                rest = f"{len(passed) - len(named)} more, {len(passed)} in all, by digest sha256:{digest}"
+                rest = (f"{len(passed) - len(named)} more, {len(passed)} in all, by digest sha256:{digest}" if named
+                        else f"{len(passed)} entries, by digest sha256:{digest}")
                 memo[asked_for] = Fact([*named, f"sha256:{digest} ({len(passed)} entries)"],
                                        f" (from the jobs that call its workflow: {'; '.join([*named, rest])})")
         found = memo[asked_for]

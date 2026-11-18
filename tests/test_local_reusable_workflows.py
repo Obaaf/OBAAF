@@ -200,12 +200,13 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
             spent = time.monotonic() - start
         last = [n for n in result.notes if n.startswith(".github/workflows/w00001.yml")]
         self.assertEqual(len(last), 1)
-        self.assertIn(f"and {count - 1 - 10} more", last[0])
+        self.assertTrue(last[0].endswith(checker.wf_mod.OTHER_EVENT))
         self.assertLess(spent, 30)
 
     def test_a_long_chain_behind_a_cycle_is_quick(self):
-        # From the second review: a chain behind a self-call was worked out again for each event.
-        count = 300
+        # From the second review: a chain behind a self-call was worked out again for each event (30 s for
+        # 1,200 files before the fix, about 1.5 s after).
+        count = 1200
         files = {".github/workflows/a00000.yml": (
             "on: [workflow_call, pull_request_target]\npermissions: {}\njobs:\n"
             "  self:\n    uses: ./.github/workflows/a00000.yml\n  next:\n    uses: ./.github/workflows/w00001.yml\n")}
@@ -222,7 +223,19 @@ class ACalledJobGetsItsCallersEventsTest(unittest.TestCase):
             result = check(tmp, files)
             spent = time.monotonic() - start
         self.assertIn("OBAAF-GHA-002", rules_on(result, f".github/workflows/w{count - 1:05d}.yml"))
-        self.assertLess(spent, 30)
+        self.assertLess(spent, 15)
+
+    def test_an_event_github_does_not_document_is_passed_on_as_one(self):
+        # From the third review: each file of a chain inventing its own event made every file hold every
+        # name. A caller's undocumented events reach the called jobs as one stand-in, which no rule names.
+        files = {".github/workflows/a.yml": caller("[ev_one, ev_two, pull_request_target]"), CALLED: called()}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (found,) = [f for f in result.findings if f.rule == "OBAAF-GHA-002"]
+        self.assertEqual(found.facts["triggers"], ["pull_request_target"])
+        (note,) = [n for n in result.notes if "is called by" in n]
+        self.assertIn(checker.wf_mod.OTHER_EVENT, note)
+        self.assertNotIn("ev_one", note)
 
     def test_every_file_of_a_cycle_gets_every_event_that_reaches_it(self):
         # From the second review: an `if:` on a call inside the cycle kept an event from a file of it.
