@@ -145,6 +145,7 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    carried: ["the action Codium-ai/pr-agent"]
 
   - id: coderabbit
     name: CodeRabbit AI PR Reviewer
@@ -161,6 +162,7 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    carried: ["the action coderabbitai/ai-pr-reviewer"]
 
   - id: openhands
     name: OpenHands
@@ -189,6 +191,7 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    carried: ["the action All-Hands-AI/OpenHands"]
 
   - id: opencode
     name: OpenCode
@@ -249,7 +252,7 @@ agent_tools:
     install_urls:
       - 'aider\.chat/install\.(sh|ps1)\b'
     settings: []
-    carried: ["aider as a command", "the install scripts aider.chat/install.sh and .ps1"]
+    carried: ["the install scripts aider.chat/install.sh and .ps1"]
 
   - id: copilot-cli
     name: GitHub Copilot CLI
@@ -343,7 +346,8 @@ agent_tools:
     packages:
       npm: ["@continuedev/cli"]
     installs: {"@continuedev/cli": cn}
-    install_urls: []
+    install_urls:
+      - 'raw\.githubusercontent\.com/continuedev/continue/[^/\s]+/extensions/cli/scripts/install\.(sh|ps1)\b'
     settings: []
 
   - id: jules
@@ -433,7 +437,7 @@ agent_tools:
       npm: ["@qwen-code/qwen-code"]
     installs: {"@qwen-code/qwen-code": qwen}
     install_urls:
-      - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.sh\b'
+      - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.(sh|ps1)\b'
     settings: []
 
   - id: swe-agent

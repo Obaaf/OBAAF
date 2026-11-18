@@ -401,7 +401,10 @@ class ReviewFindingsTest(unittest.TestCase):
         urls = [re.compile(u, re.I) for u in catalog.load().detection["agent_install_urls"]]
         for line in ("curl -fsSL https://kilo.ai/cli/install | bash", "curl -fsSL https://gh.io/copilot-install | bash",
                      "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/"
-                     "install-qwen-standalone.sh | bash"):
+                     "install-qwen-standalone.sh | bash",
+                     "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex",
+                     "curl -fsSL https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.sh"
+                     " | bash"):
             self.assertTrue(any(rx.search(line) for rx in urls), line)
         result = check(job_with("      - run: pr-agent --issue_url https://github.com/o/r/issues/1 similar_issue\n"))
         self.assertEqual(agents_of(result), [["pr-agent"]])
