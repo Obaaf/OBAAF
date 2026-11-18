@@ -157,6 +157,13 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
     return template.format(**shown), facts
 
 
+# How many entries of what callers pass a secrets finding names in full (flagship slice 2d.4b1): up to
+# PASSED_NAMED (and 1,000 characters), every one; beyond that, at most the first PASSED_SHOWN that fit in
+# 1,000 characters, and a digest of all.
+PASSED_NAMED = 5
+PASSED_SHOWN = 3
+
+
 def _truthy(value) -> bool:
     return as_text(value).strip().lower() in ("true", "1", "yes")
 
@@ -395,22 +402,23 @@ class WorkflowRules:
         # name with an expression in it can be one GitHub creates on first use, with no protection
         # rules, or one the event's author picks; a name that is not text cannot be checked at all.
         reviewed = job.environment_reading[0] == "literal"
+        passed = self._passed_fact(job, names)
         if privileged and reviewed:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and can be started by {triggers}. It references environment "
-                     "'{environment}'; confirm that environment requires reviewers.",
-                     job, severity="medium", kind="privileged-environment", secrets=secrets,
+                     "Job '{job}' receives {secrets}{passed} and can be started by {triggers}. It references "
+                     "environment '{environment}'; confirm that environment requires reviewers.",
+                     job, severity="medium", kind="privileged-environment", secrets=secrets, passed=passed,
                      triggers=sorted(privileged), environment=job.environment)
         elif privileged:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets}{environment} and can be started by {triggers}.",
-                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged),
-                     environment=self._environment_fact(job))
+                     "Job '{job}' receives {secrets}{passed}{environment} and can be started by {triggers}.",
+                     job, severity="high", kind="privileged", secrets=secrets, passed=passed,
+                     triggers=sorted(privileged), environment=self._environment_fact(job))
         elif triggers & PR_TRIGGERS:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets}{environment} and runs on pull requests. Forks get no secrets, "
-                     "but branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
-                     secrets=secrets, environment=self._environment_fact(job))
+                     "Job '{job}' receives {secrets}{passed}{environment} and runs on pull requests. Forks get no "
+                     "secrets, but branches pushed by anyone with write access do.", job, severity="low",
+                     kind="pull-request", secrets=secrets, passed=passed, environment=self._environment_fact(job))
 
     # -------------------------------------------------------------- GHA-024
     def protected_secrets(self, job: Job) -> None:
@@ -1127,8 +1135,9 @@ class WorkflowRules:
             # Where each key given to OBAAF's egress action goes is the fifth control's detail (2c.7): a model
             # key under model-keys is out of the command's reach, one passed in env is not.
             egress = self._egress(job)[0]
-            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{environment}.", job,
-                     kind="secrets", secrets=Fact(sorted(names), shown), environment=self._environment_fact(job),
+            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{passed}{environment}.", job,
+                     kind="secrets", secrets=Fact(sorted(names), shown), passed=self._passed_fact(job, names),
+                     environment=self._environment_fact(job),
                      controls=[*self._secret_controls(job, names), self._input_control(job), egress,
                                self._key_control(job)])
         elif job.environment:
@@ -3481,8 +3490,9 @@ class WorkflowRules:
         environment = self._environment_fact(job)
         if keys:
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' loads signing material from secret(s): {secrets}{environment}.", job,
-                     severity=severity, kind="secrets", secrets=keys, environment=environment)
+                     "Job '{job}' loads signing material from secret(s): {secrets}{passed}{environment}.", job,
+                     severity=severity, kind="secrets", secrets=keys, passed=self._passed_fact(job, keys),
+                     environment=environment)
         # A job that can read every secret (a computed name, toJSON(secrets), secrets: inherit) can read
         # any signing key the repository or the job's environment holds; which secrets those are is
         # not in the workflow, so the checker cannot tell that none is one.
@@ -3491,9 +3501,9 @@ class WorkflowRules:
             shown = " and ".join("secrets: inherit" if n == "*inherit" else "a reference that is not one literal name"
                                  for n in every)
             self.add("OBAAF-GHA-018", job.line,
-                     "Job '{job}' can read every secret ({how}){environment}, so any signing key stored for it "
-                     "is available to what it runs.", job, severity=severity, kind="any-secret",
-                     how=Fact(every, shown), environment=environment)
+                     "Job '{job}' can read every secret ({how}){passed}{environment}, so any signing key stored "
+                     "for it is available to what it runs.", job, severity=severity, kind="any-secret",
+                     how=Fact(every, shown), passed=self._passed_fact(job, every), environment=environment)
         commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
         actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
@@ -3511,6 +3521,40 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")
+
+    @staticmethod
+    def _passed_fact(job: Job, names) -> Fact | Note:
+        """What the jobs of this repository that call the job's workflow pass for the secrets it reads,
+        as part of a finding about those secrets (flagship slice 2d.4b1): the called job reads a
+        parameter (`secrets.MODEL_KEY`), and which secret that is depends on the caller, so an
+        acceptance written for one mapping must not cover another. Nothing for a workflow no job of the
+        repository calls, so such a finding is as before."""
+        memo = job.workflow.__dict__.setdefault("_passed_facts", {})
+        asked_for = frozenset(names)
+        if asked_for not in memo:
+            passed = job.passed_secrets(names)
+            if not passed:
+                memo[asked_for] = Note("")
+            elif len(passed) <= PASSED_NAMED and sum(len(entry) for entry in passed) <= 1000:
+                memo[asked_for] = Fact(passed, f" (from the jobs that call its workflow: {'; '.join(passed)})")
+            else:
+                # The finding grows with what each caller passes; what identifies it must not (the review
+                # of slice 2d.4b1 made a 290 KB repository print 249 MB). The first few entries are named,
+                # and every one is in the digest, so a change to any changes the finding.
+                digest = hashlib.sha256("\n".join(passed).encode("utf-8", "surrogatepass")).hexdigest()
+                # Entries are named while they fit in the budget, at most PASSED_SHOWN of them; an entry is
+                # itself bounded (a long list of secrets in one value is its digest).
+                named: list = []
+                for entry in passed[:PASSED_SHOWN]:
+                    if sum(len(e) for e in named) + len(entry) > 1000:
+                        break
+                    named.append(entry)
+                rest = (f"{len(passed) - len(named)} more, {len(passed)} in all, by digest sha256:{digest}" if named
+                        else f"{len(passed)} entries, by digest sha256:{digest}")
+                memo[asked_for] = Fact([*named, f"sha256:{digest} ({len(passed)} entries)"],
+                                       f" (from the jobs that call its workflow: {'; '.join([*named, rest])})")
+        found = memo[asked_for]
+        return Fact(list(found.value), found.shown) if isinstance(found, Fact) else found
 
     @staticmethod
     def _environment_fact(job: Job) -> Fact | Note:

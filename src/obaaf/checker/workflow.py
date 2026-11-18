@@ -40,6 +40,22 @@ RELEASE_TRIGGERS = {"push", "release", "workflow_dispatch", "workflow_call", "sc
 # A workflow_run job whose `if:` admits only runs started by these events (only people with write
 # access can cause them) is not outsider-triggerable. It is listed under this name instead.
 TRUSTED_WORKFLOW_RUN = "workflow_run (after push, release, dispatch or schedule)"
+# The events GitHub's page "Events that trigger workflows" names (as known to flagship slice 2d.4b1; the
+# page was not read again in that slice), every event a rule names (a test holds them to it:
+# `commit_comment`, which OBAAF-GHA-010 reads as an outsider's, may not be on the page), and the stand-in
+# above. A caller's event outside them is
+# passed on to the workflows it calls as OTHER_EVENT, which no rule names, as no rule names the event
+# itself, so a chain of files that each invent an event cannot make every file hold every name (the
+# third review of the slice: 4,800 such files took 1.1 GB).
+GITHUB_EVENTS = frozenset({
+    "branch_protection_rule", "check_run", "check_suite", "commit_comment", "create", "delete", "deployment",
+    "deployment_status", "discussion", "discussion_comment", "fork", "gollum", "image_version",
+    "issue_comment", "issues", "label", "merge_group", "milestone", "page_build", "project", "project_card",
+    "project_column", "public", "pull_request", "pull_request_review", "pull_request_review_comment",
+    "pull_request_target", "push", "registry_package", "release", "repository_dispatch", "schedule",
+    "status", "watch", "workflow_call", "workflow_dispatch", "workflow_run", TRUSTED_WORKFLOW_RUN,
+})
+OTHER_EVENT = "an event GitHub does not document"
 _TRUSTED_RUN_EVENTS = {"push", "release", "workflow_dispatch", "schedule"}
 
 PERMISSION_SCOPES = {
@@ -2263,7 +2279,9 @@ class Job:
         return set(known[self.id])
 
     def _triggers(self) -> set[str]:
-        events = set(self.workflow.triggers)
+        # A called workflow's jobs run on whatever starts a job that calls it: `workflow_call` stands for a
+        # caller the checker cannot see (another repository's), the callers' events for those it can.
+        events = set(self.workflow.triggers) | set(self.workflow.caller_events)
         cond = self.raw.get("if")
         if isinstance(cond, str):
             events = _narrow(events, cond)
@@ -2296,6 +2314,77 @@ class Job:
                 names.add("*inherit")      # the only string GitHub accepts here is `inherit`
             self._secret_names = frozenset(names)
         return set(self._secret_names)
+
+    def passed_secrets(self, names) -> list[str]:
+        """What the jobs of this repository that call the job's workflow pass for the secrets it reads
+        (flagship slice 2d.4b1): a called workflow's `secrets.MODEL_KEY` is whatever the caller maps onto
+        MODEL_KEY, so the secret that reaches the job is named here, with where it is passed. A caller
+        that is itself a called workflow passes on what its own callers give it, so the chain is
+        followed to its first caller, each workflow once for each name. Empty for a workflow no job of
+        the repository calls. Names are compared as GitHub compares them, in any letter case; a job that
+        reads every secret (`toJSON(secrets)`) reads every one passed. A key with space round it is read
+        without it, and a key that is not text (`null:`, `true:`, a number) is taken for every name the
+        job reads, since how GitHub spells it is not established: the wider readings. Each caller's
+        mapping is indexed by name once, and each of its entries worked out once, so a walk costs what it
+        visits (the review of slice 2d.4b1 found walks that went through every key again for each name).
+        A finding keeps only its bounded fact (`_passed_fact` in the rules), never the whole list."""
+        return self._passed_secrets(frozenset(names))
+
+    def _passed_secrets(self, names) -> list[str]:
+        out: set[str] = set()
+        # Per workflow: the names asked for so far, and whether every secret is.
+        asked: dict[int, tuple[set, bool]] = {}
+        todo = [(self.workflow, {n.upper() for n in names if not n.startswith("*")},
+                 any(n.startswith("*") for n in names))]
+        while todo:
+            workflow, wanted, every = todo.pop()
+            known, known_every = asked.get(id(workflow), (set(), False))
+            wanted = set() if known_every else wanted - known
+            every = every and not known_every
+            if not wanted and not every:
+                continue
+            asked[id(workflow)] = (known | wanted, known_every or every)
+            for call in workflow.callers:
+                where = f"{bounded(one_line(call.path))} job '{bounded(one_line(call.job))}'"
+                passed = call.secrets
+                if isinstance(passed, str):
+                    if passed.strip():
+                        # `inherit` is the only text GitHub takes here; anything else is read as it, the wider way.
+                        out.add(f"{where} passes every secret it can read (secrets: inherit)")
+                        todo.append((call.workflow, wanted, every))
+                    continue
+                if not isinstance(passed, dict):
+                    if passed is not None:
+                        out.add(f"{where} passes secrets written as {one_line(value_identity(passed))}, which "
+                                "the checker cannot read, so any secret it can read")
+                        todo.append((call.workflow, set(), True))
+                    continue
+                named, odd = call.by_name()
+                pairs = [pair for found in named.values() for pair in found] if every else \
+                    [pair for name in wanted for pair in named.get(name, [])]
+                for key, value in pairs + odd:
+                    marker = (id(key), id(value)) if not isinstance(key, str) else key
+                    cached = call._entries.get(marker)
+                    if cached is None:
+                        refs: set[str] = set()
+                        for body in expressions(value):
+                            refs |= expr_mod.secret_refs(body)
+                        if "*" in refs:
+                            source = "a secret it computes, so any secret it can read"
+                        elif refs:
+                            source = bounded(", ".join(sorted({r.upper() for r in refs})))
+                        else:
+                            source = one_line(value_identity(value))
+                        shown = bounded(one_line(key.strip().upper())) if isinstance(key, str) else \
+                            f"{one_line(value_identity(key))} (a key that is not text)"
+                        cached = (f"{where} passes {shown} as {source}", {r.upper() for r in refs if r != "*"},
+                                  "*" in refs)
+                        call._entries[marker] = cached
+                    entry, upstream, computed = cached
+                    out.add(entry)
+                    if upstream or computed:
+                        todo.append((call.workflow, upstream, computed))
+        return sorted(out)
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
@@ -2445,6 +2534,33 @@ def upload_readings(text: str) -> list[str]:
     return [text, joined, unquoted]
 
 
+@dataclass(frozen=True)
+class Call:
+    """A job of the repository that calls a workflow of the same repository (flagship slice 2d.4b1)."""
+    path: str          # the calling workflow's file
+    job: str           # the calling job's id
+    line: int
+    secrets: Any       # what the calling job's `secrets` holds as written: a mapping, `inherit`, or None
+    workflow: Any = field(default=None, compare=False, repr=False)   # the calling workflow
+    # What `secrets` passes, indexed once by name (upper case, without space round it), the keys that are
+    # not text apart; and each entry once worked out. Neither is part of what the call is.
+    _index: dict = field(default_factory=dict, compare=False, repr=False)
+    _entries: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def by_name(self) -> tuple[dict, list]:
+        if "index" not in self._index:
+            named: dict = {}
+            odd: list = []
+            if isinstance(self.secrets, dict):
+                for key, value in self.secrets.items():
+                    if isinstance(key, str):
+                        named.setdefault(key.strip().upper(), []).append((key, value))
+                    else:
+                        odd.append((key, value))
+            self._index["index"] = (named, odd)
+        return self._index["index"]
+
+
 @dataclass
 class Workflow:
     path: str
@@ -2455,6 +2571,22 @@ class Workflow:
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list = field(default_factory=list)  # IdleDeclaration: declarations in the file that do nothing
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
+    # Flagship slice 2d.4b1: the jobs of the same repository that call this workflow (`uses:
+    # ./.github/workflows/...`), and the events that can start them, which can start this workflow's
+    # jobs too. Set by the checker once every file is read; empty for a file read on its own.
+    callers: list = field(default_factory=list)          # Call
+    caller_events: frozenset = frozenset()
+
+    def give_caller_events(self, events) -> bool:
+        """Add events that can start a job calling this workflow; True if any was new. Forgets every
+        job's worked-out triggers, which those events change. An event GitHub does not document is
+        added as OTHER_EVENT."""
+        merged = self.caller_events | frozenset(e if e in GITHUB_EVENTS else OTHER_EVENT for e in events)
+        if merged == self.caller_events:
+            return False
+        self.caller_events = merged
+        self.__dict__.pop("_job_triggers", None)
+        return True
 
     @property
     def has_merge_key(self) -> bool:

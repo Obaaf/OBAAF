@@ -18,6 +18,7 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
@@ -295,6 +296,159 @@ def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
         if folder not in out:
             out.append(folder)
     return out, None
+
+
+def _call_candidates(uses: str) -> list[str]:
+    """The workflow files a local `uses` of a job may name, relative to the repository: the path as
+    written, without what follows an `@`, and with backslashes as slashes, each normalised. How GitHub
+    reads the last two is not established, so each is a candidate; one that leads outside the
+    repository, or a path with an expression, is dropped on its own (a call names a file of
+    `.github/workflows`, which can hold no expression)."""
+    path = uses.strip()[2:]
+    if "${{" in path:
+        return []
+    candidates = [path]
+    if "@" in path:
+        candidates.append(path.split("@", 1)[0])
+    candidates += [c.replace("\\", "/") for c in list(candidates) if "\\" in c]
+    out = []
+    for candidate in candidates:
+        found = posixpath.normpath(candidate.strip("/") or ".")
+        if found != ".." and not found.startswith("../") and found not in out:
+            out.append(found)
+    return out
+
+
+def _give_callers(read: list) -> None:
+    """Give each workflow that a job of the repository calls by its path (`uses:
+    ./.github/workflows/x.yml`) those calls, and the events that can start each calling job (flagship
+    slice 2d.4b1). `read` is (the file's path in the repository as found, workflow) for every workflow
+    file read without error.
+
+    A called workflow's jobs run on whatever starts the job that calls it, and `github.event` there is
+    the caller's event, so without this a `pull_request_target` workflow could check out a pull
+    request's head through a local workflow it calls and no rule saw it. Workflows are taken callers
+    first, so a chain carries the first caller's events to the last in one pass; the files of a cycle,
+    which GitHub refuses, are each given every event that reaches any of them: the wider reading.
+
+    A path is matched as git stores it, letter case included, by the path the file was found at (a link
+    is matched by its own name, not its target's). A workflow without `on: workflow_call` is given
+    nothing: GitHub refuses to call it, so the call never runs its jobs."""
+    by_path: dict[str, list] = {}
+    for found, workflow in read:
+        by_path.setdefault(found, [])
+        if all(workflow is not other for other in by_path[found]):
+            by_path[found].append(workflow)
+    calls: dict[int, list] = {}           # id of the calling workflow -> [(job, targets)]
+    for _, workflow in read:
+        for job in workflow.jobs.values():
+            uses = job.raw.get("uses")
+            if not _is_local_like(uses):
+                continue
+            targets: list = []
+            for candidate in _call_candidates(uses):
+                for target in by_path.get(candidate, []):
+                    if target.callable and all(target is not other for other in targets):
+                        targets.append(target)
+            for target in targets:
+                target.callers.append(wf_mod.Call(workflow.path, job.id, job.line, job.raw.get("secrets"), workflow))
+            if targets:
+                calls.setdefault(id(workflow), []).append((job, targets))
+    # The calls, as a graph of workflows, taken apart into groups that call each other (strongly
+    # connected components, found without recursion), callers' groups first. A group of one that does
+    # not call itself is a plain workflow; any other group is a cycle, which GitHub refuses, and each of
+    # its files is given every event that reaches any of them, the wider reading, in one step, so a
+    # chain behind a cycle is still one pass (the review of slice 2d.4b1 found a queue that was cubic).
+    nodes = list(dict.fromkeys(id(w) for _, w in read))
+    workflows = {id(workflow): workflow for _, workflow in read}
+    edges = {key: list(dict.fromkeys(id(t) for _, targets in calls.get(key, []) for t in targets)) for key in nodes}
+    for group in _strongly_connected(nodes, edges):
+        members = set(group)
+        if len(group) > 1 or group[0] in edges[group[0]]:
+            union: set = set()
+            for key in group:
+                union |= set(workflows[key].triggers) | workflows[key].caller_events
+            for key in group:
+                if workflows[key].callable:
+                    workflows[key].give_caller_events(union)
+        for key in group:
+            for job, targets in calls.get(key, []):
+                events = job.triggers()
+                for target in targets:
+                    if id(target) not in members:
+                        target.give_caller_events(events)
+
+
+def _strongly_connected(nodes: list, edges: dict) -> list[list]:
+    """The strongly connected components of a graph (Tarjan's algorithm, without recursion), each a
+    list of nodes, in topological order: a component comes before every component it has an edge to."""
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    found: list[list] = []
+    counter = 0
+    for start in nodes:
+        if start in index:
+            continue
+        index[start] = low[start] = counter
+        counter += 1
+        stack.append(start)
+        on_stack.add(start)
+        work = [(start, iter(edges.get(start, ())))]
+        while work:
+            node, it = work[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in index:
+                    index[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, iter(edges.get(nxt, ()))))
+                    advanced = True
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], index[nxt])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                group = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    group.append(member)
+                    if member == node:
+                        break
+                found.append(group)
+    found.reverse()       # Tarjan finds a component after every component it reaches
+    return found
+
+
+def _caller_notes(workflows: list) -> list[str]:
+    """A note for each called workflow whose jobs the checker read with events its own `on` does not
+    name (flagship slice 2d.4b1), so a finding that says a file of `on: workflow_call` can be started
+    by `pull_request_target` says why. The first five callers and ten events are named, and the rest
+    counted."""
+    out = []
+    for workflow in workflows:
+        extra = sorted(workflow.caller_events - set(workflow.triggers))
+        if not workflow.callers or not extra:
+            continue
+        callers = sorted({f"{call.path} job '{call.job}'" for call in workflow.callers})
+        shown = ", ".join(wf_mod.one_line(c, 120) for c in callers[:5])
+        if len(callers) > 5:
+            shown += f" and {len(callers) - 5} more"
+        events = ", ".join(wf_mod.one_line(e, 60) for e in extra[:10])
+        if len(extra) > 10:
+            events += f" and {len(extra) - 10} more"
+        out.append(f"{wf_mod.one_line(workflow.path, 120)} is called by {shown}, so its jobs are also read as "
+                   f"started by what can start the calling jobs: {events}")
+    return out
 
 
 class _ActionFileError(ValueError):
@@ -1226,28 +1380,40 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     # The policy file of GitHub's native egress firewall is read from the repository, never for files
     # checked on their own, whose repository the checker does not know.
     firewall = egress_mod.read_firewall_policy(root) if is_repo else None
+    # Every file is read before any is checked, so that a workflow another one calls is checked with
+    # what its callers give it (flagship slice 2d.4b1).
+    read: list[tuple[Path, str, Any]] = []
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
         except ValueError:
             rel = path.as_posix()
-        rels.append(rel)
-        owned_paths.extend(_as_found(path, root))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            # A file the checker could not read is an error, never a traceback or a pass.
-            errors.append(f"{rel}: cannot be read: {exc}")
-            declared.unreadable(rel, path)
+            read.append((path, rel, exc))
             continue
         workflow = wf_mod.parse(rel, text)
+        if not workflow.error:
+            # The bytes, not the text: a byte that is not UTF-8 is replaced in the text, and two files
+            # that differ only there must not be one file to an acceptance.
+            workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        read.append((path, rel, workflow))
+    readable = [workflow for _, _, workflow in read if isinstance(workflow, wf_mod.Workflow) and not workflow.error]
+    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
+                   if any(workflow is other for other in readable)])
+    for path, rel, workflow in read:
+        rels.append(rel)
+        owned_paths.extend(_as_found(path, root))
+        if isinstance(workflow, OSError):
+            # A file the checker could not read is an error, never a traceback or a pass.
+            errors.append(f"{rel}: cannot be read: {workflow}")
+            declared.unreadable(rel, path)
+            continue
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
-        # The bytes, not the text: a byte that is not UTF-8 is replaced in the text, and two files
-        # that differ only there must not be one file to an acceptance.
-        workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
@@ -1317,7 +1483,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
     notes = (jenkins_notes + repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
-             + _local_action_notes(unread_actions))
+             + _local_action_notes(unread_actions) + _caller_notes(readable))
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -1639,16 +1805,25 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     unread_actions: list = []
     action_cache: dict = {}
     out = []
+    # Every file is read first, as `check` reads them, so that a called workflow's jobs are classified
+    # with the events its callers give them (flagship slice 2d.4b1).
+    read: list[tuple[Path, str, Any]] = []
     for path in files:
         rel = path.relative_to(root).as_posix()
-        seen.append(rel)
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            errors.append(f"{rel}: cannot be read: {exc}")
+            read.append((path, rel, exc))
+            continue
+        read.append((path, rel, wf_mod.parse(rel, text)))
+    _give_callers([(_as_found(path, root)[0], workflow) for path, _, workflow in read
+                   if isinstance(workflow, wf_mod.Workflow) and not workflow.error])
+    for path, rel, workflow in read:
+        seen.append(rel)
+        if isinstance(workflow, OSError):
+            errors.append(f"{rel}: cannot be read: {workflow}")
             declared.unreadable(rel, path)
             continue
-        workflow = wf_mod.parse(rel, text)
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
