@@ -356,8 +356,13 @@ def _give_callers(read: list) -> list:
                 # when it names this one, which the checker cannot tell offline; where this repository
                 # has a workflow at that path, a note says it was not read as this call's (slice 2d.4b3b).
                 named = _NAMED_CALL_RE.match(uses.strip()) if isinstance(uses, str) else None
-                if named and any(target.callable for target in by_path.get(posixpath.normpath(named.group(1)), [])):
-                    workflow.named_calls.append((job.id, uses.strip(), posixpath.normpath(named.group(1))))
+                if named:
+                    path = posixpath.normpath(named.group(1))
+                    found = [target for target in by_path.get(path, []) if target.callable]
+                    if found:
+                        workflow.named_calls.append((job.id, uses.strip(), path))
+                    for target in found:
+                        target.named_callers.append((workflow.path, job.id))
                 continue
             targets: list = []
             for candidate in _call_candidates(uses):
@@ -2713,7 +2718,11 @@ class _LaneDeclarations:
         when the job is in the lane it names anyway."""
         for found in workflow.lane_problems:
             job = workflow.jobs.get(found.job) if found.job else None
-            if job is not None and found.lane in wf_mod.LANE_ORDER and job.in_lane(found.lane):
+            # A release lane a call gave the job (slice 2d.4b3b) holds it to fewer rules than a declared one,
+            # so a declaration of it written where it is not read still loses rules (the review found it).
+            given = (found.lane == "release" and job is not None and job.call_effects is not None
+                     and job.call_effects.lane_given)
+            if job is not None and found.lane in wf_mod.LANE_ORDER and job.in_lane(found.lane) and not given:
                 found = replace(found, redundant=True)
             self.problems.append(found)
         jobs = workflow.raw.get("jobs")

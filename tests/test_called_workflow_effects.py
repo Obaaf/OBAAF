@@ -84,8 +84,8 @@ class ACallThatPublishesMakesAReleaseJobTest(unittest.TestCase):
             result = check(tmp, files)
         lane, reason = shown[(CALLER, "release")]
         self.assertEqual(lane, "release")
-        self.assertEqual(reason, "calls .github/workflows/called.yml, whose job 'publish' uploads or publishes "
-                                 "artifacts")
+        self.assertEqual(reason, "calls .github/workflows/called.yml, whose job 'publish' is a release job "
+                                 "(uploads or publishes artifacts)")
         # The called job carries the release rules with the caller's events (slice 2d.4b1); the calling job
         # has no steps and cannot name an environment, so they are not given to it again.
         (release,) = found(result, "OBAAF-GHA-015", CALLED)
@@ -109,16 +109,20 @@ class ACallThatPublishesMakesAReleaseJobTest(unittest.TestCase):
         # Nothing about environments for a job that cannot have one.
         self.assertEqual(found(result, "OBAAF-GHA-014", CALLER), [])
 
-    def test_what_the_calling_job_holds_is_read_as_before(self):
+    def test_what_the_calling_job_holds_is_read_as_before_and_said_as_known(self):
         # OBAAF-GHA-015 `capability` (a job untrusted input can start that holds what publishing needs) is
-        # what the calling job got before; reading the call must not drop it.
+        # what the calling job got before; reading the call must not drop it, and must not say the checker
+        # cannot tell whether it releases (the first review).
         files = {CALLER: caller(on="pull_request_target",
                                 secrets="    secrets:\n      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"),
                  CALLED: called(PUBLISH)}
         with TempDir() as tmp:
             result = check(tmp, files)
         (capability,) = found(result, "OBAAF-GHA-015", CALLER)
-        self.assertEqual(capability.kind, "capability")
+        self.assertEqual((capability.kind, capability.severity), ("capability-call", "medium"))
+        self.assertEqual(capability.facts["capabilities"], ["secret NPM_TOKEN"])
+        self.assertEqual(capability.facts["workflows"], [CALLED])
+        self.assertNotIn("cannot tell", capability.message)
 
     def test_a_call_that_does_not_publish_leaves_the_caller_where_it_was(self):
         files = {CALLER: caller(), CALLED: called(BUILD)}
@@ -147,7 +151,7 @@ class ACallThatPublishesMakesAReleaseJobTest(unittest.TestCase):
         lane, reason = shown[(CALLER, "release")]
         self.assertEqual(lane, "release")
         self.assertEqual(reason, "calls .github/workflows/middle.yml, where, in .github/workflows/called.yml, job "
-                                 "'publish' uploads or publishes artifacts")
+                                 "'publish' is a release job (uploads or publishes artifacts)")
         self.assertEqual(shown[(middle, "hop")][0], "release")
 
     def test_a_declared_lane_is_kept(self):
@@ -202,16 +206,40 @@ class ACalledCacheRestoreCountsForTheCallerTest(unittest.TestCase):
         self.assertEqual([(f.severity, f.kind) for f in found(result, "OBAAF-GHA-006", CALLER)],
                          [("low", "no-cache-mode")])
 
-    def test_a_release_by_the_call_with_a_restoring_build_job(self):
-        # The called workflow builds in one job, which restores a cache, and publishes in another.
-        steps = RESTORE + BUILD
-        more = "  publish:\n    needs: build\n    runs-on: ubuntu-latest\n    steps:\n" + PUBLISH
-        files = {CALLER: caller(), CALLED: called(steps, job="build", more=more)}
+    def test_a_release_by_the_call_is_read_as_the_same_jobs_written_in_one_workflow(self):
+        # The called workflow tests in one job, which restores a cache, and publishes in another, which
+        # needs it but downloads nothing from it. Written in one workflow that gives no OBAAF-GHA-006 for
+        # the test job's cache; through a call it must not either (the first review: a false finding at high).
+        more = "  publish:\n    needs: build\n    runs-on: ubuntu-latest\n    cache-mode: none\n    steps:\n" + PUBLISH
+        files = {CALLER: caller(), CALLED: called(RESTORE + BUILD, job="build", more=more)}
         with TempDir() as tmp:
             result = check(tmp, files)
-        (finding,) = found(result, "OBAAF-GHA-006", CALLER)
-        self.assertEqual((finding.severity, finding.kind), ("high", "called-restores"))
-        self.assertEqual(finding.facts["steps"], ["job 'build' of .github/workflows/called.yml, actions/cache"])
+        self.assertEqual(found(result, "OBAAF-GHA-006"), [])
+
+    def test_a_local_action_in_a_job_that_does_not_release_gives_the_caller_nothing(self):
+        action = "runs:\n  using: composite\n  steps:\n    - run: echo lint\n      shell: bash\n"
+        more = "  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/lint\n"
+        files = {CALLER: caller(), CALLED: called(PUBLISH, extra_job="    cache-mode: none\n", more=more),
+                 ".github/actions/lint/action.yml": action}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        self.assertEqual(found(result, "OBAAF-GHA-006"), [])
+
+    def test_what_the_jobs_the_caller_needs_build_reaches_the_called_release(self):
+        # The caller's `build` restores a cache and uploads an artifact; the calling job needs it, and the
+        # called job downloads that artifact and publishes. Written in one workflow that is
+        # `needed-job-restores`; through the call it is too (the first review: a way past).
+        own = ("on: push\npermissions: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n" + RESTORE
+               + BUILD + f"      - uses: actions/upload-artifact@{SHA}\n        with:\n          name: pkg\n"
+               "          path: dist\n  release:\n    needs: build\n    cache-mode: none\n"
+               "    uses: ./.github/workflows/called.yml\n")
+        steps = f"      - uses: actions/download-artifact@{SHA}\n        with:\n          name: pkg\n" + PUBLISH
+        files = {CALLER: own, CALLED: called(steps, extra_job="    cache-mode: none\n")}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER, job="release")
+        self.assertEqual((finding.severity, finding.kind), ("high", "needed-job-restores"))
+        self.assertEqual(finding.facts["jobs"], ["build"])
 
     def test_a_release_by_the_call_with_no_restore_gets_nothing_on_the_caller(self):
         files = {CALLER: caller(), CALLED: called(PUBLISH)}
@@ -393,6 +421,112 @@ class ReportedInTheSameOrderTest(unittest.TestCase):
         self.assertTrue(any(e.startswith(".github/workflows/a.yml") for e in result.errors))
         self.assertTrue(any(e.startswith(".github/workflows/b.yml") for e in result.errors))
         self.assertTrue(any(e.startswith(".github/workflows/c.yml") for e in result.errors))
+
+
+class FirstReviewTest(unittest.TestCase):
+    """What the first review of slice 2d.4b3b found, each a test."""
+
+    def test_a_stray_declaration_on_a_job_the_call_puts_in_the_release_lane_is_still_high(self):
+        # `with: {OBAAF_LANE: release}` is not read as a declaration. A release lane given by the call holds
+        # the job to fewer rules than a declared one, so the declaration is not redundant.
+        files = {CALLER: caller(extra="") + "    with:\n      OBAAF_LANE: release\n",
+                 CALLED: "on:\n  workflow_call:\n    inputs:\n      OBAAF_LANE: {type: string, required: false}\n"
+                         "jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" + PUBLISH}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-CFG-001")
+        self.assertEqual(finding.severity, "high")
+
+    def test_a_cache_mode_of_thousands_of_digits_is_no_traceback(self):
+        big = "0x" + "f" * 5000
+        for where in ("job", "workflow"):
+            body = ("on: push\n" + (f"cache-mode: {big}\n" if where == "workflow" else "")
+                    + "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                    + (f"    cache-mode: {big}\n" if where == "job" else "") + "    steps:\n" + BUILD)
+            with TempDir() as tmp:
+                result = check(tmp, {CALLER: body})
+            self.assertEqual(result.errors, [])
+            with TempDir() as tmp:
+                lanes(tmp, {CALLER: body})
+
+    def test_an_event_named_for_an_outside_caller_passes_a_needed_job(self):
+        body = ("on: workflow_call\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                + BUILD + "  b:\n    needs: a\n    if: github.event_name == 'pull_request_target'\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: make\n        env:\n"
+                "          TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLED: body})
+        (secret,) = found(result, "OBAAF-GHA-001", CALLED, job="b")
+        self.assertIn("pull_request_target", secret.facts["triggers"])
+
+    def test_two_paths_to_one_step_are_one_entry(self):
+        middle = ".github/workflows/middle.yml"
+        files = {CALLER: caller(uses="./.github/workflows/middle.yml"),
+                 middle: "on: workflow_call\njobs:\n  x:\n    uses: ./.github/workflows/called.yml\n"
+                         "  y:\n    uses: ./.github/workflows/called.yml\n",
+                 CALLED: called(RESTORE + BUILD, job="build"),
+                 CONFIG: "lanes:\n  .github/workflows/caller.yml#release: release\n"}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLER)
+        self.assertEqual(finding.facts["steps"], ["job 'build' of .github/workflows/called.yml, actions/cache"])
+
+    def test_a_lattice_of_calls_is_counted_by_its_steps(self):
+        files = {CONFIG: "lanes:\n  .github/workflows/l0.yml#top: release\n"}
+        depth = 30
+        for i in range(depth):
+            if i + 1 < depth:
+                nxt = f"./.github/workflows/l{i + 1}.yml"
+                jobs = f"  a:\n    uses: {nxt}\n  b:\n    uses: {nxt}\n"
+            else:
+                jobs = "  build:\n    runs-on: ubuntu-latest\n    steps:\n" + RESTORE
+            files[f".github/workflows/l{i}.yml"] = f"on: workflow_call\njobs:\n{jobs}"
+        files[".github/workflows/l0.yml"] = "on: push\njobs:\n  top:\n    uses: ./.github/workflows/l1.yml\n"
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", ".github/workflows/l0.yml")
+        self.assertEqual(finding.facts["steps"], [f"job 'build' of .github/workflows/l{depth - 1}.yml, actions/cache"])
+
+    def test_a_call_by_a_repositorys_name_leaves_the_callers_cache_mode_open(self):
+        files = {CALLER: caller(uses="acme/app/.github/workflows/called.yml@main")
+                 + "  other:\n    cache-mode: none\n    uses: ./.github/workflows/called.yml\n",
+                 CALLED: called(RESTORE + PUBLISH)}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", CALLED)
+        self.assertEqual((finding.state, finding.controls), ("new", []))
+
+    def test_a_job_declared_trusted_keeps_its_note_when_the_call_makes_it_a_release_job(self):
+        files = {CALLER: caller(on="pull_request_target"), CALLED: called(PUBLISH),
+                 CONFIG: "lanes:\n  .github/workflows/caller.yml#release: trusted\n"}
+        with TempDir() as tmp:
+            shown = lanes(tmp, files)
+        lane, reason = shown[(CALLER, "release")]
+        self.assertEqual(lane, "release")
+        self.assertIn("declared trusted, which cannot override what the job does", reason)
+
+    def test_a_declared_called_job_is_named_in_a_sentence(self):
+        files = {CALLER: caller(), CALLED: called(BUILD, job="build"),
+                 CONFIG: "lanes:\n  .github/workflows/called.yml#build: release\n"}
+        with TempDir() as tmp:
+            shown = lanes(tmp, files)
+        self.assertEqual(shown[(CALLER, "release")][1],
+                         "calls .github/workflows/called.yml, whose job 'build' is a release job (set in the "
+                         "checker configuration)")
+
+    def test_a_declared_release_job_in_a_called_workflow_has_its_callers_control(self):
+        # top (cache-mode: none) calls middle, whose job `hop` is declared release and calls a workflow whose
+        # job restores. `hop` gets `called-restores`, and, as for a called job's own, its callers forbid.
+        middle = ".github/workflows/middle.yml"
+        files = {CALLER: caller(extra="    cache-mode: none\n", uses="./.github/workflows/middle.yml"),
+                 middle: "on: workflow_call\njobs:\n  hop:\n    uses: ./.github/workflows/called.yml\n",
+                 CALLED: called(RESTORE + BUILD, job="build"),
+                 CONFIG: "lanes:\n  .github/workflows/middle.yml#hop: release\n"}
+        with TempDir() as tmp:
+            result = check(tmp, files)
+        (finding,) = found(result, "OBAAF-GHA-006", middle)
+        self.assertEqual((finding.kind, finding.state), ("called-restores", "cannot-tell"))
+        self.assertEqual(found(result, "OBAAF-GHA-006", CALLER), [])
 
 
 class CostTest(unittest.TestCase):

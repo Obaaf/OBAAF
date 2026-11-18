@@ -1931,6 +1931,9 @@ class Job:
     # checker once every file is read and classified.
     called: list = field(default_factory=list, repr=False, compare=False)
     call_effects: Any = field(default=None, repr=False, compare=False)
+    # Why the job was declared `trusted`, when that is all it was declared (set by `classify`), so that a
+    # lane a call gives it later carries the same note as a lane its own steps give it.
+    trusted_declared: str | None = field(default=None, repr=False, compare=False)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:
@@ -2089,7 +2092,8 @@ class Job:
     @property
     def cache_mode(self) -> str | None:
         value = self.raw.get("cache-mode", self.workflow.raw.get("cache-mode"))
-        return str(value) if value is not None else None
+        # `as_text`: a number of thousands of digits is refused by `str` (the review of slice 2d.4b3b).
+        return as_text(value) if value is not None else None
 
     @property
     def runs_on(self) -> list[str]:
@@ -2315,8 +2319,12 @@ class Job:
         # caller the checker cannot see (another repository's), the callers' events for those it can.
         events = set(self.workflow.triggers) | set(self.workflow.caller_events)
         cond = self.raw.get("if")
+        before = set(events)
         if isinstance(cond, str):
             events = _narrow(events, cond)
+        # Events the job's own `if:` names for a caller in another repository (flagship slice 2d.4b3b): such
+        # a caller runs a needed job too, whatever its event, wherever that job can run for one.
+        outside = events - before
         if runs_after_failure(cond) or self.workflow.needs_cycle():
             return events
         for name in self.needs:
@@ -2326,7 +2334,7 @@ class Job:
             allowed = dep.triggers()
             narrowed = set()
             for event in events:
-                if event in allowed:
+                if event in allowed or (event in outside and "workflow_call" in allowed):
                     narrowed.add(event)
                 elif event == "workflow_run" and TRUSTED_WORKFLOW_RUN in allowed:
                     narrowed.add(TRUSTED_WORKFLOW_RUN)
@@ -2673,6 +2681,8 @@ class Workflow:
     # this repository has a workflow that can be called: (job id, the `uses` as written, that path). Such a
     # call is not read as a call of this repository's file, and a note says so.
     named_calls: list = field(default_factory=list)
+    # And the other way: the jobs of this repository that call this workflow's path so (path, job id).
+    named_callers: list = field(default_factory=list)
 
     def give_caller_events(self, events) -> bool:
         """Add events that can start a job calling this workflow; True if any was new. Forgets every
@@ -3162,6 +3172,9 @@ def key_line(mapping, key, owner_line: int = 0) -> int:
 _UNSET = object()
 
 
+TRUSTED_NOTE = "declared trusted, which cannot override what the job does"
+
+
 def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: dict | None = None,
              aliases: tuple = ()) -> None:
     """Put each job in every lane it belongs to.
@@ -3224,7 +3237,8 @@ def classify(workflow: Workflow, overrides: dict | None = None, extra_agents: di
                 declared.setdefault(lane, why)
         if trusted_why and job.lanes and not declared:
             # `trusted` is all the job was declared, and what it does puts it in a lane anyway.
-            job.lane_notes.append("declared trusted, which cannot override what the job does")
+            job.lane_notes.append(TRUSTED_NOTE)
+        job.trusted_declared = trusted_why if not declared else None
         job.lanes.update(declared)
         job.settle_lane(trusted_why or "default")
         for found in _stray_declarations(workflow, job, {id(workflow.raw.get("env")), id(job.raw.get("env"))}):
