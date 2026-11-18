@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import itertools
 import os
 import posixpath
 import re
@@ -176,14 +177,19 @@ def _agent_via_script(job, root: Path, commands: list) -> str | None:
     return found
 
 
-def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
+def _script_with_agent(root: Path, run: str, commands: list, memo: dict | None = None) -> str | None:
     """The first repository script a `run` text calls in which an agent CLI is found, by its path
-    relative to `root`, or None. Only scripts readable under `root` are read."""
+    relative to `root`, or None. Only scripts readable under `root` are read; with `memo`, each script
+    is searched once (local actions read many times call the same scripts)."""
     root_r = root.resolve()
     for tok in _script_targets(run) + _copied_script_targets(run, root_r):
         try:
             path = (root / tok).resolve()
             if path != root_r and root_r not in path.parents:
+                continue
+            if memo is not None and ("script", str(path)) in memo:
+                if memo[("script", str(path))]:
+                    return tok
                 continue
             if not path.is_file():
                 continue
@@ -191,7 +197,10 @@ def _script_with_agent(root: Path, run: str, commands: list) -> str | None:
                 text = script.read(200_000)
         except (OSError, RuntimeError):
             continue
-        if any(rx.search(text) for rx in commands):
+        found = any(rx.search(text) for rx in commands)
+        if memo is not None:
+            memo[("script", str(path))] = found
+        if found:
             return tok
     return None
 
@@ -204,9 +213,10 @@ LOCAL_ACTION_BYTES = 1_000_000
 # How much of local actions one check reads, in units: a reading of an action costs one, one for each
 # of its steps and one for each 200 bytes of its files, and an action is read once for each set of
 # values of the inputs its expressions read and of the environment it is given, and once more for each
-# place a cycle or the depth cuts a reading short. Beyond it the check stops reading them and fails with an
-# error, so local actions that use each other many times over, with different inputs, can neither make
-# the check slow nor hide an agent in a job read after them.
+# place a cycle or the depth cuts a reading short; the text a caller hands it costs one more for each
+# 200 characters worked on. Beyond it the check stops reading them and fails with an error, so local
+# actions that use each other many times over, with different inputs, cannot make the check run long
+# or hide an agent in a job read after them.
 LOCAL_ACTION_UNITS = 30_000
 # The longest text a step of an action is read as once its inputs are put in; a longer one is read
 # as written, and named as not read.
@@ -456,21 +466,14 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
     if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
         args = [_token_values(arg, inputs, folder, depth + 1, env, cut) for arg in _split_top(toks[2:-1], ",")]
         if args and all(values for values in args):
-
-            def filled(template: str, choice: list) -> str:
-                for n, value in enumerate(choice):
-                    template = template.replace("{" + str(n) + "}", value)
-                return template
-
             out = []
-            if len(args[0]) > 4 or any(len(values) > 4 for values in args[1:]):
-                (cut if cut is not None else []).append(True)
-            for template in args[0][:4]:
-                first = [values[0] for values in args[1:]]
-                out.append(filled(template, first))
-                for n, values in enumerate(args[1:]):
-                    for other in values[1:4]:
-                        out.append(filled(template, first[:n] + [other] + first[n + 1:]))
+            for choice in itertools.product(*args):
+                if len(out) > _VALUE_LIMIT:
+                    break
+                template = choice[0]
+                for n, value in enumerate(choice[1:]):
+                    template = template.replace("{" + str(n) + "}", value)
+                out.append(template)
             return _capped(out, cut if cut is not None else [])
     if _top_level_comparison(toks) or (head[0] == "id" and head[1].lower() in _BOOLEAN_FUNCTIONS
                                        and _wraps(toks[1:])):
@@ -585,7 +588,8 @@ def _expand_variables(run: str, env: dict, problems: list) -> str:
         return run
 
 
-def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: list) -> str | None:
+def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: list,
+                          memo: dict | None = None) -> str | None:
     """A script that `run` names relative to the action's own folder, or a folder under it, when the
     step's `working-directory` is there or its script changes to it (`cd "$GITHUB_ACTION_PATH"`, with
     `cd`'s options or `pushd`), in which an agent CLI is found."""
@@ -608,7 +612,7 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
             continue
         if root_r not in path.parents:
             continue
-        tok = _script_with_agent(root / where, run, commands)
+        tok = _script_with_agent(root / where, run, commands, memo)
         if tok:
             return f"{where}/{tok}"
     return None
@@ -710,7 +714,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             # gives it (`T: ${{ inputs.tool }}`).
             step_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
             if step_env:
-                step_env = _put_inputs(step_env, inputs, folder, problems, done, step_env)
+                step_env = _put_inputs(step_env, inputs, folder, problems, {}, step_env)
             for key_name, value in merged.items():
                 if key_name == "env":
                     put[key_name] = step_env
@@ -719,6 +723,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0))
+            # What a caller hands the action is worked on again at each reading, so it is paid for too.
+            worked = sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
+            cache[_READINGS] = cache.get(_READINGS, 0) + worked // _BYTES_PER_UNIT
+            if cache[_READINGS] > LOCAL_ACTION_UNITS:
+                raise _ReadingsExceeded()
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
             if out.agent is None:
@@ -733,8 +742,8 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
                 expand_problems: list = []
                 run = _ACTION_PATH_VAR_RE.sub(f"./{folder}", _expand_variables(step.run, step.env, expand_problems))
                 out.unread.extend((shown, f"step {number}: {problem}") for problem in expand_problems)
-                tok = _script_with_agent(root, run, commands) or _action_folder_script(
-                    root, folder, run, step.raw.get("working-directory"), commands)
+                tok = _script_with_agent(root, run, commands, cache) or _action_folder_script(
+                    root, folder, run, step.raw.get("working-directory"), commands, cache)
                 if tok:
                     out.agent = f"runs an agent in the script {tok}, from {where}"
             raw_uses = step_raw.get("uses")
@@ -753,6 +762,15 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
 
 # A reading costs one unit, one for each step it reads and one for each this many bytes of its files.
 _BYTES_PER_UNIT = 200
+
+
+def _text_size(value) -> int:
+    """The characters of the text a step's field holds: a string, or the strings of a mapping's values."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(len(item) for item in value.values() if isinstance(item, str))
+    return 0
 
 
 def _action_size(root: Path, folder: str) -> int:

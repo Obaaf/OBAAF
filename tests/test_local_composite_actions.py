@@ -587,6 +587,37 @@ class TheReviewersFourthPassTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 5)
 
 
+class TheReviewersFifthPassTest(unittest.TestCase):
+    """What the fifth review pass of this slice found (2026-11-18)."""
+
+    def test_format_combines_the_values_of_its_arguments(self):
+        body = composite("    - run: ${{ format('{0} {1}', inputs.tool || 'claude', inputs.flag || '-p') }} fix\n"
+                         "      shell: bash\n")
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})),
+                             AGENT_RULES)
+
+    def test_text_a_caller_hands_on_is_paid_for(self):
+        import time
+        parent = ("name: p\ninputs:\n  big:\n    default: '" + "b" * 20_000 + "'\nruns:\n  using: composite\n  steps:\n"
+                  + "".join(f"    - uses: ./.github/actions/c\n      with:\n        big: ${{{{ inputs.big }}}}\n"
+                            f"        n: '{i}'\n" for i in range(300)))
+        files = {".github/actions/p/action.yml": parent,
+                 ".github/actions/c/action.yml": composite("    - run: echo ${{ inputs.big }} ${{ inputs.n }}\n"
+                                                           "      shell: bash\n")}
+        with TempDir() as tmp:
+            started = time.monotonic()
+            check(tmp, job_using("./.github/actions/p"), files)
+            self.assertLess(time.monotonic() - started, 6)
+
+    def test_an_alias_shared_by_env_and_run_is_read_for_each(self):
+        body = ("runs:\n  using: composite\n  steps:\n    - env:\n        T: ${{ inputs.tool }}\n"
+                "        R: &r \"${{ env.T }} -p fix\"\n      run: *r\n      shell: bash\n")
+        text = job_using(f"./{ACTION_DIR}").rstrip("\n") + "\n        with:\n          tool: claude\n"
+        with TempDir() as tmp:
+            self.assertEqual(agent_rules(check(tmp, text, {f"{ACTION_DIR}/action.yml": body})), AGENT_RULES)
+
+
 def json_quoted(text):
     import json
     return json.dumps(text)
