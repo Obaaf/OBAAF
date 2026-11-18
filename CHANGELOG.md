@@ -10,7 +10,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 Slice 2d.4b3a (issue #228, the first part of 2d.4b3); decision D-084. Ways past OBAAF-GHA-002 and 010 recorded by slice 2d.2c, and acceptances of OBAAF-GHA-003 and 004 that outlived a caller's grant.
 
-- **A called workflow's `inputs` are read with what the jobs of the repository that call it hand them.** Each `inputs` reference outside `on` (in `env`, `run-name`, `concurrency`, jobs, steps, and an `if:` without `${{ }}`) is read as `format()` of the reference as written and each value a caller hands: its `with:`, or the input's `default` when it hands nothing.
+- **A called workflow's `inputs` are read with what the jobs of the repository that call it hand them.** Each `inputs` reference outside `on` (in `env`, `run-name`, `concurrency`, jobs, steps, and an `if:` without `${{ }}`; not a job's or step's `name`, nor a job's `runs-on`) is read as `format()` of the reference as written and each value a caller hands: its `with:`, or the input's `default` when it hands nothing.
   - `ref: ${{ inputs.ref }}` handed `${{ github.event.pull_request.head.sha }}` by a `pull_request_target` caller is OBAAF-GHA-002 high, where it was "cannot tell" at medium.
   - An outsider's text handed to an input and expanded in a script is OBAAF-GHA-010, where it was nothing.
   - The reference as written stays among the values, for a caller the checker cannot see (another repository's), so a checkout of an input handed only the base is still "cannot tell".

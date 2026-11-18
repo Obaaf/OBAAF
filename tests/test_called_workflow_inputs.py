@@ -444,6 +444,74 @@ class FromTheSecondReviewTest(unittest.TestCase):
         self.assertEqual(found(result, "OBAAF-GHA-001"), [])
 
 
+class FromTheThirdReviewTest(unittest.TestCase):
+
+    def test_a_needed_jobs_result_is_not_its_outputs(self):
+        # The usual "notify on failure" job: `needs.*.result` read the needed jobs' outputs, a false 010.
+        text = ("on: [pull_request, push]\npermissions: {}\njobs:\n  setup:\n    runs-on: ubuntu-latest\n"
+                "    outputs:\n      branch: ${{ github.head_ref || github.ref_name }}\n    steps:\n      - run: echo\n"
+                "  notify:\n    needs: [setup]\n    uses: ./.github/workflows/called.yml\n    with:\n"
+                "      x: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: text, CALLED: called(ECHO_X, inputs="x")})
+        self.assertEqual(found(result, "OBAAF-GHA-010"), [])
+
+    def test_an_include_written_as_one_expression_gives_every_name(self):
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  setup:\n    runs-on: ubuntu-latest\n"
+                "    outputs:\n      t: ${{ github.event.pull_request.title }}\n    steps:\n      - run: echo\n"
+                "  call:\n    needs: setup\n    strategy:\n      matrix:\n        include: ${{ fromJSON(needs.setup.outputs.t) }}\n"
+                "    uses: ./.github/workflows/called.yml\n    with:\n      x: ${{ matrix.title }}\n")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: text, CALLED: called(ECHO_X, inputs="x")})
+        self.assertEqual([f.severity for f in found(result, "OBAAF-GHA-010")], ["high"])
+
+    def test_an_env_value_read_by_many_steps_is_counted_for_each(self):
+        # 200 steps reading five env values of a doubling alias took 57 s.
+        doubling = "[&a0 [xxxxxxxxxxxxxxxx, xxxxxxxxxxxxxxxx], " + ", ".join(
+            f"&a{n} [*a{n - 1}, *a{n - 1}]" for n in range(1, 14)) + "]"
+        env = "".join(f"      V{n}: ${{{{ inputs.v }}}}\n" for n in range(5))
+        steps = '      - run: git fetch origin "$V0" "$V1" "$V2" "$V3" "$V4"\n' * 200
+        text = called(steps, inputs="v", extra_job="    env:\n" + env)
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, {CALLER: caller(given=f"v: {doubling}"), CALLED: text})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 20)
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_the_fork_safe_runner_selector_is_still_recognised(self):
+        text = called("      - run: make\n", inputs="runner").replace(
+            "runs-on: ubuntu-latest", "runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository "
+            "&& inputs.runner || 'ubuntu-latest' }}")
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(on="[pull_request, push]", given="runner: '[self-hosted, linux]'"),
+                                 CALLED: text})
+        self.assertEqual([(f.severity, f.kind) for f in found(result, "OBAAF-GHA-013")], [("info", "runtime-choice")])
+
+    def test_shell_braces_in_a_value_keep_a_bare_condition_narrowing(self):
+        extra = "    if: github.event_name == 'push' && inputs.tag != ''\n"
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: caller(on="[pull_request_target, push]", given="tag: ${PREFIX}-${{ github.sha }}"),
+                                 CALLED: called(checkout(HEAD) + "      - run: make\n", inputs="tag", extra_job=extra)})
+        self.assertEqual(found(result, "OBAAF-GHA-002"), [])
+
+    def test_a_step_name_that_reads_an_input_keeps_its_findings_identity(self):
+        from obaaf.checker import baseline as baseline_mod
+        steps = "      - name: Check out for ${{ inputs.os }}\n        uses: actions/checkout@v4\n"
+
+        def keys(matrix):
+            text = (f"on: push\npermissions: {{}}\njobs:\n  call:\n    strategy:\n      matrix:\n        os: [{matrix}]\n"
+                    "    uses: ./.github/workflows/called.yml\n    with:\n      os: ${{ matrix.os }}\n")
+            with TempDir() as tmp:
+                result = check(tmp, {CALLER: text, CALLED: called(steps, inputs="os")})
+            return {baseline_mod.key(f) for f in found(result, "OBAAF-GHA-008")}
+
+        with TempDir() as tmp:
+            alone = {baseline_mod.key(f) for f in found(check(tmp, {CALLED: called(steps, inputs="os")}), "OBAAF-GHA-008")}
+        self.assertEqual(keys("ubuntu-latest, windows-latest"), alone)
+        self.assertEqual(keys("ubuntu-latest, windows-latest, macos-latest"), alone)
+
+
 class TheCallersGrantTest(unittest.TestCase):
 
     AGENT = "      - run: claude -p 'review'\n"

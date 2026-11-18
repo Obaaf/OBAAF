@@ -600,14 +600,17 @@ class _CallerValues:
         self.charge(size)
         return written, toks
 
-    def matrix(self, job) -> tuple[dict | None, Any] | None:
+    def matrix(self, job) -> tuple[dict | None, list, Any] | None:
         """(name in lower case -> the values the job's matrix lists for it, under `include` too, or None
-        for a matrix that is not a mapping; the whole matrix), or None for a job without one."""
+        for a matrix that is not a mapping; the values that may give any name: an `include` written as one
+        expression, or an item of it that is not a mapping (the third review found `include: ${{
+        fromJSON(...) }}` passed over); the whole matrix), or None for a job without one."""
         key = id(job)
         if key not in self._matrices:
             strategy = job.raw.get("strategy")
             whole = strategy.get("matrix") if isinstance(strategy, dict) else None
             named: dict = {}
+            wild: list = []
             if isinstance(whole, dict):
                 for name, given in whole.items():
                     self.charge(1)
@@ -619,11 +622,13 @@ class _CallerValues:
                         continue
                     for item in (given if isinstance(given, list) else [given]):
                         self.charge(1)
+                        if not isinstance(item, dict):
+                            wild.append(item)
                         for inner, value in (item.items() if isinstance(item, dict) else ()):
                             self.charge(1)
                             named.setdefault(wf_mod.as_text(inner).strip().lower(), []).append(value)
             # A matrix written as one expression (`fromJSON(...)`) gives it for every name.
-            self._matrices[key] = None if whole is None else (named if isinstance(whole, dict) else None, whole)
+            self._matrices[key] = None if whole is None else (named if isinstance(whole, dict) else None, wild, whole)
         return self._matrices[key]
 
     def jobs(self, workflow) -> dict:
@@ -665,8 +670,8 @@ class _CallerValues:
                 if head == "matrix":
                     index = self.matrix(where)
                     if index is not None:
-                        named, whole = index
-                        found = [(v, where) for v in (named.get(path[1].value.lower(), []) if named is not None
+                        named, wild, whole = index
+                        found = [(v, where) for v in (named.get(path[1].value.lower(), []) + wild if named is not None
                                                       and len(path) > 1 and path[1].kind == expr_mod.NAME else [whole])]
                 elif head == "needs" and caller is not None:
                     jobs = self.jobs(caller)
@@ -674,10 +679,14 @@ class _CallerValues:
                         targets = jobs.get(path[1].value.lower(), [])
                     else:
                         targets = [t for name in where.needs for t in jobs.get(str(name).lower(), [])]
+                    # `needs.x.result` and the like are not outputs (the third review found the outputs read
+                    # for `needs.*.result`, a false OBAAF-GHA-010 on the usual "notify on failure" job).
+                    named_part = len(path) > 2 and path[2].kind == expr_mod.NAME
+                    if named_part and path[2].value.lower() != "outputs":
+                        targets = []
                     for target in targets:
                         outputs = target.raw.get("outputs")
-                        if len(path) > 3 and path[2].kind == expr_mod.NAME and path[2].value.lower() == "outputs" \
-                                and path[3].kind == expr_mod.NAME:
+                        if named_part and len(path) > 3 and path[3].kind == expr_mod.NAME:
                             found += [(v, target) for v in _found_in(outputs, path[3].value)]
                         elif outputs is not None:
                             found.append((outputs, target))
@@ -912,6 +921,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
 
     def put(container, key, value, condition=False):
         nonlocal made
+        if (id(container), key) in kept:
+            return
         marker = (id(value), condition)
         if marker not in worked:
             found = _caller_inputs_in_text(value, given, notes, condition)
@@ -920,16 +931,32 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
             worked[marker] = found
         found = worked[marker]
         if found != value:
-            made += len(found)
+            made += len(found) * reads.get(id(container), 1)
             if budget["chars"] + made > CALLER_INPUTS_CHECK_TEXT:
                 raise _CallerInputsExceeded("check")
             changes.append((container, key, found))
 
+    # A job's or step's `if:` is an expression without `${{ }}` too. A job's and a step's `name` are left
+    # as written: they are part of what every finding on them is, and the third review found an edit to a
+    # caller's matrix change the acceptance of an unrelated pinning finding on `name: Test on ${{
+    # inputs.os }}`. So is a job's `runs-on`: OBAAF-GHA-013 does not work out `format()` there, and the
+    # review found its fork-safe selector (`... && inputs.runner || 'ubuntu-latest'`) raised from info to
+    # medium. The text a job's or the workflow's `env` holds is read again by each step it reaches, so it
+    # is counted once for each (the review found 200 steps reading five such values take 57 s).
     conditions: set = set()
+    kept: set = {(id(workflow.raw), "name")}
+    reads: dict = {}
+    steps_in_all = sum(len(job.steps) for job in workflow.jobs.values())
+    if isinstance(workflow.raw.get("env"), dict):
+        reads[id(workflow.raw["env"])] = steps_in_all + 1
     for job in workflow.jobs.values():
         conditions.add((id(job.raw), "if"))
+        kept.update({(id(job.raw), "name"), (id(job.raw), "runs-on")})
+        if isinstance(job.raw.get("env"), dict):
+            reads[id(job.raw["env"])] = max(reads.get(id(job.raw["env"]), 0), len(job.steps) + 1)
         for step in job.steps:
             conditions.add((id(step.raw), "if"))
+            kept.add((id(step.raw), "name"))
     try:
         # A value at the top (`run-name`, `concurrency`) is put in where it is, like any other.
         for key, value in list(workflow.raw.items()):
@@ -1627,23 +1654,21 @@ def _written_tokens(toks: list) -> str:
 def _value_tokens(value: str) -> list:
     """The tokens of an expression that gives `value`, the text a step's `with:` hands an input: a string
     for plain text, the expression in parentheses for one `${{ }}`, and `format()` for text with
-    expressions in it. Text with an expression that does not end is taken as plain text."""
+    expressions in it. Text with an expression that does not end is taken as plain text. Literal text is
+    an argument of `format()`, never part of its template, and `${{` in plain text is written `${ {`, so
+    the expression made never holds `${{` in a string: a condition written without `${{ }}` that held one
+    would be read as text, always true (the third review of slice 2d.4b3a found `${PREFIX}` in a value,
+    which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`)."""
     parts = _expression_parts(value) if expr_mod.OPEN in value else None
     if not parts or all(kind == "text" for kind, _ in parts):
-        return [("str", value)]
+        return [("str", value.replace(expr_mod.OPEN, "${ {"))]
     exprs = [body for kind, body in parts if kind == "expr"]
     if len(exprs) == 1 and all(kind == "expr" or not body.strip() for kind, body in parts):
         return [("op", "("), *expr_mod.tokens(exprs[0]), ("op", ")")]
-    template, args = [], []
+    toks: list = [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(parts))))]
     for kind, body in parts:
-        if kind == "text":
-            template.append(body.replace("{", "{{").replace("}", "}}"))
-        else:
-            template.append("{" + str(len(args)) + "}")
-            args.append(body)
-    toks: list = [("id", "format"), ("op", "("), ("str", "".join(template))]
-    for body in args:
-        toks += [("op", ","), ("op", "("), *expr_mod.tokens(body), ("op", ")")]
+        toks.append(("op", ","))
+        toks += [("str", body)] if kind == "text" else [("op", "("), *expr_mod.tokens(body), ("op", ")")]
     return toks + [("op", ")")]
 
 
