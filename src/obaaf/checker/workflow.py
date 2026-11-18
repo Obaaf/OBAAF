@@ -2263,7 +2263,9 @@ class Job:
         return set(known[self.id])
 
     def _triggers(self) -> set[str]:
-        events = set(self.workflow.triggers)
+        # A called workflow's jobs run on whatever starts a job that calls it: `workflow_call` stands for a
+        # caller the checker cannot see (another repository's), the callers' events for those it can.
+        events = set(self.workflow.triggers) | set(self.workflow.caller_events)
         cond = self.raw.get("if")
         if isinstance(cond, str):
             events = _narrow(events, cond)
@@ -2296,6 +2298,60 @@ class Job:
                 names.add("*inherit")      # the only string GitHub accepts here is `inherit`
             self._secret_names = frozenset(names)
         return set(self._secret_names)
+
+    def passed_secrets(self, names) -> list[str]:
+        """What the jobs of this repository that call the job's workflow pass for the secrets it reads
+        (flagship slice 2d.4b1): a called workflow's `secrets.MODEL_KEY` is whatever the caller maps onto
+        MODEL_KEY, so the secret that reaches the job is named here, with where it is passed. A caller
+        that is itself a called workflow passes on what its own callers give it, so the chain is
+        followed to its first caller, each workflow once for each name. Empty for a workflow no job of
+        the repository calls. Names are compared as GitHub compares them, in any letter case; a job that
+        reads every secret (`toJSON(secrets)`) reads every one passed."""
+        out: set[str] = set()
+        # Per workflow: the names asked for so far, and whether every secret is.
+        asked: dict[int, tuple[set, bool]] = {}
+        todo = [(self.workflow, {n.upper() for n in names if not n.startswith("*")},
+                 any(n.startswith("*") for n in names))]
+        while todo:
+            workflow, wanted, every = todo.pop()
+            known, known_every = asked.get(id(workflow), (set(), False))
+            wanted = set() if known_every else wanted - known
+            every = every and not known_every
+            if not wanted and not every:
+                continue
+            asked[id(workflow)] = (known | wanted, known_every or every)
+            for call in workflow.callers:
+                where = f"{bounded(one_line(call.path))} job '{bounded(one_line(call.job))}'"
+                passed = call.secrets
+                if isinstance(passed, str):
+                    if passed.strip():
+                        # `inherit` is the only text GitHub takes here; anything else is read as it, the wider way.
+                        out.add(f"{where} passes every secret it can read (secrets: inherit)")
+                        todo.append((call.workflow, wanted, every))
+                    continue
+                if not isinstance(passed, dict):
+                    if passed is not None:
+                        out.add(f"{where} passes secrets written as {one_line(value_identity(passed))}, which "
+                                "the checker cannot read, so any secret it can read")
+                        todo.append((call.workflow, set(), True))
+                    continue
+                for key, value in passed.items():
+                    param = as_text(key)
+                    if not every and param.upper() not in wanted:
+                        continue
+                    refs: set[str] = set()
+                    for body in expressions(value):
+                        refs |= expr_mod.secret_refs(body)
+                    if "*" in refs:
+                        source = "a secret it computes, so any secret it can read"
+                    elif refs:
+                        source = ", ".join(sorted({r.upper() for r in refs}))
+                    else:
+                        source = one_line(value_identity(value))
+                    out.add(f"{where} passes {bounded(one_line(param.upper()))} as {source}")
+                    if refs:
+                        todo.append((call.workflow, {r.upper() for r in refs if r != "*"}, "*" in refs))
+        return sorted(out)
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
         actions = list(detection.get("agent_actions", [])) + list(extra_actions)
@@ -2445,6 +2501,16 @@ def upload_readings(text: str) -> list[str]:
     return [text, joined, unquoted]
 
 
+@dataclass(frozen=True)
+class Call:
+    """A job of the repository that calls a workflow of the same repository (flagship slice 2d.4b1)."""
+    path: str          # the calling workflow's file
+    job: str           # the calling job's id
+    line: int
+    secrets: Any       # what the calling job's `secrets` holds as written: a mapping, `inherit`, or None
+    workflow: Any = field(default=None, compare=False, repr=False)   # the calling workflow
+
+
 @dataclass
 class Workflow:
     path: str
@@ -2455,6 +2521,21 @@ class Workflow:
     problems: list[str] = field(default_factory=list)  # parts the checker cannot see into
     lane_problems: list = field(default_factory=list)  # IdleDeclaration: declarations in the file that do nothing
     digest: str = ""            # sha256 of the file's bytes, when it was read from a file
+    # Flagship slice 2d.4b1: the jobs of the same repository that call this workflow (`uses:
+    # ./.github/workflows/...`), and the events that can start them, which can start this workflow's
+    # jobs too. Set by the checker once every file is read; empty for a file read on its own.
+    callers: list = field(default_factory=list)          # Call
+    caller_events: frozenset = frozenset()
+
+    def give_caller_events(self, events) -> bool:
+        """Add events that can start a job calling this workflow; True if any was new. Forgets every
+        job's worked-out triggers, which those events change."""
+        merged = self.caller_events | frozenset(events)
+        if merged == self.caller_events:
+            return False
+        self.caller_events = merged
+        self.__dict__.pop("_job_triggers", None)
+        return True
 
     @property
     def has_merge_key(self) -> bool:

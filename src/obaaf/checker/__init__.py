@@ -18,6 +18,7 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
@@ -295,6 +296,69 @@ def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
         if folder not in out:
             out.append(folder)
     return out, None
+
+
+def _give_callers(read: list) -> None:
+    """Give each workflow that a job of the repository calls (`uses: ./.github/workflows/x.yml`) those
+    calls, and the events that can start each calling job (flagship slice 2d.4b1). `read` is (the
+    file's paths in the repository, workflow) for every workflow file read without error.
+
+    A called workflow's jobs run on whatever starts the job that calls it, and `github.event` there is
+    the caller's event, so without this a `pull_request_target` workflow could check out a pull
+    request's head through a local workflow it calls and no rule saw it. The events are worked out
+    until nothing changes, so a chain of calls carries the first caller's events to the last, and a
+    cycle (which GitHub refuses) ends with every file in it given all of them: the wider reading.
+
+    A path is matched as git stores it, letter case included. A workflow without `on: workflow_call`
+    is given nothing: GitHub refuses to call it, so the call never runs its jobs. What follows an `@`,
+    a backslash and `..` are read as `_local_action_folders` reads them for an action, each reading a
+    candidate."""
+    by_path: dict[str, list] = {}
+    for paths, workflow in read:
+        for found in paths:
+            by_path.setdefault(found, [])
+            if all(workflow is not other for other in by_path[found]):
+                by_path[found].append(workflow)
+    calls: list[tuple] = []
+    for _, workflow in read:
+        for job in workflow.jobs.values():
+            uses = job.raw.get("uses")
+            if not _is_local_like(uses):
+                continue
+            targets: list = []
+            for candidate in _local_action_folders(uses)[0]:
+                for target in by_path.get(candidate, []):
+                    if target.callable and all(target is not other for other in targets):
+                        targets.append(target)
+            for target in targets:
+                target.callers.append(wf_mod.Call(workflow.path, job.id, job.line, job.raw.get("secrets"), workflow))
+            if targets:
+                calls.append((job, targets))
+    changed = True
+    while changed:
+        changed = False
+        for job, targets in calls:
+            events = job.triggers()
+            for target in targets:
+                changed = target.give_caller_events(events) or changed
+
+
+def _caller_notes(workflows: list) -> list[str]:
+    """A note for each called workflow whose jobs the checker read with events its own `on` does not
+    name (flagship slice 2d.4b1), so a finding that says a file of `on: workflow_call` can be started
+    by `pull_request_target` says why."""
+    out = []
+    for workflow in workflows:
+        extra = sorted(workflow.caller_events - set(workflow.triggers))
+        if not workflow.callers or not extra:
+            continue
+        callers = sorted({f"{call.path} job '{call.job}'" for call in workflow.callers})
+        shown = ", ".join(wf_mod.one_line(c, 120) for c in callers[:5])
+        if len(callers) > 5:
+            shown += f" and {len(callers) - 5} more"
+        out.append(f"{wf_mod.one_line(workflow.path, 120)} is called by {shown}, so its jobs are read as started "
+                   f"by what can start the calling jobs as well as by its own triggers: {', '.join(extra)}")
+    return out
 
 
 class _ActionFileError(ValueError):
@@ -1226,28 +1290,40 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     # The policy file of GitHub's native egress firewall is read from the repository, never for files
     # checked on their own, whose repository the checker does not know.
     firewall = egress_mod.read_firewall_policy(root) if is_repo else None
+    # Every file is read before any is checked, so that a workflow another one calls is checked with
+    # what its callers give it (flagship slice 2d.4b1).
+    read: list[tuple[Path, str, Any]] = []
     for path in files:
         try:
             rel = path.resolve().relative_to(root).as_posix()
         except ValueError:
             rel = path.as_posix()
-        rels.append(rel)
-        owned_paths.extend(_as_found(path, root))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            # A file the checker could not read is an error, never a traceback or a pass.
-            errors.append(f"{rel}: cannot be read: {exc}")
-            declared.unreadable(rel, path)
+            read.append((path, rel, exc))
             continue
         workflow = wf_mod.parse(rel, text)
+        if not workflow.error:
+            # The bytes, not the text: a byte that is not UTF-8 is replaced in the text, and two files
+            # that differ only there must not be one file to an acceptance.
+            workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        read.append((path, rel, workflow))
+    readable = [workflow for _, _, workflow in read if isinstance(workflow, wf_mod.Workflow) and not workflow.error]
+    _give_callers([(_as_found(path, root), workflow) for path, _, workflow in read
+                   if any(workflow is other for other in readable)])
+    for path, rel, workflow in read:
+        rels.append(rel)
+        owned_paths.extend(_as_found(path, root))
+        if isinstance(workflow, OSError):
+            # A file the checker could not read is an error, never a traceback or a pass.
+            errors.append(f"{rel}: cannot be read: {workflow}")
+            declared.unreadable(rel, path)
+            continue
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)
             continue
-        # The bytes, not the text: a byte that is not UTF-8 is replaced in the text, and two files
-        # that differ only there must not be one file to an acceptance.
-        workflow.digest = hashlib.sha256(path.read_bytes()).hexdigest()
         wf_mod.classify(workflow, overrides=config.lanes, extra_agents=config.agents,
                         aliases=declared.aliases(rel, path))
         _apply_script_detection(workflow, root, script_cmds)
@@ -1317,7 +1393,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     _apply_ignores(findings, config, today)
     findings.sort(key=Finding.sort_key)
     notes = (jenkins_notes + repo_notes + _lane_notes(root, catalog, is_repo, agent_lane_present, suspect_jobs)
-             + _local_action_notes(unread_actions))
+             + _local_action_notes(unread_actions) + _caller_notes(readable))
     cov: list[dict] = []
     summaries: list[dict] = []
     for result in jenkins_results:
@@ -1639,16 +1715,25 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     unread_actions: list = []
     action_cache: dict = {}
     out = []
+    # Every file is read first, as `check` reads them, so that a called workflow's jobs are classified
+    # with the events its callers give them (flagship slice 2d.4b1).
+    read: list[tuple[Path, str, Any]] = []
     for path in files:
         rel = path.relative_to(root).as_posix()
-        seen.append(rel)
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            errors.append(f"{rel}: cannot be read: {exc}")
+            read.append((path, rel, exc))
+            continue
+        read.append((path, rel, wf_mod.parse(rel, text)))
+    _give_callers([(_as_found(path, root), workflow) for path, _, workflow in read
+                   if isinstance(workflow, wf_mod.Workflow) and not workflow.error])
+    for path, rel, workflow in read:
+        seen.append(rel)
+        if isinstance(workflow, OSError):
+            errors.append(f"{rel}: cannot be read: {workflow}")
             declared.unreadable(rel, path)
             continue
-        workflow = wf_mod.parse(rel, text)
         if workflow.error:
             errors.append(f"{rel}: {workflow.error}")
             declared.unreadable(rel, path)

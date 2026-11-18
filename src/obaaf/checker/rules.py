@@ -395,22 +395,23 @@ class WorkflowRules:
         # name with an expression in it can be one GitHub creates on first use, with no protection
         # rules, or one the event's author picks; a name that is not text cannot be checked at all.
         reviewed = job.environment_reading[0] == "literal"
+        passed = self._passed_fact(job, names)
         if privileged and reviewed:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets} and can be started by {triggers}. It references environment "
-                     "'{environment}'; confirm that environment requires reviewers.",
-                     job, severity="medium", kind="privileged-environment", secrets=secrets,
+                     "Job '{job}' receives {secrets}{passed} and can be started by {triggers}. It references "
+                     "environment '{environment}'; confirm that environment requires reviewers.",
+                     job, severity="medium", kind="privileged-environment", secrets=secrets, passed=passed,
                      triggers=sorted(privileged), environment=job.environment)
         elif privileged:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets}{environment} and can be started by {triggers}.",
-                     job, severity="high", kind="privileged", secrets=secrets, triggers=sorted(privileged),
-                     environment=self._environment_fact(job))
+                     "Job '{job}' receives {secrets}{passed}{environment} and can be started by {triggers}.",
+                     job, severity="high", kind="privileged", secrets=secrets, passed=passed,
+                     triggers=sorted(privileged), environment=self._environment_fact(job))
         elif triggers & PR_TRIGGERS:
             self.add("OBAAF-GHA-001", job.line,
-                     "Job '{job}' receives {secrets}{environment} and runs on pull requests. Forks get no secrets, "
-                     "but branches pushed by anyone with write access do.", job, severity="low", kind="pull-request",
-                     secrets=secrets, environment=self._environment_fact(job))
+                     "Job '{job}' receives {secrets}{passed}{environment} and runs on pull requests. Forks get no "
+                     "secrets, but branches pushed by anyone with write access do.", job, severity="low",
+                     kind="pull-request", secrets=secrets, passed=passed, environment=self._environment_fact(job))
 
     # -------------------------------------------------------------- GHA-024
     def protected_secrets(self, job: Job) -> None:
@@ -1127,8 +1128,9 @@ class WorkflowRules:
             # Where each key given to OBAAF's egress action goes is the fifth control's detail (2c.7): a model
             # key under model-keys is out of the command's reach, one passed in env is not.
             egress = self._egress(job)[0]
-            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{environment}.", job,
-                     kind="secrets", secrets=Fact(sorted(names), shown), environment=self._environment_fact(job),
+            self.add("OBAAF-GHA-005", job.line, "Agent job '{job}' receives {secrets}{passed}{environment}.", job,
+                     kind="secrets", secrets=Fact(sorted(names), shown), passed=self._passed_fact(job, names),
+                     environment=self._environment_fact(job),
                      controls=[*self._secret_controls(job, names), self._input_control(job), egress,
                                self._key_control(job)])
         elif job.environment:
@@ -3511,6 +3513,18 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")
+
+    @staticmethod
+    def _passed_fact(job: Job, names) -> Fact | Note:
+        """What the jobs of this repository that call the job's workflow pass for the secrets it reads,
+        as part of a finding about those secrets (flagship slice 2d.4b1): the called job reads a
+        parameter (`secrets.MODEL_KEY`), and which secret that is depends on the caller, so an
+        acceptance written for one mapping must not cover another. Nothing for a workflow no job of the
+        repository calls, so such a finding is as before."""
+        passed = job.passed_secrets(names)
+        if not passed:
+            return Note("")
+        return Fact(passed, f" (from the jobs that call its workflow: {'; '.join(passed)})")
 
     @staticmethod
     def _environment_fact(job: Job) -> Fact | Note:
