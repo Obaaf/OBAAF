@@ -550,6 +550,38 @@ class FromTheFourthReviewTest(unittest.TestCase):
         self.assertEqual(found(result, "OBAAF-GHA-002"), [])
 
 
+class FromTheFifthReviewTest(unittest.TestCase):
+
+    def test_values_read_through_the_workflows_env_by_local_action_steps_end_quickly(self):
+        # Eight 25 KB values read through the workflow's env by 4,000 steps of local actions took 120 s.
+        doubling = "[&a0 [xxxxxxxxxxxxxxxx, xxxxxxxxxxxxxxxx], " + ", ".join(
+            f"&a{n} [*a{n - 1}, *a{n - 1}]" for n in range(1, 10)) + "]"
+        env = "env:\n" + "".join(f'  V{n}: "${{{{ inputs.v }}}}"\n' for n in range(8))
+        jobs = "".join(f"  b{n}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/a\n"
+                       for n in range(10))
+        text = ("on:\n  workflow_call:\n    inputs:\n      v:\n        type: string\npermissions: {}\n" + env
+                + "jobs:\n" + jobs)
+        action = ("runs:\n  using: composite\n  steps:\n"
+                  + '    - run: git fetch o $V0 $V1 $V2 $V3 $V4 $V5 $V6 $V7\n      shell: bash\n' * 400)
+        with TempDir() as tmp:
+            start = time.monotonic()
+            result = check(tmp, {CALLER: caller(given=f"v: {doubling}"), CALLED: text,
+                                 ".github/actions/a/action.yml": action})
+            spent = time.monotonic() - start
+        self.assertLess(spent, 30)
+        self.assertTrue(any("inputs are read as written" in e for e in result.errors), result.errors)
+
+    def test_a_run_this_script_workflow_with_many_callers_is_no_error(self):
+        script = "".join(f"        ./tools/step-{n}.sh --target component --verbose --retries 3 --log build-{n}.log\n"
+                         for n in range(40))
+        jobs = "".join(f"  t{n}:\n    uses: ./.github/workflows/called.yml\n    with:\n      name: component-{n}\n"
+                       f"      script: |\n{script.replace('component', f'component-{n}')}" for n in range(20))
+        with TempDir() as tmp:
+            result = check(tmp, {CALLER: f"on: push\npermissions: {{}}\njobs:\n{jobs}",
+                                 CALLED: called("      - run: ${{ inputs.script }}\n", inputs="name script")})
+        self.assertEqual(result.errors, [])
+
+
 class TheCallersGrantTest(unittest.TestCase):
 
     AGENT = "      - run: claude -p 'review'\n"

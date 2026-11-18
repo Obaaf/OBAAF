@@ -471,10 +471,11 @@ CALLER_INPUT_TEXT = 1_000_000
 CALLER_INPUTS_CHECK_TEXT = 5_000_000
 # The places (values in mappings and lists, an alias's each time it is given) looked at in one workflow.
 CALLER_INPUTS_PLACES = 1_000_000
-# The characters of all the values handed to one input: every reference to it is given them all, and
-# the rules read some places once for each step (the fourth review found a 400 KB value, made by a short
-# list of aliases, read through `env` by 250 steps of a local action take 30 s).
-CALLER_INPUT_VALUES = 50_000
+# The characters of all the values handed to one input: every reference to it is given them all. It
+# was 50,000; the fifth review found a reusable "run this script" workflow that 20 jobs each hand a
+# 2.9 KB script fail on it, so the cost of what the rules read again for each step is bounded where it
+# arises instead (`_check_caller_input_reads`).
+CALLER_INPUT_VALUES = 500_000
 _INPUTS_WORD = re.compile(r"\binputs\b", re.I)
 
 
@@ -926,6 +927,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
     places = 0
     worked: dict = {}
 
+    env_texts: list = []        # (job or None for the workflow's, characters) of each text put in `env` or `defaults`
+
     def put(container, key, value, condition=False):
         nonlocal made
         if (id(container), key) in kept:
@@ -939,6 +942,8 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
         found = worked[marker]
         if found != value:
             made += len(found) * reads.get(id(container), 1)
+            if id(container) in scopes:
+                env_texts.append((scopes[id(container)], len(found)))
             if budget["chars"] + made > CALLER_INPUTS_CHECK_TEXT:
                 raise _CallerInputsExceeded("check")
             changes.append((container, key, found))
@@ -956,7 +961,9 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
     reads: dict = {}
     steps_in_all = sum(len(job.steps) for job in workflow.jobs.values())
 
-    def read_per_step(scope, steps):
+    scopes: dict = {}
+
+    def read_per_step(scope, steps, job=None):
         # `env` and `defaults` (its `run.shell` and `run.working-directory`) are read again by each step.
         for name in ("env", "defaults"):
             todo_ = [scope.get(name)] if isinstance(scope, dict) else []
@@ -964,6 +971,7 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
                 node_ = todo_.pop()
                 if isinstance(node_, dict):
                     reads[id(node_)] = max(reads.get(id(node_), 0), steps + 1)
+                    scopes.setdefault(id(node_), job)
                     todo_.extend(v for v in node_.values() if isinstance(v, dict))
 
     read_per_step(workflow.raw, steps_in_all)
@@ -972,7 +980,7 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
         kept.update({(id(job.raw), "name"), (id(job.raw), "runs-on")})
         if isinstance(job.raw.get("runs-on"), (dict, list)):
             unread.add(id(job.raw["runs-on"]))
-        read_per_step(job.raw, len(job.steps))
+        read_per_step(job.raw, len(job.steps), job)
         for step in job.steps:
             conditions.add((id(step.raw), "if"))
             kept.add((id(step.raw), "name"))
@@ -1006,13 +1014,42 @@ def _put_in_caller_inputs(workflow, budget: dict) -> None:
         workflow.problems.append(_too_much_given(exc))
         return
     budget["chars"] += made
+    undo = [(container, key, container[key]) for container, key, _ in changes]
     for container, key, found in changes:
         container[key] = found
+    workflow.__dict__["_caller_inputs_undo"] = (undo, env_texts, budget)
     workflow.caller_input_notes.extend(dict.fromkeys(notes))
     # What was worked out from the values as they were written is worked out again.
     workflow.__dict__.pop("_job_triggers", None)
     for job in workflow.jobs.values():
         job._secret_names = None
+
+
+def _check_caller_input_reads(workflow) -> bool:
+    """Once the steps of the local composite actions a workflow's jobs use are known (slice 2d.4b2),
+    count each text the callers' inputs put into an `env` or `defaults` again for each of those steps,
+    which read it too (the fifth review of slice 2d.4b3a found 4,000 steps of local actions read eight
+    25 KB values through the workflow's `env` take 120 s). Past the check's `CALLER_INPUTS_CHECK_TEXT`
+    the values are put back as written, the jobs' local steps are cleared for the caller to read again,
+    and the file has a problem, an error of the check. True when the values were put back."""
+    found = workflow.__dict__.pop("_caller_inputs_undo", None)
+    if found is None:
+        return False
+    undo, env_texts, budget = found
+    local = {id(job): sum(len(steps) for steps in job.local_steps.values()) for job in workflow.jobs.values()}
+    every = sum(local.values())
+    extra = sum(size * (every if job is None else local.get(id(job), 0)) for job, size in env_texts)
+    if budget["chars"] + extra <= CALLER_INPUTS_CHECK_TEXT:
+        budget["chars"] += extra
+        return False
+    for container, key, old in undo:
+        container[key] = old
+    workflow.problems.append(_too_much_given(_CallerInputsExceeded("check")))
+    workflow.__dict__.pop("_job_triggers", None)
+    for job in workflow.jobs.values():
+        job._secret_names = None
+        job.local_steps.clear()
+    return True
 
 
 class _ActionFileError(ValueError):
@@ -2374,6 +2411,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                                       unread_actions, errors, action_cache)
         _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
                                   config.agents)
+        if _check_caller_input_reads(workflow):
+            _apply_local_action_steps(workflow, None if on_its_own else root, unread_actions, errors, steps_state,
+                                      config.agents)
         declared.workflow(workflow, path)
         for job in workflow.jobs.values():
             if job.in_lane("agent"):
@@ -2791,6 +2831,9 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
                                       unread_actions, errors, action_cache)
         _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
                                   config.agents)
+        if _check_caller_input_reads(workflow):
+            _apply_local_action_steps(workflow, root if is_repo else None, unread_actions, errors, steps_state,
+                                      config.agents)
         declared.workflow(workflow, path)
         # What `check` reports as an error for the file (an input given twice under two spellings, an
         # expression too deep for the rules to read) means the file was not fully read, so `--lanes`
