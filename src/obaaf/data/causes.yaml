@@ -329,7 +329,7 @@ causes:
     kinds:
       OBAAF-GHA-010: [through-env]
     fix_kind: by-hand
-    next: "Read the value from the environment instead of the ${{ env.NAME }} expression: \"$NAME\" in a POSIX shell, $env:NAME in PowerShell, process.env.NAME in actions/github-script."
+    next: "Read the value from the environment instead of the ${{ env.NAME }} expression: \"$NAME\" in a POSIX shell, $env:NAME in PowerShell, %NAME% in cmd, process.env.NAME in actions/github-script. For a script an action runs elsewhere, such as over SSH, pass the variable through the action's own environment input."
   - id: release-from-pull-request
     sentence: "A release job runs on pull requests, where a branch pushed by anyone with write access gets whatever secrets and token permissions the job has."
     kinds:
@@ -341,7 +341,7 @@ causes:
     kinds:
       OBAAF-GHA-015: [capability]
     fix_kind: by-hand
-    next: "If the job does not release, remove the publishing permissions or secrets it does not need and name its environment in plain text, or accept the finding with that reason. If it does release, start it only from trusted events."
+    next: "If the job does not release, remove the publishing permissions or secrets it does not need and, if its environment is an expression, name it in plain text, or accept the finding with that reason. If it does release, start it only from trusted events."
   - id: job-reads-every-secret
     sentence: "A job can read every secret, so the checker cannot tell that no signing key is among them."
     kinds:
