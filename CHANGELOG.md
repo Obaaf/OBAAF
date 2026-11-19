@@ -14,6 +14,19 @@ Slice 4.9 (issue #152). The form and checklist explain which answers count towar
 - Where the form, the checklist and the text and Markdown reports state a tier, they now say that it reflects the answers given and that OBAAF does not verify that they are true, in place of "a tier describes controls in place".
 - **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`, and its ranking sentence names the two counts it ranks by. The JSON report is unchanged.
 
+### Agent actions given a setting their own documentation warns about
+
+Slice 2d.5c1 (issue #81, part of part 2 of 2d.5); decision D-088. **New rule OBAAF-GHA-026. It can turn a passing gate red.**
+
+- It reports a step that gives an agent action a value its own documentation warns about.
+  - `openai/codex-action`: `safety-strategy: unsafe` (high) or `read-only` (medium), and `allow-users: "*"` (high).
+  - `anthropics/claude-code-action`: `allowed_non_write_users: "*"` (high) or any other value (medium), `allowed_bots: "*"` (medium) and `show_full_output: true` (medium); `show_full_output: true` on `anthropics/claude-code-base-action` too.
+- Each finding quotes the documentation's words and gives the file, commit and lines they were read from. The settings are data, under `settings` in each agent tool's entry in `detection.yaml`, and `obaaf catalog` refuses one without its words or with a source that is not a file at a commit.
+- A value is compared trimmed and in any letter case. A value the checker cannot read (an expression, a list, a mapping) is "cannot tell" (case `computed`), at most medium.
+- The steps of local composite actions are read too, with the using step's inputs put in.
+- Not read yet: the same settings given as command-line options (`claude_args`, `codex-args`, `--dangerously-skip-permissions` and the like) and the other agent tools' settings (slice 2d.5c2).
+- This repository's report and Expectrail's are byte-identical before and after (neither uses these actions).
+
 ### Agent tools are data, and the agent rules name the agent
 
 Slice 2d.5b (issue #81, part 1 of 2d.5); decision D-087.

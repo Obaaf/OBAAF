@@ -37,6 +37,7 @@ Each rule is either an **authority** finding (who or what can change, build, rel
 | [OBAAF-GHA-023](#obaaf-gha-023) | high | authority | Template placeholder left in a workflow | - |
 | [OBAAF-GHA-024](#obaaf-gha-024) | high | authority | Protected secret used outside its environment | G3.4, G9.1 |
 | [OBAAF-GHA-025](#obaaf-gha-025) | high | hygiene | Agent tool installed at a version that can change | G2.1, R6 |
+| [OBAAF-GHA-026](#obaaf-gha-026) | high | authority | Agent action given a setting its own documentation warns about | R2, R7 |
 | [OBAAF-CFG-001](#obaaf-cfg-001) | high | authority | Lane declaration that does nothing | - |
 | [OBAAF-JEN-001](#obaaf-jen-001) | high | authority | Credentials available to change-request code or an AI agent | G3.4, G8.1, G9.1, R2, R3 |
 | [OBAAF-JEN-002](#obaaf-jen-002) | high | authority | Build steps on the controller or on agents shared with privileged work | G3.1, G3.2, R7 |
@@ -317,6 +318,16 @@ An agent job installs or runs a tool at a version it does not fix (flagship slic
 
 **Fix.** Install the agent CLI from its registry at an exact version (for example `npm install -g @anthropic-ai/claude-code@1.2.3`, or `pip install aider-chat==0.86.1`), better with its hash from a lockfile, and move the version through reviewed changes. If the tool ships only an install script, download the release it would install, at a fixed version, check its checksum, and install that instead.
 
+## OBAAF-GHA-026
+
+**Agent action given a setting its own documentation warns about** (high). Requirements: R2, R7. Supports: FR12.
+
+**Why it matters.** The agent's own makers say that this value lets people without write access give it a prompt, or lets it read or print the secrets the job holds.
+
+A step gives an agent action a value for an input that the tool's own documentation warns about (flagship slice 2d.5c1). The values are data: each agent tool's entry in the detection data lists them under `settings`, each with the documentation's words, quoted, and the file, commit and lines they were read from, and the finding prints both. Read on 2026-11-19: `openai/codex-action` with `safety-strategy: unsafe` (high) or `read-only` (medium), and `allow-users: "*"` (high); `anthropics/claude-code-action` with `allowed_non_write_users: "*"` (high) or any other value (medium), `allowed_bots: "*"` (medium) and `show_full_output: true` (medium), and `anthropics/claude-code-base-action` with `show_full_output: true` (medium). A value is compared trimmed and in any letter case, which is wider than some of the actions read it; the input's name is read in any case of A to Z, as GitHub does; an action at a path under one of these is read as it. A value the checker cannot read (an expression, a list, a mapping) is case `computed`, "cannot tell", at most medium. Read in the job's steps and in the steps of the local composite actions it uses. A value only another scanner calls dangerous is not reported. Not read: the same settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as `--dangerously-skip-permissions`), an action's configuration files (`settings`, `codex-home`), and the other agent tools' settings (flagship slice 2d.5c2).
+
+**Fix.** Remove the input, so the action uses its default, or set the value the documentation recommends: for `openai/codex-action`, `safety-strategy: drop-sudo` (the default) or `unprivileged-user`, and named users in `allow-users`; for `anthropics/claude-code-action`, named bots in `allowed_bots`, no `allowed_non_write_users` except in a workflow whose `permissions` are as narrow as the documentation asks, and `show_full_output` only while debugging, in a repository whose logs nobody else can read.
+
 ## OBAAF-CFG-001
 
 **Lane declaration that does nothing** (high). Requirements: -. Supports: FR12.
@@ -515,6 +526,7 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 
 | Test file | Models | Expected rules |
 | --- | --- | --- |
+| `tests/fixtures/workflows/risky/agent-action-unsafe.yml` | An agent action is given two settings its own documentation warns about: no privilege reduction, so the agent can read the model key from memory, and anyone may start it from an issue comment. | OBAAF-GHA-005, OBAAF-GHA-026 |
 | `tests/fixtures/workflows/risky/agent-cli-unpinned.yml` | An agent job installs its CLI by piping a downloaded script into a shell, and another CLI from npm with no version, while it holds a model key. | OBAAF-GHA-005, OBAAF-GHA-020, OBAAF-GHA-025 |
 | `tests/fixtures/workflows/risky/agent-lane-misspelled.yml` | Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed. | OBAAF-CFG-001 |
 | `tests/fixtures/workflows/risky/claude-action-toctou.yml` | Claude Code action case: an agent on pull requests reads instruction files from the change under review, with the token on disk. | OBAAF-GHA-012, OBAAF-GHA-011, OBAAF-GHA-020 |

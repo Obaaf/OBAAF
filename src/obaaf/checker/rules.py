@@ -110,8 +110,10 @@ class Finding:
 
 class Note(str):
     """Text a finding's message shows that is not one of its facts, because the facts already hold
-    it: a count of the files or characters that are listed in full as a fact. Every other value
-    given to `compose` is a fact. A note must never say something the facts do not."""
+    it: a count of the files or characters that are listed in full as a fact, or what the catalogue
+    gives for a fact (the words of documentation an OBAAF-GHA-026 finding's `setting` names, and where
+    they are, flagship slice 2d.5c1). Every other value given to `compose` is a fact. A note must never
+    say something the facts do not."""
 
 
 class Fact:
@@ -541,6 +543,7 @@ class WorkflowRules:
             self.script_injection(job)
             self.agent_rules(job)
             self.agent_tool_installs(job)
+            self.agent_tool_settings(job)
             self.release_rules(job)
             self.unpinned(job)
             self.persisted_credentials(job)
@@ -1803,6 +1806,76 @@ class WorkflowRules:
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
                          **agents)
+
+    # -------------------------------------------------------------- GHA-026
+    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
+
+    def agent_tool_settings(self, job: Job) -> None:
+        """OBAAF-GHA-026: a step gives an agent action a setting the tool's own documentation warns about
+        (flagship slice 2d.5c1). The settings are data, under each agent tool's entry in the detection
+        data, each with the documentation's words and where they are. One finding per step and input: for
+        the first of the settings for that input whose values the given value is (compared trimmed and in
+        any letter case, the wider reading), or, where the value is not plain text (an expression, a list,
+        a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
+        most medium. An input that is not given has the action's default, which no setting names."""
+        known = agent_tools.settings(self.detection)
+        if not known:
+            return
+        for step in job.steps:
+            if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
+                continue
+            given = step.with_
+            if not given:
+                continue
+            by_input: dict = {}
+            for tool, name, setting in known:
+                if step.uses_action(setting["action"]):
+                    key = input_name(setting["input"])
+                    if key in given:
+                        by_input.setdefault(key, []).append((tool, name, setting))
+            for key, candidates in by_input.items():
+                self._agent_setting(job, step, given[key], candidates)
+
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list) -> None:
+        action = (step.action or "").lower()
+        tool_name = candidates[0][1]
+        input_shown = candidates[0][2]["input"]
+        if raw is None:
+            return          # `input:` with nothing after it is an empty value, which no setting names
+        if isinstance(raw, bool):
+            text = "true" if raw else "false"
+        elif isinstance(raw, (str, int, float)):
+            text = as_text(raw)
+        else:
+            text = None
+        if text is None or "${{" in text:
+            shown = one_line(text if text is not None else shown_value(raw), 120)
+            worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} the input `{input}` a value the checker cannot "
+                     "read ({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
+                     "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
+                     input=input_shown, value=Fact(text if text is not None else shown_value(raw), shown),
+                     tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
+            return
+        value = text.strip()
+        folded = value.casefold()
+        for tool, name, setting in candidates:
+            if "equals" in setting:
+                hit = any(folded == str(v).strip().casefold() for v in setting["equals"])
+            else:
+                hit = folded != ""
+            if not hit:
+                continue
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}: {value}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=setting["severity"],
+                     kind="setting", action=action, input=setting["input"],
+                     value=Fact(value, one_line(value, 120)), setting=f"{tool}/{setting['id']}",
+                     tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
+                     source=Note(str(setting["source"])))
+            return
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
