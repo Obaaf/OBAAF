@@ -96,6 +96,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-086 | OBAAF reports, as OBAAF-GHA-025 (high), an agent job that runs as code a script downloaded while the job runs, whatever it installs, or installs or runs an agent CLI the catalogue names at a version that can change; only agent jobs are read | Accepted, 2026-11-18 |
 | D-087 | Agent tools are data: one entry per tool in `detection.yaml`, with the sources its facts were read from and the date, from which the checker's agent lists are built; every tool ci-agent-audit recognised at `4a88ee6` has one; the agent rules' findings name the agents a job runs in a fact, `agents` | Accepted, 2026-11-18 |
 | D-088 | OBAAF reports, as OBAAF-GHA-026, a step that gives an agent action a value of an input that the tool's own documentation warns about, with the documentation's words and source; the values are data in each agent tool's entry; a value the checker cannot read is "cannot tell" at most medium | Proposed |
+| D-089 | Init previews both files, applies explicitly, stops on conflicts and starts CI in report mode | Accepted, 2026-11-18 |
 
 ---
 
@@ -796,3 +797,15 @@ Read on 2026-11-19 from `openai/codex-action` at `4aac6da` and `anthropics/claud
 **Consequence.** A gate can fail where it passed. Settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as `--dangerously-skip-permissions`) and the other 21 tools' settings are not read yet (slice 2d.5c2, F-264). A value the action itself would refuse (`UNSAFE` where it compares exactly) is reported; that is the wider reading. A setting an action reads from a configuration file (`settings`, `codex-home`) is not read, nor `display_report`, `ACTIONS_STEP_DEBUG` or a key written in clear, nor these actions inside another repository's composite action or reusable workflow. A `uses:` with an empty path segment, a leading `/` or a backslash is not matched to the action at all, here or by the agent lane (#245).
 
 **Status.** Proposed.
+
+### D-089 How a team reviews and applies the first configuration
+
+**Decision.** Running `obaaf init` shows the proposed configuration and workflow. The user runs `obaaf init --apply` to write them. If either target already exists with different contents, show the conflicting path and diff and stop before writing either file. A first CI workflow reports findings. The team chooses its gate threshold later.
+
+When the tool detects a secret name but cannot establish its GitHub environment, list the name for review. Write a protection rule only when the environment is known. The team resolves ambiguous names.
+
+**Reason.** Someone adopting OBAAF can inspect both files and the detected jobs and secrets before changing their repository. A configuration assembled from a new workflow and an existing, conflicting file can give misleading results. A first report lets the team see the effect of choosing a threshold.
+
+**Consequence.** Setup takes a preview and an explicit apply. A conflict requires reconciliation before the pair can be written. The first workflow does not block on finding severity. Secret values are unnecessary for proposing rules from workflow references.
+
+**Status.** Accepted, 2026-11-18. Sean chose each of these four outcomes in his session (Central Time). This records the requirements for slice 3.3 (#84).
