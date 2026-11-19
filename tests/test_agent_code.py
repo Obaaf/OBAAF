@@ -359,6 +359,13 @@ class SecondReviewTest(unittest.TestCase):
             (heredoc("python3", "import subprocess\nfor p in prompts:\n    cmd = ['claude', '-p', p]\n"
                                 "    cmd.append('" + DSP + "')\n    subprocess.run(cmd)"), "hit"),
             (heredoc("ruby", "c = ['claude']\nc.push('-v')\nsystem(*c)"), "none"),
+            (heredoc("ruby", "args = ['claude', '-p', 'x']\nargs << '--verbose' if v\nsystem(*args)"), "none"),
+            (heredoc("ruby", "args = ['claude', '-p', 'x']\nextra.each { |f| args << f }\nsystem(*args)"), "cannot"),
+            (heredoc("ruby", "args = ['claude', '-p', 'x']\nextra.each do |f|\n  args << f\nend\nsystem(*args)"), "cannot"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in extra:\n    cmd += [f]\n"
+                                "subprocess.run(cmd)"), "cannot"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor i in range(n):\n    cmd += [extra[i]]\n"
+                                "subprocess.run(cmd)"), "cannot"),
         ])
         Case.expect(self, [
             ("for (const pr of prs) {\n  const args = ['-p', prompt(pr)];\n  if (v) args.push('--verbose');\n"

@@ -1917,8 +1917,16 @@ def _change_words(code: _Code, k: int, at: int = -1) -> list | None:
         return _word(code, k + 2, code.close[k + 2], False, "")       # `cmd + ['--output-format', 'json']`
     if after.text in ("+=", "<<") and k + 2 < len(toks):
         end = code._operand_end(k + 2)
-        if end < 0 or not _statement_end(code, end + 1):
+        modifier = end >= 0 and end + 1 < len(toks) and code.family == "ruby" and toks[end + 1].kind == "name" and \
+            toks[end + 1].text in ("if", "unless")         # `args << '--verbose' if v`
+        if end < 0 or not (_statement_end(code, end + 1) or modifier):
             return None
+        loop = _in_loop(code, k)
+        if loop is not None and (at < 0 or _in_loop(code, at) != loop):
+            return None                         # added once for each turn of a loop: any number of words
+        if any(toks[x].kind == "name" and toks[x].text in _loop_names(code) for x in range(k + 2, end + 1)) and (
+                loop is None or at < 0 or _in_loop(code, at) != loop):
+            return None                         # a loop's value (`f`, `extra[i]`): any number of words
         return _word(code, k + 2, end, after.text == "<<", "", listy=after.text == "+=")
     return None
 
