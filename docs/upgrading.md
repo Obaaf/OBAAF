@@ -6,6 +6,8 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 
 Run `obaaf check . --settings FILE` with the audit snapshot from the repository you are checking. OBAAF-GHA-005 records its UTC date and tests exclusive secret storage and protected-branch access. Refresh observations older than 30 days. An unread setting carries its reason into the finding. Review the other four controls and any separate code-ownership finding. When verification clears a finding covered by a baseline, its entry becomes stale and can fail the gate at the configured severity. Review and remove the obsolete entry. The shipped catalogue currently has no released egress action commit for the credential-isolation control.
 
+Checkout and tool-pin suggestions repeat the selected snapshot. Use `obaaf fix . --settings FILE` for paperwork with the same evidence. Keep the snapshot inside the repository so the private copy can check its contents and code ownership. A single-workflow check still cannot verify snapshot ownership. The generated blocking gate and egress draft do not support this option.
+
 ## Versions, and what to pin
 
 - **A release** has three numbers (`0.3.0`). It is on PyPI (`pip install obaaf==0.3.0`) and has a tag (`v0.3.0`).

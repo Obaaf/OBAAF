@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import fnmatch
 import hashlib
@@ -19,6 +19,7 @@ from obaaf.catalog import load
 from obaaf.checker import baseline, workflow
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.fix_copy import private_copy
+from obaaf.settings_evidence import SettingsEvidence, scan_identity
 
 
 class ProofError(ValueError):
@@ -37,6 +38,8 @@ class CheckOptions:
     baseline: Path | None = None
     platform: str = "auto"
     fail_on: str = "medium"
+    settings: Path | None = None
+    evidence: SettingsEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -80,14 +83,38 @@ def _relative(root: Path, path: Path) -> Path:
     return relative
 
 
+def bind_settings(root, copy, options):
+    """Read the selected input in the isolated tree using the original check's Git identity."""
+    if options.settings is None:
+        return options
+    from obaaf.audit.snapshot import SnapshotError
+
+    target = root / options.path
+    base = workflow.locate(target)[0] if target.is_dir() else target.parent
+    path = _relative(root, options.settings)
+    try:
+        current = SettingsEvidence.load(copy / path, scan_identity(target, base))
+    except (OSError, SnapshotError) as error:
+        raise ProofError(f"--settings: {error}") from error
+    current = replace(current, source=path)
+    if options.evidence is not None and options.evidence != current:
+        raise ProofError("selected settings evidence changed since the preview; rerun the check")
+    return replace(options, settings=path, evidence=current)
+
+
 def check_inputs(root, options, today, catalog):
     """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
     config = checker.Config.load(base, str(root / options.config) if options.config is not None else None)
+    evidence = options.evidence
+    if options.settings is not None:
+        if evidence is None:
+            raise ProofError("selected settings have not been read for the proof")
+        evidence = replace(evidence, source=root / options.settings)
     result = checker.check(target, config=config, platform=options.platform, catalog=catalog,
-                           today=today, gate_files=files)
+                           today=today, gate_files=files, settings=evidence)
     if result.errors:
         raise ProofError(f"checker could not read every input: {result.errors[0]}")
     if not result.files:
@@ -221,11 +248,15 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
         options = CheckOptions(_relative(root, options.path),
                                _relative(root, options.config) if options.config is not None else None,
                                _relative(root, options.baseline) if options.baseline is not None else None,
-                               options.platform, options.fail_on)
+                               options.platform, options.fail_on, options.settings, options.evidence)
         checker.parse_fail_on(options.fail_on)
         today = date.today()
         catalog = load()
         with private_copy(root) as dest:
+            options = bind_settings(root, dest, options)
+            if options.settings is not None and any(
+                    (dest / options.settings).resolve() == (dest / _relative(dest, edit.path)).resolve() for edit in edits):
+                raise ProofError("a fix cannot edit its selected settings snapshot")
             before = check_inputs(dest, options, today, catalog)
             original = check_inputs(root, options, today, catalog)
             check_copy_matches(root, original, before)

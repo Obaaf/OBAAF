@@ -116,6 +116,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 | D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
+| D-112 | Carry selected settings into fix proof | Proposed |
 
 ---
 
@@ -1058,3 +1059,11 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
 
 **Status.** Proposed, 2026-11-19 (A4b, #300).
+
+### D-112 Carry selected settings into fix proof
+
+**Decision.** A checkout or tool-pin suggestion from a check with explicit settings repeats the snapshot path. For tightening and paperwork, each proof reads the snapshot from the private copy, verifies its repository identity against the original checkout, and uses the corresponding repository-relative path for ownership checks on each tree. Explicit apply repeats the proof and requires the same parsed evidence. Single-file checks retain their existing ownership limitation.
+
+**Consequence.** The snapshot must be inside the repository for a fix. An unreadable or changed input prevents applying the proposed edits. The generated blocking gate and egress drafting commands do not support this option.
+
+**Status.** Proposed, 2026-11-19 (#302).
