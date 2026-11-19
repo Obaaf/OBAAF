@@ -38,6 +38,18 @@ Slice 2d.5c2b (issue #81, the rest of part 2 of 2d.5); decision D-094. **OBAAF-G
 - OBAAF-GHA-026's `Why:` line now also names "a way to other jobs or clients".
 - Not reported: a dangerous mode a tool runs in by default (a one-shot `cline "prompt"`, and the three actions that run their CLI with `--yolo` themselves); options described with no sentence of warning (OpenCode's `--auto`, Aider's `--yes-always`); Kiro CLI and Amp, documented only on web pages; environment variables such as `COPILOT_ALLOW_ALL` and `GOOSE_MODE`.
 
+### Agent CLIs given options built in code in another language
+
+Slice 2d.5c2c (issue #81, the rest of part 2 of 2d.5); decision D-095. **OBAAF-GHA-026 reads more, and it can turn a passing gate red.**
+
+- A new reader, `src/obaaf/checker/agent_code.py`, reads by its tokens the code given to an interpreter (`python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, awk, a heredoc or a pipe into one), a github-script script and a step whose `shell` is python, node, ruby, perl, php or pwsh. Strings, escapes, interpolation (`f"..."`, `` `${}` ``, `#{}`, `$x`), heredocs, `qw`, `%w`, here-strings and regular expressions are read as each language reads them.
+- **Now "cannot tell" (medium `command-computed`):** an argument list with a splat or spread, joined with another, held in a name the code changes, or given whole as a value (`exec.exec('claude', flags)`, which was quiet); a command line in a string given to a call that runs one and joined with or holding a value (`os.system("claude " + os.environ["F"])`, `"claude #{ENV["F"]}"`, `"claude $ENV{F}"`), a list joined into one, a `${{ }}` expression or an unquoted heredoc's expansion pasted into the code, and a value whose known start or end could be a warned option.
+- **Now matched (`command-option`):** literal pieces (`"--" + "dangerously-skip-permissions"`, `"-" + "y"` for Gemini CLI), which were "cannot tell"; a name given a literal (`f = "--" + "yolo"`, `p = "claude"`); a list held in a name the code does not change.
+- **Quiet:** a literal argument list (`subprocess.run(["claude", "--version"])`), one value in one place of a list (`["claude", "-p", prompt]`), and a string that names the program but is logged, posted or compared rather than run.
+- PowerShell and cmd are read word by word: quotes (curly ones too in PowerShell), groups, `;`, `|`, redirections, `&`, `Start-Process`, `call`, `for ... do`, `if`, and continuation lines (a backtick or a caret at a line's end). A variable inside double quotes is one word; outside quotes it is "cannot tell", as before.
+- Fixed in the interpreter reader: `php -r` was taken for an option with a value and its code never read; `python3 -I -c`, `perl -Mautodie -e`, `ruby -rtime -e` and `awk -v f=x` read the wrong word as the code; `pypy` is an interpreter; a `shell` of `/usr/bin/env python3 {0}` or `uv run --script {0}` is python.
+- This repository's report and Expectrail's are byte-identical before and after.
+
 ### Agent CLIs run with an option their own documentation warns about
 
 Slice 2d.5c2a (issue #81, part of part 2 of 2d.5); decision D-090. **OBAAF-GHA-026 now also reads command-line options. It can turn a passing gate red.**

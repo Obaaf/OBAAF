@@ -1987,6 +1987,19 @@ class WorkflowRules:
         first = shell.split()[0] if shell.split() else ""
         return first.rsplit("/", 1)[-1].lower()
 
+    def _step_language(self, job: Job, step: Step, shell_name: str) -> str:
+        """The language a `run` step's script is read as by `agent_code`: the shell's program, after `env`
+        and its options (`/usr/bin/env python3 {0}`), and python for `uv run --script {0}`."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            return shell_name
+        words = [w.rsplit("/", 1)[-1].lower() for w in shell.split() if w != "{0}"]
+        while words and (words[0] == "env" or words[0].startswith("-")):
+            words = words[1:]
+        if words and words[0] in ("uv", "uvx") and ("--script" in words or "run" in words):
+            return "python"
+        return words[0] if words else shell_name
+
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
@@ -1995,9 +2008,10 @@ class WorkflowRules:
         if step.run:
             shell_name = self._step_shell(job, step)
             # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
-            parts.append((step.run.replace("^", "") if shell_name in ("cmd", "cmd.exe") else step.run,
-                          shell_name in ("bash", "sh")))
-            languages[id(parts[-1][0])] = shell_name
+            # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
+            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", step.run).replace("^", "")
+                          if shell_name in ("cmd", "cmd.exe") else step.run, shell_name in ("bash", "sh")))
+            languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):

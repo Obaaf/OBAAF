@@ -89,6 +89,7 @@ _RENAMES = frozenset({"alias", "hash", "ln", "cp", "install", "mv", "rsync", "li
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 # Interpreters and the options that give them code to run.
 _CODE_OPTIONS = {"perl": ("-e", "-E"), "python": ("-c",), "python3": ("-c",), "python2": ("-c",), "ruby": ("-e",),
+                 "pypy": ("-c",), "pypy3": ("-c",),
                  "node": ("-e", "--eval", "-p", "--print"), "nodejs": ("-e", "--eval"), "php": ("-r",),
                  "pwsh": ("-c", "-command", "-Command", "-CommandWithArgs"),
                  "powershell": ("-c", "-command", "-Command"), "cmd": ("/c", "/C", "/k", "/K"),
@@ -889,7 +890,7 @@ _DATA_COMMANDS = frozenset({
     "then", "else", "elif", "fi", "while", "until", "if", "function", "}", "{", "!",
     "make", "cmake", "dotnet", "mvn", "gradle", "corepack", "volta-install", "poetry", "uv", "pipenv",
     "hatch", "pdm"})
-_INTERPRETER_RE = re.compile(r"(python|python2|python3|ruby|perl|node|nodejs|php|lua|bun|deno|osascript|tclsh|"
+_INTERPRETER_RE = re.compile(r"(python|python2|python3|pypy|pypy3|ruby|perl|node|nodejs|php|lua|bun|deno|osascript|tclsh|"
                              r"pwsh|powershell|cmd|awk|gawk|mawk)(?:[0-9.]*)(?:\.exe)?")
 
 
@@ -1220,33 +1221,54 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
     options = _CODE_OPTIONS.get(family, ())
     code = None
     skip = False
+    group = family[:-1] if family in ("gawk", "mawk") else family
+    takes_value = _VALUE_OPTIONS.get(group, frozenset())
+    switches = _SWITCHES.get(group, "")
     for n, x in enumerate(rest):
         t = x.text
         if skip:
             skip = False
             continue
-        if t in ("-m", "-W", "-X", "-r", "--require", "--import", "--loader", "-I", "-M", "-x", "--env-file") and (
-                t not in options):      # php's `-r` is code (found by slice 2d.5c2c), node's is a module
-            if t == "-m":
-                return False            # a module is run (`python -m pkg`): not read, as a repository script is not
-            skip = True
-            continue
-        if t in options or (t.startswith("-") and not t.startswith("--") and len(t) > 2 and any(
-                o.startswith("-") and len(o) == 2 and t.endswith(o[1]) for o in options)):
+        if t == "-m" and group in ("python", "python2", "python3", "pypy"):
+            return False                # a module is run (`python -m pkg`): not read, as a repository script is not
+        if t == "-f" and group in ("awk", "gaw", "maw"):
+            return False                # an awk program from a file: not read, as a repository script is not
+        if t in options:
             code = rest[n + 1] if n + 1 < len(rest) else None
             break
-        if family in ("awk", "gawk", "mawk") and not t.startswith("-"):
+        if t.startswith("-") and not t.startswith("--") and len(t) > 2 and any(
+                len(o) == 2 and o[0] == "-" and t.endswith(o[1]) for o in options) and all(
+                ch in switches for ch in t[1:-1]):
+            code = rest[n + 1] if n + 1 < len(rest) else None     # `perl -le`, `python3 -Ic`, `node -pe`
+            break
+        if t in takes_value:
+            skip = True                 # an option with its value in the next word (`-W error`, `awk -v x=1`)
+            continue
+        if t.startswith("-"):
+            continue                    # a switch, or an option with its value attached (`-Mautodie`, `-F,`)
+        if family in ("awk", "gawk", "mawk"):
             code = x
             break
-        if not t.startswith("-"):
-            if _written(t, ctx):
-                ctx.cannot_tell(f"{x.shown}, a file written in the step")
-                return True
-            if x.computed and mentions(x.shown, ctx.programs, ctx.packages):
-                ctx.cannot_tell(x.shown)
-                return True
-            break
-    texts = [code.text] if code is not None else [body for _k, body, _l in command.stdin]
+        if _written(t, ctx):
+            ctx.cannot_tell(f"{x.shown}, a file written in the step")
+            return True
+        if x.computed and mentions(x.shown, ctx.programs, ctx.packages):
+            ctx.cannot_tell(x.shown)
+            return True
+        break
+    # An unquoted heredoc's body is expanded by bash before the interpreter reads it: each expansion is a
+    # value pasted into the code (flagship slice 2d.5c2c, found by its review).
+    texts = [code.text] if code is not None else [body if literal else _paste_expansions(body)
+                                                  for _k, body, literal in command.stdin]
+    if code is None and not texts and command.piped:
+        # Code read from a pipe (`echo '...' | python3`): what `echo` or `printf` writes, else "cannot tell"
+        # where the pipeline names the tool.
+        literal = _literal_output(command.before)
+        if literal is not None:
+            texts = [literal]
+        elif mentions(_pipeline(command), ctx.programs, ctx.packages):
+            ctx.cannot_tell(f"{family} reading its code from a pipe: " + _pipeline(command))
+            return True
     if not texts:
         return False
     for text in texts:
@@ -1268,6 +1290,40 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
                 from obaaf.checker import agent_code
                 agent_code.read_code(text, family, ctx)
     return True
+
+
+# Options of an interpreter that take the next word as their value, and the one-letter switches that may
+# come before a code option in one group (`perl -lne`, `python3 -Ic`).
+_VALUE_OPTIONS = {
+    "python": frozenset({"-W", "-X", "--check-hash-based-pycs"}),
+    "pypy": frozenset({"-W", "-X"}),
+    "node": frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "-C",
+                       "--conditions", "--input-type", "--title"}),
+    "nodejs": frozenset({"-r", "--require", "--import", "--loader", "--env-file", "-C", "--input-type"}),
+    "perl": frozenset({"-I", "-M", "-m", "-x"}),
+    "ruby": frozenset({"-r", "-I", "-C", "-E", "-F", "-K", "--encoding"}),
+    "php": frozenset({"-d", "-c", "-z"}),
+    "awk": frozenset({"-v", "-F", "--assign", "--field-separator"}),
+    "gaw": frozenset({"-v", "-F", "--assign", "--field-separator"}),
+    "maw": frozenset({"-v", "-F"}),
+    "bun": frozenset({"-r", "--preload", "--env-file", "--cwd"}),
+    "deno": frozenset({"--config", "--import-map"}),
+}
+_SWITCHES = {"python": "bBdEhiIOPqsSuvVxR", "python2": "bBdEhiIOPqsSuvVxR", "python3": "bBdEhiIOPqsSuvVxR",
+             "pypy": "bBdEhiIOPqsSuvVxR",
+             "perl": "lnpawsTtWXUcC0123456789", "ruby": "nplawsdvUcy", "node": "p", "nodejs": "p", "bun": "p"}
+_BASH_EXPANSION_RE = re.compile(r"\\[\\$`]|\$\{[^}]*\}|\$\([^)]*\)|`[^`]*`|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]")
+
+
+def _paste_expansions(body: str) -> str:
+    """An unquoted heredoc's body with each expansion bash makes in it written as a pasted value
+    (`${{ ... }}`), and its backslash escapes undone."""
+    def one(m):
+        text = m.group(0)
+        if text.startswith("\\"):
+            return text[1]
+        return "${{ " + text.replace("}}", "} }") + " }}"
+    return _BASH_EXPANSION_RE.sub(one, body)
 
 
 def _string_script(word: Word, ctx: _Context) -> None:

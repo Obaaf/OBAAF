@@ -987,15 +987,30 @@ rules:
       checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`) or a new name made for a program
       (`alias`, `hash`, `ln`, `cp`); `IFS` set; `eval` or a shell given text the checker cannot read; a
       script file written in the step and run; text it cannot split; nesting deeper than four levels; in
-      another shell, a variable or splat among the program's words (`claude @a`); and in code in another
-      language that names the tool, a warned option written in pieces (`"--dangerously-" + "skip-..."`). Read
+      PowerShell or cmd, a variable, group or splat outside quotes among the program's words (`claude @a`,
+      `claude $flags`, `claude %F%`), or a command it cannot name (`& $exe`, `%C%`); and in code in another
+      language (code given to `python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, awk or a heredoc, a
+      github-script script, a step whose `shell` is python, node, ruby, perl or php), read by its tokens
+      (flagship slice 2d.5c2c): an argument list with a splat or spread, joined with another, held in a name
+      the code changes, or given as a value to a call that takes the list (`exec.exec('claude', flags)`,
+      `os.execvp`); a command line in a string given to a call that runs one (`os.system`, `execSync`,
+      backticks, `%x`, `qx`, `shell_exec`, awk's `system` and pipes) and joined with or holding a value
+      (`"claude " + f`, `f"claude {f}"`, `"claude #{f}"`, `"claude $f"`, `"claude %s" % f`), which can end the
+      string's own quotes; a list joined into such a string; a value pasted into the code before it runs (a
+      `${{ }}` expression, a shell expansion in an unquoted heredoc); a value whose known start or end could
+      be a warned option (`"--" + x`, `x + "-skip-permissions"`) or that holds one as a literal
+      (`env.get("F", "--yolo")`); code the checker cannot split. Literal pieces are joined and matched
+      (`"--" + "yolo"`), a name given a literal is that literal, and one value in one place of a list
+      (`["claude", "-p", prompt]`) is one word that is not one of these options, as a quoted variable is in
+      bash. Read
       in the job's steps and in the steps of the local composite actions it uses. A value only another
       scanner calls dangerous is not reported. Not read: a quoted word that starts with a variable or a
       substitution (`claude -p "$PROMPT"`) is taken for one word that is not one of these options, though
-      the tool's own parser may read a value that starts with `-` as an option (#254); in code in another
-      language, options built from variables (an argument array held in a variable, a shell string joined
-      with a variable, `"--" + "yolo"`) are not read beyond a warned option's start written in pieces
-      (flagship slice 2d.5c2c); Codex's `--sandbox
+      the tool's own parser may read a value that starts with `-` as an option (#254), and so is one value
+      in one place of an argument list in code in another language; in such code, a program name given by
+      escapes, pieces or a path built at run time, a list held in a mapping or an attribute of another
+      object, Perl's `exec { ... }`, code written into another process's input, and AppleScript and Tcl
+      beyond the widest reading; Codex's `--sandbox
       danger-full-access` and the action's `sandbox` input (neither the CLI's files nor the action's give a
       sentence of warning for them) and Codex's `-c` overrides; settings given to `--settings` (a file or
       JSON), claude-code-action's `settings` and codex-action's `codex-home`; an environment variable the

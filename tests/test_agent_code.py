@@ -108,24 +108,28 @@ class TheEntrysCasesTest(Case):
 
     def test_an_option_built_from_pieces(self):
         self.expect([
+            # A name given literal pieces is that text where it is used (one step of data flow).
             (heredoc("python3", "import subprocess\nf = '--' + 'dangerously-skip-permissions'\n"
-                                "subprocess.run(['claude', '-p', 'x', f])"), "cannot"),
+                                "subprocess.run(['claude', '-p', 'x', f])"), "hit"),
+            (heredoc("python3", "import subprocess\nf = '--' + mode\nsubprocess.run(['claude', '-p', 'x', f])"),
+             "cannot"),
             (heredoc("python3", "import subprocess\nsubprocess.run(['claude', '--' + 'dangerously-skip-permissions'])"),
              "hit"),
             (heredoc("python3", "import subprocess\nsubprocess.run(['claude', '--dangerously-' + mode])"), "cannot"),
             (heredoc("python3", "import subprocess\nsubprocess.run(['claude', f'--{mode}', '-p', 'x'])"), "cannot"),
-            ("ruby -e 'f = \"--\" + \"dangerously-skip-permissions\"; system(\"claude\", \"-p\", \"x\", f)'", "cannot"),
+            ("ruby -e 'f = \"--\" + \"dangerously-skip-permissions\"; system(\"claude\", \"-p\", \"x\", f)'", "hit"),
             ("perl -e 'my $f = \"--\" . \"dangerously-skip-permissions\"; system(\"claude\", \"-p\", \"x\", $f)'",
-             "cannot"),
+             "hit"),
         ])
         # Gemini CLI's `-y`.
         self.expect([
-            (heredoc("python3", "import subprocess\ny = '-' + 'y'\nsubprocess.run(['gemini', '-p', 'x', y])"), "cannot"),
+            (heredoc("python3", "import subprocess\ny = '-' + 'y'\nsubprocess.run(['gemini', '-p', 'x', y])"), "hit"),
+            (heredoc("python3", "import subprocess\ny = '-' + v\nsubprocess.run(['gemini', '-p', 'x', y])"), "cannot"),
             (heredoc("python3", "import subprocess\nsubprocess.run(['gemini', '-' + 'y', '-p', 'x'])"), "hit"),
         ])
         self.expect([
             ("await exec.exec('claude', ['-p', 'x', '--' + 'dangerously-skip-permissions'])", "hit"),
-            ("const f = '--' + 'dangerously-skip-permissions'\nawait exec.exec('claude', ['-p', 'x', f])", "cannot"),
+            ("const f = '--' + 'dangerously-skip-permissions'\nawait exec.exec('claude', ['-p', 'x', f])", "hit"),
         ], make=script_step)
 
     def test_a_literal_argument_list_and_one_value_in_a_prompts_place_stay_quiet(self):
@@ -236,6 +240,60 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(agent_code.family_of("pwsh.exe"), "pwsh")
         self.assertEqual(agent_code.family_of("github-script"), "js")
         self.assertEqual(agent_code.family_of("fish"), "other")
+
+
+def maker(name):
+    makers = {
+        "bash": run_step, "gs": script_step,
+        "py": lambda c: run_step(heredoc("python3", c)), "node": lambda c: run_step(heredoc("node", c)),
+        "rb": lambda c: run_step(heredoc("ruby", c)), "pl": lambda c: run_step(heredoc("perl", c)),
+        "php": lambda c: run_step(heredoc("php", c)),
+        "pwsh": lambda c: shell_step("pwsh", c, "windows-latest"), "cmd": lambda c: shell_step("cmd", c, "windows-latest"),
+        "pyshell": lambda c: shell_step("python", c),
+    }
+    if name.startswith("shell:"):
+        return lambda c: shell_step(name[6:], c)
+    return makers[name]
+
+
+class FirstReviewCasesTest(unittest.TestCase):
+    """Every probe of the first review, with what is reported now (`agent_code_review_cases.py`)."""
+
+    def test_each_case(self):
+        from agent_code_review_cases import CASES
+        for cid, how, code, want, why in CASES:
+            with self.subTest(case=cid, why=why):
+                got = kinds(check(maker(how)(code)))
+                got = "hit" if "command-option" in got else ("cannot" if got == ["command-computed"] else (
+                    "none" if not got else ",".join(got)))
+                if want == "hit/cannot":
+                    self.assertIn(got, ("hit", "cannot"), code)
+                else:
+                    self.assertEqual(got, want, code)
+
+    def test_a_string_that_names_the_marker_does_not_end_the_check(self):
+        # The first version raised IndexError, and the whole check ended with a traceback.
+        text = run_step("python3 -c 'import os; os.system(\"claude ${__OBAAF_HOLE_1}\")'\nclaude " + DSP)
+        self.assertIn("command-option", kinds(check(text)))
+
+    def test_a_value_pasted_in_before_the_code_runs(self):
+        self.assertEqual(kinds(check(script_step("await exec.exec('claude', ['-p', 'x', ${{ inputs.flags }}])"))),
+                         ["command-computed"])
+        self.assertEqual(kinds(check(run_step(heredoc("python3", "import subprocess\nsubprocess.run(['claude', '-p', "
+                                                                 "'x', '${{ inputs.flags }}'])")))), ["command-computed"])
+        unquoted = "python3 <<EOF\nimport subprocess\nsubprocess.run(['claude', '-p', 'x', '$FLAGS'])\nEOF"
+        self.assertEqual(kinds(check(run_step(unquoted))), ["command-computed"])
+        self.assertEqual(kinds(check(run_step(unquoted.replace("<<EOF", "<<'EOF'")))), [])
+
+    def test_interpreter_options_are_read_by_language(self):
+        Case.expect(self, [
+            ("python3 -I -c 'import subprocess,sys; subprocess.run([\"claude\", *sys.argv[1:]])'", "cannot"),
+            ("perl -Mautodie -e 'system(\"claude\", @ARGV)'", "cannot"),
+            ("ruby -rtime -e 'system(\"claude\", *ARGV)'", "cannot"),
+            ("awk -v f=\"$F\" 'BEGIN { system(\"claude \" f) }'", "cannot"),
+            ("perl -le 'system(\"claude\", @ARGV)'", "cannot"),
+            ("echo 'import subprocess,sys; subprocess.run([\"claude\", *sys.argv[1:]])' | python3", "cannot"),
+        ])
 
 
 class CostTest(unittest.TestCase):
