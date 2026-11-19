@@ -146,13 +146,12 @@ def _changed_occurrences(difference):
     return counts
 
 
-def _stale_ignore(result):
+def _stale_ignores(result):
     for entry in result.config.ignore:
         if not any(f.rule == entry["rule"] and f.rule != checker.IDLE_DECLARATION
                    and fnmatch.fnmatch(f.path, str(entry["path"]))
                    and (not entry.get("job") or entry["job"] == f.job) for f in result.findings):
-            return True
-    return False
+            yield entry
 
 
 def _manifest(root: Path) -> dict:
@@ -257,9 +256,15 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                       - _rows(f for f in after.findings if f.state == ACCEPTED))
             promised_gone = Counter((p.identity, p.severity, p.previous) for p in promises
                                     if p.outcome == "gone" and p.previous == ACCEPTED)
-            missing = sum((losses - promised_gone).values())
-            if missing:
-                raise ProofError(f"{missing} previously accepted finding(s) would lose their acceptance")
+            unpromised = losses - promised_gone
+            if unpromised:
+                names = []
+                for (identity, _, _), count in unpromised.items():
+                    fields = json.loads(identity)
+                    names.append(f"{count} × {fields['rule']} in {fields['path']} "
+                                 f"{fields.get('job', '')} {fields.get('step', '')}".rstrip())
+                raise ProofError(f"{sum(unpromised.values())} previously accepted finding(s) would lose "
+                                 f"their acceptance: {', '.join(names)}")
             if _rows(after.findings) != +expected:
                 raise ProofError("finding changes differ from the promised identities, severities or states")
             if _approvals(after.findings) - _approvals(before.findings) != approved:
@@ -273,8 +278,12 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                 raise ProofError("an unrelated finding changed its acceptance or control evidence")
             if _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog)):
                 raise ProofError("a finding newly counts at the selected gate")
-            if after.baseline_stale or _stale_ignore(after):
-                raise ProofError("a baseline or ignore entry no longer matches a finding")
+            stale = [("baseline", e) for e in after.baseline_stale] + [("ignore", e) for e in _stale_ignores(after)]
+            if stale:
+                names = [f"{kind} {entry['rule']} in {entry['path']} {entry.get('job', '')}".rstrip()
+                         for kind, entry in stale]
+                raise ProofError(f"a baseline or ignore entry no longer matches a finding "
+                                 f"({len(stale)} unmatched): {', '.join(names)}")
             return after
     except ProofError:
         raise

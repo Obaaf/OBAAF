@@ -31,6 +31,7 @@ class Paperwork:
     promises: tuple[Promise, ...]
     items: tuple[Item, ...]
     refused: tuple[str, ...]
+    already_satisfied: str | None = None
 
 
 def _promise(f, made=None):

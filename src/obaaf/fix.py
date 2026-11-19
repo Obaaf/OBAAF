@@ -111,9 +111,18 @@ def _render(proposal, before, after, reasons, paths, threshold, catalog):
             _show_diff(edit)
 
 
-def _verified_plan(source, copy, options, before, metadata):
-    from obaaf.fix_paperwork import plan
+def _verified_plan(source, copy, options, before, metadata, plan):
     from obaaf.fix_proof import ProofError, prove
+
+    def rejection(item, error):
+        if item.kind != "tightening":
+            return f"{item.description}: {error}"
+        from obaaf.checker.todo import tightening_command
+        pin = metadata.get("pin")
+        request = ["--pin", "=".join(pin)] if pin else ["--tighten", "checkout-credentials"]
+        command = tightening_command(before, request, candidate=item.id)
+        return (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
+                f"their owner. Retry this step alone with {command}")
 
     def verify(candidate):
         for edit in candidate.edits:
@@ -130,7 +139,7 @@ def _verified_plan(source, copy, options, before, metadata):
         return combined, verify(combined), reasons
     except ProofError as error:
         if len(combined.items) == 1:
-            reasons.append(f"{combined.items[0].description}: {error}")
+            reasons.append(rejection(combined.items[0], error))
             return plan(copy, options, before, selected=(), **metadata), None, reasons
 
     # Stale entries must be removed together to meet the proof condition. Try that
@@ -146,7 +155,7 @@ def _verified_plan(source, copy, options, before, metadata):
         try:
             result = verify(candidate)
         except ProofError as error:
-            reasons.extend(f"{item.description}: {error}" for item in batch)
+            reasons.extend(rejection(item, error) for item in batch)
             continue
         verified, verdict, selected = candidate, result, ids
     return verified, verdict, reasons
@@ -167,17 +176,50 @@ def run(args):
                 return run_gate(args, root, options, lock, _show_diff)
         if (args.reason is not None or args.expires is not None) and not all((args.owner, args.reason, args.expires, args.baseline)):
             raise ValueError("baseline migration needs --baseline, --owner, --reason and --expires together")
+        pin = None
+        if args.pin is not None:
+            from obaaf.fix_tightening import parse_pin
+            if len(args.pin) != 1:
+                raise ValueError("select one --pin PACKAGE=VERSION per preview")
+            pin = parse_pin(args.pin[0])
+        if args.candidate is not None and not args.candidate.strip():
+            raise ValueError("--candidate needs a nonblank name from the tightening preview")
+        if args.candidate is not None and not (args.tighten or pin):
+            raise ValueError("--candidate needs --tighten checkout-credentials or --pin PACKAGE=VERSION")
+        if (args.tighten or pin) and any(v is not None for v in (args.owner, args.reason, args.expires)):
+            raise ValueError("workflow tightening cannot change acceptance metadata; request paperwork separately")
         root, options = _paths(args)
         checker.parse_fail_on(options.fail_on)
-        metadata = dict(owner=args.owner, reason=args.reason, expires=args.expires)
+        if args.tighten or pin:
+            from obaaf.fix_tightening import plan
+            metadata = dict(candidate=args.candidate, pin=pin)
+        else:
+            from obaaf.fix_paperwork import plan
+            metadata = dict(owner=args.owner, reason=args.reason, expires=args.expires)
         with (apply_lock(root) if args.apply else nullcontext()) as lock, private_copy(root) as copy:
             today, catalog = date.today(), load()
             before = check_inputs(copy, options, today, catalog)
             source = check_inputs(root, options, today, catalog)
             check_copy_matches(root, source, before)
+            before.checked = str(args.path)
+            before.options = ([f"--config={args.config}"] if args.config else []) + [f"--platform={args.platform}"]
+            before.baseline_path = args.baseline or ""
+            before.fail_on = args.fail_on
             paths = _owner_paths(copy, options, before, today, catalog)
-            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata)
+            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan)
+            if args.tighten:
+                print("Checkout tightening can affect later steps that use Git credentials.")
             _render(proposal, source, after, reasons, paths, options.fail_on, catalog)
+            if pin and not proposal.edits:
+                if proposal.already_satisfied:
+                    print(one_line(proposal.already_satisfied))
+                    return 0
+                print("No proven pin to apply. Review the reported install and its original workflow by hand.")
+                return 1
+            if args.candidate is not None and not proposal.edits:
+                print("Named checkout withheld. Review its original workflow and resolve the reported condition "
+                      "before running this named request again.")
+                return 1
             if args.apply:
                 sys.stdout.flush()
                 if proposal.edits:
