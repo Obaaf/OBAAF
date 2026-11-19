@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -4872,17 +4873,84 @@ class WorkflowRules:
                     return True
         return False
 
+    # The npm CLI's words that set `provenance` on the command line (flagship slice 2d.12). nopt reads a
+    # boolean option as true when it is given alone or with `=true`, and as false with `--no-` or `=false`;
+    # the last one given wins.
+    _NPM_PROVENANCE_ON = frozenset({"--provenance", "--provenance=true"})
+    _NPM_PROVENANCE_OFF = frozenset({"--no-provenance", "--provenance=false"})
+    # Characters in a word that the shell may turn into other words, or that say a value is not known.
+    _NPM_UNREAD_RE = re.compile(r"[$`*?\[\]{}~\\]|OBAAF_EXPRESSION")
+
+    def _npm_provenance_publish(self, job: Job, step: Step) -> bool:
+        """Whether a step publishes to npm with provenance that npm signs as it publishes (flagship slice
+        2d.12, #201): its whole script is one command, `npm publish` followed by words the checker reads
+        as written, the last of which that sets `provenance` sets it true, with no `--provenance-file`;
+        the job holds `id-token: write` in permissions it declares (or its workflow does) and runs only on
+        GitHub-hosted runners, as npm's documentation asks; and the script runs in a POSIX shell the
+        checker reads, where nothing earlier in the job may have changed what `npm` runs. npm's CLI throws
+        before it publishes when it cannot sign (`ensureProvenanceGeneration` in libnpmpublish), so such a
+        step publishes nothing without provenance. Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`,
+        `.npmrc`, trusted publishing, pnpm, Yarn, an action, a variable or expression among the words, a
+        second command) is not read, and the upload is counted as it was before."""
+        if step.uses or not isinstance(step.run, str) or not step.run.strip():
+            return False
+        perms = job.permissions
+        if perms is None or perms.level("id-token") != "write":
+            return False
+        sets = job.runner_label_sets()
+        if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
+                               for labels in sets):
+            return False
+        shell = self._failfast_shell(job, step)
+        if shell is None or self._bash_env(job, step):
+            return False
+        # One command, on one line or continued with a backslash at a line's end, and nothing else but
+        # comment lines and blank ones.
+        lines = [line for line in step.run.replace("\\\n", "").split("\n")
+                 if line.strip() and not line.strip().startswith("#")]
+        if len(lines) != 1 or "${{" in step.run:
+            return False
+        commands, complete = binding_commands(_expressions_for_shell(step.run), *shell)
+        if not complete or len(commands) != 1:
+            return False
+        words = commands[0]
+        if words[:2] != ["npm", "publish"] or any(self._NPM_UNREAD_RE.search(w) or not w for w in words):
+            return False
+        try:
+            if shlex.split(lines[0], comments=True) != words:
+                return False        # an `|| exit` after it, or quoting the reader turned into other words
+        except ValueError:
+            return False
+        provenance = False
+        for word in words[2:]:
+            if word.startswith("--provenance-file"):
+                return False
+            if word in self._NPM_PROVENANCE_ON:
+                provenance = True
+            elif word in self._NPM_PROVENANCE_OFF or word.startswith("--provenance") or word.startswith(
+                    "--no-provenance"):
+                provenance = False      # `--provenance=no` and the like: not read as true
+        return provenance
+
     def provenance_missing(self) -> None:
         uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
         if any(self._signs_provenance(j) for j in self.wf.jobs.values()):
             return
+        # An upload that is `npm publish --provenance`, in the form `_npm_provenance_publish` reads, signs
+        # its own provenance (flagship slice 2d.12); the other uploads are weighed as before.
+        def unsigned(j: Job) -> list[Step]:
+            return [s for s in j.upload_steps(self.detection) if not self._npm_provenance_publish(j, s)]
+
+        uploading = [j for j in uploading if unsigned(j)]
+        if not uploading:
+            return
         # Provenance signed by another workflow counts when every upload is gated on verifying it, by a
         # check that comes before it and stops it (flagship slice 2d.2e: before, any verify text anywhere
         # in the job counted, after the upload or in an `echo` included).
         unverified = [j for j in uploading
-                      if any(kind is None for _s, kind in self._upload_checks(j, j.upload_steps(self.detection)))]
+                      if any(kind is None for _s, kind in self._upload_checks(j, unsigned(j)))]
         if not unverified:
             return
         # One finding for the workflow. It is reported on the first publishing job that is a release

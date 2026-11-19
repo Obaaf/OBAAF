@@ -38,6 +38,15 @@ Slice 2d.5c2b (issue #81, the rest of part 2 of 2d.5); decision D-094. **OBAAF-G
 - OBAAF-GHA-026's `Why:` line now also names "a way to other jobs or clients".
 - Not reported: a dangerous mode a tool runs in by default (a one-shot `cline "prompt"`, and the three actions that run their CLI with `--yolo` themselves); options described with no sentence of warning (OpenCode's `--auto`, Aider's `--yes-always`); Kiro CLI and Amp, documented only on web pages; environment variables such as `COPILOT_ALLOW_ALL` and `GOOSE_MODE`.
 
+### `npm publish --provenance` counts as provenance
+
+Slice 2d.12 (issue #201); decision D-097. **OBAAF-GHA-017 is reported for fewer workflows; a baseline entry for one it no longer reports no longer matches, which fails a check at or above `--fail-on`.**
+
+- A release upload that is `npm publish --provenance` signs its own provenance, and OBAAF-GHA-017 ("Release builds without provenance") no longer counts it. npm's documentation asks for `id-token: write`, a GitHub-hosted runner and the flag; npm's CLI throws before it publishes when it cannot sign (`ensureProvenanceGeneration`, read in npm/cli at `787f152`), so such a step publishes nothing without provenance.
+- **Only one form is read:** the step's whole script is that one command (a comment or a line continued with a backslash aside), every word is read as written (no `$`, backquote, glob, expression or `|| exit`), the last word that sets `provenance` sets it true (`--provenance` or `--provenance=true`; `--no-provenance` and `--provenance=false` turn it off, as npm reads them), there is no `--provenance-file`, the job's declared permissions (or its workflow's) give `id-token: write`, every runner it may run on is GitHub-hosted, and its shell is a POSIX shell that no earlier step or `env` may have changed (`BASH_ENV`, `GITHUB_PATH`).
+- **Still reported, as before:** `NPM_CONFIG_PROVENANCE`, `publishConfig.provenance`, `.npmrc`, trusted publishing (which turns provenance on by itself), `pnpm publish` and `yarn npm publish`, an action that publishes, a second command in the step, and any other upload in the workflow, which still needs provenance of its own.
+- This repository's report and Expectrail's are byte-identical before and after.
+
 ### Which actions and called workflows are an agent's
 
 Slice 2d.11 (issue #236); decision D-096. **Fewer jobs are agent jobs, and a baseline entry for one of their findings no longer matches, which fails a check at or above `--fail-on`. A step whose `uses:` leaves its repository, and a configuration that is not a list of text, can also turn a passing gate red.**
