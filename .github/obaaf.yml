@@ -1,5 +1,9 @@
 # OBAAF's configuration for checking this repository with `obaaf check .`.
 # Local dogfood command: obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
+# The one baseline entry names its finding exactly, including the publish step, which has no name of
+# its own and so is known by its `uses` with the pinned commit. A new pin of pypa/gh-action-pypi-publish
+# (Dependabot's grouped actions update) therefore makes that entry stale and the finding new, and CI's
+# dogfood step fails until a maintainer rewrites the entry for the new pin (#238, plan item 64).
 # See docs/checker-configuration.md.
 ignore:
   # The escape tests make a second checkout with actions/checkout's default on purpose: it is the
