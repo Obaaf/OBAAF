@@ -244,11 +244,15 @@ class WhatIsNotReadIsNamedTest(unittest.TestCase):
                 self.assertIn(f"job 'a' uses the local action ./{ACTION_DIR}", result.errors[0])
 
     def test_paths_outside_the_repository(self):
-        for uses, why in (("./../elsewhere", "leads outside the repository"),
-                          ("./.github/../../elsewhere", "leads outside the repository"),
-                          ("./${{ inputs.where }}", "holds an expression")):
-            with self.subTest(uses=uses):
-                self.assertIn(why, self.note_for({}, uses=uses))
+        # Flagship slice 2d.11 (from its review): a path out of the repository can reach any action the
+        # runner downloaded for the job, beside the workspace, so the job is an agent job, with no note that
+        # says it is not. A path with an expression is still a note.
+        for uses in ("./../elsewhere", "./.github/../../elsewhere"):
+            with self.subTest(uses=uses), TempDir() as tmp:
+                result = check(tmp, job_using(uses), {})
+                self.assertTrue(agent_rules(result))
+                self.assertFalse([n for n in result.notes if n.startswith("Local actions were not read through")])
+        self.assertIn("holds an expression", self.note_for({}, uses="./${{ inputs.where }}"))
 
     def test_a_link_out_of_the_repository(self):
         with TempDir() as tmp:
@@ -259,8 +263,14 @@ class WhatIsNotReadIsNamedTest(unittest.TestCase):
             (root / ACTION_DIR).parent.mkdir(parents=True, exist_ok=True)
             (root / ACTION_DIR).symlink_to(outside, target_is_directory=True)
             result = checker.check(root)
-            self.assertEqual(agent_rules(result), [])
-            self.assertTrue(any("leads outside the repository" in n for n in result.notes), result.notes)
+            # Flagship slice 2d.11 (from its second review): a link out of the repository can reach the
+            # folder beside the workspace where the runner keeps every action the job downloads, as
+            # `./..` can, so the job is an agent job, and the reason says where the link leads.
+            self.assertTrue(agent_rules(result))
+            self.assertFalse([n for n in result.notes if n.startswith("Local actions were not read through")])
+            ((_f, _job, lane, reason),) = checker.lanes(root)
+            self.assertEqual(lane, "agent")
+            self.assertIn("leads outside the repository", reason)
 
     def test_an_unread_action_inside_a_read_one(self):
         files = {f"{ACTION_DIR}/action.yml": composite(PLAIN, "    - uses: ./.github/actions/js\n"),

@@ -23,7 +23,14 @@ version: 0.1.0
 #   read          the date the sources were read
 #   sources       where the entry's facts were read: the tool's action file, README or documentation
 #   actions       actions that run the agent, matched as a prefix of the `uses:` value before the `@`
-#                 (`owner/repo` also matches `owner/repo/path`); each with the inputs that carry a prompt
+#                 (`owner/repo` also matches `owner/repo/path`, and a called workflow
+#                 `owner/repo/.github/workflows/x.yml`, but not `owner/repo-docs`); each with the inputs
+#                 that carry a prompt
+#   not_agents    actions in a folder under one of those that run no agent (flagship slice 2d.11), each
+#                 with `action` (owner/repo/path; the folder exactly as written, owner and repository in
+#                 any case), `says` (the action's own words for what it does), `source` (where they are:
+#                 a file at a commit in that repository, with its lines), `checked` (what was read to know
+#                 it runs no agent) and `read` (the date). Any other path under an action is the agent.
 #   commands      Python regular expressions that find the agent run in a command line (`run:`, an
 #                 action's input, a `docker://` step's arguments); options may come before the prompt flag
 #   programs      the command-line programs the tool installs
@@ -156,6 +163,18 @@ agent_tools:
           If `claude_args` turns off permission checks, for example with `bypassPermissions`, commands outside
           the list run without approval, and the action logs a warning.
         source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md#L102
+    not_agents:
+      - action: anthropics/claude-code-action/agent-approval-check
+        read: 2026-11-19
+        says: >-
+          Require N human approvals on PRs that contain agent-authored commits (Claude, Claude Code, or any
+          configured bot identity). Posts an `agent-approval-check` commit status — mark it as a required
+          check on protected branches to gate merges.
+        checked: >-
+          Its composite steps (lines 49 to 72) set up Python, install httpx, PyYAML and tenacity at exact
+          versions and run its own agent_approval_check.py, which imports no model's library, starts no
+          other program and sends its requests only to api.github.com.
+        source: https://github.com/anthropics/claude-code-action/blob/f431adaf77e0fecf918431e75a2b5b45b85af002/agent-approval-check/action.yml#L1-L6
     carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
   - id: gemini-cli
