@@ -170,12 +170,16 @@ class AgentActions:
     that folder, not one under it. A step's action is read with `..` worked out first, so
     `.../agent-approval-check/../base-action` is the base action."""
 
-    __slots__ = ("catalogue", "excluded", "configured")
+    __slots__ = ("catalogue", "excluded", "configured", "configured_local")
 
     def __init__(self, detection: dict, configured=()):
         self.catalogue = tuple(str(a).lower() for a in detection.get("agent_actions", ()) or ())
         self.excluded = frozenset(_repo_and_path(str(a)) for a in detection.get("agent_not_actions", ()) or ())
-        self.configured = tuple(p for p in (_configured_prefix(a) for a in configured or ()) if p)
+        given = [str(a).strip() for a in configured or ()]
+        self.configured = tuple(p for p in (_configured_prefix(a) for a in given if not is_local_reference(a)) if p)
+        # A local entry (`./.github/workflows/agent.yml`) names a called local workflow by its first
+        # characters, in any case, as it did before slice 2d.11; no step's action is local.
+        self.configured_local = tuple(a.lower() for a in given if is_local_reference(a))
 
     def names(self, action: str | None) -> str | None:
         """The prefix that makes `action` (`owner/repo[/path]`, as `Step.action` gives it) an agent action,
@@ -200,9 +204,13 @@ class AgentActions:
         """Whether a job that calls the workflow `reusable` (its `uses:`) calls one in an agent action's
         repository or folder, read as a step's action is: `owner/repo/.github/workflows/x.yml@ref` is
         under `owner/repo`, and a workflow of `owner/repo-docs` is not (before slice 2d.11 a call was
-        matched by the first characters alone). A call of the workflow's own repository is not."""
-        if not isinstance(reusable, str) or not reusable.strip() or is_local_reference(reusable.strip()):
+        matched by the first characters alone). A call of the workflow's own repository is an agent's only
+        where a repository's own local entry begins it."""
+        if not isinstance(reusable, str) or not reusable.strip():
             return False
+        if is_local_reference(reusable.strip()):
+            low = reusable.strip().lower()
+            return any(low.startswith(entry) for entry in self.configured_local)
         return self.names(action_name(reusable.strip())) is not None
 
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.

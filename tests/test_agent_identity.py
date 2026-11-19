@@ -215,8 +215,7 @@ class CalledWorkflowTest(unittest.TestCase):
 
     def test_a_configured_action_that_names_nothing_is_refused(self):
         for agents in ({"actions": "my-org/agent"}, {"actions": ["@v1"]}, {"actions": [""]}, {"actions": ["/"]},
-                       {"actions": [3]}, {"actions": ["./.github/actions/run-agent"]}, {"actions": ["$/x"]},
-                       {"actions": ["docker://ghcr.io/x/agent"]},
+                       {"actions": [3]}, {"actions": ["docker://ghcr.io/x/agent"]},
                        {"commands": "run-agent"}, {"commands": [" "]}, {"commands": ["("]}):
             with self.subTest(agents=agents), self.assertRaises(checker.ConfigError):
                 Config.from_data({"agents": agents}, "obaaf.yml")
@@ -242,6 +241,21 @@ class CalledWorkflowTest(unittest.TestCase):
         self.assertFalse(actions.calls("./.github/workflows/x.yml"))
         self.assertFalse(actions.calls(None))
         self.assertFalse(actions.calls("   "))
+
+    def test_a_local_call_a_repository_names_is_its_agent(self):
+        # Found by the fourth review of slice 2d.11: a local entry named a called local workflow by its first
+        # characters before the slice, and still does (its job cannot carry OBAAF_LANE: a job that calls a
+        # workflow takes no `env`).
+        for entry in ("./.github/workflows/agent.yml", "$/.github/workflows/agent.yml", "./.github/workflows/"):
+            with self.subTest(entry=entry):
+                config = Config.from_data({"agents": {"actions": [entry]}}, "obaaf.yml")
+                uses = "./.github/workflows/agent.yml" if entry.startswith("./") else "$/.github/workflows/agent.yml"
+                files = {".github/workflows/agent.yml": "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                                                        "    steps:\n      - run: ./review.sh\n"}
+                found = [f for f in check(calling(uses, "    secrets: inherit\n"), files=files, config=config).findings
+                         if f.rule in AGENT_RULES and f.job == "a"]
+                self.assertTrue(found)
+                self.assertTrue(all(f.facts["agents"] == [f"agents.actions: {entry}"] for f in found))
 
 
 class OutOfTheRepositoryTest(unittest.TestCase):
