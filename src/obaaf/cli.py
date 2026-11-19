@@ -91,6 +91,9 @@ def cmd_check(args) -> int:
     from obaaf.catalog import load
     from obaaf.checker import report
 
+    if args.summary and (args.format != "text" or args.lanes or args.write_baseline):
+        print("error: --summary requires a text check without --lanes or --write-baseline", file=sys.stderr)
+        return EXIT_USAGE
     target = Path(args.path)
     base = target.parent if target.is_file() else target
     if target.is_dir():
@@ -182,6 +185,7 @@ def cmd_check(args) -> int:
     gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
+    result.fail_on = args.fail_on
     # What a command the report suggests has to repeat to check the same thing.
     # One word each, so a value that begins with a hyphen is still read as a value.
     result.options = ([f"--config={args.config}"] if args.config else []) \
@@ -192,7 +196,9 @@ def cmd_check(args) -> int:
         # Checking nothing must not look like a pass (an empty or mistyped path).
         print(_nothing_checked(target, args.platform), file=sys.stderr)
         return EXIT_USAGE
-    if args.format == "json":
+    if args.summary:
+        text = report.to_summary(result, expiring_within=args.expiry_warning)
+    elif args.format == "json":
         text = report.to_json(result, expiring_within=args.expiry_warning)
     elif args.format == "sarif":
         text = report.to_sarif(result, expiring_within=args.expiry_warning)
@@ -789,6 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto",
                    help="which CI definitions to check: auto (GitHub Actions workflows and Jenkinsfiles), github "
                         "or jenkins. Jenkins results are advisory (see docs/jenkins.md).")
+    x.add_argument("--summary", action="store_true", help="show the accepted risk and the to-do list with scan, coverage and baseline warnings "
+                        "(a text check only: not with --format json or sarif, --lanes or --write-baseline)")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
     x.add_argument("--fail-on", default="medium",
