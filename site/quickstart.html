@@ -24,7 +24,7 @@
 obaaf --version
 obaaf check unpinned.yml --fail-on low
 obaaf check pinned.yml --fail-on low</code></pre>
-<p>Checked on 2026-11-14 at 04:24 UTC with obaaf 0.3.0 from PyPI. <code>obaaf --version</code> printed <code>obaaf 0.3.0</code>. The first command exited 1. The second exited 0. The finding is low. A medium threshold would not fail it. The same two files, checked again the same day with obaaf 0.3.0 and with the development version, exited 1 and then 0.</p>
+<p>Checked on 2026-11-14 at 04:24 UTC with obaaf 0.3.0 from PyPI. <code>obaaf --version</code> printed <code>obaaf 0.3.0</code>. The check of <code>unpinned.yml</code> exited 1. The check of <code>pinned.yml</code> exited 0. The finding is low. A medium threshold would not fail it. The same two files, checked again the same day with obaaf 0.3.0 and with the development version, exited 1 and then 0.</p>
 <h2>The finding</h2>
 <pre><code>unpinned.yml
      9  LOW    OBAAF-GHA-008  Action or container not pinned to a full digest  [job build]

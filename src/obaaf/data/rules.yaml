@@ -902,10 +902,10 @@ rules:
       A step gives an agent action a value for an input that the tool's own documentation warns about
       (flagship slice 2d.5c1). The values are data: each agent tool's entry in the detection data lists
       them under `settings`, each with the documentation's words, quoted, and the file, commit and lines they
-      were read from, and the finding prints both. Read on 2026-11-19: `openai/codex-action` with
+      were read from, and a finding for a matching value prints both. Read on 2026-11-19: `openai/codex-action` with
       `safety-strategy: unsafe` (high) or `read-only` (medium), and `allow-users: "*"` (high);
-      `anthropics/claude-code-action` with `allowed_non_write_users: "*"` (high) or any other value
-      (medium), `allowed_bots: "*"` (medium) and `show_full_output: true` (medium), and
+      `anthropics/claude-code-action` with `allowed_non_write_users: "*"` (high) or any other value that is
+      not empty (medium), `allowed_bots: "*"` (medium) and `show_full_output: true` (medium), and
       `anthropics/claude-code-base-action` with `show_full_output: true` (medium). A value is compared
       with the white space either Python or JavaScript trims taken off its ends, U+FEFF included, and in any
       letter case, which is wider than some of the actions read it; the input's name is read in any case of
