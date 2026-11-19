@@ -1,6 +1,8 @@
 """A finding has exactly one rule/kind cause, including kinds with no specific entry."""
 
+import ast
 import copy
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ from obaaf.catalog import load
 from obaaf.causes import CauseCatalog
 
 
+SRC = Path(__file__).resolve().parent.parent / "src" / "obaaf"
 JENKINS = "OBAAF-JEN-001"
 INSTALL = "OBAAF-GHA-025"
 LANE = "OBAAF-CFG-001"
@@ -107,3 +110,81 @@ class ShippedCauseCatalogTest(unittest.TestCase):
         self.assertEqual(typo.fix_kind, "paperwork")
         self.assertEqual(missing_job.fix_kind, "by-hand")
         self.assertNotEqual(typo.id, missing_job.id)
+
+
+# The literal kinds each rule's `add` calls give a finding that have no cause of their own, each read
+# against its rule's remaining-kinds cause. A new literal kind fails the test below until its author
+# assigns it a cause in causes.yaml or, having read that rule's remaining-kinds cause, adds it here.
+# (The review of #253 found OBAAF-GHA-026's command-line kinds from #255 under the cause written for
+# an action's inputs.) "" is a finding given no kind. Kinds built at run time are not seen here.
+REMAINDER_READ = {
+    "OBAAF-GHA-001": {"privileged", "privileged-environment", "pull-request"},
+    "OBAAF-GHA-002": {"checkout", "checkout-unresolved", "fetch", "fetch-unresolved"},
+    "OBAAF-GHA-003": {"inherited", "undeclared", "write"},
+    "OBAAF-GHA-004": {""},
+    "OBAAF-GHA-005": {"secrets"},
+    "OBAAF-GHA-006": {"called-restores", "needed-job-restores"},
+    "OBAAF-GHA-007": {""},
+    "OBAAF-GHA-008": {"container", "image", "image-expression", "image-unreadable"},
+    "OBAAF-GHA-009": {""},
+    "OBAAF-GHA-010": {"", "indirect", "through-env", "through-matrix"},
+    "OBAAF-GHA-011": {""},
+    "OBAAF-GHA-012": {"fetch", "fetch-unresolved", "head", "merge-commit", "unresolved"},
+    "OBAAF-GHA-015": {"", "capability", "capability-call", "environment", "pull-request"},
+    "OBAAF-GHA-016": {"unchecked"},
+    "OBAAF-GHA-017": {""},
+    "OBAAF-GHA-018": {"action", "any-secret", "command", "secrets"},
+    "OBAAF-GHA-019": {""},
+    "OBAAF-GHA-021": {"unchecked"},
+    "OBAAF-GHA-022": {""},
+    "OBAAF-GHA-023": {""},
+    "OBAAF-GHA-024": {"caller", "environment-expression", "environment-not-a-name", "environment-unsure",
+                      "no-environment", "other-environment"},
+    "OBAAF-GHA-025": {"agent-cli", "piped-download"},
+    "OBAAF-GHA-026": {"option", "setting"},
+    **{f"OBAAF-JEN-{n:03d}": {""} for n in range(1, 16)},
+    "OBAAF-REPO-001": {"gate-no-owner", "no-owner"},
+    "OBAAF-REPO-002": {"no-owner"},
+}
+
+
+def literal_kinds(rules):
+    """Each (rule, kind) an `add` call in the package writes out, for the rules in `rules`."""
+    found = set()
+    for path in SRC.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            rule = node.args[0].value
+            if name != "add" or rule not in rules:
+                continue
+            kind = next((k.value for k in node.keywords if k.arg == "kind"), ast.Constant(""))
+            if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
+                found.add((rule, kind.value))
+    return found
+
+
+class LiteralKindsTest(unittest.TestCase):
+    def test_every_literal_kind_has_its_own_cause_or_was_read_against_the_remainder(self):
+        causes = load().causes
+        found = literal_kinds(set(load().rules))
+        self.assertGreater(len(found), 60)
+        unread = sorted(pair for pair in found
+                        if pair not in causes._exact and pair[1] not in REMAINDER_READ.get(pair[0], set()))
+        self.assertEqual(unread, [], "assign these a cause in causes.yaml, or read the rule's remaining-kinds "
+                                     "cause and add them to REMAINDER_READ")
+        listed = {(rule, kind) for rule, kinds in REMAINDER_READ.items() for kind in kinds}
+        self.assertEqual(sorted(listed - found), [], "REMAINDER_READ names kinds the checker no longer writes")
+        self.assertEqual(sorted(listed & set(causes._exact)), [], "REMAINDER_READ names kinds with a cause")
+
+    def test_agent_cli_kinds_have_their_own_causes(self):
+        causes = load().causes
+        action = causes.for_finding("OBAAF-GHA-026", "setting")
+        self.assertIs(causes.for_finding("OBAAF-GHA-026", "option"), action)
+        option = causes.for_finding("OBAAF-GHA-026", "command-option")
+        unread = causes.for_finding("OBAAF-GHA-026", "command-computed")
+        self.assertEqual(len({action.id, option.id, unread.id,
+                              causes.for_finding("OBAAF-GHA-026", "computed").id}), 4)
+        self.assertIn("CLI", option.sentence)
+        self.assertIn("cannot read", unread.sentence)

@@ -140,7 +140,7 @@ causes:
     sentence: "An agent action receives an input its own documentation warns about."
     rules: [OBAAF-GHA-026]
     except_kinds:
-      OBAAF-GHA-026: [computed]
+      OBAAF-GHA-026: [computed, command-option, command-computed]
     fix_kind: by-hand
     next: "Read the warning quoted in the finding. Remove the override or set the input to a value appropriate for this job."
   - id: ineffective-lane
@@ -282,6 +282,18 @@ causes:
       OBAAF-GHA-026: [computed]
     fix_kind: by-hand
     next: "Inspect how the input is constructed. Use an explicit reviewed literal or leave the input at its documented default."
+  - id: agent-cli-option
+    sentence: "An agent CLI is run with an option its own documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-option]
+    fix_kind: by-hand
+    next: "Read the warning quoted in the finding and remove the option from the command that runs the agent."
+  - id: agent-cli-option-unresolved
+    sentence: "The checker cannot read the words an agent CLI is run with to compare them with the options its documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-computed]
+    fix_kind: by-hand
+    next: "Inspect how the command line is built. Write the agent's options as literal words in the step, or check that none of the named options can be among them."
   - id: instruction-file-size
     sentence: "An instruction file exceeds the amount of text the checker scans."
     kinds:
