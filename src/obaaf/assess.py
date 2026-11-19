@@ -209,6 +209,7 @@ def template(catalog: Catalog | None = None) -> str:
     catalog = catalog or load()
     lines = [
         "# OBAAF self-assessment answers. Answer each item yes, no, or na where allowed.",
+        "# Leave an item unanswered if you are not sure; it counts as no.",
         "# Keep this file inside your studio: it is never sent anywhere.",
         "# Score it with:  obaaf assess score this-file.yaml",
         f"format: {ANSWER_FORMAT}",
@@ -241,7 +242,7 @@ def to_text(result: Result, catalog: Catalog | None = None, limit: int = 10) -> 
     who = f" for {result.answers.studio}" if result.answers.studio else ""
     out.append(f"OBAAF self-assessment{who}")
     out.append(f"Tier reached: {result.tier} ({result.tier_name})")
-    out.append("The tier reflects the answers you supplied.")
+    out.append("The tier reflects the answers you supplied; OBAAF does not check them.")
     for tier, counts in result.per_tier.items():
         satisfied = counts["yes"] + counts["na"]
         out.append(f"  Tier {tier} {catalog.tiers[tier]['name']:<11} {satisfied:>2}/{counts['items']} satisfied")
@@ -278,7 +279,7 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     meta.append(f"Scored by obaaf {__version__}")
     out += [" · ".join(meta), ""]
     out.append(f"**Tier reached: {result.tier} ({result.tier_name}).** "
-               "The tier reflects the answers you supplied.")
+               "The tier reflects the answers you supplied; OBAAF does not check them.")
     out.append("")
     out.append("| Tier | Satisfied | No | Unanswered |")
     out.append("| --- | --- | --- | --- |")
