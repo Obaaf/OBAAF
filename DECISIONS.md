@@ -809,3 +809,13 @@ When the tool detects a secret name but cannot establish its GitHub environment,
 **Consequence.** Setup takes a preview and an explicit apply. A conflict requires reconciliation before the pair can be written. The first workflow does not block on finding severity. Secret values are unnecessary for proposing rules from workflow references.
 
 **Status.** Accepted, 2026-11-18. Sean chose each of these four outcomes in his session (Central Time). This records the requirements for slice 3.3 (#84).
+
+### D-090 How a finding gets a next action in the cause catalogue
+
+**Decision.** Give each checker rule one cause for its remaining kinds. When a kind needs different advice, explicitly exclude it from that group and assign it to one named cause. The catalogue check fails on missing or overlapping assignments. A cause has a stable ID, a sentence, a fix kind and a next action. Jenkins causes direct the reader to a manual change.
+
+**Reason.** Two findings under the same rule can require different work. For example, a tool installed at a changeable version and an install line too long to inspect call for different advice. Naming both sides of an exception lets the catalogue catch a deleted assignment before a report gives the wrong advice.
+
+**Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule’s remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
+
+**Status.** Proposed, 2026-11-19 (A1a, #252).
