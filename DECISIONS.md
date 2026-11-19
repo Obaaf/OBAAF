@@ -810,7 +810,7 @@ When the tool detects a secret name but cannot establish its GitHub environment,
 
 **Status.** Accepted, 2026-11-18. Sean chose each of these four outcomes in his session (Central Time). This records the requirements for slice 3.3 (#84).
 
-### D-090 How a finding gets a next action in the cause catalogue
+### D-091 How a finding gets a next action in the cause catalogue
 
 **Decision.** Give each checker rule one cause for its remaining kinds. When a kind needs different advice, explicitly exclude it from that group and assign it to one named cause. The catalogue check fails on missing or overlapping assignments. A cause has a stable ID, a sentence, a fix kind and a next action. Jenkins causes direct the reader to a manual change.
 
