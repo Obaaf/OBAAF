@@ -1,0 +1,192 @@
+"""Preview and install a repository's first report-only GitHub Actions check."""
+
+from __future__ import annotations
+
+import difflib
+import os
+import re
+import sys
+from collections import defaultdict
+from importlib.resources import files
+from pathlib import Path
+from stat import S_ISREG
+from tempfile import NamedTemporaryFile
+
+import yaml
+
+from obaaf import agent_tools, checker
+from obaaf.catalog import load
+from obaaf.checker import CONFIG_LOCATIONS
+from obaaf.checker.egress import MODEL_KEYS
+from obaaf.checker.workflow import one_line, parse, secret_names
+
+WORKFLOW = ".github/workflows/obaaf-pipeline-check.yml"
+PROVIDER_KEYS = frozenset(MODEL_KEYS) | {
+    "META_API_KEY", "MODEL_API_KEY", "FIREWORKS_API_KEY", "BASETEN_API_KEY", "OPENROUTER_API_KEY",
+    "MISTRAL_API_KEY", "COHERE_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+    "AZURE_OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN", "CLAUDE_API_KEY", "GEMINI_API_KEY", "COPILOT_PROVIDER_API_KEY",
+}
+
+
+def _read(path: Path) -> bytes | None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    if not S_ISREG(mode):
+        raise ValueError(f"{path} must be a regular file")
+    return path.read_bytes()
+
+
+def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
+    folder = root / ".github/workflows"
+    catalog = load()
+    config = checker.Config()
+    actions = checker._agent_actions(catalog, config)
+    commands = checker._script_commands(catalog, config)
+    action_cache = {}
+    step_state = {"agent": action_cache}
+    unread = []
+    lanes = {}
+    environments = defaultdict(set)
+    notes = []
+    unnamed_environments = set()
+    for path in sorted(folder.iterdir()) if folder.exists() else ():
+        rel = path.relative_to(root).as_posix()
+        if rel == WORKFLOW or not path.name.lower().endswith((".yaml", ".yml")):
+            continue
+        contents = _read(path)
+        if contents is None:
+            raise ValueError(f"{rel} disappeared during inspection")
+        workflow = parse(rel, contents.decode("utf-8"))
+        if workflow.error or workflow.problems:
+            raise ValueError(f"{rel}: {workflow.error or workflow.problems[0]}")
+        errors = []
+        checker._apply_local_action_detection(workflow, root, actions, commands, unread, errors, action_cache)
+        checker._apply_local_action_steps(workflow, root, unread, errors, step_state)
+        if errors:
+            raise ValueError(errors[0])
+        for job in workflow.jobs.values():
+            key = f"{rel}#{job.id}"
+            names = {name.upper() for name in job.secret_names()}
+            steps = [*job.steps, *(step for inner in job.local_steps.values() for step in inner)]
+            for inner in job.local_steps.values():
+                for step in inner:
+                    names.update(name.upper() for name in secret_names(step.raw))
+            provider = names & PROVIDER_KEYS
+            for env in [workflow.env, job.env, *(step.env for step in steps)]:
+                if isinstance(env, dict):
+                    provider.update(str(k) for k, v in env.items() if k in PROVIDER_KEYS and secret_names(v))
+            tools = agent_tools.named_agents(job, catalog.detection)
+            if not tools and job.agent_step_why:
+                tools = sorted(set(job.agent_step_why.values()))
+            if tools or provider:
+                lanes[key] = "agent"
+                evidence = tools + [f"references {name}" for name in sorted(provider)]
+                notes.append(f"{key}: {', '.join(evidence)}")
+            kind, value = job.environment_reading
+            environment = value if kind == "literal" and "workflow_call" not in workflow.triggers else None
+            for name in names:
+                if name.startswith("*"):
+                    notes.append(f"{key}: review access to unnamed or inherited secrets")
+                    unnamed_environments.add(environment)
+                else:
+                    environments[name].add(environment)
+    protected = {}
+    for name, values in sorted(environments.items()):
+        values = values | unnamed_environments
+        valid_name = re.fullmatch(r"[A-Z0-9_]+", name) and len(name.replace("_", "")) >= 3
+        if len(values) == 1 and None not in values and valid_name:
+            protected[name] = next(iter(values))
+        else:
+            notes.append(f"Review {name}: no single literal environment can be proposed.")
+    notes.extend(checker._local_action_notes(unread))
+    if not lanes:
+        notes.append("To create an agent workflow, start with GitHub Agentic Workflows: https://github.github.com/gh-aw/")
+    config = yaml.safe_dump({"lanes": lanes, "protected_secrets": protected}, sort_keys=False)
+    workflow_bytes = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+    return {CONFIG_LOCATIONS[0]: config.encode("utf-8"), WORKFLOW: workflow_bytes}, notes
+
+
+def _install(root: Path, missing: dict[str, bytes]) -> None:
+    # Prepare complete files first, then link them into place without replacing an existing name.
+    staged = {}
+    linked = []
+    try:
+        for name, content in missing.items():
+            dest = root / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile(dir=dest.parent, delete=False) as source:
+                staged[dest] = Path(source.name)
+                source.write(content)
+        for dest, source_path in staged.items():
+            os.link(source_path, dest)
+            linked.append(dest)
+    except OSError:
+        for dest in reversed(linked):
+            if dest.exists() and dest.samefile(staged[dest]):
+                dest.unlink()
+        raise
+    finally:
+        for source_path in staged.values():
+            source_path.unlink(missing_ok=True)
+
+
+def _show_diff(old: bytes, proposed: bytes, old_name: str, new_name: str) -> None:
+    before = old.decode("utf-8", "backslashreplace").splitlines(keepends=True)
+    after = proposed.decode("utf-8").splitlines(keepends=True)
+    for line in difflib.unified_diff(before, after, fromfile=old_name, tofile=new_name):
+        print(one_line(line.removesuffix("\n")))
+        if not line.endswith("\n"):
+            print(r"\ No newline at end of file")
+
+
+def run(args) -> int:
+    root = Path(args.path).resolve()
+    try:
+        if not root.is_dir():
+            raise ValueError(f"{root} is not a repository directory")
+        for folder in (root / ".github", root / ".github/workflows"):
+            if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+                raise ValueError(f"{folder} must be a directory inside the repository")
+        proposal, notes = _proposal(root)
+        for note in notes:
+            print(one_line(note))
+        missing = {}
+        conflict = False
+        for alternate in CONFIG_LOCATIONS[1:]:
+            existing = _read(root / alternate)
+            if existing is None:
+                continue
+            conflict = True
+            print(f"Conflict: existing checker configuration at {alternate}. "
+                  f"Reconcile it with {CONFIG_LOCATIONS[0]} before applying.")
+            if existing == proposal[CONFIG_LOCATIONS[0]]:
+                print("The contents match. Creating another supported configuration would make the choice ambiguous.")
+            else:
+                _show_diff(existing, proposal[CONFIG_LOCATIONS[0]], alternate, CONFIG_LOCATIONS[0])
+        for name, content in proposal.items():
+            old = _read(root / name)
+            if old == content:
+                print(f"Already matches: {name}")
+                continue
+            if old is None:
+                missing[name] = content
+            else:
+                print(f"Conflict: {name}")
+                conflict = True
+            _show_diff(old or b"", content, name if old is not None else "/dev/null", name)
+        if conflict:
+            print("Resolve the differences and preview again.", file=sys.stderr)
+            return 1
+        if args.apply:
+            _install(root, missing)
+            for name in missing:
+                print(f"Wrote {name}")
+        elif missing:
+            print("Review both files, then run obaaf init with --apply to write them.")
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"error: {one_line(error)}", file=sys.stderr)
+        return 2

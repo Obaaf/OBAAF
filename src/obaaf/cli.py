@@ -40,6 +40,12 @@ def _github_output(pairs: dict[str, str]) -> None:
                     handle.write(f"{key}={value}\n")
 
 
+# ------------------------------------------------------------------ init
+def cmd_init(args) -> int:
+    from obaaf.init import run
+    return run(args)
+
+
 # ------------------------------------------------------------------ assess
 def cmd_assess_init(args) -> int:
     from obaaf import assess
@@ -761,6 +767,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
+
+    x = sub.add_parser("init", help="preview a GitHub Actions configuration and report-only workflow")
+    x.add_argument("path", nargs="?", default=".", help="repository directory (default: current directory)")
+    x.add_argument("--apply", action="store_true", help="create both files after reviewing the preview")
+    x.set_defaults(func=cmd_init)
 
     # assess
     a = sub.add_parser("assess", help="the self-assessment").add_subparsers(dest="sub", required=True)
