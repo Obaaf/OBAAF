@@ -1,4 +1,5 @@
 # OBAAF's configuration for checking this repository with `obaaf check .`.
+# Local dogfood command: obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 # See docs/checker-configuration.md.
 ignore:
   # The escape tests make a second checkout with actions/checkout's default on purpose: it is the
@@ -11,16 +12,3 @@ ignore:
     owner: "@seanudeke"
     reason: The kept token is the fixture for the egress action's refusal test; the token can only read, and only this repository's own steps follow it
     until: 2027-05-14
-  # Since plan slice 2d.4b2 the rules read the steps of ./actions/setup-obaaf as steps of the release
-  # job. Its install step writes the virtual environment it made to GITHUB_PATH, so OBAAF-GHA-016 can no
-  # longer vouch that `obaaf` in the verify step is the one setup-obaaf installed, and says "cannot
-  # tell". It is: the action is this repository's own, read from the same commit, and installs OBAAF
-  # from hash-locked wheels into a fresh directory under RUNNER_TEMP. Accepted in Sean's name for him
-  # to confirm (plan item 64); an entry names a rule in a job, so it would also cover any other
-  # OBAAF-GHA-016 there until it expires, which is why it is short.
-  - rule: OBAAF-GHA-016
-    path: .github/workflows/release-pypi.yml
-    job: publish
-    owner: "@seanudeke"
-    reason: The PATH entry before the verify step is the one this repository's own setup-obaaf writes, from hash-locked wheels; see plan item 64
-    until: 2027-02-18

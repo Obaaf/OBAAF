@@ -16,7 +16,7 @@ OBAAF accepts contributions under the rules below. Version 0.x formats may still
 python -m unittest discover -s tests -v
 obaaf docs build --check
 obaaf catalog
-obaaf check .
+obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 ```
 
 ## Review responsibility
