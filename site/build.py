@@ -65,7 +65,7 @@ FORMATS = {
     "build-record": ("Build record", "The release artifacts",
                      "obaaf attest build-record", "the release lane's attest job",
                      "Records how a release artifact was built. The source, assets, manifest, SDK "
-                     "entries and isolation fields identify their reporters."),
+                     "entries and isolation fields carry reporter labels."),
 }
 DOCS = "https://github.com/Obaaf/OBAAF/blob/main/docs/attestations.md"
 
