@@ -170,6 +170,26 @@ PASSED_NAMED = 5
 PASSED_SHOWN = 3
 
 
+def _plain(value, depth: int = 0):
+    """A YAML value as JSON can hold it, the same for the same value: text, a number as `as_text` writes
+    it (an integer of any length), true, false and null as JSON's, a list item by item, and a mapping as a
+    list of [key, value] pairs sorted by the key's JSON (keys may be numbers, null or booleans, which do not
+    sort against text). Below 64 levels a value is given as one marker: GitHub refuses such inputs, so the
+    file never runs (found by 2d.5c1's third review: `json.dumps(sort_keys=True)` raised on mixed keys)."""
+    if depth > 64:
+        return "<nested more than 64 levels>"
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, float)):
+        return as_text(value)
+    if isinstance(value, dict):
+        pairs = [[_plain(k, depth + 1), _plain(v, depth + 1)] for k, v in value.items()]
+        return sorted(pairs, key=lambda kv: json.dumps(kv[0], ensure_ascii=False))
+    if isinstance(value, (list, tuple)):
+        return [_plain(v, depth + 1) for v in value]
+    return as_text(value)
+
+
 def _truthy(value) -> bool:
     return as_text(value).strip().lower() in ("true", "1", "yes")
 
@@ -1871,8 +1891,7 @@ class WorkflowRules:
             # The whole value is the fact, so an acceptance stops matching when any of it changes (found by
             # 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo` become `unsafe`).
             if text is None:
-                text = raw if isinstance(raw, str) else json.dumps(raw, sort_keys=True, default=as_text,
-                                                                     ensure_ascii=False)
+                text = raw if isinstance(raw, str) else json.dumps(_plain(raw), ensure_ascii=False)
             shown = one_line(text, 120)
             worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
             severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst

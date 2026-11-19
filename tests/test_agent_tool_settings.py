@@ -208,6 +208,19 @@ class CannotTellTest(unittest.TestCase):
         hits = found(check(one_step(CODEX, "          allow-users: [alice, '*']\n")))
         self.assertEqual(hits[0].facts["value"], '["alice", "*"]')
 
+    def test_a_value_json_cannot_sort_or_print_is_still_a_finding_not_a_traceback(self):
+        # Found by 2d.5c1's third review: mixed keys and an integer of thousands of digits raised.
+        big = "0x" + "f" * 5000
+        for written in ("[{1: a, b: c}]", "[{~: a, b: c}]", "[{true: a, b: c}]", f"[{big}]"):
+            with self.subTest(written=written[:20]):
+                text = ("on: issue_comment\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                        "    steps:\n      - uses: " + CODEX + "\n        with: " + written + "\n")
+                self.assertEqual([h.kind for h in found(check(text))], ["computed"])
+        for written in ("{1: a, b: c}", "{~: a, b: c}", "[" * 70 + "x" + "]" * 70):
+            with self.subTest(written=written[:20]):
+                hits = found(check(one_step(CODEX, f"          allow-users: {written}\n")))
+                self.assertEqual([h.kind for h in hits], ["computed"])
+
 
 class WhereStepsAreReadTest(unittest.TestCase):
 
