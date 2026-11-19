@@ -5,6 +5,8 @@ import json
 import shlex
 import unittest
 
+from obaaf.cli import build_parser
+from obaaf.checker.todo_acceptance import migration_command
 from obaaf.checker import CheckResult, Config, acceptance, baseline, report
 from obaaf.checker.rules import Control, Finding, VERIFIED
 
@@ -49,3 +51,8 @@ class TodoReportTest(unittest.TestCase):
         self.assertEqual(shlex.split(groups[0]["command"]), [
             "obaaf", "baseline", "migrate", result.baseline_path, result.checked,
             "--owner", "OWNER", "--reason", "REASON", "--expires", "YYYY-MM-DD", *result.options])
+
+    def test_migration_command_parses_relative_paths_starting_with_a_dash(self):
+        result = CheckResult([], [], [], Config(), checked="-source", baseline_path="-old.json")
+        args = build_parser().parse_args(shlex.split(migration_command(result))[1:])
+        self.assertEqual((args.file, args.path), ("./-old.json", "./-source"))

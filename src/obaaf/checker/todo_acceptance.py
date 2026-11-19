@@ -11,9 +11,13 @@ from obaaf.checker.rules import ACCEPTED, FIXED
 
 def migration_command(result) -> str:
     """Use only CLI arguments from this check. A migration requires three user decisions."""
-    args = ["obaaf", "baseline", "migrate", result.baseline_path or "FILE"]
+    paths = [result.baseline_path or "FILE"]
     if result.checked not in ("", "."):
-        args.append(result.checked)
+        paths.append(result.checked)
+    # Quoting protects spaces and shell metacharacters, but argparse reads an initial dash
+    # as an option even after shell quoting. A relative path with ./ denotes the same file.
+    args = ["obaaf", "baseline", "migrate"]
+    args.extend("./" + path if path.startswith("-") else path for path in paths)
     args.extend(("--owner", "OWNER", "--reason", "REASON", "--expires", "YYYY-MM-DD"))
     args.extend(result.options)
     return shlex.join(args)
