@@ -105,6 +105,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 
 ---
 
@@ -931,3 +932,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
+
+### D-106 Checkout credential tightening by kind or candidate name
+
+**Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.
+
+**Reason.** Later Git operations may need the checkout credential. The adopter chooses whether to make this workflow change. A disappearing acceptance or a stale entry is a separate decision for its owner.
+
+**Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, and edits whose precise effect cannot be proven remain for manual review. The checker reads the workflow offline.
+
+**Status.** Proposed, 2026-11-19 (slice A5a, #285).
