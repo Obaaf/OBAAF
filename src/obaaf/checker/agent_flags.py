@@ -1,55 +1,87 @@
 """Command-line options an agent tool's own files warn about (flagship slice 2d.5c2a, OBAAF-GHA-026).
 
-An agent tool's entry in the detection data may list `flags`: an option's spellings (`--yolo`, `-y`),
-the values warned about when it takes one (`--permission-mode bypassPermissions`), and the documentation's
+An agent tool's entry in the detection data may list `flags`: an option's spellings (`--yolo`, `-y`), the
+values warned about when it takes one (`--permission-mode bypassPermissions`), and the documentation's
 words. This module finds them in two places:
 
-- a script that runs the tool's program (`claude`, `codex`, `gemini`, or its package through `npx` and the
-  like): `read_script`;
+- a script that runs the tool's program (`claude`, `codex`, `gemini`, a path to one, or its package through
+  `npx` and the like): `read_script`;
 - an input that an action of the entry hands to the program as options (`claude_args`, `codex-args`):
   `read_args`.
 
-Both are read the wider way. A script is read twice and the two readings are added together: once as a
-shell splits it into words (quotes and backslashes taken out, `$'...'` decoded, a variable the step's,
-job's or workflow's `env` gives a plain value put in, `bash -c` and `eval` read again), and once with
-quotes and backslashes simply removed and the text cut where a shell starts a command, as the agent
-lane is found (so an option written inside a prompt's text is read as given). An option is matched in
-any letter case, `--name=value` as well as `--name value`, and a one-letter option inside a group of
-letters (`-yd`).
+A bash or sh script is read twice and the two readings are added together.
 
-What the first reading cannot read is "cannot tell": a word of the program's command with a variable or
-a substitution that is not inside quotes (the shell splits its value into words, any of which may be an
-option), any `${{ }}` expression in the command (GitHub puts its text in before the shell reads the
-line), the program run by `xargs` (its words come from the input), and an option that takes a value
-given a value the checker cannot read. A word in double quotes is one word: one that starts with an
-expansion is not read as an option (its value is not known), and one whose written start is the start
-of a warned option (`"--dangerously-$X"`) is "cannot tell".
+The first reading splits it as bash does (`_lex`): quotes, backslashes, `$'...'` and `$"..."` as bash
+reads them; heredocs as data, unless a shell reads them; a variable put in where its value is known (an
+`env` value with a plain value, or one plain assignment in the script itself); command substitutions,
+`bash -c`, `sh -c`, `eval`, `env -S`, `su -c`, `script -c`, `flock -c`, `watch`, `npx -c`, aliases, and the
+text a shell reads from a pipe, a heredoc or a here-string read again as scripts. The program counts only
+where a command is started (after `sudo`, `env`, `timeout`, `xargs`, `find -exec`, `npx` and the like).
+Whatever this reading cannot read, in a step that names the tool, is "cannot tell":
+
+- a word of the program's command with a variable or substitution outside quotes, `"$@"` or
+  `"${NAME[@]}"`, an unquoted glob or brace, or a `${{ }}` expression (GitHub puts its text in before the
+  shell reads the line);
+- a quoted word that could start a warned option (`"--dangerously-$X"`, `"$EMPTY"--yolo`,
+  `"${F:---yolo}"`), and a warned option that takes a value given one the checker cannot read;
+- the program run by `xargs` or `parallel`, whose words come from their input;
+- a command the checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`), a new name made for a
+  program (`alias`, `hash`, `ln`, `cp`), `IFS` set, `eval` or a shell given text the checker cannot read,
+  a script file written in the step and run, and text it cannot split (an unclosed quote) or nesting
+  deeper than it reads.
+
+The second reading is the widest: the text with comments and data heredocs taken out, quotes, backslashes,
+brackets and commas removed, cut where a shell starts a command (`workflow.command_segments`); a command
+that starts with the program has its words matched as known text. So an option written in a prompt's
+text, or in a JavaScript or Python argument list, is read as given.
+
+An option is matched in any letter case, as `--name=value` and `--name value`, and a one-letter option
+inside a group of letters (`-yp`). Nothing after a word `--` is an option. `--name=false` (or `0`, `no`,
+`off`) for an option that takes no value is not a match.
 """
 
 from __future__ import annotations
 
-import codecs
 import json
 import re
 from dataclasses import dataclass, field
 
-from obaaf.checker.workflow import (_SHELLS, _command_positions, _readings, _script_tokens, _sub_expressions,
-                                    command_segments)
+from obaaf.checker.workflow import _SHELLS, _command_positions, _sub_expressions, command_segments
 
-_EXPRESSION = "\x02OBAAFEXPR\x02"
-_SEPARATORS = frozenset({";", "&&", "||", "&", ";;", "|", "|&", "(", ")", "\n"})
-_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
-_ASSIGNED_RE = re.compile(
-    r"(?:^|[\s;&|({`])(?:(?:export|local|readonly|typeset|declare|let)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)"
-    r"(?:\[[^\]]*\])?\+?=|\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+)?)*([A-Za-z_][A-Za-z0-9_]*)"
-    r"|\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b|\bgetopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)")
-# A plain value: no quote, backslash, expansion, backquote or character a shell treats specially.
+_EXPR = "\x02"           # a `${{ }}` expression is held as \x02<n>\x02 while a script is read
+_MAX_DEPTH = 4
+_SEPARATORS = frozenset({";", "&", "&&", "||", "|", "|&", ";;", ";&", ";;&", "(", ")", "\n"})
+_REDIRECTS = frozenset({"<", ">", ">>", "<>", ">|", "&>", "&>>", ">&", "<&", "<<<"})
 _PLAIN_VALUE_RE = re.compile(r"[A-Za-z0-9 _.,:/@%+=-]*")
-_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
-_EVAL = frozenset({"eval"})
-_SPLITS_QUOTED_RE = re.compile(r"\$\{?[@*]|\$\{[A-Za-z_][A-Za-z0-9_]*\[[@*]\]|\$\{![A-Za-z_]")
-_QUOTING_RE = re.compile(r"[\"'\\]")
-_MAX_DEPTH = 3
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_WINDOWS_SUFFIX_RE = re.compile(r"\.(exe|cmd|bat|ps1|com)$", re.I)
+# What JavaScript's `\s` and `trim()` take for white space (the actions split and trim their inputs in
+# JavaScript): Python's own white space and U+FEFF.
+JS_SPACE = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
+_JS_SPACE = JS_SPACE
+_JS_SPACE_RE = re.compile("[" + re.escape(_JS_SPACE) + "]")
+_FALSE_VALUES = frozenset({"false", "0", "no", "off"})
+# Commands that run the command or program named among their arguments.
+_RUNS_ARGUMENTS = frozenset({
+    "sudo", "doas", "env", "timeout", "nice", "ionice", "nohup", "stdbuf", "time", "command", "builtin", "exec",
+    "chronic", "unbuffer", "runuser", "setsid", "flock", "retry", "xargs", "parallel", "find", "docker", "podman",
+    "nerdctl", "kubectl", "nsenter", "chroot", "unshare", "firejail", "bwrap", "systemd-run", "strace", "ltrace",
+    "valgrind", "gdb", "chrt", "taskset", "faketime", "proot", "toolbox", "distrobox", "flatpak-spawn", "wsl",
+    "devbox", "poetry", "uv", "pipx", "mise", "asdf", "direnv", "dotenv",
+    "op", "doppler", "infisical", "aws-vault", "with-contenv", "tini", "dumb-init", "catchsegv", "script", "su",
+    "watch", "caffeinate", "npx", "bunx", "deno", "node", "nodejs", "ssh"})
+# Commands whose arguments make another name for a program.
+_RENAMES = frozenset({"alias", "hash", "ln", "cp", "install", "mv", "rsync", "link", "update-alternatives"})
+# Option words of a shell that take the next word as their value.
+_SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+# Interpreters and the options that give them code to run.
+_CODE_OPTIONS = {"perl": ("-e", "-E"), "python": ("-c",), "python3": ("-c",), "python2": ("-c",), "ruby": ("-e",),
+                 "node": ("-e", "--eval", "-p", "--print"), "nodejs": ("-e", "--eval"), "php": ("-r",),
+                 "pwsh": ("-c", "-command", "-Command", "-CommandWithArgs"),
+                 "powershell": ("-c", "-command", "-Command"), "cmd": ("/c", "/C", "/k", "/K"),
+                 "osascript": ("-e",), "lua": ("-e",), "tclsh": ("-c",), "awk": (), "deno": ("eval",)}
+_RUNNER_STRING_OPTIONS = {"su": ("-c", "--command"), "runuser": ("-c", "--command"), "script": ("-c", "--command"),
+                          "flock": ("-c", "--command"), "npx": ("-c", "--call"), "npm": ("-c", "--call")}
 
 
 @dataclass
@@ -63,292 +95,1143 @@ class Reading:
         self.hits.setdefault(flag["id"], (flag, option, value))
 
     def cannot_tell(self, flag: dict, word: str) -> None:
-        words = self.unknown.setdefault(flag["id"], [])
-        if word not in words:
-            words.append(word)
+        self.unknown.setdefault(flag["id"], {})[word] = None
 
     def merge(self, other: "Reading") -> None:
         for fid, hit in other.hits.items():
             self.hits.setdefault(fid, hit)
         for fid, words in other.unknown.items():
-            for word in words:
-                if word not in self.unknown.setdefault(fid, []):
-                    self.unknown[fid].append(word)
+            self.unknown.setdefault(fid, {}).update(words)
 
 
-def _base(word: str) -> str:
-    return word.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].casefold()
+# ------------------------------------------------------------------------------------------- matching
+_TABLES: dict = {}
 
 
-def _runs(word: str, programs: list, packages: list) -> bool:
-    """Whether a word names the tool's program (`claude`, `/usr/local/bin/claude`, `CLAUDE` in any case) or
-    its package, with or without a version (`@anthropic-ai/claude-code@2.1.0`)."""
-    word = word.strip()
-    if _base(word) in programs:
-        return True
-    low = word.casefold()
-    for package in packages:
-        if low == package or (low.startswith(package + "@") and len(low) > len(package) + 1):
-            return True
-    return False
+def _table(flags: list) -> tuple:
+    """(long or two-letter option -> [flag], one letter -> [flag]) for a list of flags, worked out once."""
+    key = id(flags)
+    cached = _TABLES.get(key)
+    if cached is not None and cached[0] is flags:
+        return cached[1]
+    options: dict = {}
+    letters: dict = {}
+    for flag in flags:
+        for option in flag["options"]:
+            o = option.casefold()
+            options.setdefault(o, []).append(flag)
+            if len(o) == 2 and o[0] == "-" and o[1] != "-":
+                letters.setdefault(o[1], []).append(flag)
+    if len(_TABLES) >= 16:
+        _TABLES.clear()
+    _TABLES[key] = (flags, (options, letters))
+    return options, letters
 
 
 def _equals(value: str, flag: dict) -> bool:
-    folded = value.strip().strip("\"'").strip().casefold()
+    folded = value.strip(_JS_SPACE).strip("\"'").strip(_JS_SPACE).casefold()
+    if any(str(v).casefold() in folded for v in flag.get("contains", [])):
+        return True
     return any(folded == str(v).strip().casefold() for v in flag.get("equals", []))
 
 
-def _match(words: list, flags: list, reading: Reading) -> None:
-    """Match the words of one command after its program. Each word is (text, kind): kind is None for a
-    word whose text is known, "splits" for one with an expansion outside quotes, "expression" for one with
-    a `${{ }}` expression, and "quoted" for one in quotes with an expansion (`prefix` is its known start)."""
+def _takes_value(flag: dict) -> bool:
+    return "equals" in flag or "contains" in flag
+
+
+def _match_known(words: list, flags: list, reading: Reading) -> None:
+    """Match a command's words after its program, each known text. Stops at a word `--`."""
+    options, letters = _table(flags)
+    for i, word in enumerate(words):
+        low = word.casefold()
+        if low == "--":
+            return
+        if not low.startswith("-"):
+            continue
+        name, eq, after = low.partition("=")
+        for flag in options.get(name, ()):
+            if _takes_value(flag):
+                if eq:
+                    if _equals(word[len(name) + 1:], flag):
+                        reading.hit(flag, word[:len(name)], word[len(name) + 1:])
+                elif i + 1 < len(words) and _equals(words[i + 1], flag):
+                    reading.hit(flag, word, words[i + 1])
+            elif not eq or after.strip() not in _FALSE_VALUES:
+                reading.hit(flag, word, None)
+        if not eq and len(low) > 2 and low[1] != "-" and low[1:].isalpha():
+            for letter in dict.fromkeys(low[1:]):
+                for flag in letters.get(letter, ()):
+                    if _takes_value(flag):
+                        if letter == low[-1] and i + 1 < len(words) and _equals(words[i + 1], flag):
+                            reading.hit(flag, word, words[i + 1])
+                    else:
+                        reading.hit(flag, word, None)
+
+
+def _could_start(text: str, flags: list) -> list:
+    """The flags one of whose options a word could be or begin with, given the text it is known to start
+    with (`--dangerously-` could become `--dangerously-skip-permissions`); none for an empty start."""
+    low = text.casefold()
+    if not low:
+        return []
+    out = []
     for flag in flags:
-        takes = "equals" in flag
         for option in flag["options"]:
             o = option.casefold()
-            short = len(o) == 2 and o[0] == "-" and o[1] != "-"
-            for i, (word, kind, prefix) in enumerate(words):
-                if kind in ("splits", "expression"):
-                    reading.cannot_tell(flag, word)
-                    continue
-                low = (prefix if kind == "quoted" else word).casefold()
-                if kind == "quoted":
-                    # One word whose end is not known: "cannot tell" when what is written could start the
-                    # option (`"--dangerously-$X"`, `"--permission-mode=$M"`); a word that starts with the
-                    # expansion is not read as an option.
-                    if low and (o.startswith(low) or low.startswith(o)):
-                        reading.cannot_tell(flag, word)
-                    continue
-                if takes:
-                    if low == o:
-                        if i + 1 < len(words):
-                            value, vkind, _vprefix = words[i + 1]
-                            if vkind:
-                                reading.cannot_tell(flag, f"{word} {value}")
-                            elif _equals(value, flag):
-                                reading.hit(flag, word, value)
-                    elif low.startswith(o + "="):
-                        if _equals(word[len(o) + 1:], flag):
-                            reading.hit(flag, word[:len(o)], word[len(o) + 1:])
-                    elif short and re.fullmatch(r"-[a-z]{2,}", low) and low.endswith(o[1]) and i + 1 < len(words):
-                        value, vkind, _vprefix = words[i + 1]
-                        if vkind:
-                            reading.cannot_tell(flag, f"{word} {value}")
-                        elif _equals(value, flag):
-                            reading.hit(flag, word, value)
-                else:
-                    if low == o or low.startswith(o + "="):
-                        reading.hit(flag, word, None)
-                    elif short and re.fullmatch(r"-[a-z]{2,}", low) and o[1] in low[1:]:
-                        reading.hit(flag, word, None)
+            if o.startswith(low) or low.startswith(o) or (len(o) == 2 and o[0] == "-" and o[1] != "-"
+                                                          and low.startswith("-") and not low.startswith("--")):
+                out.append(flag)
+                break
+    return out
 
 
-def _decode_ansi_c(text: str) -> str:
-    """`$'...'` strings, which bash decodes (`$'\\x2d-yolo'` is `--yolo`), written as single-quoted text."""
-    def decode(m: re.Match) -> str:
-        body = m.group(1)
-        try:
-            value = codecs.decode(body.replace("\\'", "'").encode("latin-1", "backslashreplace"), "unicode_escape")
-        except (UnicodeDecodeError, ValueError):
-            value = body
-        return "'" + value.replace("'", "'\\''") + "'"
-    return _ANSI_C_RE.sub(decode, text)
+# --------------------------------------------------------------------------------------------- the lexer
+@dataclass
+class Word:
+    text: str = ""              # the word as bash reads it, with an unknown expansion left as written
+    shown: str = ""             # the word as written in the script
+    unquoted: bool = False      # an unknown expansion outside quotes (its value is split into words)
+    quoted: bool = False        # an unknown expansion inside double quotes (one word)
+    splits: bool = False        # `"$@"` or `"${NAME[@]}"`: one word for each value
+    glob: bool = False          # an unquoted `*`, `?` or `[`
+    brace: bool = False         # an unquoted `{a,b}` or `{a..b}`
+    expr: bool = False          # a `${{ }}` expression
+    redirect: bool = False      # the target of a redirection, not an argument
+    candidates: list = field(default_factory=list)   # what the word could start with or be, where unknown
+    inner: list = field(default_factory=list)        # the scripts of its command substitutions
+
+    @property
+    def computed(self) -> bool:
+        return self.unquoted or self.quoted or self.splits or self.glob or self.brace or self.expr
 
 
-def _lines_as_commands(text: str) -> str:
-    """The script with each line break outside quotes made a `;` (a quoted line break stays), a line ended
-    by a backslash joined to the next, and each `#` comment taken out, so that it can be split as one text."""
-    out, quote, escaped, previous = [], "", False, " "
-    i = 0
+@dataclass
+class Command:
+    words: list = field(default_factory=list)
+    stdin: list = field(default_factory=list)        # (kind, text, literal): heredocs and here-strings
+    piped: bool = False                              # its input is the output of the command before it
+    before: "Command | None" = None                  # that command
+
+
+_ANSI_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b",
+                 "E": "\x1b", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _ANSI_ESCAPES:
+            out.append(_ANSI_ESCAPES[nxt])
+            i += 2
+        elif nxt in "01234567":
+            m = re.match(r"[0-7]{1,3}", body[i + 1:])
+            out.append(chr(int(m.group(0), 8) & 0xFF))
+            i += 1 + len(m.group(0))
+        elif nxt in "xuU":
+            size = {"x": 2, "u": 4, "U": 8}[nxt]
+            m = re.match(r"[0-9A-Fa-f]{1,%d}" % size, body[i + 2:])
+            if m:
+                try:
+                    out.append(chr(int(m.group(0), 16)))
+                except (ValueError, OverflowError):
+                    pass
+                i += 2 + len(m.group(0))
+            else:
+                out.append("\\" + nxt)
+                i += 2
+        elif nxt == "c" and i + 2 < len(body):
+            out.append(chr(ord(body[i + 2]) & 0x1F))
+            i += 3
+        else:
+            out.append("\\" + nxt)
+            i += 2
+    return "".join(out)
+
+
+def _balanced(text: str, i: int, open_: str, close: str) -> int:
+    """The index just after the `close` that ends what opens at `text[i]`, skipping quoted text; len(text)
+    when it does not end."""
+    depth, quote = 0, ""
     while i < len(text):
         ch = text[i]
-        if escaped:
-            escaped = False
-            if ch == "\n":
-                out[-1] = " "           # a backslash before a line break joins the lines
-            else:
-                out.append(ch)
-            previous = ch
-            i += 1
-            continue
-        if ch == "\\" and quote != "'":
-            escaped = True
-            out.append(ch)
-            previous = ch
-            i += 1
-            continue
         if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
             if ch == quote:
                 quote = ""
-            out.append(ch)
+        elif ch == "\\":
+            i += 2
+            continue
         elif ch in "'\"":
             quote = ch
+        elif ch == open_:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+class _Lexer:
+    """Bash's reading of a script, as far as this rule needs it: words, operators, redirections, heredocs
+    and here-strings, with quotes and expansions marked. `problem` is set where it cannot read the text."""
+
+    def __init__(self, text: str, variables: dict) -> None:
+        self.text = text
+        self.variables = variables
+        self.problem = ""
+
+    def commands(self) -> list:
+        tokens = self._tokens()
+        out: list = []
+        current = Command()
+        for token in tokens:
+            if isinstance(token, Word):
+                current.words.append(token)
+            elif isinstance(token, tuple):
+                current.stdin.append(token)
+            elif token in _SEPARATORS:
+                had = bool(current.words or current.stdin)
+                if had:
+                    out.append(current)
+                current = Command(piped=token in ("|", "|&"), before=current if had else None)
+        if current.words or current.stdin:
+            out.append(current)
+        return out
+
+    # The tokens: Word, an operator (str), or (kind, text, literal) for a heredoc or here-string.
+    def _tokens(self) -> list:
+        text, n = self.text, len(self.text)
+        tokens: list = []
+        pending: list = []          # heredocs waiting for the end of the line: [index in tokens, delim, tabs, quoted]
+        i = 0
+        word: Word | None = None
+        start = 0
+        redirect_next = False
+        here_string_next = False
+
+        def finish(end: int) -> None:
+            nonlocal word, redirect_next, here_string_next
+            if word is not None:
+                word.shown = text[start:end]
+                if here_string_next:
+                    tokens.append(("herestring", word.text, not word.computed))
+                    here_string_next = False
+                    redirect_next = False
+                else:
+                    word.redirect = redirect_next
+                    redirect_next = False
+                    tokens.append(word)
+            word = None
+
+        def begin(at: int) -> Word:
+            nonlocal word, start
+            if word is None:
+                word = Word()
+                start = at
+            return word
+
+        while i < n:
+            ch = text[i]
+            if ch == "\n":
+                finish(i)
+                tokens.append("\n")
+                i += 1
+                if pending:
+                    i = self._heredoc_bodies(i, pending, tokens)
+                    pending = []
+                continue
+            if ch in " \t\r":
+                finish(i)
+                i += 1
+                continue
+            if ch == "#" and word is None:
+                end = text.find("\n", i)
+                i = n if end < 0 else end
+                continue
+            if ch == "\\":
+                if i + 1 < n and text[i + 1] == "\n":
+                    i += 2
+                    continue
+                w = begin(i)
+                if i + 1 < n:
+                    w.text += text[i + 1]
+                i += 2
+                continue
+            if ch == "'":
+                w = begin(i)
+                end = text.find("'", i + 1)
+                if end < 0:
+                    self.problem = "an unclosed quote"
+                    end = n
+                w.text += text[i + 1:end]
+                i = end + 1
+                continue
+            if ch == '"':
+                w = begin(i)
+                i = self._double(i + 1, w)
+                continue
+            if ch == "$" and i + 1 < n and text[i + 1] == "'":
+                w = begin(i)
+                m = re.compile(r"((?:[^'\\]|\\.)*)'", re.S).match(text, i + 2)
+                if not m:
+                    self.problem = "an unclosed quote"
+                    w.text += text[i + 2:]
+                    i = n
+                else:
+                    w.text += _ansi_c(m.group(1))
+                    i = m.end()
+                continue
+            if ch == "$" and i + 1 < n and text[i + 1] == '"':
+                w = begin(i)
+                i = self._double(i + 2, w)
+                continue
+            if ch == "$" or ch == "`" or ch == _EXPR:
+                w = begin(i)
+                i = self._expansion(i, w, quoted=False)
+                continue
+            if ch in "<>" and i + 1 < n and text[i + 1] == "(":
+                # Process substitution: one word (a /dev/fd path) whose text runs a script.
+                w = begin(i)
+                end = _balanced(text, i + 1, "(", ")")
+                w.inner.append(text[i + 2:end - 1])
+                w.text += text[i:end]
+                w.unquoted = True
+                w.candidates.append("")
+                i = end
+                continue
+            if ch in ";&|()<>":
+                if word is not None and ch in "<>" and word.text.isdigit() and not word.computed and \
+                        text[start:i] == word.text:
+                    word = None                     # `2>`: the number is part of the redirection
+                else:
+                    finish(i)
+                op = self._operator(i)
+                i += len(op)
+                if op in ("<<", "<<-"):
+                    m = re.compile(r"[ \t]*(['\"]?)([^\s;&|<>()'\"]+)\1").match(text, i)
+                    if m:
+                        pending.append((len(tokens), m.group(2), op == "<<-", bool(m.group(1)) or "\\" in m.group(2)))
+                        i = m.end()
+                    continue
+                if op == "<<<":
+                    here_string_next = True
+                    continue
+                if op in _REDIRECTS:
+                    redirect_next = True
+                    continue
+                tokens.append(op)
+                continue
+            w = begin(i)
+            if ch in "*?" or (ch == "[" and "]" in text[i + 1:i + 200].split()[0] if text[i + 1:i + 200].split()
+                              else False):
+                w.glob = True           # `[` only with a `]` after it in the word (`[[` and `[` are tests)
+            if ch == "{" and re.match(r"\{[^{}\s]*(,|\.\.)[^{}\s]*\}", text[i:]):
+                w.brace = True
+            w.text += ch
+            i += 1
+        finish(n)
+        if pending:
+            self.problem = "a heredoc with no end"
+        return tokens
+
+    def _operator(self, i: int) -> str:
+        for op in ("<<<", "<<-", ";;&", "&>>", "&&", "||", ";;", ";&", "|&", ">>", "<<", ">&", "<&", "&>", "<>",
+                   ">|", ";", "&", "|", "(", ")", "<", ">"):
+            if self.text.startswith(op, i):
+                return op
+        return self.text[i]
+
+    def _heredoc_bodies(self, i: int, pending: list, tokens: list) -> int:
+        text = self.text
+        for offset, (index, delim, tabs, quoted) in enumerate(pending):
+            index += offset
+            body: list = []
+            while True:
+                if i >= len(text):
+                    self.problem = "a heredoc with no end"
+                    break
+                end = text.find("\n", i)
+                line = text[i:] if end < 0 else text[i:end]
+                i = len(text) if end < 0 else end + 1
+                if (line.lstrip("\t") if tabs else line) == delim:
+                    break
+                body.append(line.lstrip("\t") if tabs else line)
+            tokens.insert(index, ("heredoc", "\n".join(body), quoted))
+        return i
+
+    def _double(self, i: int, w: Word) -> int:
+        """Read a double-quoted part from `i` (just after the quote) into `w`; the index after it."""
+        text, n = self.text, len(self.text)
+        while i < n:
+            ch = text[i]
+            if ch == '"':
+                return i + 1
+            if ch == "\\" and i + 1 < n:
+                nxt = text[i + 1]
+                if nxt in '$`"\\':
+                    w.text += nxt
+                elif nxt != "\n":
+                    w.text += "\\" + nxt
+                i += 2
+                continue
+            if ch in "$`" + _EXPR:
+                i = self._expansion(i, w, quoted=True)
+                continue
+            w.text += ch
+            i += 1
+        self.problem = "an unclosed quote"
+        return n
+
+    def _expansion(self, i: int, w: Word, quoted: bool) -> int:
+        """Read the expansion at `i` into `w`; the index after it."""
+        text, n = self.text, len(self.text)
+        ch = text[i]
+
+        def unknown(raw: str, defaults: list = ()) -> None:
+            if quoted:
+                w.quoted = True
+            else:
+                w.unquoted = True
+            w.candidates.append(w.text)                 # what is known of the word before it
+            w.candidates.extend(w.text + d for d in defaults)
+            w.text += raw
+
+        if ch == _EXPR:
+            end = text.find(_EXPR, i + 1)
+            end = n if end < 0 else end + 1
+            w.expr = True
+            w.text += text[i:end]
+            return end
+        if ch == "`":
+            end = i + 1
+            while end < n and text[end] != "`":
+                end += 2 if text[end] == "\\" else 1
+            w.inner.append(text[i + 1:end])
+            unknown(text[i:end + 1])
+            return end + 1
+        # `$`
+        if i + 1 >= n:
+            w.text += "$"
+            return i + 1
+        nxt = text[i + 1]
+        if text.startswith("$((", i):
+            end = _balanced(text, i + 1, "(", ")")
+            w.text += "0"                               # arithmetic gives a number, never an option
+            return end
+        if nxt == "(":
+            end = _balanced(text, i + 1, "(", ")")
+            w.inner.append(text[i + 2:end - 1])
+            unknown(text[i:end])
+            return end
+        if nxt == "{":
+            end = _balanced(text, i + 1, "{", "}")
+            body = text[i + 2:end - 1]
+            if re.fullmatch(r"@|\*|[A-Za-z_][A-Za-z0-9_]*\[[@*]\]|[@*]:.*|[A-Za-z_][A-Za-z0-9_]*\[[@*]\]:.*", body) \
+                    or body.startswith("!"):
+                w.splits = True
+            defaults = []
+            dm = re.match(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?(:?[-+=?])(.*)\Z", body, re.S)
+            if dm:
+                defaults.append(dm.group(2).strip("\"'"))
+            unknown(text[i:end], defaults)
+            return end
+        m = _IDENT_RE.match(text, i + 1)
+        if m:
+            unknown("$" + m.group(0))
+            return m.end()
+        if nxt in "@*":
+            w.splits = True
+            unknown("$" + nxt)
+            return i + 2
+        if nxt in "#?$!-":
+            w.text += "0"
+            return i + 2
+        if nxt.isdigit():
+            unknown("$" + nxt)
+            return i + 2
+        w.text += "$"
+        return i + 1
+
+
+def _substitute(text: str, variables: dict) -> str:
+    """The script with each `$NAME` and `${NAME}` whose value is known put in, outside single quotes (a plain
+    value has no quote, expansion or backslash, so bash would read the result as it reads the variable:
+    split into words outside double quotes, one word inside them)."""
+    if not variables or "$" not in text:
+        return text
+    out, i, n, quote = [], 0, len(text), ""
+    while i < n:
+        ch = text[i]
+        if quote == "'":
             out.append(ch)
-        elif ch == "#" and (previous.isspace() or previous in ";&|("):
-            end = text.find("\n", i)
-            i = len(text) if end < 0 else end
+            if ch == "'":
+                quote = ""
+            i += 1
             continue
-        elif ch == "\n":
-            out.append(" ; ")
-        else:
+        if ch == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == "'" and not quote:
+            quote = "'"
+            if i > 0 and text[i - 1] == "$":
+                quote = "'"
             out.append(ch)
-        previous = ch
+            i += 1
+            continue
+        if ch == '"':
+            quote = "" if quote == '"' else '"'
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$":
+            m = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))").match(text, i)
+            if m:
+                name = m.group(1) or m.group(2)
+                if name in variables:
+                    out.append(variables[name])
+                    i = m.end()
+                    continue
+        out.append(ch)
         i += 1
     return "".join(out)
 
 
-def plain_variables(scopes: list, script: str) -> dict:
-    """The variables whose value the checker can put into a script: each `env` value (the step's first,
-    then the job's, then the workflow's) that is a plain value with no expression, and that the script
-    does not set itself (a variable it sets is not known; `read`, `for` and `getopts` set one too)."""
-    assigned = {next(g for g in m.groups() if g) for m in _ASSIGNED_RE.finditer(script)}
-    out: dict = {}
+def _lex(text: str, variables: dict) -> tuple[list, str]:
+    lexer = _Lexer(_substitute(text, variables), variables)
+    commands = lexer.commands()
+    return commands, lexer.problem
+
+
+# ------------------------------------------------------------------------------------- reading commands
+def _base(word: str) -> str:
+    return _WINDOWS_SUFFIX_RE.sub("", word.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]).casefold()
+
+
+def _is_package(word: str, packages: list) -> bool:
+    low = word.casefold()
+    return any(low == p or (low.startswith(p + "@") and len(low) > len(p) + 1) for p in packages)
+
+
+def _names_package_path(word: str, packages: list) -> bool:
+    low = word.casefold().replace("\\", "/")
+    return any(f"/{p}/" in low or low.startswith(p + "/") for p in packages)
+
+
+@dataclass
+class _Context:
+    programs: list
+    packages: list
+    flags: list
+    variables: dict
+    mentioned: bool
+    written: set                    # files the script writes (`> f`, `tee f`)
+    reading: Reading
+    depth: int = 0
+    loose: bool = False             # the tool's name appears in the text at all, even inside a word
+
+    def cannot_tell(self, word: str) -> None:
+        if self.mentioned:
+            for flag in self.flags:
+                self.reading.cannot_tell(flag, word)
+
+
+def _arguments(words: list) -> list:
+    return [w for w in words if not w.redirect]
+
+
+def _read_program_args(words: list, ctx: _Context) -> None:
+    """The words after the program: known ones are matched; what is not known is "cannot tell"."""
+    known: list = []
+    for w in words:
+        if w.text == "--" and not w.computed:
+            break
+        if w.expr or w.unquoted or w.splits or w.glob:
+            for flag in ctx.flags:
+                ctx.reading.cannot_tell(flag, w.shown)
+            known.append("\x00")                        # a word whose text is not known
+            continue
+        if w.brace:
+            expansions = _brace_expansions(w.text)
+            if expansions is None:
+                for flag in ctx.flags:
+                    ctx.reading.cannot_tell(flag, w.shown)
+                known.append("\x00")
+            else:
+                for expansion in expansions:
+                    _match_known([expansion], ctx.flags, ctx.reading)
+                known.append(expansions[0] if expansions else "")
+            continue
+        if w.quoted:
+            stripped = re.sub(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$\([^)]*\)|`[^`]*`|\$[0-9@*]", "", w.text)
+            for candidate in [*w.candidates, stripped]:
+                for flag in _could_start(candidate, ctx.flags):
+                    ctx.reading.cannot_tell(flag, w.shown)
+            known.append("\x00")
+            continue
+        known.append(w.text)
+    _match_known(known, ctx.flags, ctx.reading)
+    # A warned option that takes a value, given a word that is not known.
+    options, _letters = _table(ctx.flags)
+    for i, text in enumerate(known[:-1]):
+        flags = options.get(text.casefold(), ())
+        if known[i + 1] == "\x00":
+            for flag in flags:
+                if _takes_value(flag):
+                    ctx.reading.cannot_tell(flag, f"{text} {words[i + 1].shown if i + 1 < len(words) else ''}".strip())
+
+
+def _brace_expansions(text: str) -> list | None:
+    """The words one comma brace in a word expands to (`a{b,c}d` is `abd` and `acd`), or None for what is
+    not one plain comma brace (a range, nesting, more than one brace)."""
+    m = re.fullmatch(r"([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)", text)
+    if not m or ".." in m.group(2):
+        return None
+    return [m.group(1) + a + m.group(3) for a in m.group(2).split(",")]
+
+
+def _read_text(text: str, ctx: _Context) -> None:
+    """Read a script (or a part of one: `bash -c`, a substitution) with the first reading."""
+    if ctx.depth > _MAX_DEPTH:
+        ctx.cannot_tell("nesting deeper than the checker reads")
+        return
+    commands, problem = _lex(text, ctx.variables)
+    if problem:
+        ctx.cannot_tell(problem)
+    for number, command in enumerate(commands):
+        _read_command(command, ctx)
+        for w in command.words:
+            for inner in w.inner:
+                _read_nested(inner, ctx)
+
+
+def _read_nested(text: str, ctx: _Context) -> None:
+    ctx.depth += 1
+    try:
+        _read_text(text, ctx)
+    finally:
+        ctx.depth -= 1
+
+
+def _literal_output(command: Command | None) -> str | None:
+    """What `echo` or `printf` with known words writes, for a shell that reads it from a pipe."""
+    if command is None or not command.words:
+        return None
+    name = _base(command.words[0].text)
+    words = _arguments(command.words[1:])
+    if name not in ("echo", "printf") or any(w.computed for w in words):
+        return None
+    words = [w.text for w in words]
+    while name == "echo" and words and re.fullmatch(r"-[neE]+", words[0]):
+        words = words[1:]
+    return " ".join(words)
+
+
+def _read_command(command: Command, ctx: _Context) -> None:
+    words = [w for w in command.words if not w.redirect]
+    if words and words[0].text == "coproc" and not words[0].computed:
+        words = words[2:] if len(words) > 2 and words[2].text == "{" else words[1:]
+    texts = [w.text for w in words]
+    if any(re.match(r"IFS\+?=", t) for t in texts) and ctx.loose:
+        for flag in ctx.flags:
+            ctx.reading.cannot_tell(flag, "IFS=")
+    # `_command_positions` also takes a word that starts with `$(` or a backquote for a command; here such
+    # a word counts only where a command starts (its own script is read anyway).
+    positions = sorted(_command_positions([("x" if t.startswith(("$(", "`")) else t) for t in texts]))
+    started = set(positions)
+    # `find ... -exec cmd`, and a word after a command that runs its arguments, start a command too.
+    for i, t in enumerate(texts):
+        if t in ("-exec", "-execdir", "-ok", "-okdir") and i + 1 < len(texts):
+            started.add(i + 1)
+    first = max(positions) if positions else None        # the command itself, after `sudo`, `env` and the like
+    name0 = _base(texts[first]) if first is not None else ""
+    for i in sorted(started):
+        w = words[i]
+        if w.redirect:
+            continue
+        if w.computed and not re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", w.text):
+            if ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages):
+                for flag in ctx.flags:
+                    ctx.reading.cannot_tell(flag, w.shown)
+            continue
+        if _start(words, i, ctx, command):
+            return
+    # A command that runs its arguments: the program anywhere among them is run.
+    if name0 in _RUNS_ARGUMENTS:
+        for i in range(first + 1, len(words)):
+            w = words[i]
+            if not w.computed and (_base(w.text) in ctx.programs or _is_package(w.text, ctx.packages)
+                                   or _names_package_path(w.text, ctx.packages)):
+                if _start(words, i, ctx, command, forced=True):
+                    return
+    if name0 in _RENAMES and any(_mentions(w.text, ctx) for w in words[first + 1:]):
+        ctx.cannot_tell(" ".join(texts[first:first + 4]))
+
+
+def _mentions(text: str, ctx: _Context) -> bool:
+    low = text.casefold()
+    return any(re.search(r"(?<![\w@-])" + re.escape(p) + r"(?![\w-])", low) for p in ctx.programs) or \
+        any(p in low for p in ctx.packages)
+
+
+def _start(words: list, i: int, ctx: _Context, command: Command, forced: bool = False) -> bool:
+    """Read the command started at word `i`. True when it is the program (or a runner of a script) and the
+    rest of the command has been read."""
+    w = words[i]
+    name = _base(w.text)
+    rest = _arguments(words[i + 1:])
+    before = [_base(x.text) for x in words[:i]]
+    if name in ctx.programs or _is_package(w.text, ctx.packages):
+        if "xargs" in before or "parallel" in before:
+            ctx.cannot_tell("xargs" if "xargs" in before else "parallel")
+        _read_program_args(rest, ctx)
+        return True
+    if name in ("node", "nodejs", "bun", "deno"):
+        for n, x in enumerate(rest):
+            if x.text.startswith("-"):
+                if x.text in _CODE_OPTIONS.get(name, ()):
+                    break
+                continue
+            if _names_package_path(x.text, ctx.packages):
+                _read_program_args(rest[n + 1:], ctx)
+                return True
+            break
+    if name in ("npx", "bunx") or (name in ("pnpm", "yarn", "npm", "bun") and rest and rest[0].text in (
+            "dlx", "exec", "x")):
+        args = rest if name in ("npx", "bunx") else rest[1:]
+        n = 0
+        while n < len(args):
+            t = args[n].text
+            if t in ("-c", "--call") and n + 1 < len(args):
+                _string_script(args[n + 1], ctx)
+                return True
+            if t.startswith("--call="):
+                _read_nested(t[len("--call="):], ctx)
+                return True
+            if t in ("-p", "--package") and n + 1 < len(args):
+                n += 2
+                continue
+            if t == "--" or (t.startswith("-") and not args[n].computed):
+                n += 1
+                continue
+            break
+        if n < len(args):
+            target = args[n]
+            if target.computed:
+                ctx.cannot_tell(target.shown)
+                return True
+            if _base(target.text) in ctx.programs or _is_package(target.text, ctx.packages):
+                after = args[n + 1:]
+                if after and after[0].text == "--" and not after[0].computed:
+                    after = after[1:]           # passed on to the package (the wider reading)
+                _read_program_args(after, ctx)
+                return True
+        return False
+    if name in ("yarn", "pnpm") and rest:
+        # `yarn claude ...`, `pnpm claude ...`, `yarn run claude ...`: a package's program.
+        args = rest[1:] if rest[0].text == "run" and len(rest) > 1 else rest
+        if not args[0].computed and _base(args[0].text) in ctx.programs:
+            _read_program_args(args[1:], ctx)
+            return True
+        return False
+    if name in _CODE_OPTIONS:
+        # An interpreter given code (`perl -e`, `python3 -c`, `node -e`, `pwsh -Command`): the code is read
+        # the widest way, and "cannot tell" where it names the tool and nothing is found there.
+        for n, x in enumerate(rest):
+            if x.text in _CODE_OPTIONS[name] and n + 1 < len(rest):
+                code = rest[n + 1]
+                probe = Reading()
+                _read_widest(code.text, ctx.programs, ctx.packages, ctx.flags, probe)
+                ctx.reading.merge(probe)
+                if not probe.hits and (code.computed or mentions(code.text, ctx.programs, ctx.packages)):
+                    for flag in ctx.flags:
+                        ctx.reading.cannot_tell(flag, f"{name} {x.text} ...")
+                return True
+        return False
+    if name in _SHELLS:
+        _shell(rest, ctx, command)
+        return True
+    if name == "eval":
+        if any(x.computed for x in rest):
+            ctx.cannot_tell("eval " + " ".join(x.shown for x in rest)[:80])
+        else:
+            _read_nested(" ".join(x.text for x in rest), ctx)
+        return True
+    if name in ("source", "."):
+        if rest:
+            target = rest[0]
+            if target.inner and target.text.startswith("<("):
+                inner_commands, _p = _lex(target.inner[0], ctx.variables)
+                literal = _literal_output(inner_commands[-1]) if len(inner_commands) == 1 else None
+                if literal is None:
+                    ctx.cannot_tell(target.shown)
+                else:
+                    _read_nested(literal, ctx)
+            elif target.text in ("/dev/stdin", "-"):
+                _stdin(command, ctx)
+            elif target.computed or target.text in ctx.written:
+                ctx.cannot_tell(target.shown)
+        return True
+    if name == "env":
+        for n, x in enumerate(rest):
+            if x.text in ("-S", "--split-string") and n + 1 < len(rest):
+                _string_script(rest[n + 1], ctx)
+                return True
+            for prefix in ("--split-string=", "-S"):
+                if x.text.startswith(prefix) and len(x.text) > len(prefix):
+                    _read_nested(x.text[len(prefix):], ctx)
+                    return True
+        return False
+    if name in _RUNNER_STRING_OPTIONS:
+        short, long_ = _RUNNER_STRING_OPTIONS[name]
+        for n, x in enumerate(rest):
+            if x.text in (short, long_) and n + 1 < len(rest):
+                _string_script(rest[n + 1], ctx)
+                return True
+            if x.text.startswith(long_ + "="):
+                _read_nested(x.text[len(long_) + 1:], ctx)
+                return True
+        return False
+    if name == "watch":
+        args = [x for x in rest]
+        n = 0
+        while n < len(args) and args[n].text.startswith("-"):
+            n += 2 if args[n].text in ("-n", "--interval", "-d") and n + 1 < len(args) else 1
+        if any(x.computed for x in args[n:]):
+            ctx.cannot_tell("watch")
+        elif args[n:]:
+            _read_nested(" ".join(x.text for x in args[n:]), ctx)
+        return True
+    if name == "alias":
+        for x in rest:
+            head, eq, value = x.text.partition("=")
+            if not eq:
+                continue
+            if x.computed:
+                ctx.cannot_tell(x.shown)
+                continue
+            _read_nested(value, ctx)
+            first = value.split()[:1]
+            if first and (_base(first[0]) in ctx.programs or _is_package(first[0], ctx.packages)):
+                ctx.programs.append(head.casefold())
+        return True
+    return False
+
+
+def _string_script(word: Word, ctx: _Context) -> None:
+    if word.computed:
+        ctx.cannot_tell(word.shown)
+    else:
+        _read_nested(word.text, ctx)
+
+
+def _stdin(command: Command, ctx: _Context) -> None:
+    """A shell (or `source /dev/stdin`) reading its script from its input: a heredoc, a here-string, or
+    the output of the command before it in a pipeline."""
+    if command.stdin:
+        for _kind, body, _literal in command.stdin:
+            _read_nested(body, ctx)
+        return
+    if command.piped:
+        literal = _literal_output(command.before)
+        if literal is None:
+            ctx.cannot_tell("a shell reading its script from a pipe")
+        else:
+            _read_nested(literal, ctx)
+
+
+def _shell(rest: list, ctx: _Context, command: Command) -> None:
+    n = 0
+    while n < len(rest):
+        x = rest[n]
+        t = x.text
+        if x.computed:
+            ctx.cannot_tell(x.shown)
+            return
+        if t == "--":
+            n += 1
+            break
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", t):
+            m = n + 1
+            while m < len(rest) and rest[m].text == "--" and not rest[m].computed:
+                m += 1
+            if m < len(rest):
+                _string_script(rest[m], ctx)
+            return
+        if t in _SHELL_VALUE_OPTIONS or re.fullmatch(r"[-+][A-Za-z]*[oO]", t):
+            n += 2
+            continue
+        if t.startswith(("-", "+")):
+            if "s" in t[1:] and not t.startswith("--"):
+                _stdin(command, ctx)
+                return
+            n += 1
+            continue
+        break
+    if n < len(rest):
+        target = rest[n]
+        if target.computed or target.text in ctx.written:
+            ctx.cannot_tell(target.shown)
+        return
+    _stdin(command, ctx)
+
+
+# ---------------------------------------------------------------------------------------- variables
+_ASSIGNED_RE = re.compile(
+    r"(?:^|[\s;&|({`])(?:(?:export|local|readonly|typeset|declare|let)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\[[^\]]*\])?\+?=|\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+)?)*([A-Za-z_][A-Za-z0-9_]*)"
+    r"|\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b|\bgetopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"|\bprintf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*):?=")
+_LITERAL_ASSIGN_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:(?:export|local|readonly|typeset|declare)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)="
+    r"(\"[^\"$`\\]*\"|'[^']*'|[A-Za-z0-9_.,:/@%+=-]*)(?=$|[\s;&|)])")
+
+
+def known_variables(scopes: list, script: str, trust_env: bool = True) -> tuple[dict, dict]:
+    """(known, unread): the variables whose value the checker can put into a script, and the `env` values
+    it cannot read (name -> value as written), for the facts. An `env` name takes its value from the first
+    scope that sets it (the step's, then the job's, then the workflow's), and is known only when that value
+    is plain and the script does not set the name. A name the script sets is known only when it is set
+    once, to a plain value (`FLAGS="--model x"`). `trust_env` False (an earlier step may write `GITHUB_ENV`)
+    leaves every `env` name unknown."""
+    counts: dict = {}
+    for m in _ASSIGNED_RE.finditer(script):
+        name = next(g for g in m.groups() if g)
+        counts[name] = counts.get(name, 0) + 1
+    known: dict = {}
+    unread: dict = {}
+    seen: set = set()
     for scope in scopes:
         if not isinstance(scope, dict):
             continue
         for name, value in scope.items():
-            if not isinstance(name, str) or name in out or name in assigned:
+            if not isinstance(name, str) or name in seen:
                 continue
+            seen.add(name)
             if isinstance(value, bool):
                 value = "true" if value else "false"
-            if isinstance(value, (int, float)):
+            elif isinstance(value, (int, float)):
                 value = str(value)
-            if isinstance(value, str) and _PLAIN_VALUE_RE.fullmatch(value):
-                out[name] = value
-    for name in list(out):
-        if name in assigned:
-            del out[name]
-    return out
-
-
-def _put_in(text: str, variables: dict) -> str:
-    if not variables or "$" not in text:
-        return text
-    return _VARIABLE_RE.sub(lambda m: variables.get(m.group(1) or m.group(2), m.group(0)), text)
-
-
-def _word_kind(text: str, quoted: bool) -> tuple[str | None, str]:
-    """(kind, known start) of a word: see `_match`."""
-    if _EXPRESSION in text:
-        return "expression", ""
-    at = text.find("$")
-    at_tick = text.find("`")
-    if at_tick >= 0 and (at < 0 or at_tick < at):
-        at = at_tick
-    if at < 0:
-        return None, text
-    if not quoted or _SPLITS_QUOTED_RE.search(text):
-        # Outside quotes the value is split into words; so is `"$@"` and `"${NAME[@]}"` inside them.
-        return "splits", text[:at]
-    return "quoted", text[:at]
-
-
-def _commands(tokens: list) -> list:
-    out, current = [], []
-    for text, quoted in tokens:
-        if not quoted and text in _SEPARATORS:
-            if current:
-                out.append(current)
-            current = []
-        else:
-            current.append((text, quoted))
-    if current:
-        out.append(current)
-    return out
-
-
-def _read_tokens(text: str, programs: list, packages: list, flags: list, reading: Reading, depth: int) -> bool:
-    """The first reading: the script split as a shell splits it. False when it cannot be split (an
-    unclosed quote), which the second reading still covers."""
-    tokens = _script_tokens(_lines_as_commands(_decode_ansi_c(text)))
-    if tokens is None:
-        return False
-    for command in _commands(tokens):
-        words = [t for t, _q in command]
-        positions = _command_positions(words)
-        for i, (word, quoted) in enumerate(command):
-            if depth < _MAX_DEPTH:
-                if _base(word) in _SHELLS:
-                    flag_at = next((n for n in range(i + 1, min(i + 4, len(command)))
-                                    if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", command[n][0])), None)
-                    if flag_at is not None and flag_at + 1 < len(command):
-                        _read_tokens(command[flag_at + 1][0], programs, packages, flags, reading, depth + 1)
-                if _base(word) in _EVAL and i in positions:
-                    _read_tokens(" ".join(t for t, _q in command[i + 1:]), programs, packages, flags, reading,
-                                 depth + 1)
-            if not _runs(word, programs, packages):
+            if name in counts:
                 continue
-            rest = []
-            for text_, quoted_ in command[i + 1:]:
-                kind, prefix = _word_kind(text_, quoted_)
-                rest.append((text_, kind, prefix))
-            _match(rest, flags, reading)
-            # `xargs ... claude`: the words xargs adds come from its input, which the checker does not read.
-            if any(_base(w) == "xargs" and n in positions for n, w in enumerate(words[:i])):
-                for flag in flags:
-                    reading.cannot_tell(flag, "xargs")
-    return True
+            if trust_env and isinstance(value, str) and _PLAIN_VALUE_RE.fullmatch(value):
+                known[name] = value
+            else:
+                unread[name] = value if isinstance(value, str) else type(value).__name__
+    literal: dict = {}
+    for m in _LITERAL_ASSIGN_RE.finditer(script):
+        literal.setdefault(m.group(1), []).append(m.group(2).strip("\"'") if m.group(2)[:1] in "\"'" else m.group(2))
+    for name, values in literal.items():
+        if counts.get(name) == 1 and len(values) == 1 and _PLAIN_VALUE_RE.fullmatch(values[0]):
+            known[name] = values[0]
+    return known, unread
 
 
-def _read_segments(text: str, programs: list, packages: list, flags: list, reading: Reading) -> None:
-    """The second reading: each reading of the text (as written, lines joined, quotes taken out,
-    backslashes taken out) cut where a shell starts a command, wrappers taken off; a command that starts
-    with the program has its words matched as known text."""
-    for variant in _readings(text):
-        for segment in command_segments(variant):
-            words = segment.split()
-            if not words or not _runs(words[0].strip("\"'"), programs, packages):
-                continue
-            _match([(w.strip("\"'"), None, w) for w in words[1:]], flags, reading)
+# ------------------------------------------------------------------------------------------ the readings
+def _hold_expressions(text: str) -> tuple[str, list]:
+    held: list = []
+
+    def hold(expression: str) -> str:
+        held.append(expression)
+        return f"{_EXPR}{len(held) - 1}{_EXPR}"
+    return _sub_expressions(text, hold), held
 
 
-def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None) -> Reading:
-    """Each warned flag a script gives the tool's program, and what the checker cannot read there."""
+def _show(word: str, held: list) -> str:
+    return re.sub(re.escape(_EXPR) + r"(\d+)" + re.escape(_EXPR), lambda m: held[int(m.group(1))], word)
+
+
+def _strip_data(text: str) -> str:
+    """The text with comments and the bodies of heredocs no shell reads taken out, for the widest reading."""
+    out_lines: list = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out_lines.append(line)
+        m = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if m and not re.search(r"(^|[\s;&|(])(ba|z|da|k|a)?sh\b[^|;&]*<<", line):
+            delim, j = m.group(1), i + 1
+            while j < len(lines) and lines[j].strip("\t") != delim:
+                j += 1
+            if j < len(lines):
+                i = j
+        i += 1
+    joined = "\n".join(out_lines)
+    return "\n".join(_strip_comment_line(line) for line in re.sub(r"\\\r?\n", " ", joined).split("\n"))
+
+
+def _strip_comment_line(line: str) -> str:
+    quote, previous = "", " "
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (previous.isspace() or previous in ";&|("):
+            return line[:i]
+        previous = ch
+    return line
+
+
+def _read_widest(text: str, programs: list, packages: list, flags: list, reading: Reading) -> None:
+    """The second reading: quotes, backslashes, brackets and commas taken out, cut where a shell starts a
+    command; a command that starts with the program has its words matched as known text."""
+    plain = re.sub(r"[\[\],]", " ", re.sub(r"[\"'\\]", "", _strip_data(text).replace("$'", "'")))
+    for segment in command_segments(plain):
+        words = segment.split()
+        if not words:
+            continue
+        first = words[0]
+        if _base(first) in programs or _is_package(first, packages):
+            _match_known(words[1:], flags, reading)
+        elif _base(first) in ("node", "nodejs", "bun", "deno") and len(words) > 1 and _names_package_path(
+                words[1], packages):
+            _match_known(words[2:], flags, reading)
+
+
+def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
+                mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
+                written_files: set | None = None, loose: bool | None = None) -> Reading:
+    """Each warned flag a script gives the tool's program, and what the checker cannot read there.
+    `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
+    workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
+    the script is in another shell or language, which is read only the widest way, and "cannot tell" where
+    it names the tool and nothing is found. `unread`: `env` values the checker cannot read, shown with a
+    word that uses them."""
     reading = Reading()
     if not text or not flags:
         return reading
-    low = _QUOTING_RE.sub("", text).casefold()
-    names = [p.casefold() for p in programs] + [p.casefold() for p in packages]
-    if not any(name in low for name in names):
-        return reading          # the program is not in the text at all (the common case, kept cheap)
-    put = _put_in(text, variables or {})
-    written: list = []
-
-    def hold(expression: str) -> str:
-        written.append(expression)
-        return f"{_EXPRESSION}{len(written) - 1}{_EXPRESSION}"
-
     programs = [p.casefold() for p in programs]
     packages = [p.casefold() for p in packages]
-    _read_tokens(_sub_expressions(put, hold), programs, packages, flags, reading, 0)
-    if written:
-        # Each held expression is shown as it was written.
-        back = re.compile(re.escape(_EXPRESSION) + r"(\d+)" + re.escape(_EXPRESSION))
-        reading.unknown = {fid: list(dict.fromkeys(back.sub(lambda m: written[int(m.group(1))], w) for w in words))
-                           for fid, words in reading.unknown.items()}
-    _read_segments(put, programs, packages, flags, reading)
+    if mentioned is None:
+        mentioned = mentions(text, programs, packages)
+    if loose is None:
+        loose = mentioned or appears(text, programs, packages)
+    if not mentioned and not loose:
+        return reading          # the tool is not named at all (the common case, kept cheap)
+    held_text, held = _hold_expressions(text)
+    if bash:
+        written = set(written_files or ()) | {m.group(1) for m in re.finditer(
+            r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
+        ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
+                       loose=loose)
+        _read_text(held_text, ctx)
+        if held or unread:
+            shown: dict = {}
+            for fid, words in reading.unknown.items():
+                out: dict = {}
+                for word in words:
+                    word = _show(word, held)
+                    for name, value in (unread or {}).items():
+                        if re.search(r"\$\{?" + re.escape(name) + r"(?![A-Za-z0-9_])", word):
+                            word = f"{word} ({name}: {value})"
+                    out[word] = None
+                shown[fid] = out
+            reading.unknown = shown
+    _read_widest(text, programs, packages, flags, reading)
+    if not bash and not reading.hits and mentioned:
+        for flag in flags:
+            reading.cannot_tell(flag, "a script the checker does not read as bash")
     return reading
 
 
-def read_args(value: str, flags: list, json_array: bool = False) -> Reading:
-    """Each warned flag in an input an action hands to the program as options. `json_array`: the action
-    reads a value that starts with `[` as a JSON array of words (codex-action's `codex-args`). Lines that
-    start with `#` are taken out, as claude-code-action takes them out; a `#` later in a line is not."""
+def appears(text: str, programs: list, packages: list) -> bool:
+    """Whether the tool's name is anywhere in a text, even inside a word, once quotes, backslashes and
+    `$'...'` are read: the check that decides whether a step is read at all."""
+    names = [n.casefold() for n in programs + packages]
+    low = re.sub(r"[\"'\\]", "", text).casefold()
+    if any(n in low for n in names):
+        return True
+    if "$'" in text:
+        decoded = re.sub(r"[\"'\\]", "", re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)),
+                                                  text)).casefold()
+        return any(n in decoded for n in names)
+    return False
+
+
+def mentions(text: str, programs: list, packages: list) -> bool:
+    """Whether a text names the tool: its program as a word (not after `@` or a letter), or its package,
+    once quotes, backslashes and `$'...'` are read."""
+    low = re.sub(r"[\"'\\]", "", text).casefold()
+    if any(p in low for p in packages):
+        return True
+    for program in programs:
+        if re.search(r"(?<![\w@-])" + re.escape(program) + r"(?![\w-])", low):
+            return True
+    if "$'" in text:
+        decoded = re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)), text).casefold()
+        decoded = re.sub(r"[\"'\\]", "", decoded)
+        return any(p in decoded for p in packages) or any(
+            re.search(r"(?<![\w@-])" + re.escape(p) + r"(?![\w-])", decoded) for p in programs)
+    return False
+
+
+def starts_program(text: str, programs: list, packages: list) -> bool:
+    """Whether a text, read the widest way, holds a command that starts with the program."""
+    programs = [p.casefold() for p in programs]
+    packages = [p.casefold() for p in packages]
+    if not mentions(text, programs, packages):
+        return False
+    plain = re.sub(r"[\[\],]", " ", re.sub(r"[\"'\\]", "", _strip_data(text)))
+    for segment in command_segments(plain):
+        words = segment.split()
+        if words and (_base(words[0]) in programs or _is_package(words[0], packages)):
+            return True
+    return False
+
+
+_EXPANSION_RE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$\([^)]*\)|`[^`]*`|\$[0-9@*#?$!-]")
+
+
+def read_args(value: str, flags: list, json_array: bool = False, comments: bool = False,
+              expands: bool = False) -> tuple[Reading, list]:
+    """Each warned flag in an input an action hands to the program as options, and the words that make the
+    rest "cannot tell". `json_array`: the action reads a value that starts with `[` as a JSON array of words
+    (codex-action's `codex-args`, after trimming as `core.getInput` trims). `comments`: lines that start
+    with `#` are left out, as claude-code-action leaves them out. `expands`: the action's tokenizer puts in a
+    `$NAME` it has no value for as nothing (shell-quote, claude-code-action), so a word that would be a
+    warned option without its expansions is "cannot tell". White space is what JavaScript takes for it,
+    U+FEFF included."""
     reading = Reading()
-    text = "\n".join(line for line in value.split("\n") if not line.strip().startswith("#"))
+    unknown: list = []
+    text = value
+    if comments:
+        text = "\n".join(line for line in text.split("\n") if not line.strip(_JS_SPACE).startswith("#"))
     words: list = []
-    if json_array and text.strip().startswith("["):
+    trimmed = text.strip(_JS_SPACE)
+    parsed = None
+    if json_array and trimmed.startswith("["):
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(trimmed)
         except ValueError:
             parsed = None
         if isinstance(parsed, list):
-            words = [(str(w), None, str(w)) for w in parsed]
-    if not words:
-        tokens = _script_tokens(_decode_ansi_c(text).replace("\n", " "))
-        if tokens is not None:
-            words = [(t, None, t) for t, _q in tokens]
-    _match(words, flags, reading)
-    unquoted = re.sub(r"[\\\"']", "", text)
-    _match([(w, None, w) for w in unquoted.split()], flags, reading)
-    return reading
+            words = [str(w) for w in parsed]
+    spaced = _JS_SPACE_RE.sub(" ", text)
+    if not isinstance(parsed, list):
+        commands, _problem = _lex(spaced, {})
+        for command in commands:
+            for w in command.words:
+                if expands and (w.unquoted or w.quoted or w.splits):
+                    stripped = _EXPANSION_RE.sub("", w.text)
+                    probe = Reading()
+                    _match_known([stripped], flags, probe)
+                    if probe.hits or _could_start(stripped, flags):
+                        unknown.append(w.shown)
+                words.append(w.text)
+            words.extend(body for _kind, body, _literal in command.stdin)
+    _match_known(words, flags, reading)
+    _match_known(re.sub(r"[\[\],]", " ", re.sub(r"[\\\"']", "", spaced)).split(), flags, reading)
+    return reading, unknown

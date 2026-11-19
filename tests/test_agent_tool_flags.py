@@ -203,7 +203,6 @@ class CommandLineTest(unittest.TestCase):
             ('claude -p x --permission-mode "$MODE"', None),
             ('claude -p x --permission-mode=$MODE', None),
             ('claude -p x "--dangerously-$REST"', None),
-            ("FLAGS=--dangerously-skip-permissions; claude -p x $FLAGS", None),
         ]:
             with self.subTest(script=script):
                 result = check(run_step(script))
@@ -339,3 +338,216 @@ class ReaderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def kinds(result):
+    return sorted({f.kind for f in found(result)})
+
+
+class ReviewCasesTest(unittest.TestCase):
+    """The ways past and false positives two reviewers found in slice 2d.5c2a's first version, each a case.
+    `hit` is a `command-option` finding, `cannot` a `command-computed` one with no option found, `none`
+    nothing."""
+
+    DSP = "--dangerously-skip-permissions"
+
+    def expect(self, cases, **kw):
+        for script, want in cases:
+            with self.subTest(script=script):
+                got = kinds(check(run_step(script, **kw)))
+                if want == "hit":
+                    self.assertIn("command-option", got, script)
+                elif want == "cannot":
+                    self.assertEqual(got, ["command-computed"], script)
+                else:
+                    self.assertEqual(got, [], script)
+
+    def test_substitutions_and_redirections_do_not_end_the_command(self):
+        d = self.DSP
+        self.expect([
+            (f"claude --mcp-config <(echo {{}}) {d}", "hit"),
+            ("claude -p x <(true) $FLAGS", "cannot"),
+            (f"claude -p x $(true) {d}", "hit"),
+            (f"claude -p x 2>/dev/null {d}", "hit"),
+            (f"claude -p x > out.txt {d}", "hit"),
+            (f'git commit -m "$(claude -p x {d})"', "hit"),
+        ])
+
+    def test_shells_eval_and_runners_of_command_strings_are_read(self):
+        d = self.DSP
+        self.expect([
+            (f'bash --noprofile --norc -eo pipefail -c "claude -p x {d}"', "hit"),
+            (f"bash -o errexit -o pipefail -c 'claude {d}'", "hit"),
+            (f"bash -c -- 'claude {d}'", "hit"),
+            ('bash -c "claude -p x \\$FLAGS"', "cannot"),
+            ('eval "claude -p x \\$FLAGS"', "cannot"),
+            ('bash -c "$S"  # runs claude', "cannot"),
+            (f"env -S 'claude {d}'", "hit"),
+            (f"script -q -c 'claude {d}' /dev/null", "hit"),
+            (f"su runner -c 'claude {d}'", "hit"),
+            (f"watch -g 'claude {d}'", "hit"),
+            (f"echo 'claude {d}' | bash", "hit"),
+            ("cat prompt.sh | bash", "none"),
+            (f"echo x; claude -p x | tee log.txt; echo 'claude {d}' | sh -s", "hit"),
+            (f"bash <<< 'claude {d}'", "hit"),
+            (f"source <(echo 'claude {d}')", "hit"),
+            (f"printf 'claude {d}' > run.sh\nbash run.sh", "cannot"),
+            (f"CMD='claude {d}'\neval \"$CMD\"", "hit"),
+            (f"bash <<'EOF'\nclaude {d}\nEOF", "hit"),
+            (f"sh -c \"sh -c 'sh -c \\\"sh -c claude\\\\ {d}\\\"'\"", "hit"),
+        ])
+
+    def test_quoting_forms_bash_reads_are_read(self):
+        d = self.DSP
+        self.expect([
+            ('claude -p x "$A"$FLAGS', "cannot"),
+            (f'claude -p x $"{d}"', "hit"),
+            ("claude -p x --dangerously-skip-{permissions,}", "hit"),
+            (f"claude {{{d},}}", "hit"),
+            ("claude -p x --dangerously-skip-permission[s]", "cannot"),
+            (f'claude -p x "${{U:-{d}}}"', "cannot"),
+            (f'claude -p x "$EMPTY"{d}', "cannot"),
+            (f"{d.join(['claude -p x ', ''])}", "hit"),
+        ])
+
+    def test_a_heredoc_is_data_unless_a_shell_reads_it(self):
+        d = self.DSP
+        self.expect([
+            ("cat > p.md <<'EOF'\nDon't stop.\nEOF\nclaude $FLAGS -p x", "cannot"),
+            (f"claude -p <<'EOF'\nNever run claude {d}\nEOF", "none"),
+            (f"cat <<EOF > notes.md\nclaude {d}\nEOF\nclaude -p x", "none"),
+        ])
+
+    def test_a_program_named_another_way(self):
+        d = self.DSP
+        self.expect([
+            (f"C=claude; $C {d}", "hit"),
+            (f'"$(command -v claude)" {d}', "cannot"),
+            (f"$'\\x63laude' {d}", "hit"),
+            (f"cl$'a'ude {d}", "hit"),
+            (f"{{claude,}} {d}", "cannot"),
+            (f"alias c='claude {d}'", "hit"),
+            (f"shopt -s expand_aliases\nalias c=claude\nc {d}", "hit"),
+            (f"hash -p $(command -v claude) c; c {d}", "cannot"),
+            (f"ln -s $(command -v claude) ./c; ./c {d}", "cannot"),
+            (f"IFS=_; A=claude_{d}; $A", "cannot"),
+            (f"claude.cmd {d}", "hit"),
+            (f"node node_modules/@anthropic-ai/claude-code/cli.js {d}", "hit"),
+            (f"node -e \"execFileSync('claude',['{d}'])\"", "hit"),
+            (f"python3 -c 'subprocess.run([\"claude\",\"{d}\"])'", "hit"),
+            (f"find . -maxdepth 0 -exec claude {d} \;", "hit"),
+            (f"docker run --rm img claude {d}", "hit"),
+        ])
+
+    def test_env_values_from_every_scope_and_what_overrides_them(self):
+        d = self.DSP
+        self.assertIn("command-option", kinds(check(run_step("$CMD", job_env={"CMD": f"claude {d} -p x"}))))
+        self.assertIn("command-option", kinds(check(run_step(f"$AGENT {d}", job_env={"AGENT": "claude"}))))
+        # The step's value wins over the job's, even when it is one the checker cannot read.
+        self.assertEqual(kinds(check(run_step("claude -p x $FLAGS", env={"FLAGS": "${{ github.event.comment.body }}"},
+                                              job_env={"FLAGS": "--model"}))), ["command-computed"])
+        hit = found(check(run_step("claude -p x $FLAGS", env={"FLAGS": "${{ github.event.comment.body }}"})))[0]
+        self.assertIn("github.event.comment.body", " ".join(hit.facts["words"]))
+        for script in ("printf -v FLAGS '%s' x\nclaude -p x $FLAGS", ": ${FLAGS:=x}\nclaude -p x $FLAGS"):
+            with self.subTest(script=script):
+                self.assertEqual(kinds(check(run_step(script, job_env={"FLAGS": "--model"}))), ["command-computed"])
+
+    def test_a_github_env_write_before_the_step_makes_env_values_unknown(self):
+        text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                "    env: {FLAGS: --model}\n    steps:\n"
+                "      - run: echo \"FLAGS=--dangerously-skip-permissions\" >> \"$GITHUB_ENV\"\n"
+                "      - run: claude -p x $FLAGS\n")
+        self.assertEqual(kinds(check(text)), ["command-computed"])
+
+    def test_a_matrix_command_and_another_shell_are_cannot_tell(self):
+        matrix = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                  "    strategy:\n      matrix:\n        cmd: ['claude -p x']\n    steps:\n"
+                  "      - run: ${{ matrix.cmd }}\n")
+        self.assertEqual(kinds(check(matrix)), ["command-computed"])
+        pwsh = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: windows-latest\n    steps:\n"
+                "      - run: claude -p x @flags\n")
+        self.assertEqual(kinds(check(pwsh)), ["command-computed"])
+        pwsh_hit = pwsh.replace("@flags", self.DSP)
+        self.assertEqual(kinds(check(pwsh_hit)), ["command-option"])
+
+    def test_github_script_argument_lists(self):
+        text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/github-script@" + "b" * 40 + "\n        with:\n          script: |\n")
+        self.assertEqual(kinds(check(text + f"            await exec.exec('claude', ['{self.DSP}'])\n")),
+                         ["command-option"])
+        self.assertEqual(kinds(check(text + "            await exec.exec('claude', flags)\n")), ["command-computed"])
+        self.assertEqual(kinds(check(text + "            await github.rest.issues.createComment({body: '@claude'})\n")),
+                         [])
+
+    def test_gemini_spellings_yargs_takes(self):
+        self.expect([("gemini --y -p x", "hit"), ("gemini --approvalMode yolo -p x", "hit"),
+                     ("gemini --approvalMode=YOLO -p x", "hit"), ("gemini --yolo=false -p x", "none"),
+                     ("codex exec {--yolo,}", "hit")])
+
+    def test_false_positives_found_by_the_review(self):
+        d = self.DSP
+        self.expect([
+            (f"echo claude {d}", "none"),
+            ("npm install -g @google/gemini-cli -y", "none"),
+            ("sudo apt-get install gemini -y", "none"),
+            ("conda install -c x gemini -y", "none"),
+            (f'claude -p "$P" # never add {d}', "none"),
+            ("codex mcp add srv -- npx server --yolo", "none"),
+            (f"claude -p -- {d}", "none"),
+            ('claude -p "$PROMPT"', "none"),
+            (f"grep -r claude . {d}", "none"),
+        ])
+
+    def test_the_words_fact_names_the_command_substitution(self):
+        a = found(check(run_step("claude -p x $(cat ./safe-flags.txt)")))[0]
+        b = found(check(run_step("claude -p x $(curl -s https://example.invalid/f)")))[0]
+        self.assertNotEqual(a.facts["words"], b.facts["words"])
+
+
+class ArgsInputReviewTest(unittest.TestCase):
+    def test_javascript_white_space_and_expansions_in_claude_args(self):
+        for value, want in [('"\\ufeff--dangerously-skip-permissions"', ["option"]),
+                            ('"--model\\u00a0x\\u00a0--dangerously-skip-permissions"', ["option"]),
+                            ("--danger${X}ously-skip-permissions", ["computed"]),
+                            ("--dangerously-skip-permissions$X", ["computed"])]:
+            with self.subTest(value=value):
+                got = sorted({f.kind for f in found(check(one_step(CLAUDE, f"          claude_args: {value}\n")))})
+                self.assertEqual(got, want)
+
+    def test_codex_args_keeps_lines_that_start_with_a_hash(self):
+        value = "|\n            --model x\n            # --yolo"
+        hits = found(check(one_step(CODEX, f"          codex-args: {value}\n")), "option")
+        self.assertEqual([h.facts["setting"] for h in hits], ["codex/bypass-approvals-and-sandbox"])
+
+    def test_a_control_character_is_cannot_tell(self):
+        hits = found(check(one_step(CODEX, '          codex-args: "--model\\u0000--yolo"\n')))
+        self.assertIn("computed", {h.kind for h in hits})
+
+
+class CostTest(unittest.TestCase):
+    def flags(self, tool):
+        return next(r for r in agent_tools.flag_readers(load().detection) if r[0] == tool)
+
+    def test_repeated_program_words_and_quotes_are_linear(self):
+        _t, _n, flags, programs, packages, _a = self.flags("claude-code")
+        for make in (lambda n: "echo " + "claude " * n, lambda n: "claude " * n, lambda n: "a''b " * (n * 10),
+                     lambda n: "claude --permission-mode " * n, lambda n: "xargs claude " * n):
+            timings = []
+            for n in (500, 2000):
+                start = time.perf_counter()
+                agent_flags.read_script(make(n), programs, packages, flags, mentioned=True)
+                timings.append(time.perf_counter() - start)
+            with self.subTest(text=make(2)[:30]):
+                self.assertLess(timings[1], max(0.5, timings[0] * 8))
+
+
+class ExpectrailShapeTest(unittest.TestCase):
+    """A step that only names the tool in its arguments, with `[[ ]]` tests and arrays, as the first
+    adopter's judge step does: nothing to report (found on Expectrail by this slice's own run)."""
+
+    def test_tests_and_arrays_in_a_step_that_names_the_tool(self):
+        script = ('args=(--case "$CASE" --out runs/judge)\n'
+                  'if [[ "$LIVE" == "true" ]]; then args+=(--live); else args+=(--no-sam); fi\n'
+                  'if [ "$OUTSIDE" = "on" ]; then args+=(--outside claude,gpt --passes 3); fi\n'
+                  'python -m "$module" "${args[@]}" > judge.log 2>&1\n')
+        self.assertEqual(found(check(run_step(script))), [])

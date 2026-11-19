@@ -54,17 +54,36 @@ Every tool that ci-agent-audit recognised at its commit `4a88ee6` (2026-11-07) h
 
 A value only another scanner's data calls dangerous is not reported. The actions' defaults, `safety-strategy: drop-sudo` or `unprivileged-user`, and named users or bots in `allow-users` and `allowed_bots` give no finding; an empty `allowed_non_write_users` also gives no finding. The documented warning for `allowed_bots: "*"` concerns public repositories. The checker reports the literal without checking repository visibility. A value is compared with white space taken off its ends as either Python or JavaScript trims it (U+FEFF included); a value with a control, format, separator, private-use or unassigned character left inside it other than a space, a tab, a carriage return or a line feed, and a `with:` that is neither a mapping nor empty (inputs written as one expression, `with: ${{ fromJSON(...) }}`), are "cannot tell". Not read: claude-code-action's `display_report`, a key written in clear, `ACTIONS_STEP_DEBUG`, these actions inside another repository's composite action or reusable workflow, and a `uses:` with an empty path segment, a leading `/` or a backslash (#245).
 
-**Options the tool's own documentation warns about** (OBAAF-GHA-026, slice 2d.5c2a, decision D-090). An entry's `flags` lists command-line options its own files warn about, each with the option's spellings, the values warned about where it takes one, the words, quoted, and the file, commit and lines they were read from; an action's `args_inputs` name the inputs it hands the program as options. They are read in those inputs (case `option`) and wherever a step runs the tool's program or package (case `command-option`). Read on 2026-11-19:
+**Options the tool's own documentation warns about** (OBAAF-GHA-026, slice 2d.5c2a, decision D-090). An entry's `flags` lists command-line options its own files warn about, each with the option's spellings, the values warned about where it takes one (`equals`, or `contains` for a value that holds the text), the words, quoted, and the file, commit and lines they were read from; an action's `args_inputs` name the inputs it hands the program as options. They are read in those inputs (case `option`) and wherever a step runs the tool's program or package (case `command-option`). Read on 2026-11-19:
 
-| Tool | Option | Severity | Read in |
+| Option | Entry | Severity | Read in |
 | --- | --- | --- | --- |
-| `claude-code` | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` | high | `claude`, `claude_args` of `anthropics/claude-code-action` and its base action |
-| `claude-code` | `--permission-mode bypassPermissions` | high | the same |
-| `codex` | `--dangerously-bypass-approvals-and-sandbox`, `--yolo` | high | `codex`, `codex-args` of `openai/codex-action` |
-| `codex` | `--dangerously-bypass-hook-trust` | medium | the same |
-| `gemini-cli` | `--yolo`, `-y`, `--approval-mode yolo` | medium (its documentation turns the sandbox on with them) | `gemini` |
+| `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` | `claude-code` | high | `claude`, and `claude_args` of `anthropics/claude-code-action` and its base action |
+| `--permission-mode bypassPermissions`, and `--settings` given text that holds `bypassPermissions` | `claude-code` | high | the same |
+| `--dangerously-bypass-approvals-and-sandbox`, `--yolo` | `codex` | high | `codex`, and `codex-args` of `openai/codex-action` |
+| Codex's `--dangerously-bypass-hook-trust` | `codex` | medium | the same |
+| `--yolo`, `-y`, `--y`, `--approval-mode yolo`, `--approvalMode yolo` | `gemini-cli` | medium (its documentation turns the sandbox on with them) | `gemini` |
 
-An option is matched in any letter case, as `--name=value` and `--name value`, and a one-letter option inside a group (`-yp`); quotes, backslashes and `$'...'` are taken out as a shell takes them out, and a variable the step's, job's or workflow's `env` gives a plain value is put in. An option written inside a prompt's text is read as given. What the checker cannot read in the command is a medium `command-computed` finding: a variable or substitution outside quotes, `"$@"`, any `${{ }}` expression, `xargs` running the program, and a warned option given a value it cannot read. To clear one, write the options out in the step, or quote the variable. A quoted word that starts with a variable (`claude -p "$PROMPT"`) is read as one word that is not an option. Not read: Codex's `--sandbox danger-full-access` and `-c` overrides, options in a configuration file or in an environment variable the tool reads, and the other 20 tools' options.
+**How a script is read.** A bash or sh script is read twice, and the two readings are added together:
+
+- as bash splits it: quotes, backslashes, `$'...'` and `$"..."` as bash reads them; a heredoc as data unless a shell reads it; a variable put in where its value is known (an `env` value that is plain text, from the step's `env`, else the job's, else the workflow's, unless the script sets the name or a step before it writes `GITHUB_ENV`; or a name the script sets once, to plain text); and command substitutions, `bash -c`, `sh -c`, `eval`, `env -S`, `su -c`, `script -c`, `flock -c`, `watch`, `npx -c`, aliases, interpreters given code (`perl -e`, `python3 -c`, `node -e`, `pwsh -Command`), and text a shell reads from a pipe, a heredoc or a here-string read again;
+- the widest way: comments and data heredocs taken out, quotes and backslashes removed, brackets and commas made spaces, and the text cut where a shell starts a command. So an option written in a prompt's text, or in a JavaScript or Python argument list, is read as given.
+
+The program counts where a command starts: after `sudo`, `env`, `timeout`, `xargs`, `find -exec`, `npx`, `yarn` and the like, and as an argument of a command that runs its arguments (`docker run`, `ssh`, `parallel`). A step in another shell (`pwsh`, `cmd`, `python`; pwsh is the default on a Windows runner) and a github-script script are read only the widest way. An option is matched in any letter case, as `--name=value` and as `--name value`, and a one-letter option inside a group (`-yp`). Nothing after a word `--` is an option, and `--name=false` is not a match.
+
+**What is "cannot tell"** (a medium `command-computed` finding), in a step that names the tool:
+
+- a word of the program's command with a variable or substitution outside quotes, `"$@"` or `"${NAME[@]}"`, an unquoted glob, or a `${{ }}` expression;
+- a quoted word that could start a warned option (`"--dangerously-$X"`, `"$EMPTY"--yolo`, `"${F:---yolo}"`);
+- a warned option that takes a value, given one the checker cannot read;
+- the program run by `xargs` or `parallel`;
+- a command the checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`), or a new name made for a program (`alias`, `hash`, `ln`, `cp`);
+- `IFS` set, `eval` or a shell given text the checker cannot read, a script file written in the step and run, text it cannot split (an unclosed quote), and nesting deeper than four levels;
+- a step in another shell, and a github-script script that runs a command, that name the tool where nothing is found.
+
+To clear one, write the options out in the step. A quoted word that starts with a variable or substitution (`claude -p "$PROMPT"`) is read as one word that is not an option, although the tool's own parser may take a value that begins with `-` as one (#254).
+
+**Not read:** Codex's `--sandbox danger-full-access` and its `-c` overrides; a settings file given to `--settings`; options in a configuration file or an environment variable the tool reads; a program run on another machine (`ssh`); a local Docker or JavaScript action; the other 20 tools' options.
 
 **What the entries do not cover**, as read on 2026-11-18:
 - Docker images that run an agent (`docker://...pr-agent`, Amp's review image): an image is not matched to an entry.
