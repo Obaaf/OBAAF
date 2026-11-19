@@ -779,7 +779,8 @@ class FourthReviewCasesTest(unittest.TestCase):
         d = self.DSP
         for script in (f"kubectl -n agents exec pod -- claude {d}", f"kubectl --namespace agents exec pod -- claude {d}",
                        f"docker --context remote run img claude {d}", f"docker -H unix:///var/run/docker.sock run img claude {d}",
-                       f"podman --remote run img claude {d}"):
+                       f"podman --remote run img claude {d}", f"docker --tls run img claude {d}",
+                       f"kubectl -n a --insecure-skip-tls-verify exec pod -- claude {d}"):
             with self.subTest(script=script):
                 self.assertIn("command-option", kinds(check(run_step(script))))
 

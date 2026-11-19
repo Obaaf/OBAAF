@@ -921,15 +921,19 @@ def _read_command(command: Command, ctx: _Context) -> None:
                 if mentions(value, ctx.programs, ctx.packages):
                     _read_nested(value[1:] if value.startswith("!") else value, ctx)
         return
-    # The subcommand, after the command's own options and their values (`kubectl -n agents exec`).
-    k = first + 1
-    while k < len(words) and texts[k].startswith("-"):
-        k += 1 if "=" in texts[k] or k + 1 >= len(words) or texts[k] in ("--remote", "--debug", "-D") else 2
-    sub = texts[k] if k < len(words) else ""
-    if name0 in ("docker", "podman", "nerdctl") and sub not in ("run", "exec", "compose", "container"):
-        return                      # `docker build -t claude`: the program's name as data
-    if name0 == "kubectl" and sub not in ("exec", "run", "debug"):
-        return
+    sub = texts[first + 1] if first + 1 < len(words) else ""
+    if name0 in ("docker", "podman", "nerdctl", "kubectl"):
+        # Data only where the first subcommand among the next words is one that does not run a command
+        # (`docker build -t claude`, `kubectl get pods -l app=claude`); a global option, with or without a
+        # value, is skipped by looking for either kind (fails closed: neither found, the words are read).
+        runs = ("run", "exec", "compose", "container", "debug", "attach")
+        data = ("build", "buildx", "pull", "push", "tag", "images", "image", "ps", "logs", "login", "logout",
+                "inspect", "rm", "rmi", "stop", "kill", "save", "load", "network", "volume", "get", "describe",
+                "apply", "create", "delete", "label", "annotate", "rollout", "scale", "config", "version")
+        kind = next((("runs" if t in runs else "data") for t in texts[first + 1:first + 12]
+                     if t in runs or t in data), None)
+        if kind == "data":
+            return
     if name0 in _DATA_COMMANDS and sub not in ("run", "exec", "x", "dlx"):
         return                      # `conda run`, `poetry run`, `uv run`, `npm exec` run what follows
     # Any other command (`cross-env`, `tmux`, `docker run`, `ssh`, `trap`): a word among its arguments may
