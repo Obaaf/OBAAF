@@ -56,3 +56,91 @@ class TodoReportTest(unittest.TestCase):
         result = CheckResult([], [], [], Config(), checked="-source", baseline_path="-old.json")
         args = build_parser().parse_args(shlex.split(migration_command(result))[1:])
         self.assertEqual((args.file, args.path), ("./-old.json", "./-source"))
+
+
+class TodoOrderAndFieldsTest(unittest.TestCase):
+    """What each entry says and the order of entries (D-092), from the review of #258."""
+
+    def todo(self, findings, **result_fields):
+        result = CheckResult(findings, [], [], Config(), today=date(2026, 11, 19))
+        for name, value in result_fields.items():
+            setattr(result, name, value)
+        return json.loads(report.to_json(result))["todo"]
+
+    def test_ordering_is_migration_then_highest_severity_then_count_then_id(self):
+        old = Finding("OBAAF-GHA-011", "low", "wf", 1, "Old entry.")
+        old.acceptance = acceptance.Acceptance(acceptance.BASELINE, problems=[baseline.V1_PROBLEM])
+        lows = [Finding("OBAAF-GHA-009", "low", "wf", n, "Implicit.") for n in range(2, 5)]
+        medium = Finding("OBAAF-GHA-023", "medium", "wf", 5, "Placeholder.")
+        highs = [Finding("OBAAF-GHA-019", "high", "wf", 6, "Unsafe."),
+                 *(Finding("OBAAF-GHA-010", "high", "wf", n, "Script.") for n in (7, 8))]
+        other_high = Finding("OBAAF-GHA-002", "high", "wf", 9, "Checkout.")
+        groups = self.todo([*lows, medium, *highs, other_high, old],
+                           baseline_format=baseline.FORMAT_V1, baseline_path="b.json")
+        self.assertEqual([g["id"] for g in groups], [
+            "acceptance-old-baseline",       # the one action the CLI can take now
+            "untrusted-script-text",         # high, 2 findings
+            "privileged-checkout",           # high, 1, and before unsafe-checkout-option by id
+            "unsafe-checkout-option",        # high, 1
+            "template-placeholder",          # medium
+            "implicit-token-permissions",    # low, 3: count never outranks severity
+        ])
+        self.assertEqual([g["count"] for g in groups], [1, 2, 1, 1, 1, 3])
+
+    def test_fields_of_a_rule_entry_and_an_acceptance_entry(self):
+        ownerless = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
+        ownerless.acceptance = acceptance.make(acceptance.IGNORE, None, "reviewed", "2027-01-01",
+                                               date(2026, 11, 19))
+        plain = Finding("OBAAF-GHA-009", "low", "wf", 2, "Implicit.")
+        by_id = {g["id"]: g for g in self.todo([ownerless, plain])}
+        rule, accept = by_id["implicit-token-permissions"], by_id["acceptance-owner-missing"]
+        self.assertEqual((rule["kind"], accept["kind"]), ("rule", "acceptance"))
+        for group in (rule, accept):
+            with self.subTest(group=group["id"]):
+                self.assertIsNone(group["command"])           # a manual step has no command
+                self.assertNotEqual(group["nextAction"], group["sentence"])
+                self.assertNotIn("previousMatches", group)
+                self.assertNotIn("pinCandidates", group)
+                self.assertEqual(group["count"], sum(group["bySeverity"].values()))
+
+    def test_a_hint_goes_only_to_the_group_whose_finding_shares_the_location(self):
+        secrets = Finding("OBAAF-GHA-005", "high", "a.yml", 1, "Secrets.", job="agent", kind="secrets")
+        other = Finding("OBAAF-GHA-009", "low", "a.yml", 2, "Implicit.", job="agent")
+        groups = self.todo([secrets, other], baseline_stale=[
+            {"rule": "OBAAF-GHA-005", "path": "a.yml", "job": "agent"}])
+        by_id = {g["id"]: g for g in groups}
+        self.assertEqual(by_id["agent-secrets"]["previousMatches"], 1)
+        self.assertNotIn("previousMatches", by_id["implicit-token-permissions"])
+
+    def test_the_report_is_written_whatever_the_list_cannot_read(self):
+        odd = Finding("OBAAF-GHA-009", "critical", "wf", 1, "Odd severity.")
+        old = Finding("OBAAF-GHA-011", "low", "wf", 2, "Old entry.")
+        old.acceptance = acceptance.Acceptance(acceptance.BASELINE, problems=[baseline.V1_PROBLEM])
+        stale = [{"path": "wf"}, {"rule": "OBAAF-GHA-009", "path": "wf", "job": ["j"]}, "not an entry"]
+        groups = self.todo([odd, old], baseline_stale=stale, baseline_format=baseline.FORMAT_V1, options=None)
+        self.assertEqual(sum(g["count"] for g in groups), 2)
+
+    def test_an_inconsistent_catalogue_leaves_the_list_empty_and_says_why(self):
+        from obaaf.catalog import load
+        from obaaf.causes import CauseCatalog
+        import copy
+        catalog = copy.copy(load())
+        catalog.causes = CauseCatalog({"causes": []}, catalog.rules)
+        result = CheckResult([Finding("OBAAF-GHA-009", "low", "wf", 1, "Implicit.")], [], [], Config())
+        data = json.loads(report.to_json(result, catalog))
+        self.assertEqual(data["todo"], [])
+        self.assertTrue(any("cause catalogue is inconsistent" in note for note in data["notes"]))
+
+    def test_acceptance_causes_do_not_share_an_id_with_the_catalogue(self):
+        import ast
+        from pathlib import Path
+        from obaaf.catalog import load
+        from obaaf.checker import todo_acceptance
+        tree = ast.parse(Path(todo_acceptance.__file__).read_text(encoding="utf-8"))
+        ids = {node.args[0].value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Cause"
+               and node.args and isinstance(node.args[0], ast.Constant)}
+        self.assertGreaterEqual(len(ids), 11)
+        causes = load().causes
+        shipped = {c.id for c in [*causes._remaining.values(), *causes._exact.values()]}
+        self.assertEqual(ids & shipped, set())

@@ -47,7 +47,10 @@ class PreviousAcceptancesTest(unittest.TestCase):
                       finding(controls=[Control("environment", VERIFIED)]), finding(acceptance=invalid),
                       finding(message="Example. (An ignore entry for this finding expired on 2026-11-17.)"),
                       unknown]
-        self.assertEqual(previous_acceptances([stale()], candidates), {id(unknown): 1})
+        # One stale entry for every candidate, so no finding is left out by the tie-break: a finding
+        # that should get no hint would get one (review of #258).
+        entries = [stale() for _ in candidates]
+        self.assertEqual(previous_acceptances(entries, candidates), {id(unknown): 1})
 
     def test_conflicting_candidate_kinds_get_no_hint_even_when_counts_match(self):
         candidates = [finding(), finding(kind="environment")]

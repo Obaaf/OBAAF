@@ -63,7 +63,7 @@ jobs:
           obaaf docs build --check
 
       - name: Check this repository's own workflows
-        run: obaaf check . --fail-on medium
+        run: obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 
   package:
     runs-on: ubuntu-latest

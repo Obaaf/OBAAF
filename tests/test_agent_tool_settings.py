@@ -158,9 +158,12 @@ class CannotTellTest(unittest.TestCase):
 
     def test_inputs_written_as_one_expression_are_cannot_tell(self):
         # Found by 2d.5c1's review: GitHub evaluates `with:` into the inputs, which the checker cannot read.
-        for uses, settings in ((CODEX, ["codex/anyone", "codex/safety-read-only", "codex/safety-unsafe"]),
-                               (CLAUDE, ["claude-code/any-bot", "claude-code/full-output",
-                                         "claude-code/non-write-users", "claude-code/non-write-users-anyone"])):
+        # Since slice 2d.5c2a the options of the input the action hands its program are named too.
+        for uses, settings in ((CODEX, ["codex/anyone", "codex/bypass-approvals-and-sandbox", "codex/bypass-hook-trust",
+                                        "codex/safety-read-only", "codex/safety-unsafe"]),
+                               (CLAUDE, ["claude-code/any-bot", "claude-code/bypass-permissions-mode",
+                                         "claude-code/full-output", "claude-code/non-write-users",
+                                         "claude-code/non-write-users-anyone", "claude-code/skip-permissions"])):
             for written in ("${{ fromJSON(vars.CFG) }}", "${{ matrix.w }}"):
                 with self.subTest(uses=uses, written=written):
                     text = ("on: issue_comment\npermissions: {contents: read}\njobs:\n  a:\n"
@@ -288,7 +291,7 @@ class DataTest(unittest.TestCase):
 
     def test_every_shipped_setting_cites_a_file_at_a_commit_and_was_read(self):
         shipped = agent_tools.settings(load().detection)
-        self.assertEqual(len(shipped), 8)
+        self.assertEqual(len(shipped), 11)          # 8 from slice 2d.5c1, 3 from slice 2d.5c2b
         for tool, _name, setting in shipped:
             with self.subTest(setting=f"{tool}/{setting['id']}"):
                 self.assertRegex(setting["source"], r"/blob/[0-9a-f]{40}/.+#L\d+")

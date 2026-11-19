@@ -413,11 +413,14 @@ class EgressActionTest(unittest.TestCase):
         self.assertEqual(self.state(CHECKOUT + "\n" + action()), "fixed")
 
     def test_only_upload_artifact_itself_may_run_after(self):
-        for uses in ("actions/upload-artifact/../../../evil/act/v1@v4", "actions/upload-artifact//x@v4",
-                     "actions/upload-artifact/./x@v4"):
+        for uses in ("actions/upload-artifact//x@v4", "actions/upload-artifact/./x@v4"):
             with self.subTest(uses=uses):
                 after = f"\n      - uses: {uses}\n        with: {{name: out, path: out}}"
                 self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "cannot-tell")
+        # Flagship slice 2d.11 (from its review): a path that climbs out of upload-artifact's repository can
+        # reach any action the runner downloaded for the job, so it is an agent outside the confined command.
+        after = "\n      - uses: actions/upload-artifact/../../../evil/act/v1@v4\n        with: {name: out, path: out}"
+        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "new")
         after = "\n      - uses: actions/upload-artifact@v4\n        with: {name: out, path: out}"
         self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "fixed")
 

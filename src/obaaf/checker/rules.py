@@ -3,29 +3,46 @@
 from __future__ import annotations
 
 import bisect
+import collections
 import copy
 import fnmatch
 import hashlib
 import json
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
+from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
-    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
+    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
+
+
+def _strings_in(value, limit: int) -> list:
+    """The strings in a value of lists and mappings (a matrix), at most `limit` of them, each node once."""
+    out: list = []
+    stack, seen = [value], set()
+    while stack and len(out) < limit:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, (list, dict)) and id(node) not in seen:
+            seen.add(id(node))
+            stack.extend(node.values() if isinstance(node, dict) else node)
+    return out
 _OWNER_PLACEHOLDER_RE = re.compile(r"obaaf_owner", re.I)
 _SHA_PLACEHOLDER_RE = re.compile(r"@0{40}(?![0-9a-fA-F])")
 
@@ -583,6 +600,7 @@ class WorkflowRules:
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
                                firewall=self.firewall)
         second._through = True
+        second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
         order = {"high": 0, "medium": 1, "low": 2}
         standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
@@ -625,55 +643,112 @@ class WorkflowRules:
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
+    # Values OBAAF-GHA-023 reaches in one file, each place counted on its own: a large workflow reaches
+    # some thousands.
+    _PLACEHOLDER_WALK = 500_000
+
+    class _WalkExceeded(Exception):
+        pass
+
     def placeholders(self) -> None:
         """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
         The values are read as YAML gives them, so an escape (`OBAAF\\x5FOWNER`, a line joined inside
         double quotes) is the placeholder it spells, and a comment, which GitHub never reads, is not.
         `OBAAF_OWNER` is found in any letter case (GitHub owner names are compared without regard to
-        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros."""
-        seen: set = set()
+        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros.
+
+        A value written once under a YAML anchor and reached through aliases is one object to the
+        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each list and
+        mapping in it once, so a step shared by two jobs, or used twice in one job, is reported at each
+        (slice 2d.3: it was reported at the first place only). Each text is searched once, however
+        often it is reached, and a text with a placeholder reached again in the same place is that
+        place's once. A file whose places together reach more values than the checker reads is an
+        error for the file, never a pass; the rule's findings so far, and the other rules', stand."""
         found: list = []
+        budget = [self._PLACEHOLDER_WALK]
+        searched: dict = {}
+
+        def held(text: str, where: str) -> list:
+            key = (text, where.rsplit(".", 1)[-1] == "uses")
+            if key not in searched:
+                searched[key] = _placeholders_in(text, where)
+            return searched[key]
 
         def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
-            if isinstance(value, (dict, list)):
-                if id(value) in seen:
-                    return
-                seen.add(id(value))
-            if isinstance(value, str):
-                for placeholder in _placeholders_in(value, where):
-                    found.append((line, job, step, where, placeholder))
-            elif isinstance(value, dict):
-                for key, sub in value.items():
-                    name = as_text(key)
-                    for placeholder in _placeholders_in(name, where):
-                        found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
-                    sub_line = line
-                    if hasattr(value, "line_of"):
-                        try:
-                            sub_line = max(int(value.line_of(key) or 0), line)
-                        except (TypeError, ValueError):
-                            pass
-                    visit(sub, f"{where}.{name}" if where else name, sub_line, job, step)
-            elif isinstance(value, list):
-                for n, sub in enumerate(value):
-                    visit(sub, f"{where}[{n}]", line, job, step)
+            seen: set = set()
 
+            def walk(value, where: str, line: int) -> None:
+                budget[0] -= 1
+                if budget[0] < 0:
+                    raise self._WalkExceeded()
+                if isinstance(value, (dict, list)):
+                    if id(value) in seen:
+                        return
+                    seen.add(id(value))
+                if isinstance(value, str):
+                    placeholders = held(value, where)
+                    if placeholders:
+                        # A text reached again through an alias in the same place is that place's once,
+                        # as a list or mapping is; a text written out twice is two objects, and two places.
+                        if id(value) in seen:
+                            return
+                        seen.add(id(value))
+                    for placeholder in placeholders:
+                        found.append((line, job, step, where, placeholder))
+                elif isinstance(value, dict):
+                    for key, sub in value.items():
+                        name = as_text(key)
+                        for placeholder in held(name, where):
+                            found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
+                        sub_line = line
+                        if hasattr(value, "line_of"):
+                            try:
+                                sub_line = max(int(value.line_of(key) or 0), line)
+                            except (TypeError, ValueError):
+                                pass
+                        walk(sub, f"{where}.{name}" if where else name, sub_line)
+                elif isinstance(value, list):
+                    for n, sub in enumerate(value):
+                        walk(sub, f"{where}[{n}]", line)
+
+            walk(value, where, line)
+
+        try:
+            self._placeholder_places(visit)
+        except self._WalkExceeded:
+            message = ("values reached through YAML aliases are too many to read for template placeholders; the "
+                       "checker cannot tell whether one is left")
+            problems = getattr(self, "_problems", None)
+            problems = self.wf.problems if problems is None else problems
+            if message not in problems:
+                problems.append(message)
+        self._placeholder_findings(found)
+
+    def _placeholder_places(self, visit) -> None:
         jobs_raw = self.wf.raw.get("jobs")
         for key, sub in self.wf.raw.items():
             if key != "jobs":
                 visit({key: sub}, "", 1, None, None)
-        by_raw = {id(job.raw): job for job in self.wf.jobs.values()}
+        # Each job and step is matched to its raw value in order, so that two places holding the same
+        # value through an alias are two jobs or two steps, not one.
+        by_raw: dict = collections.defaultdict(collections.deque)
+        for job in self.wf.jobs.values():
+            by_raw[id(job.raw)].append(job)
         if isinstance(jobs_raw, dict):
             for key, job_raw in jobs_raw.items():
-                job = by_raw.get(id(job_raw))
+                queue = by_raw.get(id(job_raw))
+                job = queue.popleft() if queue else None
                 if job is None:
                     visit({key: job_raw}, "jobs", 1, None, None)
                     continue
-                steps = {id(step.raw): step for step in job.steps}
+                steps: dict = collections.defaultdict(collections.deque)
+                for step in job.steps:
+                    steps[id(step.raw)].append(step)
                 for name, sub in job_raw.items():
                     if name == "steps" and isinstance(sub, list):
                         for n, step_raw in enumerate(sub):
-                            step = steps.get(id(step_raw))
+                            queue = steps.get(id(step_raw))
+                            step = queue.popleft() if queue else None
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
@@ -683,8 +758,10 @@ class WorkflowRules:
             for job in self.wf.jobs.values():
                 for step in job.steps:
                     if step.via is not None and isinstance(step.written, dict):
-                        seen.clear()      # each use of an action is read, as each step written in a job is
+                        # each use of an action is read, as each step written in a job is
                         visit(step.written, "step", step.line, job, step)
+
+    def _placeholder_findings(self, found: list) -> None:
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)
@@ -1604,7 +1681,11 @@ class WorkflowRules:
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                     out[name] = None
                     continue
-                text = str(value)
+                try:
+                    text = str(value)
+                except ValueError:          # an integer too long for Python to print (found by 2d.5c2a's review)
+                    out[name] = None
+                    continue
                 out[name] = None if "$" in text or len(text) > 10_000 else text
         return out
 
@@ -1717,13 +1798,18 @@ class WorkflowRules:
                 return True
         return False
 
-    def _pin_candidate(self, step: Step, shell: str) -> str | None:
+    def _pin_candidate(self, step: Step, shell: str, windows: bool = False) -> str | None:
         """One literal package in a direct workflow run. Normalized detection text loses its origin."""
         raw = step.raw.get("run")
         if step.via is not None or step.uses is not None or not isinstance(raw, str):
             return None
-        # A called workflow may already contain values substituted from a caller.
-        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash"):
+        # A `run` written once under a YAML anchor and reached through aliases is one edit for every
+        # step that reaches it, so none of them is a candidate (review of #258).
+        if "run" in getattr(step.raw, "shared_keys", ()):
+            return None
+        # A called workflow may already contain values substituted from a caller. A Windows runner's
+        # default shell is PowerShell, as agent_tool_installs reads it.
+        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash") or (windows and not shell):
             return None
         # Exactly one package token on one install line. The optional second line may
         # only query the installed CLI's version, using the catalogue's own spelling.
@@ -1829,7 +1915,8 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
-                         pin_candidate=self._pin_candidate(step, shell) if len(installs) == 1 and not piped else None,
+                         pin_candidate=self._pin_candidate(step, shell, windows) if len(installs) == 1 and not piped
+                         else None,
                          **agents)
 
     # -------------------------------------------------------------- GHA-026
@@ -1844,16 +1931,22 @@ class WorkflowRules:
         a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
         most medium. An input that is not given has the action's default, which no setting names."""
         known = agent_tools.settings(self.detection)
-        if not known:
+        readers = agent_tools.flag_readers(self.detection)
+        if not known and not readers:
             return
+        if readers:
+            self._agent_flags(job, readers)
         for step in job.steps:
             if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
                 continue
             written = step.raw.get("with")
             if written is not None and not isinstance(written, dict):
                 # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
-                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review).
-                mine = [c for c in known if step.uses_action(c[2]["action"])]
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review), and so is
+                # every flag of an input it hands the program as options (slice 2d.5c2a).
+                mine = [c for c in known if self._tool_action(step, c[2]["action"])]
+                mine += [(tool, name, flag) for tool, name, flags, _programs, _packages, args in readers
+                         if any(self._tool_action(step, a) for a in args) for flag in flags]
                 if mine:
                     self._agent_setting(job, step, written, mine, whole=True)
                 continue
@@ -1862,18 +1955,240 @@ class WorkflowRules:
                 continue
             by_input: dict = {}
             for tool, name, setting in known:
-                if step.uses_action(setting["action"]):
+                if self._tool_action(step, setting["action"]):
                     key = input_name(setting["input"])
                     if key in given:
                         by_input.setdefault(key, []).append((tool, name, setting))
             for key, candidates in by_input.items():
                 self._agent_setting(job, step, given[key], candidates)
 
+    def _tool_action(self, step: Step, action: str) -> bool:
+        """Whether the step uses `action`, an agent tool's action, or one in a folder under it that the
+        catalogue does not list as running no agent (flagship slice 2d.11): the approval check under
+        `anthropics/claude-code-action` is not given that action's settings."""
+        return step.uses_action(action) and not self._agent_actions().excludes(step.action)
+
+    def _agent_flags(self, job: Job, readers: list) -> None:
+        """OBAAF-GHA-026 for command-line options (flagship slice 2d.5c2a): an option an agent tool's own
+        files warn about, given where the tool's program is run in a step's script (its `run`, a
+        github-script script, the command OBAAF's egress action runs, and any other input, `env` value or
+        `docker://` argument that is a command running the program) or in an input one of the tool's actions
+        hands the program as options (`claude_args`, `codex-args`). `agent_flags` says how each is read and
+        what is "cannot tell"."""
+        for step in job.steps:
+            given = step.with_ if step.uses and not step.is_local else {}
+            written = step.raw.get("with")
+            for tool, name, flags, programs, packages, args in readers:
+                # The inputs an action of the tool hands its program as options. A `with:` that is one
+                # expression is "cannot tell" for them in `agent_tool_settings`.
+                if given and isinstance(written, dict):
+                    for action, inputs in args.items():
+                        if not self._tool_action(step, action):
+                            continue
+                        for key in dict.fromkeys(input_name(i) for i in inputs):
+                            if key in given:
+                                self._agent_args(job, step, tool, name, flags, action, key, given[key])
+                self._agent_command(job, step, tool, name, flags, programs, packages)
+
+    def _agent_args(self, job: Job, step: Step, tool: str, name: str, flags: list, action: str, key: str,
+                    raw) -> None:
+        if raw is None:
+            return
+        text = ("true" if raw else "false") if isinstance(raw, bool) else as_text(raw) if isinstance(
+            raw, (str, int, float)) else None
+        candidates = [(tool, name, dict(flag, input=key)) for flag in flags]
+        if text is None or "${{" in text:
+            # The same case as a setting's value the checker cannot read (a list, a mapping, an expression).
+            self._agent_setting(job, step, raw, candidates)
+            return
+        codex = action.lower() == "openai/codex-action"
+        # claude-code-action leaves out a line that starts with `#` and puts in an unset variable as nothing
+        # (shell-quote); codex-action reads `[` as JSON and keeps every other word (string-argv).
+        reading, unknown = agent_flags.read_args(text, flags, json_array=codex, comments=not codex,
+                                                 expands=not codex)
+        odd = any(unicodedata.category(ch)[0] in "CZ" and ch not in agent_flags.JS_SPACE for ch in text)
+        if odd or unknown:
+            # A character either side may read otherwise, or a variable the action may put in as nothing.
+            self._agent_setting(job, step, raw, [c for c in candidates if c[2]["id"] not in reading.hits],
+                                force_computed=True)
+        shown_action = (step.action or "").lower()
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` the option `{option}`, which {tool}'s "
+                     "own documentation warns about: \"{says}\" ({source}).", job, step,
+                     severity=flag["severity"], kind="option", action=shown_action, input=key,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+
+    _COMMAND_INPUTS = frozenset({"run", "command", "commands", "cmd", "script", "shell", "args", "arguments",
+                                 "entrypoint", "exec", "execute", "build-command", "test-command"})
+
+    _FOREIGN_SPECIAL_RE = re.compile(r"[$@`%^(]")
+
+    def _later_writes(self, job: Job) -> list:
+        """The indexes of the job's steps that can set a variable for the steps after them, worked out once."""
+        cache = self.__dict__.setdefault("_later_writes_cache", {})
+        if job.id not in cache:
+            cache[job.id] = [n for n, s in enumerate(job.steps) if self._SETS_FOR_LATER_RE.search(
+                (s.run or "") + " " + " ".join(str(v) for v in s.with_.values() if isinstance(v, str)) + " "
+                + " ".join(str(v) for v in s.env.values() if isinstance(v, str)))]
+        return cache[job.id]
+
+    _EXEC_CALL_RE = re.compile(r"\b(exec|execSync|execFile|execFileSync|spawn|spawnSync|getExecOutput|run|call|"
+                               r"check_call|check_output|Popen|system)\s*\(|\$`|child_process|\.apply\s*\(")
+
+    def _step_shell(self, job: Job, step: Step) -> str:
+        """The shell a `run` step's script is given to: its `shell`, else the job's and then the workflow's
+        `defaults.run.shell`, else bash (pwsh on a Windows runner)."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
+                run = defaults.get("run") if isinstance(defaults, dict) else None
+                if isinstance(run, dict) and isinstance(run.get("shell"), str):
+                    shell = run["shell"]
+                    break
+        if not isinstance(shell, str):
+            windows = any("windows" in str(label).lower() for label in job.runs_on)
+            return "pwsh" if windows else "bash"
+        first = shell.split()[0] if shell.split() else ""
+        return first.rsplit("/", 1)[-1].lower()
+
+    def _step_language(self, job: Job, step: Step, shell_name: str) -> str:
+        """The language a `run` step's script is read as by `agent_code`: the shell's program, after `env`
+        and its options (`/usr/bin/env python3 {0}`), and python for `uv run --script {0}`."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            return shell_name
+        words = [w.rsplit("/", 1)[-1].lower() for w in shell.split() if w != "{0}"]
+        while words and (words[0] == "env" or words[0].startswith("-")):
+            words = words[1:]
+        if words and words[0] in ("uv", "uvx") and ("--script" in words or "run" in words):
+            return "python"
+        return words[0] if words else shell_name
+
+    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
+                       packages: list) -> None:
+        # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
+        parts: list = []
+        languages: dict = {}
+        if step.run:
+            shell_name = self._step_shell(job, step)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
+            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", step.run).replace("^", "")
+                          if shell_name in ("cmd", "cmd.exe") else step.run, shell_name in ("bash", "sh")))
+            languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
+        given = step.with_ if step.uses else {}
+        script = given.get("script") if step.uses_action("actions/github-script") else None
+        if isinstance(script, str):
+            parts.append((script, False))
+            languages[id(script)] = "github-script"
+        if step.confines and isinstance(given.get("run"), str):
+            parts.append((given["run"], True))
+        # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
+        if step.run:
+            for shell in (step.raw.get("shell"), *(d.get("run", {}).get("shell") for d in (
+                    job.raw.get("defaults"), self.wf.raw.get("defaults")) if isinstance(d, dict) and isinstance(
+                    d.get("run"), dict))):
+                if isinstance(shell, str):
+                    parts.append((shell.replace("{0}", "script.sh"), True))
+                    break
+        own = {id(text) for text, _bash in parts}
+        # (text, whether its input's name says it is a command): other inputs, `env` values, and a
+        # `docker://` step's entrypoint and arguments, which GitHub hands the container as one command line.
+        others = [(v, k in self._COMMAND_INPUTS) for k, v in given.items() if isinstance(v, str) and id(v) not in own
+                  and not (k == "script" and script is not None) and not (k == "run" and step.confines)]
+        if step.uses and step.uses.strip().lower().startswith("docker://"):
+            entry, args = given.get("entrypoint"), given.get("args")
+            others.append((" ".join(v for v in (entry, args) if isinstance(v, str)), True))
+        others += [(v, False) for v in step.env.values() if isinstance(v, str)]
+        named = [text for text, _bash in parts] + [v for v, _c in others] + [
+            v for scope in (job.env, self.wf.env) if isinstance(scope, dict) for v in scope.values() if isinstance(v, str)]
+        matrix = job.raw.get("strategy")
+        if isinstance(matrix, dict):
+            named += _strings_in(matrix.get("matrix"), 2000)
+        scopes = [step.raw.get("env"), job.raw.get("env"), self.wf.raw.get("env")]
+        # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
+        scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+        scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        if not any(agent_flags.appears(t, programs, packages) for t in named):
+            # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
+            # where the script has a `$` and an assignment, with a regular expression (kept cheap).
+            if not any("$" in text and "=" in text and agent_flags.appears(agent_flags.put_in_cheaply(
+                    text, scopes), programs, packages) for text, _b in parts):
+                return              # the tool's name is nowhere in the step (the common case, kept cheap)
+        # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
+        # the job's and workflow's `env` values are then not known; the step's own `env` is.
+        writes = self._later_writes(job)
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        later = any(n < index for n in writes)
+        trust_env = [scoped, scoped and not later, scoped and not later]
+        known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
+        mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
+        reading = agent_flags.Reading()
+        for text, bash in parts:
+            variables, unread = known[id(text)]
+            if bash:
+                reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                      mentioned=mentioned, unread=unread, loose=True))
+            else:
+                # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
+                # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
+                # JavaScript or another shell is read the widest way; "cannot tell" where it names the tool and
+                # holds the start of a warned option it cannot complete (`"--dangerously-" + "skip-..."`).
+                # The language is read by its tokens too (`agent_code`, flagship slice 2d.5c2c): argument lists
+                # held in variables, command lines joined with values, options in pieces; in another shell, a
+                # variable or splat among the program's words (`claude @a`, `& claude $flags`, `claude %F%`)
+                # is "cannot tell", as an unquoted one is in bash.
+                if agent_flags.appears(text, programs, packages):
+                    reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                          mentioned=agent_flags.mentions(text, programs, packages),
+                                                          bash=False, loose=True,
+                                                          language=languages.get(id(text), "")))
+        for other, command_like in others:
+            # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
+            # starts a command with it, or that names the tool in an input whose name says it is a command.
+            if agent_flags.starts_program(other, programs, packages) or (
+                    command_like and agent_flags.appears(other, programs, packages)):
+                variables, unread = agent_flags.known_variables(scopes, other, trust_env)
+                reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
+                                                      unread=unread, prose=not command_like))
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with `{option}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=flag["severity"],
+                     kind="command-option", program=tool,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+        open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_ and agent_tools.other_program_only(self.detection, tool, programs, [
+                text for text, _bash in parts] + [v for v, _c in others]):
+            # Another well-known program has this name (AWS's `copilot`, pressly's `goose`): no "cannot tell"
+            # where every place the step names the program is followed by that other program's own words
+            # (flagship slice 2d.5c2b).
+            open_ = []
+        if open_:
+            words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
+            shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
+            worst = max((f["severity"] for f in open_), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with words the checker cannot read ({words}), "
+                     "so it cannot tell whether they hold an option that {tool}'s own documentation warns about "
+                     "({settings}).", job, step, severity=severity, kind="command-computed", program=tool,
+                     words=Fact([bounded(w) for w in words], shown), tool=Note(name),
+                     settings=sorted(f"{tool}/{f['id']}" for f in open_))
+
     # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
     # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
     _TRIMMED = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
 
-    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False) -> None:
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False,
+                       force_computed: bool = False) -> None:
         action = (step.action or "").lower()
         tool_name = candidates[0][1]
         input_shown = "with" if whole else candidates[0][2]["input"]
@@ -1891,7 +2206,12 @@ class WorkflowRules:
         # A control, format or separator character left inside the value (a NUL, which ends an environment
         # variable, U+200B, a no-break space) can make the action read another value than the one written.
         odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
-        if text is None or "${{" in text or odd:
+        # A value that starts with a comment, read by `fromJSON` (`/* x */ true`): what the runner's reader
+        # makes of it was not tested, so it is "cannot tell" (2d.5c2b's second review).
+        commented = core is not None and core.startswith("/") and any(c[2].get("json") is True for c in candidates)
+        if text is None or "${{" in text or odd or force_computed or commented:
+            if not candidates:
+                return
             # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
             # any of it changes (found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo`
             # become `unsafe`). A list or a mapping, which GitHub refuses as inputs, is named by its kind, as
@@ -1911,11 +2231,15 @@ class WorkflowRules:
             return
         value = core
         folded = value.casefold()
+        decoded = self._json_text(value)
         for tool, name, setting in candidates:
+            # An action that reads the input through `fromJSON` (`json: true`) takes `'"true"'` as `true`.
+            compared = decoded.strip(self._TRIMMED).casefold() if setting.get("json") is True and (
+                decoded is not None) else folded
             if "equals" in setting:
-                hit = any(folded == str(v).strip().casefold() for v in setting["equals"])
+                hit = any(compared == str(v).strip().casefold() for v in setting["equals"])
             else:
-                hit = folded != ""
+                hit = compared != ""
             if not hit:
                 continue
             self.add("OBAAF-GHA-026", step.line,
@@ -1926,6 +2250,36 @@ class WorkflowRules:
                      tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
                      source=Note(str(setting["source"])))
             return
+
+    _JSON_WORD_RE = re.compile(r"[^\s,/\]\}:\[\{]+")
+
+    @classmethod
+    def _json_text(cls, value: str):
+        """What GitHub's `fromJSON` makes of a value, as text, the way the runner's reader (Newtonsoft's
+        `JToken.ReadFrom`) does: the first token, a string in double or single quotes (`'"true"'`, `"'true'"`)
+        or a word up to a separator (`true // off`, `true off`); anything after it is not read. None where the
+        first token is neither (the runner refuses it). Found by 2d.5c2b's reviews."""
+        text = value.lstrip(" \t\r\n")
+        if text[:1] in ("'", '"'):
+            quote = text[0]
+            i, out = 1, []
+            while i < len(text):
+                ch = text[i]
+                if ch == "\\" and i + 1 < len(text):
+                    try:
+                        piece = json.loads('"' + text[i:i + (6 if text[i + 1] == "u" else 2)] + '"')
+                    except ValueError:
+                        piece = text[i + 1]
+                    out.append(piece)
+                    i += 6 if text[i + 1] == "u" else 2
+                    continue
+                if ch == quote:
+                    return "".join(out)
+                out.append(ch)
+                i += 1
+            return None
+        m = cls._JSON_WORD_RE.match(text)
+        return m.group(0) if m else None
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
@@ -2175,15 +2529,22 @@ class WorkflowRules:
             self.__dict__["_agent_patterns_cache"] = cached
         return cached
 
+    def _agent_actions(self) -> AgentActions:
+        """The agent actions, the catalog's (less the paths it lists as running no agent) and the
+        configuration's, built once (flagship slice 2d.11)."""
+        cached = self.__dict__.get("_agent_actions_cache")
+        if cached is None:
+            cached = AgentActions(self.detection, self.agents.get("actions", ()) or ())
+            self.__dict__["_agent_actions_cache"] = cached
+        return cached
+
     def _agent_step(self, step: Step, text: str) -> str | None:
         """Why the checker takes the step to run an agent, or None."""
-        actions = list(self.detection.get("agent_actions", [])) + list(self.agents.get("actions", ()) or ())
-        commands = [re.compile(p, re.M) for p in
-                    list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
-        for prefix in actions:
-            if step.uses_action(prefix):
-                return f"uses {one_line(step.action, 80)}"
-        if text and matches_any(commands, text):
+        if self._agent_actions().names(step.action):
+            return f"uses {one_line(step.action, 80)}"
+        if leaves_repository(step.uses):
+            return f"uses {one_line(step.uses, 80)}, a path out of its repository that can reach any action the job downloads"
+        if text and matches_any(self._agent_patterns(), text):
             return "runs an agent CLI"
         return None
 
@@ -4573,23 +4934,200 @@ class WorkflowRules:
                     return True
         return False
 
+    # What `npm publish` may be given for its provenance to be credited (flagship slice 2d.12, from its
+    # review). npm's option reader (nopt) takes `true` or `false` after a boolean option as its value,
+    # reads `no-` in any case after any number of dashes, and gives an option that takes a value the next
+    # word, `--provenance` included, so only a closed list of words is read: anything else, a folder or a
+    # package to publish among them, keeps the upload counted.
+    _NPM_PUBLISH_FLAGS = frozenset({"--provenance", "--provenance=true", "--access=public"})
+    _NPM_PUBLISH_VALUES = {"--access": re.compile(r"public\Z"), "--tag": re.compile(r"[A-Za-z0-9][A-Za-z0-9._]*\Z")}
+    _NPM_TAG_RE = re.compile(r"--tag=[A-Za-z0-9][A-Za-z0-9._]*\Z")
+    # Characters in a word that the shell may turn into other words, or that say a value is not known.
+    _NPM_UNREAD_RE = re.compile(r"[$`*?\[\]{}~\\]|OBAAF_EXPRESSION")
+    # The Node.js versions that ship npm 9.5.0 or later, which npm's documentation asks for (line 37 of
+    # generating-provenance-statements.mdx at 507a73e): Node.js 20.0.0 shipped npm 9.6.4; an older one
+    # may ship npm 8, which does not know `--provenance`.
+    _NODE_VERSION_RE = re.compile(r"v?([0-9]+)(\.([0-9]+|x|\*)){0,2}\Z")
+    _NODE_ALIASES = frozenset({"lts/*", "latest", "current", "node"})
+    _SETUP_NODE_INPUTS = frozenset({"node-version", "registry-url", "scope", "cache", "package-manager-cache",
+                                    "always-auth", "check-latest"})
+    # The commands an earlier step may run: they install the package's dependencies and run its own scripts,
+    # and change neither npm nor the job's environment in the workflow's text.
+    _NPM_EARLIER_RE = re.compile(r"npm (ci|install|test|run [A-Za-z0-9:_.-]+)\Z")
+    # Variables that change what `npm`, Node.js or the shell runs, or where npm sends the package, in the
+    # publishing step's, the job's or the workflow's `env`; also any `BASH...`, `LD_...`, `NPM_CONFIG_...`
+    # and `NODE_...` name but `NODE_AUTH_TOKEN` (`_npm_env_changes`). Bash runs `SHELLOPTS` and expands
+    # `PS4` at start (found by the second review of slice 2d.12).
+    _NPM_ENV_KEYS = frozenset({"PATH", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "EXECIGNORE"})
+    _NPM_REGISTRY = frozenset({"https://registry.npmjs.org", "https://registry.npmjs.org/"})
+
+    def _npm_env_changes(self, env) -> bool:
+        """Whether an `env` mapping may change what `npm`, Node.js or the shell runs, or where npm sends the
+        package; an `env` that is not a mapping (one expression) may."""
+        if env is None:
+            return False
+        if not isinstance(env, dict):
+            return True
+        for key in env:
+            name = str(key).strip().upper()
+            if name in self._NPM_ENV_KEYS or name.startswith(("BASH", "LD_", "NPM_CONFIG_")) or (
+                    name.startswith("NODE_") and name != "NODE_AUTH_TOKEN"):
+                return True
+        return False
+
+    def _npm_provenance_publish(self, job: Job, step: Step) -> bool:
+        """Whether a step publishes to npm with provenance that npm signs as it publishes (flagship slice
+        2d.12, #201). npm's CLI signs in `buildMetadata` before the request that sends the package, and
+        throws when it cannot (libnpmpublish's `publish.js` at 787f152), so such a step publishes nothing
+        without provenance. It is read only in the form npm's documentation gives, and only where the
+        workflow's text leaves nothing that could change npm or what it is given:
+
+        - the step's whole script is one command, `npm publish` followed only by `--provenance` (or
+          `--provenance=true`), `--access public` and `--tag NAME`, each read as written;
+        - the job's permissions, or its workflow's when it declares none, give `id-token: write`;
+        - every runner it may run on is GitHub-hosted, and it has no `container` and no `services`;
+        - its shell is a POSIX shell the checker reads, nothing runs beside it, and no `env` of the step, the
+          job or the workflow is one expression or names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+          `EXECIGNORE`, a `BASH...`, `LD_...` or `NPM_CONFIG_...` variable, or a `NODE_...` one but
+          `NODE_AUTH_TOKEN`;
+        - an earlier step is `actions/setup-node` with a Node.js version that ships npm 9.5.0 or later (20
+          and up, or `lts/*`, `latest`, `current` or `node`), and every earlier step, with no `env`, `if` or
+          `continue-on-error`, is `actions/checkout`, such a setup-node step with no input beyond
+          `node-version`, `registry-url` (npm's own registry), `scope`, `cache`, `package-manager-cache`,
+          `always-auth` and `check-latest`, or a `run` step whose lines are `npm ci`, `npm install`,
+          `npm test` or `npm run NAME`, in the runner's default shell (neither the job nor the workflow sets
+          a default `shell`).
+
+        Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm, Yarn,
+        an action that publishes, a folder or package to publish, any other option or earlier step) is not
+        read, and the upload is counted as it was before."""
+        if step.uses or not isinstance(step.run, str) or not step.run.strip():
+            return False
+        perms = job.permissions
+        if perms is None or perms.level("id-token") != "write":
+            return False
+        sets = job.runner_label_sets()
+        if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
+                               for labels in sets) or job.raw.get("container") is not None \
+                or job.raw.get("services") is not None:
+            return False        # a container or a service is another image, which can change npm (third review)
+        shell = self._failfast_shell(job, step)
+        if shell is None or self._bash_env(job, step):
+            return False
+        if any(self._npm_env_changes(scope.get("env")) for scope in (step.raw, job.raw, self.wf.raw)
+               if isinstance(scope, dict)):
+            return False
+        # Nothing runs beside it (a parallel group, or an earlier step left running in the background), and
+        # the steps before it read with the job's and the workflow's own default shell, if they set one.
+        earlier = job.steps[:step.index]
+        if step.group is not None or any(other.background or other.group is not None for other in earlier):
+            return False
+        for scope in (job.raw, self.wf.raw):
+            defaults = scope.get("defaults") if isinstance(scope, dict) else None
+            if defaults is not None and not (isinstance(defaults, dict) and set(map(str, defaults)) <= {"run"} and (
+                    isinstance(defaults.get("run"), dict) and "shell" not in defaults["run"])):
+                return False
+        if not all(self._npm_earlier_step_reads(job, other) for other in earlier) or not any(
+                other.action and other.action.lower() == "actions/setup-node" for other in earlier):
+            return False
+        words = self._one_command(job, step)
+        if words is None or words[:2] != ["npm", "publish"]:
+            return False
+        rest = words[2:]
+        provenance = False
+        at = 0
+        while at < len(rest):
+            word = rest[at]
+            if word in self._NPM_PUBLISH_FLAGS or self._NPM_TAG_RE.match(word):
+                provenance = provenance or word.startswith("--provenance")
+                at += 1
+            elif word in self._NPM_PUBLISH_VALUES and at + 1 < len(rest) and \
+                    self._NPM_PUBLISH_VALUES[word].match(rest[at + 1]):
+                at += 2
+            else:
+                return False
+        return provenance
+
+    def _one_command(self, job: Job, step: Step) -> list[str] | None:
+        """The words of a `run` step's script when it is one command, on one line or continued with a
+        backslash at a line's end, with nothing else but comment lines and blank ones, every word read as
+        written; else None."""
+        lines = [line for line in step.run.replace("\\\n", "").split("\n")
+                 if line.strip() and not line.strip().startswith("#")]
+        shell = self._failfast_shell(job, step)
+        if len(lines) != 1 or "${{" in step.run or shell is None:
+            return None
+        commands, complete = binding_commands(_expressions_for_shell(step.run), *shell)
+        if not complete or len(commands) != 1:
+            return None
+        words = commands[0]
+        if any(not w or self._NPM_UNREAD_RE.search(w) for w in words):
+            return None
+        try:
+            if shlex.split(lines[0], comments=True) != words:
+                return None     # an `|| exit` after it, or quoting the reader turned into other words
+        except ValueError:
+            return None
+        return words
+
+    def _npm_earlier_step_reads(self, job: Job, step: Step) -> bool:
+        """Whether a step before `npm publish --provenance` is one that leaves npm as it is (see
+        `_npm_provenance_publish`)."""
+        # No earlier step is given an `env` (an action runs in its own Node.js, which `NODE_OPTIONS` can
+        # make load a file; found by the second review of slice 2d.12), and none may be skipped or fail
+        # without stopping the job.
+        if step.raw.get("env") is not None or step.raw.get("if") is not None or step.raw.get("continue-on-error") \
+                is not None:
+            return False
+        if step.uses:
+            if step.action and step.action.lower() == "actions/checkout":
+                return True
+            if not (step.action and step.action.lower() == "actions/setup-node"):
+                return False
+            given = step.raw.get("with")
+            if not isinstance(given, dict) or set(map(str, given)) - self._SETUP_NODE_INPUTS:
+                return False
+            registry = given.get("registry-url")
+            if registry is not None and as_text(registry).strip() not in self._NPM_REGISTRY:
+                return False
+            version = given.get("node-version")
+            if version is None or isinstance(version, (bool, float)) or not isinstance(version, (str, int)):
+                return False        # the runner's own Node.js, whose npm the checker does not know
+            text = as_text(version).strip()
+            match = self._NODE_VERSION_RE.match(text)
+            return text in self._NODE_ALIASES or bool(match and int(match.group(1)) >= 20)
+        if not isinstance(step.run, str) or step.raw.get("shell") is not None:
+            return False
+        lines = [" ".join(line.split()) for line in step.run.split("\n") if line.strip() and not line.strip().startswith("#")]
+        return bool(lines) and all(self._NPM_EARLIER_RE.match(line) for line in lines)
+
     def provenance_missing(self) -> None:
         uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
         if any(self._signs_provenance(j) for j in self.wf.jobs.values()):
             return
+        # An upload that is `npm publish --provenance`, in the form `_npm_provenance_publish` reads, signs
+        # its own provenance (flagship slice 2d.12); the other uploads are weighed as before.
+        def unsigned(j: Job) -> list[Step]:
+            return [s for s in j.upload_steps(self.detection) if not self._npm_provenance_publish(j, s)]
+
+        uploading = [j for j in uploading if unsigned(j)]
+        if not uploading:
+            return
         # Provenance signed by another workflow counts when every upload is gated on verifying it, by a
         # check that comes before it and stops it (flagship slice 2d.2e: before, any verify text anywhere
         # in the job counted, after the upload or in an `echo` included).
         unverified = [j for j in uploading
-                      if any(kind is None for _s, kind in self._upload_checks(j, j.upload_steps(self.detection)))]
+                      if any(kind is None for _s, kind in self._upload_checks(j, unsigned(j)))]
         if not unverified:
             return
         # One finding for the workflow. It is reported on the first publishing job that is a release
         # job before anything else, as it was when a job had one lane, so an accepted finding stays
         # where the baseline has it; a job that is also an agent or effect job is named only when
-        # there is no other.
+        # there is no other. A job whose every upload is a credited `npm publish --provenance` is not
+        # among them (slice 2d.12), so the finding can move to the next publishing job, and an acceptance
+        # that names the first one no longer matches.
         job = next((j for j in unverified if j.lane == "release"), unverified[0])
         self.add("OBAAF-GHA-017", job.line,
                  "Job '{job}' publishes artifacts, but no job in this workflow signs provenance for them.", job)

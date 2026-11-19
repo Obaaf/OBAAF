@@ -147,7 +147,7 @@ class ProblemsTest(unittest.TestCase):
         out = {"id": "tool", "name": "Tool", "read": datetime.date(2026, 11, 18),
                "sources": ["https://example.com/docs"], "actions": {"example/tool-action": {"prompt_inputs": ["prompt"]}},
                "commands": [], "programs": [], "prompt_flags": [], "packages": {}, "installs": {},
-               "install_urls": [], "settings": []}
+               "install_urls": [], "settings": [], "no_warnings": "Read the README at a commit; it warns about nothing."}
         out.update(changes)
         return out
 

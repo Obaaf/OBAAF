@@ -79,6 +79,140 @@ def is_local_reference(uses) -> bool:
     """`./path` or `$/path`: an action or reusable workflow in the workflow's own repository."""
     return isinstance(uses, str) and uses.startswith(("./", "$/"))
 
+
+def action_name(uses: str) -> str:
+    """`owner/repo[/path]` of a `uses:` value that names another repository's action or workflow, without
+    the `@ref`. Flagship slice 2d.2e: `actions/cache/save/../restore` is read as the path it names, whether
+    or not GitHub resolves it (if it does not, the workflow fails and nothing runs); `..` never climbs out
+    of `owner/repo`."""
+    action = uses.split("@", 1)[0]
+    if "/." in action:
+        parts: list[str] = []
+        for part in action.split("/"):
+            if part == "..":
+                if len(parts) > 2:
+                    parts.pop()
+            elif part not in (".", ""):
+                parts.append(part)
+        action = "/".join(parts)
+    return action
+
+
+def names_action(action: str, prefix: str) -> bool:
+    """Whether `prefix` (`owner/repo` or `owner/repo/path`) names `action` (as `action_name` gives it): the
+    same action, or one in a folder under it, in any letter case. `owner/repo-docs` is not under
+    `owner/repo`: the next character must be a `/` (flagship slice 2d.11)."""
+    low, pre = action.lower(), prefix.lower()
+    return low == pre or low.startswith(pre + "/")
+
+
+def leaves_repository(uses) -> bool:
+    """Whether a step's `uses:` names a path that leaves its repository (flagship slice 2d.11,
+    from its review): a local `./`, `$/` or `.\\` path whose `..` climbs above the workspace, or another
+    repository's action whose `..` climbs to or above `owner/repo` (`action_name` stops `..` there, so the
+    name it gives is not what the runner would look for). The runner puts every action a job uses in one
+    folder beside the workspace, the whole repository of each, so such a path can reach an action the job
+    never names (`./../../_actions/anthropics/claude-code-action/<ref>`). A backslash is read as a `/` too,
+    and a local path is also read without what follows an `@`, as `_local_action_folders` reads them, since
+    how GitHub reads either is not established."""
+    if not isinstance(uses, str):
+        return False
+    text = uses.strip()
+    if not text or text.startswith("docker://"):
+        return False
+    if text.startswith(("./", "$/", ".\\")):
+        rest = text[2:]
+        candidates = [rest, rest.split("@", 1)[0]]
+        floor = 0
+    else:
+        candidates = [text.split("@", 1)[0]]
+        floor = 2
+    for candidate in candidates + [c.replace("\\", "/") for c in candidates if "\\" in c]:
+        parts = candidate.split("/")
+        if floor and any(part in (".", "..") for part in parts[:floor]):
+            return True
+        depth = 0
+        for part in parts[floor:]:
+            if part == "..":
+                if depth == 0:
+                    return True
+                depth -= 1
+            elif part not in (".", ""):
+                depth += 1
+    return False
+
+
+def _configured_prefix(entry) -> str:
+    """A repository's own `agents.actions` entry as a prefix to compare: without space round it, without
+    an `@ref` (any ref of it is the agent) and without a `/` at its end, in lower case (flagship slice 2d.11,
+    from its review: before, a called workflow was compared with the entry as written, `x.yml@v1` too)."""
+    return action_name(str(entry).strip()).rstrip("/").lower()
+
+
+def _repo_and_path(action: str) -> tuple[str, str]:
+    """`owner/repo` in lower case, and the path under it as written: GitHub's owner and repository names
+    are read in any case, a path in the repository is not (a git tree is case-sensitive)."""
+    parts = action.split("/", 2)
+    return "/".join(parts[:2]).lower(), parts[2] if len(parts) > 2 else ""
+
+
+class AgentActions:
+    """The actions the checker takes to run an agent (flagship slice 2d.11): each catalogue entry's
+    actions and the paths under them (`agent_actions` in the detection data), except the paths the
+    catalogue lists as running no agent (`agent_not_actions`, from each entry's `not_agents`), and a
+    repository's own `agents.actions` with every path under them, which nothing narrows. (Where it is read,
+    a step whose `uses:` leaves its repository, `leaves_repository`, is taken for an agent's too: it can run
+    any action the runner downloaded for the job, the folders this list takes out included.)
+
+    A path the catalogue lists is taken out only as it is written there: its `owner/repo` in any case,
+    the folder under it exactly (`agent-approval-check`, not `Agent-Approval-Check`, which a Linux runner
+    does not find and a macOS or Windows runner may; the wider reading keeps that one an agent), and only
+    that folder, not one under it. A step's action is read with `..` worked out first, so
+    `.../agent-approval-check/../base-action` is the base action."""
+
+    __slots__ = ("catalogue", "excluded", "configured", "configured_local")
+
+    def __init__(self, detection: dict, configured=()):
+        self.catalogue = tuple(str(a).lower() for a in detection.get("agent_actions", ()) or ())
+        self.excluded = frozenset(_repo_and_path(str(a)) for a in detection.get("agent_not_actions", ()) or ())
+        given = [str(a).strip() for a in configured or ()]
+        self.configured = tuple(p for p in (_configured_prefix(a) for a in given if not is_local_reference(a)) if p)
+        # A local entry (`./.github/workflows/agent.yml`) names a called local workflow by its first
+        # characters, in any case, as it did before slice 2d.11; no step's action is local.
+        self.configured_local = tuple(a.lower() for a in given if is_local_reference(a))
+
+    def names(self, action: str | None) -> str | None:
+        """The prefix that makes `action` (`owner/repo[/path]`, as `Step.action` gives it) an agent action,
+        as the catalogue or the configuration writes it in lower case, or None."""
+        if not action:
+            return None
+        low = action.lower()
+        for prefix in self.configured:
+            if low == prefix or low.startswith(prefix + "/"):
+                return prefix
+        for prefix in self.catalogue:
+            if low == prefix or low.startswith(prefix + "/"):
+                return None if self.excluded and _repo_and_path(action) in self.excluded else prefix
+        return None
+
+    def excludes(self, action: str | None) -> bool:
+        """Whether the catalogue lists `action` as one that runs no agent, though it is under an agent
+        action's folder (OBAAF-GHA-026 reads no agent tool's settings on it)."""
+        return bool(action and self.excluded and _repo_and_path(action) in self.excluded)
+
+    def calls(self, reusable) -> bool:
+        """Whether a job that calls the workflow `reusable` (its `uses:`) calls one in an agent action's
+        repository or folder, read as a step's action is: `owner/repo/.github/workflows/x.yml@ref` is
+        under `owner/repo`, and a workflow of `owner/repo-docs` is not (before slice 2d.11 a call was
+        matched by the first characters alone). A call of the workflow's own repository is an agent's only
+        where a repository's own local entry begins it."""
+        if not isinstance(reusable, str) or not reusable.strip():
+            return False
+        if is_local_reference(reusable.strip()):
+            low = reusable.strip().lower()
+            return any(low.startswith(entry) for entry in self.configured_local)
+        return self.names(action_name(reusable.strip())) is not None
+
 # OBAAF's egress action (flagship slice 2c.2), as `owner/repo/path` in lower case.
 EGRESS_ACTION = "obaaf/obaaf/actions/egress"
 # The shape of a GitHub-hosted runner label. Only used to find a hosted label written inside a
@@ -1801,25 +1935,13 @@ class Step:
         """'owner/repo[/path]' for a remote action, without the ref."""
         if not self.uses or self.is_local or self.uses.startswith("docker://"):
             return None
-        action = self.uses.split("@", 1)[0]
-        # Flagship slice 2d.2e: `actions/cache/save/../restore` is read as the path it names, whether or
-        # not GitHub resolves it (if it does not, the workflow fails and nothing runs).
-        if "/." in action:
-            parts: list[str] = []
-            for part in action.split("/"):
-                if part == "..":
-                    if len(parts) > 2:
-                        parts.pop()
-                elif part not in (".", ""):
-                    parts.append(part)
-            action = "/".join(parts)
-        return action
+        return action_name(self.uses)
 
     def uses_action(self, prefix: str) -> bool:
         action = self.action
         if not action:
             return False
-        return action.lower() == prefix.lower() or action.lower().startswith(prefix.lower() + "/")
+        return names_action(action, prefix)
 
     def text(self) -> str:
         """The run script plus a github-script script, for pattern matching."""
@@ -2501,16 +2623,13 @@ class Job:
         return list(memo[scope])
 
     def runs_agent(self, detection: dict, extra_actions=(), extra_commands=()) -> str | None:
-        actions = list(detection.get("agent_actions", [])) + list(extra_actions)
+        actions = AgentActions(detection, extra_actions)
         commands = [re.compile(p, re.M) for p in list(detection.get("agent_commands", [])) + list(extra_commands)]
-        # As `Step.uses_action` reads each prefix, with the step's action lowered once (slice 2d.5b's cost).
-        lowered = [prefix.lower() for prefix in actions]
         for step in self.steps:
-            action = step.action
-            if action:
-                low = action.lower()
-                if any(low == prefix or low.startswith(prefix + "/") for prefix in lowered):
-                    return f"uses {step.action}"
+            if actions.names(step.action):
+                return f"uses {step.action}"
+            if leaves_repository(step.uses):
+                return f"uses {one_line(step.uses, 80)}, a path out of its repository that can reach any action the job downloads"
             text = step.agent_text(commands)
             if text and matches_any(commands, text):
                 return f"runs an agent CLI in '{step.name}'"
@@ -2518,10 +2637,8 @@ class Job:
         # {0}` under `defaults.run` runs the agent with every script.
         if any(matches_any(commands, form, anchored=True) for form in self.default_shell_forms()):
             return "runs an agent CLI as the default shell"
-        if self.reusable:
-            for prefix in actions:
-                if self.reusable.lower().startswith(prefix.lower()):
-                    return f"calls {self.reusable}"
+        if actions.calls(self.reusable):
+            return f"calls {self.reusable}"
         return None
 
     def default_shell_forms(self) -> list[str]:
@@ -3536,16 +3653,73 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
 
 
 ARTIFACT_API_RE = re.compile(
-    r"gh\s+run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|/actions/runs/\S*/artifacts|"
-    r"/actions/artifacts/\S*/(zip|\{archive_format\})", re.I)
+    r"gh\s+run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|archive_download_url|"
+    r"/actions/runs/\S*/artifacts|/actions/artifacts/\S*/(zip|\{archive_format\})", re.I)
+
+
+def _gh_run_download(text: str) -> bool:
+    """Whether a command in the text is `gh run download`, with options before either word (`gh -R repo
+    run download`, `gh run --repo=repo download`): `run` must be the first word after `gh` that is
+    not an option or an option's value, and `download` the first after `run`, before any comment.
+    Word by word, so linear in the text."""
+    def commands(words: list) -> list:
+        out, skip = [], False
+        for word in words:
+            if word.startswith("#"):
+                break
+            if skip:
+                skip = False
+            elif word in ("-R", "--repo"):
+                skip = True
+            elif not word.startswith("-"):
+                out.append(word)
+        return out
+
+    for segment in command_segments(text):
+        words = segment.split()
+        if words and words[0].rsplit("/", 1)[-1] == "gh" and commands(words[1:])[:2] == ["run", "download"]:
+            return True
+    return False
 
 
 def _downloads_from_trigger_run(job: Job) -> bool:
+    """Whether a step can bring another run's files into the job. Counted: an action other than
+    `actions/download-artifact` whose name ends in `download-artifact` or holds `/download-artifact`
+    or `artifact-download` (dawidd6's and its forks); `actions/download-artifact` given a `run-id` other than
+    `${{ github.run_id }}` (this run), or a `repository`, whatever the value, or inputs that are not a
+    mapping the checker can read, or naming `workflow_run` in any letter case; and the artifacts API
+    or `gh run download` (with options before either word) in the run script, a github-script
+    script, the command OBAAF's egress action runs or a `docker://` step's arguments, with lines
+    continued with a backslash joined and quotes taken out. The inputs of other actions (a retry
+    wrapper's `command`) and what a variable or `gh alias` stands for are not read.
+
+    Before slice 2d.3 only an input that held the text `workflow_run` as written counted, so
+    `run-id: ${{ GITHUB.EVENT.WORKFLOW_RUN.ID }}`, a run id passed through `env` or an input, or a
+    `repository` took the job out of the effect lane, and with it OBAAF-GHA-021 and 022; so did
+    `gh run \\` continued on the next line, `gh 'run' download`, `gh -R repo run download` and the
+    API's `archive_download_url`. Counting `run-id` or `repository` without `github-token` is the
+    wide reading: download-artifact may ignore them then. Listing or deleting artifacts is not a
+    download and is not counted."""
     for step in job.steps:
-        if step.uses_action("actions/download-artifact") or step.uses_action("dawidd6/action-download-artifact"):
-            if "workflow_run" in str(step.with_) or step.uses_action("dawidd6/action-download-artifact"):
+        action = (step.action or "").lower()
+        if action != "actions/download-artifact" and (
+                action.endswith("download-artifact") or "/download-artifact" in action or "artifact-download" in action):
+            return True
+        if step.uses_action("actions/download-artifact"):
+            given = step.raw.get("with")
+            if given is not None and not isinstance(given, dict):
                 return True
-        if ARTIFACT_API_RE.search(step.text()):
+            if "workflow_run" in str(step.with_).lower():
+                return True
+            for name in ("run-id", "repository"):
+                value = step.with_.get(name)
+                if value is None or as_text(value).strip() == "":
+                    continue
+                if name == "run-id" and "".join(as_text(value).split()).lower() == "${{github.run_id}}":
+                    continue
+                return True
+        if ARTIFACT_API_RE.search(step.text()) or any(ARTIFACT_API_RE.search(r) or _gh_run_download(r)
+                                                      for r in _readings(step.scripts())):
             return True
     return False
 

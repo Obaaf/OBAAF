@@ -1,0 +1,25 @@
+{
+  "format": "obaaf-baseline/v0.2",
+  "tool": "obaaf 0.4.0.dev0",
+  "findings": [
+    {
+      "rule": "OBAAF-GHA-016",
+      "severity": "high",
+      "path": ".github/workflows/release-pypi.yml",
+      "job": "publish",
+      "step": "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086",
+      "kind": "cannot-tell",
+      "facts": {
+        "steps": [
+          "pypa/gh-action-pypi-publish"
+        ],
+        "checks": [
+          "publish: Verify the release before uploading (FR6)"
+        ]
+      },
+      "owner": "@seanudeke",
+      "reason": "The PATH entry before the verify step is the one this repository's own setup-obaaf writes, from hash-locked wheels; see plan item 64",
+      "expires": "2027-02-18"
+    }
+  ]
+}

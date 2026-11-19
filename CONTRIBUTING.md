@@ -16,8 +16,10 @@ OBAAF accepts contributions under the rules below. Version 0.x formats may still
 python -m unittest discover -s tests -v
 obaaf docs build --check
 obaaf catalog
-obaaf check .
+obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 ```
+
+The baseline holds one maintainer's acceptance of one finding in the release job (#238). It names that finding exactly, so the last command fails, until a maintainer rewrites the entry, after any of these: a new pin of `pypa/gh-action-pypi-publish` (the publish step has no name, so it is known by its pinned commit), a renamed verify step in `release-pypi.yml`, or a checker change to what OBAAF-GHA-016 records. `tests/test_release_job_acceptance.py` holds the entry to the one that was approved.
 
 ## Review responsibility
 

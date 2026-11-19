@@ -19,7 +19,7 @@ def migration_command(result) -> str:
     args = ["obaaf", "baseline", "migrate"]
     args.extend("./" + path if path.startswith("-") else path for path in paths)
     args.extend(("--owner", "OWNER", "--reason", "REASON", "--expires", "YYYY-MM-DD"))
-    args.extend(str(option) for option in result.options)
+    args.extend(str(option) for option in (result.options or ()))
     return shlex.join(args)
 
 
