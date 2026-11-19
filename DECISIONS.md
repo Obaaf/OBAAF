@@ -930,4 +930,6 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Evidence.** `tests/test_settings_evidence.py` exercises the audit producer with recorded responses and tests timestamp boundaries, identity, exclusivity, branch policies, partial reads and the public CLI. `TheTemplateStepTest.test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin` exercises the selected snapshot and checker support in the template.
 
+**Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
+
 **Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.

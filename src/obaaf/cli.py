@@ -217,6 +217,7 @@ def cmd_check(args) -> int:
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
+    result.settings_path = args.settings or ""
     # What a command the report suggests has to repeat to check the same thing.
     # One word each, so a value that begins with a hyphen is still read as a value.
     result.options = ([f"--config={args.config}"] if args.config else []) \

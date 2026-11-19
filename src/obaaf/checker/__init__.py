@@ -2309,6 +2309,7 @@ class CheckResult:
     today: date | None = None                                # the day acceptances were judged against
 
     fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
+    settings_path: str = ""  # only check accepts this explicit evidence input
 
     @property
     def workflow_files(self) -> list[str]:
