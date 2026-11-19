@@ -10,6 +10,7 @@ documentation; none is copied from another project.
 
 import datetime
 import re
+import time
 import unittest
 
 from helpers import TempDir
@@ -206,7 +207,25 @@ class CannotTellTest(unittest.TestCase):
         self.assertNotEqual(fact("drop-sudo"), fact("read-only"))
         self.assertIn("read-only", fact("read-only"))
         hits = found(check(one_step(CODEX, "          allow-users: [alice, '*']\n")))
-        self.assertEqual(hits[0].facts["value"], '["alice", "*"]')
+        self.assertEqual(hits[0].facts["value"], "a list")
+        long_mode = "x" * 300
+        self.assertTrue(fact(long_mode).startswith("sha256:"))
+        self.assertNotEqual(fact(long_mode), fact(long_mode[:-1] + "y"))
+
+    def test_aliases_in_a_list_or_mapping_value_are_not_expanded(self):
+        # Found by 2d.5c1's fourth review: ten levels of ten aliases took minutes and gigabytes.
+        levels = ["x-l0: &l0 [x, x, x, x, x, x, x, x, x, x]"]
+        for n in range(1, 10):
+            levels.append(f"x-l{n}: &l{n} [" + ", ".join([f"*l{n - 1}"] * 10) + "]")
+        for where in ("{prompt: hi, allow-users: *l9}", "*l9"):
+            with self.subTest(where=where):
+                text = ("on: issue_comment\npermissions: {contents: read}\n" + "\n".join(levels) +
+                        "\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: " + CODEX +
+                        "\n        with: " + where + "\n")
+                started = time.monotonic()
+                hits = found(check(text))
+                self.assertLess(time.monotonic() - started, 10)
+                self.assertEqual([h.kind for h in hits], ["computed"])
 
     def test_a_value_json_cannot_sort_or_print_is_still_a_finding_not_a_traceback(self):
         # Found by 2d.5c1's third review: mixed keys and an integer of thousands of digits raised.

@@ -21,7 +21,7 @@ from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
-    digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
+    bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
@@ -168,26 +168,6 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
 # 1,000 characters, and a digest of all.
 PASSED_NAMED = 5
 PASSED_SHOWN = 3
-
-
-def _plain(value, depth: int = 0):
-    """A YAML value as JSON can hold it, the same for the same value: text, a number as `as_text` writes
-    it (an integer of any length), true, false and null as JSON's, a list item by item, and a mapping as a
-    list of [key, value] pairs sorted by the key's JSON (keys may be numbers, null or booleans, which do not
-    sort against text). Below 64 levels a value is given as one marker: GitHub refuses such inputs, so the
-    file never runs (found by 2d.5c1's third review: `json.dumps(sort_keys=True)` raised on mixed keys)."""
-    if depth > 64:
-        return "<nested more than 64 levels>"
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if isinstance(value, (int, float)):
-        return as_text(value)
-    if isinstance(value, dict):
-        pairs = [[_plain(k, depth + 1), _plain(v, depth + 1)] for k, v in value.items()]
-        return sorted(pairs, key=lambda kv: json.dumps(kv[0], ensure_ascii=False))
-    if isinstance(value, (list, tuple)):
-        return [_plain(v, depth + 1) for v in value]
-    return as_text(value)
 
 
 def _truthy(value) -> bool:
@@ -1888,18 +1868,21 @@ class WorkflowRules:
         # variable, U+200B, a no-break space) can make the action read another value than the one written.
         odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
         if text is None or "${{" in text or odd:
-            # The whole value is the fact, so an acceptance stops matching when any of it changes (found by
-            # 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo` become `unsafe`).
+            # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
+            # any of it changes (found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo`
+            # become `unsafe`). A list or a mapping, which GitHub refuses as inputs, is named by its kind, as
+            # `value_identity` names it: walking it would expand every YAML alias in it (the fourth review).
             if text is None:
-                text = raw if isinstance(raw, str) else json.dumps(_plain(raw), ensure_ascii=False)
-            shown = one_line(text, 120)
+                fact = shown = value_identity(raw)
+            else:
+                fact, shown = bounded(text), one_line(text, 120)
             worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
             severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
             self.add("OBAAF-GHA-026", step.line,
                      "Step '{step}' of job '{job}' gives {action} `{input}` a value the checker cannot read "
                      "({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
                      "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
-                     input=input_shown, value=Fact(text, shown),
+                     input=input_shown, value=Fact(fact, shown),
                      tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
             return
         value = core
