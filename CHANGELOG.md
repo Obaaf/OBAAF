@@ -38,6 +38,21 @@ Slice 2d.5c2b (issue #81, the rest of part 2 of 2d.5); decision D-094. **OBAAF-G
 - OBAAF-GHA-026's `Why:` line now also names "a way to other jobs or clients".
 - Not reported: a dangerous mode a tool runs in by default (a one-shot `cline "prompt"`, and the three actions that run their CLI with `--yolo` themselves); options described with no sentence of warning (OpenCode's `--auto`, Aider's `--yes-always`); Kiro CLI and Amp, documented only on web pages; environment variables such as `COPILOT_ALLOW_ALL` and `GOOSE_MODE`.
 
+### `npm publish --provenance` counts as provenance
+
+Slice 2d.12 (issue #201); decision D-097. **OBAAF-GHA-017 is reported for fewer workflows; a baseline entry for one it no longer reports no longer matches, which fails a check at or above `--fail-on`.**
+
+- A release upload that is `npm publish --provenance` signs its own provenance, and OBAAF-GHA-017 ("Release builds without provenance") no longer counts it. npm's documentation asks for `id-token: write`, a GitHub-hosted runner and the flag; npm's CLI throws before it publishes when it cannot sign (`ensureProvenanceGeneration`, read in npm/cli at `787f152`), so such a step publishes nothing without provenance.
+- **Only the documented form is read:**
+  - the step's whole script is `npm publish` with only `--provenance` (or `--provenance=true`), `--access public` and `--tag NAME`, each read as written (a comment or a line continued with a backslash aside);
+  - the job's declared permissions, or its workflow's, give `id-token: write`; every runner it may run on is GitHub-hosted, and it has no container and no services;
+  - an earlier `actions/setup-node` step sets Node.js 20 or later, or `lts/*`, `latest`, `current` or `node` (npm 9.5.0 or later, which npm's documentation asks for), with npm's own registry if it names one, and every earlier step is `actions/checkout`, such a setup-node step, or a `run` step of `npm ci`, `npm install`, `npm test` or `npm run NAME`, none with an `env`, an `if` or `continue-on-error`, nothing run beside them, and no default `shell` in the job or the workflow;
+  - its shell is a POSIX shell the checker reads, and no `env` of the step, the job or the workflow names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `EXECIGNORE`, a `BASH`, `LD_` or `NPM_CONFIG_` variable, or a `NODE_` one but `NODE_AUTH_TOKEN`.
+- **A closed list, because of how npm reads its options** (found by the slice's review): `--provenance false` sets it false, `--NO-provenance` and `---no-provenance` turn it off, and an option that takes a value takes `--provenance` as it (`--cache --provenance`), so any other word keeps the upload counted. A folder or package named to publish does too.
+- **Still reported, as before:** `NPM_CONFIG_PROVENANCE`, `publishConfig.provenance`, `.npmrc`, trusted publishing (which turns provenance on by itself only for a public package of a public repository), `pnpm publish` and `yarn npm publish`, an action that publishes, a second command in the step, any other earlier step, and any other upload in the workflow, which still needs provenance of its own. What the repository's own files (`package.json`, `.npmrc`) and the package's scripts (`npm ci`, `prepublishOnly`) do is not read.
+- **A finding can move.** Where one job's only upload is a credited `npm publish --provenance` and another job also publishes, OBAAF-GHA-017 is now reported on that other job, so an acceptance that names the first job no longer matches.
+- This repository's report and Expectrail's are byte-identical before and after.
+
 ### Which actions and called workflows are an agent's
 
 Slice 2d.11 (issue #236); decision D-096. **Fewer jobs are agent jobs, and a baseline entry for one of their findings no longer matches, which fails a check at or above `--fail-on`. A step whose `uses:` leaves its repository, and a configuration that is not a list of text, can also turn a passing gate red.**

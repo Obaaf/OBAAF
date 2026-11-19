@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -4872,23 +4873,200 @@ class WorkflowRules:
                     return True
         return False
 
+    # What `npm publish` may be given for its provenance to be credited (flagship slice 2d.12, from its
+    # review). npm's option reader (nopt) takes `true` or `false` after a boolean option as its value,
+    # reads `no-` in any case after any number of dashes, and gives an option that takes a value the next
+    # word, `--provenance` included, so only a closed list of words is read: anything else, a folder or a
+    # package to publish among them, keeps the upload counted.
+    _NPM_PUBLISH_FLAGS = frozenset({"--provenance", "--provenance=true", "--access=public"})
+    _NPM_PUBLISH_VALUES = {"--access": re.compile(r"public\Z"), "--tag": re.compile(r"[A-Za-z0-9][A-Za-z0-9._]*\Z")}
+    _NPM_TAG_RE = re.compile(r"--tag=[A-Za-z0-9][A-Za-z0-9._]*\Z")
+    # Characters in a word that the shell may turn into other words, or that say a value is not known.
+    _NPM_UNREAD_RE = re.compile(r"[$`*?\[\]{}~\\]|OBAAF_EXPRESSION")
+    # The Node.js versions that ship npm 9.5.0 or later, which npm's documentation asks for (line 37 of
+    # generating-provenance-statements.mdx at 507a73e): Node.js 20.0.0 shipped npm 9.6.4; an older one
+    # may ship npm 8, which does not know `--provenance`.
+    _NODE_VERSION_RE = re.compile(r"v?([0-9]+)(\.([0-9]+|x|\*)){0,2}\Z")
+    _NODE_ALIASES = frozenset({"lts/*", "latest", "current", "node"})
+    _SETUP_NODE_INPUTS = frozenset({"node-version", "registry-url", "scope", "cache", "package-manager-cache",
+                                    "always-auth", "check-latest"})
+    # The commands an earlier step may run: they install the package's dependencies and run its own scripts,
+    # and change neither npm nor the job's environment in the workflow's text.
+    _NPM_EARLIER_RE = re.compile(r"npm (ci|install|test|run [A-Za-z0-9:_.-]+)\Z")
+    # Variables that change what `npm`, Node.js or the shell runs, or where npm sends the package, in the
+    # publishing step's, the job's or the workflow's `env`; also any `BASH...`, `LD_...`, `NPM_CONFIG_...`
+    # and `NODE_...` name but `NODE_AUTH_TOKEN` (`_npm_env_changes`). Bash runs `SHELLOPTS` and expands
+    # `PS4` at start (found by the second review of slice 2d.12).
+    _NPM_ENV_KEYS = frozenset({"PATH", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "EXECIGNORE"})
+    _NPM_REGISTRY = frozenset({"https://registry.npmjs.org", "https://registry.npmjs.org/"})
+
+    def _npm_env_changes(self, env) -> bool:
+        """Whether an `env` mapping may change what `npm`, Node.js or the shell runs, or where npm sends the
+        package; an `env` that is not a mapping (one expression) may."""
+        if env is None:
+            return False
+        if not isinstance(env, dict):
+            return True
+        for key in env:
+            name = str(key).strip().upper()
+            if name in self._NPM_ENV_KEYS or name.startswith(("BASH", "LD_", "NPM_CONFIG_")) or (
+                    name.startswith("NODE_") and name != "NODE_AUTH_TOKEN"):
+                return True
+        return False
+
+    def _npm_provenance_publish(self, job: Job, step: Step) -> bool:
+        """Whether a step publishes to npm with provenance that npm signs as it publishes (flagship slice
+        2d.12, #201). npm's CLI signs in `buildMetadata` before the request that sends the package, and
+        throws when it cannot (libnpmpublish's `publish.js` at 787f152), so such a step publishes nothing
+        without provenance. It is read only in the form npm's documentation gives, and only where the
+        workflow's text leaves nothing that could change npm or what it is given:
+
+        - the step's whole script is one command, `npm publish` followed only by `--provenance` (or
+          `--provenance=true`), `--access public` and `--tag NAME`, each read as written;
+        - the job's permissions, or its workflow's when it declares none, give `id-token: write`;
+        - every runner it may run on is GitHub-hosted, and it has no `container` and no `services`;
+        - its shell is a POSIX shell the checker reads, nothing runs beside it, and no `env` of the step, the
+          job or the workflow is one expression or names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+          `EXECIGNORE`, a `BASH...`, `LD_...` or `NPM_CONFIG_...` variable, or a `NODE_...` one but
+          `NODE_AUTH_TOKEN`;
+        - an earlier step is `actions/setup-node` with a Node.js version that ships npm 9.5.0 or later (20
+          and up, or `lts/*`, `latest`, `current` or `node`), and every earlier step, with no `env`, `if` or
+          `continue-on-error`, is `actions/checkout`, such a setup-node step with no input beyond
+          `node-version`, `registry-url` (npm's own registry), `scope`, `cache`, `package-manager-cache`,
+          `always-auth` and `check-latest`, or a `run` step whose lines are `npm ci`, `npm install`,
+          `npm test` or `npm run NAME`, in the runner's default shell (neither the job nor the workflow sets
+          a default `shell`).
+
+        Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm, Yarn,
+        an action that publishes, a folder or package to publish, any other option or earlier step) is not
+        read, and the upload is counted as it was before."""
+        if step.uses or not isinstance(step.run, str) or not step.run.strip():
+            return False
+        perms = job.permissions
+        if perms is None or perms.level("id-token") != "write":
+            return False
+        sets = job.runner_label_sets()
+        if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
+                               for labels in sets) or job.raw.get("container") is not None \
+                or job.raw.get("services") is not None:
+            return False        # a container or a service is another image, which can change npm (third review)
+        shell = self._failfast_shell(job, step)
+        if shell is None or self._bash_env(job, step):
+            return False
+        if any(self._npm_env_changes(scope.get("env")) for scope in (step.raw, job.raw, self.wf.raw)
+               if isinstance(scope, dict)):
+            return False
+        # Nothing runs beside it (a parallel group, or an earlier step left running in the background), and
+        # the steps before it read with the job's and the workflow's own default shell, if they set one.
+        earlier = job.steps[:step.index]
+        if step.group is not None or any(other.background or other.group is not None for other in earlier):
+            return False
+        for scope in (job.raw, self.wf.raw):
+            defaults = scope.get("defaults") if isinstance(scope, dict) else None
+            if defaults is not None and not (isinstance(defaults, dict) and set(map(str, defaults)) <= {"run"} and (
+                    isinstance(defaults.get("run"), dict) and "shell" not in defaults["run"])):
+                return False
+        if not all(self._npm_earlier_step_reads(job, other) for other in earlier) or not any(
+                other.action and other.action.lower() == "actions/setup-node" for other in earlier):
+            return False
+        words = self._one_command(job, step)
+        if words is None or words[:2] != ["npm", "publish"]:
+            return False
+        rest = words[2:]
+        provenance = False
+        at = 0
+        while at < len(rest):
+            word = rest[at]
+            if word in self._NPM_PUBLISH_FLAGS or self._NPM_TAG_RE.match(word):
+                provenance = provenance or word.startswith("--provenance")
+                at += 1
+            elif word in self._NPM_PUBLISH_VALUES and at + 1 < len(rest) and \
+                    self._NPM_PUBLISH_VALUES[word].match(rest[at + 1]):
+                at += 2
+            else:
+                return False
+        return provenance
+
+    def _one_command(self, job: Job, step: Step) -> list[str] | None:
+        """The words of a `run` step's script when it is one command, on one line or continued with a
+        backslash at a line's end, with nothing else but comment lines and blank ones, every word read as
+        written; else None."""
+        lines = [line for line in step.run.replace("\\\n", "").split("\n")
+                 if line.strip() and not line.strip().startswith("#")]
+        shell = self._failfast_shell(job, step)
+        if len(lines) != 1 or "${{" in step.run or shell is None:
+            return None
+        commands, complete = binding_commands(_expressions_for_shell(step.run), *shell)
+        if not complete or len(commands) != 1:
+            return None
+        words = commands[0]
+        if any(not w or self._NPM_UNREAD_RE.search(w) for w in words):
+            return None
+        try:
+            if shlex.split(lines[0], comments=True) != words:
+                return None     # an `|| exit` after it, or quoting the reader turned into other words
+        except ValueError:
+            return None
+        return words
+
+    def _npm_earlier_step_reads(self, job: Job, step: Step) -> bool:
+        """Whether a step before `npm publish --provenance` is one that leaves npm as it is (see
+        `_npm_provenance_publish`)."""
+        # No earlier step is given an `env` (an action runs in its own Node.js, which `NODE_OPTIONS` can
+        # make load a file; found by the second review of slice 2d.12), and none may be skipped or fail
+        # without stopping the job.
+        if step.raw.get("env") is not None or step.raw.get("if") is not None or step.raw.get("continue-on-error") \
+                is not None:
+            return False
+        if step.uses:
+            if step.action and step.action.lower() == "actions/checkout":
+                return True
+            if not (step.action and step.action.lower() == "actions/setup-node"):
+                return False
+            given = step.raw.get("with")
+            if not isinstance(given, dict) or set(map(str, given)) - self._SETUP_NODE_INPUTS:
+                return False
+            registry = given.get("registry-url")
+            if registry is not None and as_text(registry).strip() not in self._NPM_REGISTRY:
+                return False
+            version = given.get("node-version")
+            if version is None or isinstance(version, (bool, float)) or not isinstance(version, (str, int)):
+                return False        # the runner's own Node.js, whose npm the checker does not know
+            text = as_text(version).strip()
+            match = self._NODE_VERSION_RE.match(text)
+            return text in self._NODE_ALIASES or bool(match and int(match.group(1)) >= 20)
+        if not isinstance(step.run, str) or step.raw.get("shell") is not None:
+            return False
+        lines = [" ".join(line.split()) for line in step.run.split("\n") if line.strip() and not line.strip().startswith("#")]
+        return bool(lines) and all(self._NPM_EARLIER_RE.match(line) for line in lines)
+
     def provenance_missing(self) -> None:
         uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
         if any(self._signs_provenance(j) for j in self.wf.jobs.values()):
             return
+        # An upload that is `npm publish --provenance`, in the form `_npm_provenance_publish` reads, signs
+        # its own provenance (flagship slice 2d.12); the other uploads are weighed as before.
+        def unsigned(j: Job) -> list[Step]:
+            return [s for s in j.upload_steps(self.detection) if not self._npm_provenance_publish(j, s)]
+
+        uploading = [j for j in uploading if unsigned(j)]
+        if not uploading:
+            return
         # Provenance signed by another workflow counts when every upload is gated on verifying it, by a
         # check that comes before it and stops it (flagship slice 2d.2e: before, any verify text anywhere
         # in the job counted, after the upload or in an `echo` included).
         unverified = [j for j in uploading
-                      if any(kind is None for _s, kind in self._upload_checks(j, j.upload_steps(self.detection)))]
+                      if any(kind is None for _s, kind in self._upload_checks(j, unsigned(j)))]
         if not unverified:
             return
         # One finding for the workflow. It is reported on the first publishing job that is a release
         # job before anything else, as it was when a job had one lane, so an accepted finding stays
         # where the baseline has it; a job that is also an agent or effect job is named only when
-        # there is no other.
+        # there is no other. A job whose every upload is a credited `npm publish --provenance` is not
+        # among them (slice 2d.12), so the finding can move to the next publishing job, and an acceptance
+        # that names the first one no longer matches.
         job = next((j for j in unverified if j.lane == "release"), unverified[0])
         self.add("OBAAF-GHA-017", job.line,
                  "Job '{job}' publishes artifacts, but no job in this workflow signs provenance for them.", job)
