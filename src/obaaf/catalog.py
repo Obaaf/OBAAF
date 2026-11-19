@@ -14,6 +14,7 @@ from importlib import resources
 from typing import Any
 
 from obaaf import agent_tools, yamlutil
+from obaaf.causes import CauseCatalog
 
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
 # The longest a rule's `why` may be: one line of the text report (slice 3.2b).
@@ -58,6 +59,9 @@ class Catalog:
     # built from them, so the entries are checked as they were read.
     agent_tool_problems: list = field(default_factory=list)
 
+    cause_data: dict = field(default_factory=lambda: _read("causes"))
+    causes: CauseCatalog = field(init=False)
+
     def __post_init__(self) -> None:
         for fam in self.profile["families"]:
             self.families[fam["id"]] = fam
@@ -71,6 +75,7 @@ class Catalog:
             self.agent_requirements[req["id"]] = req
         for rule in self.rules_data["rules"]:
             self.rules[rule["id"]] = rule
+        self.causes = CauseCatalog(self.cause_data, self.rules)
 
     # ------------------------------------------------------------------ lookups
     def items_for_requirement(self, gid: str) -> list[dict]:
@@ -246,6 +251,7 @@ class Catalog:
                 if rid in self.agent_requirements and rule_id not in checks:
                     out.append(f"{rule_id} lists {rid}, but {rid} does not list {rule_id}")
         out.extend(self.agent_tool_problems)
+        out.extend(self.causes.problems)
         return out
 
 

@@ -6,7 +6,10 @@ Two differences from PyYAML's SafeLoader matter here:
   booleans. PyYAML follows YAML 1.1 and would read the workflow key `on`, and
   answers such as `yes` and `no`, as booleans.
 * Every mapping remembers the line it starts on, and the line of each key, so
-  findings can point at the right place.
+  findings can point at the right place. It also remembers which of its keys
+  hold a value written once and reached from more than one place (a YAML
+  anchor and its aliases), so a value can be told apart from one that an edit
+  at this place would not change alone.
 """
 
 from __future__ import annotations
@@ -22,10 +25,12 @@ class LineDict(dict):
 
     line: int = 0
     key_lines: dict
+    shared_keys: set
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.key_lines = {}
+        self.shared_keys = set()
 
     def line_of(self, key: str) -> int:
         return self.key_lines.get(key, self.line)
@@ -41,6 +46,24 @@ class DuplicateKeyError(yaml.YAMLError):
 
 class _Loader(yaml.SafeLoader):
     """SafeLoader with YAML 1.2 booleans, line numbers and duplicate-key errors."""
+
+    def compose_node(self, parent, index):
+        aliased = self.check_event(yaml.AliasEvent)
+        node = super().compose_node(parent, index)
+        if aliased:
+            # The anchor's node and everything under it are reached from more than one place. Each
+            # node is marked once, so an alias of an alias costs no more than the nodes themselves.
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                if getattr(current, "obaaf_shared", False):
+                    continue
+                current.obaaf_shared = True
+                if isinstance(current, yaml.MappingNode):
+                    todo.extend(n for pair in current.value for n in pair)
+                elif isinstance(current, yaml.SequenceNode):
+                    todo.extend(current.value)
+        return node
 
 
 # Replace the YAML 1.1 boolean resolver with a YAML 1.2 one.
@@ -69,6 +92,8 @@ def _construct_mapping(loader: _Loader, node: yaml.MappingNode) -> LineDict:
             raise DuplicateKeyError(f"duplicate key {key!r} on line {key_node.start_mark.line + 1}")
         result[key] = loader.construct_object(value_node, deep=True)
         result.key_lines[key] = key_node.start_mark.line + 1
+        if getattr(value_node, "obaaf_shared", False):
+            result.shared_keys.add(key)
     return result
 
 

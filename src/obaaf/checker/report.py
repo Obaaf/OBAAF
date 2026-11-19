@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import unicodedata
 from datetime import date
 
@@ -19,6 +18,8 @@ from obaaf.checker import CheckResult, SEVERITY_ORDER
 from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import baseline as baseline_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
+from obaaf.checker.todo import todo
+from obaaf.checker.todo_acceptance import migration_command
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -336,10 +337,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
                          "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
                          "accepts these findings, why and until when:")
-            checked = f" {shlex.quote(result.checked)}" if result.checked not in ("", ".") else ""
-            given = "".join(f" {shlex.quote(str(word))}" for word in result.options)
-            lines.append(one_line(f"    obaaf baseline migrate {shlex.quote(result.baseline_path or 'FILE')}{checked} "
-                                  f"--owner OWNER --reason REASON --expires YYYY-MM-DD{given}"))
+            lines.append(one_line("    " + migration_command(result)))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
@@ -492,7 +490,10 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
             # that counts "findings" does not count it.
             for f in result.findings if f.state != FIXED
         ],
-        "notes": list(result.notes),
+        "notes": list(result.notes) + ([
+            "The to-do list is empty because the cause catalogue is inconsistent; obaaf catalog names the problems."
+        ] if catalog.causes.problems else []),
+        "todo": todo(result, catalog),
     }
     cleared = result.cleared()
     if cleared:
