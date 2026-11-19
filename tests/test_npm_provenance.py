@@ -56,7 +56,7 @@ class CreditedTest(unittest.TestCase):
     def test_the_spellings_that_are_read(self):
         for line in ("npm publish --provenance", "npm publish --provenance=true --access public",
                      "npm publish --access public --tag next --provenance",
-                     "npm publish --no-provenance --provenance",
+                     "npm publish --provenance --tag=next --access=public --provenance",
                      "npm publish --provenance  # signed by Sigstore",
                      "npm publish \\\n          --provenance --access public"):
             with self.subTest(line=line):
@@ -67,6 +67,14 @@ class CreditedTest(unittest.TestCase):
         top = "permissions:\n  contents: read\n  id-token: write\n"
         self.assertEqual(found(workflow(permissions=None, top=top)), [])
         self.assertEqual(found(workflow(permissions=None, top="permissions: write-all\n")), [])
+
+    def test_the_node_versions_and_earlier_steps_that_are_read(self):
+        for version in ("20", "'20.11.1'", "'22.x'", "24", "lts/*", "latest", "node", "current", "v20"):
+            with self.subTest(version=version):
+                self.assertEqual(found(workflow().replace("node-version: '24.x'", f"node-version: {version}")), [])
+        extra = ("      - run: npm run build\n      - run: |\n          npm test\n          npm run lint:ci\n"
+                 "        env:\n          CI: true\n")
+        self.assertEqual(found(workflow(extra_steps=extra)), [])
 
     def test_a_hosted_matrix_is_read(self):
         text = workflow(runs_on="${{ matrix.os }}").replace(
@@ -102,6 +110,57 @@ class StillReportedTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(len(found(workflow("      - run: |\n          " + line + "\n"))), 1)
 
+    def test_what_npms_option_reader_does_with_the_words(self):
+        # Found by the review of slice 2d.12: nopt takes `false` after a boolean option as its value, reads
+        # `no-` in any case after any number of dashes, and gives an option that takes a value the next
+        # word, `--provenance` too; a positional is a folder or a package to publish; `--` ends options.
+        for line in ("npm publish --provenance false", "npm publish --access public --provenance\tfalse",
+                     "npm publish --provenance true", "npm publish --provenance --NO-provenance",
+                     "npm publish --provenance --No-provenance", "npm publish --provenance -no-provenance",
+                     "npm publish --provenance ---no-provenance", "npm publish --cache --provenance",
+                     "npm publish -C --provenance", "npm publish --otp --provenance",
+                     "npm publish --access --provenance", "npm publish --access restricted --provenance",
+                     "npm publish some-pkg@1.0.0 --provenance", "npm publish ./other --provenance",
+                     "npm publish --no-provenance -- --provenance", "npm publish --provenance --tag",
+                     "npm publish --provenance --tag -x", "npm publish --provenance --registry=https://registry.npmjs.org"):
+            with self.subTest(line=line):
+                self.assertEqual(len(found(workflow("      - run: |\n          " + line + "\n"))), 1)
+
+    def test_an_npm_that_may_not_sign(self):
+        # npm 9.5.0 or later is needed (npm's documentation, line 37); Node.js before 20 may ship npm 8.
+        for version in ("16.x", "14", "'18.x'", "lts/hydrogen", "${{ matrix.node }}", "'>=20'"):
+            with self.subTest(version=version):
+                self.assertEqual(len(found(workflow().replace("node-version: '24.x'", f"node-version: {version}"))), 1)
+        no_version = workflow().replace("          node-version: '24.x'\n", "")
+        self.assertEqual(len(found(no_version)), 1)
+        from_file = workflow().replace("node-version: '24.x'", "node-version-file: .nvmrc")
+        self.assertEqual(len(found(from_file)), 1)
+        no_setup = workflow().replace(f"      - uses: actions/setup-node@{PIN}\n        with:\n          node-version: '24.x'\n"
+                                      "          registry-url: 'https://registry.npmjs.org'\n", "")
+        self.assertEqual(len(found(no_setup)), 1)
+        for extra in ("      - run: npm install -g npm@8.19.4\n", "      - run: sudo ln -sf /bin/true /usr/local/bin/npm\n",
+                      f"      - uses: example/setup-tools@{PIN}\n", "      - run: npm ci && npm run build\n",
+                      f"      - uses: actions/cache@{PIN}\n        with: {{path: ~/.npm, key: k}}\n",
+                      "      - run: npm ci\n        shell: bash -e {0}\n",
+                      "      - run: npm ci\n        env:\n          NODE_OPTIONS: --require ./x.js\n"):
+            with self.subTest(extra=extra):
+                self.assertEqual(len(found(workflow(extra_steps=extra))), 1)
+
+    def test_what_npm_runs_may_have_been_changed(self):
+        for env in ("PATH: /tmp/fake:/usr/bin:/bin", "NODE_OPTIONS: --require ./x.js", "NODE_PATH: ./x",
+                    "LD_PRELOAD: ./x.so", "path: /tmp/fake"):
+            publish = "      - run: npm publish --provenance --access public\n        env:\n          " + env + "\n"
+            with self.subTest(env=env, where="step"):
+                self.assertEqual(len(found(workflow(publish))), 1)
+            with self.subTest(env=env, where="workflow"):
+                self.assertEqual(len(found(workflow(top="env:\n  " + env + "\n"))), 1)
+        job_env = workflow().replace("    steps:\n", "    env:\n      PATH: /tmp/fake\n    steps:\n", 1)
+        self.assertEqual(len(found(job_env)), 1)
+        container = workflow().replace("    steps:\n", "    container: node:16\n    steps:\n", 1)
+        self.assertEqual(len(found(container)), 1)
+        expression_env = workflow().replace("    steps:\n", "    env: ${{ fromJSON(vars.ENV) }}\n    steps:\n", 1)
+        self.assertEqual(len(found(expression_env)), 1)
+
     def test_two_commands_in_the_step(self):
         publish = "      - run: |\n          npm run build\n          npm publish --provenance\n"
         self.assertEqual(len(found(workflow(publish))), 1)
@@ -118,6 +177,14 @@ class StillReportedTest(unittest.TestCase):
         other_job = workflow() + ("  docker:\n    runs-on: ubuntu-latest\n    permissions: {contents: read}\n"
                                   "    steps:\n      - run: docker push ghcr.io/example/app:1\n")
         self.assertEqual(len(found(other_job)), 1)
+
+    def test_the_finding_moves_to_the_job_whose_upload_has_no_provenance(self):
+        # Found by the review of slice 2d.12: an acceptance names the job, so it no longer matches
+        # (docs/upgrading.md says so).
+        text = workflow() + ("  docker:\n    runs-on: ubuntu-latest\n    permissions: {contents: read}\n"
+                             "    steps:\n      - run: docker push ghcr.io/example/app:1\n")
+        (finding,) = found(text)
+        self.assertEqual(finding.job, "docker")
 
     def test_a_shell_the_checker_does_not_read_or_one_changed_before(self):
         pwsh = "      - run: npm publish --provenance\n        shell: pwsh\n"

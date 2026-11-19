@@ -622,18 +622,23 @@ rules:
       for OBAAF-GHA-016; an attestation of an SBOM only does not count (flagship slice 2d.2e).
       Provenance verified before the upload counts only when the check comes before every upload and
       stops it. An upload that is `npm publish --provenance` signs its own provenance and is not counted
-      (flagship slice 2d.12): only where the step's whole script is that one command, with words the
-      checker reads as written, the last that sets `provenance` setting it true and no
-      `--provenance-file`, in a job that holds `id-token: write` and runs only on GitHub-hosted runners,
-      in a POSIX shell nothing earlier in the job may have changed; npm then signs or publishes nothing.
-      `NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm and Yarn are not read.
+      (flagship slice 2d.12), only in the form npm's documentation gives: the step's whole script is
+      `npm publish` with only `--provenance`, `--access public` and `--tag NAME`, each read as written; the
+      job holds `id-token: write`, runs only on GitHub-hosted runners and in no container; an earlier
+      `actions/setup-node` step sets Node.js 20 or later (npm 9.5.0 or later), and every earlier step is
+      `actions/checkout`, such a setup-node step, or `npm ci`, `npm install`, `npm test` or `npm run NAME`;
+      and no `env` names `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV` or an `LD_` variable. npm then
+      signs before it sends the package, or sends nothing. `NPM_CONFIG_PROVENANCE`, `publishConfig`,
+      `.npmrc`, trusted publishing, pnpm, Yarn and any other option or earlier step are not read, and the
+      upload is counted. What the package's own scripts do is not read.
       Not read: whether the provenance signed is for the files published, and whether a provenance job
       is tied to the publishing job by `needs`.
     fix: >-
       Add a separate attestation job that signs provenance and an OBAAF build record for every release
       artifact (see templates/github-actions/workflows/obaaf-release.yml), or verify provenance signed
       by another workflow before the upload (see obaaf-publish.yml). For an npm package, publish with
-      `npm publish --provenance` from a GitHub-hosted runner in a job with `id-token: write`.
+      npm 9.5.0 or later, as one step `npm publish --provenance --access public`, from a GitHub-hosted
+      runner in a job with `id-token: write`.
 
   - id: OBAAF-GHA-018
     title: Signing key available to build steps
