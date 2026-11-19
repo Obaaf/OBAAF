@@ -98,6 +98,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-088 | OBAAF reports, as OBAAF-GHA-026, a step that gives an agent action a value of an input that the tool's own documentation warns about, with the documentation's words and source; the values are data in each agent tool's entry; a value the checker cannot read is "cannot tell" at most medium | Proposed |
 | D-089 | Init previews both files, applies explicitly, stops on conflicts and starts CI in report mode | Accepted, 2026-11-18 |
 | D-090 | OBAAF-GHA-026 also reports a command-line option an agent tool's own files warn about, in an action's argument input or where a step runs the tool's program, with the words and source; the options are data; what the checker cannot read in the command is "cannot tell" at most medium | Proposed |
+| D-093 | Show the action list at the end of the text report and on its own with `--summary` | Proposed |
 | D-094 | The other agent tools' entries are read: each warned setting or option is data with its words and source, an entry with none says in `no_warnings` what was read, a Python CLI's option is read with every beginning argparse takes, and where a program name is shared with another tool, a command the checker cannot read is not "cannot tell" when every place it is named is followed by that other tool's own words | Proposed |
 | D-095 | Code in another language that runs an agent tool is read by its tokens: an argument list or a command line the checker cannot read is "cannot tell", literal pieces and names given literals are read as their text, and one value in one place of a list is one word | Proposed |
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
@@ -851,6 +852,16 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** JSON gains a `todo` array. A changeable tool version is one cause with counts for pin candidates and manual fixes. An eligible literal install can be considered for a user-supplied pin. The later fix command must still prove the patch. Existing JSON fields, SARIF, gate results and acceptance identities are preserved.
 
 **Status.** Proposed, 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.
+
+### D-093 The text to-do list and the summary view
+
+**Decision.** Put the same action list just before the full text report’s version line and in `obaaf check --summary`. In the shorter view, retain scan errors and stale-entry warnings. The check uses the same exit status in either view. Reject a summary combined with a machine format, lane listing or baseline write before writing any file.
+
+**Reason.** A team can read its next actions without losing the reason a gate failed. Explicitly asking to write or accept findings is a separate operation.
+
+**Consequence.** The text report grows by one section. The summary uses the original inputs for suggested commands, with a count by severity before any suggestion to accept remaining risk. Existing machine formats keep the behavior of the preceding adoption slice.
+
+**Status.** Proposed, 2026-11-19 (A1c, #259).
 
 ### D-094 The other agent tools' settings and options
 
