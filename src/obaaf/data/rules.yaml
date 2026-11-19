@@ -910,8 +910,10 @@ rules:
       `anthropics/claude-code-base-action` with `show_full_output: true` (medium); read on 2026-11-19 for
       slice 2d.5c2b, `google-github-actions/run-gemini-cli` with `gemini_debug: true` and
       `QwenLM/qwen-code-action` with `qwen_debug: true` (medium: each action warns that debug output could
-      reveal sensitive information; both read the input through `fromJSON`, so a JSON string such as
-      `'"true"'` is read as what it decodes to), and `OpenHands/extensions/plugins/pr-review` with `enable-uv-cache:
+      reveal sensitive information; both read the input through `fromJSON`, so a value is read as the
+      runner's JSON reader reads it: its first token, a string in double or single quotes (`'"true"'`,
+      `"'true'"`) or a word up to a separator (`true // off`), and one that starts with a comment is "cannot
+      tell"), and `OpenHands/extensions/plugins/pr-review` with `enable-uv-cache:
       true` or `auto` (medium: the action warns that a shared cache can carry a poisoned package into more
       privileged workflows, and `auto` turns setup-uv's cache on on GitHub-hosted runners). A value is compared
       with the white space either Python or JavaScript trims taken off its ends, U+FEFF included, and in any
@@ -932,15 +934,21 @@ rules:
       yolo` and `--approvalMode yolo` (high: its documentation says `--yolo` turns on no sandbox), Kilo
       Code's `--auto` and the hidden `--yolo`, `--dangerously-skip-permissions` and
       `--dangerouslySkipPermissions`, which skip the checks `--auto` answers (high), Cline's `--yolo`, `-y`,
-      `--zen`, `-z` and `--auto-approve true` (high; the last three do what `--yolo` does), GitHub Copilot
+      `--zen`, `-z` and `--auto-approve` or `--autoapprove` with any value but `false` (high; the last ones do
+      what `--yolo` does, and Cline's own code puts `true` after a bare one), GitHub Copilot
       CLI's `--allow-all-tools`, `--allow-all` and `--yolo` (high), OpenHands' `--always-approve`, `--yolo`
       and `--headless` and any beginning of them (`--always`, `--yol`, `--head`), as Python's argparse
       takes them (high), Qwen Code's `--insecure`, Copilot CLI's `--show-secrets`, `--trust-folder` and
-      `--share-gist`, Continue's `cn --auto`, OpenCode's `--hostname 0.0.0.0` and goose's
-      `--dangerously-unauthenticated` (medium). AWS's Copilot CLI is also `copilot` and pressly's migration
-      tool is also `goose`, so for these two a command the checker cannot read is "cannot tell" only where
-      the step also runs `copilot -p` or `goose run`. A program after a package runner may carry its version
-      (`uvx openhands@latest`, `uv tool run openhands==1.2`). Case `option`: in `claude_args` of `anthropics/claude-code-action` and
+      `--share-gist` and `--share`, Continue's `cn --auto`, OpenCode's `--hostname 0.0.0.0` and goose's
+      `--dangerously-unauthenticated` (medium), and PR-Agent's `--config-branch` given `$GITHUB_HEAD_REF` or
+      `${{ github.head_ref }}`, the values its documentation names (high), where a value the checker cannot
+      read is "cannot tell" and a branch written out is not reported. AWS's Copilot CLI is also `copilot`
+      and pressly's migration tool is also `goose`: for these two, a command the checker cannot read is not
+      "cannot tell" where every place the step names the program is followed by that other tool's own
+      commands, options or database drivers (`copilot svc deploy`, `goose postgres "$DB" up`). A program
+      after a package runner (`uvx`, `uv ... run`, with uv's options anywhere among those words, `pipx run`)
+      may carry its version or extras (`uvx openhands@latest`, `uv tool run openhands==1.2`, `uvx
+      openhands[all]`). Case `option`: in `claude_args` of `anthropics/claude-code-action` and
       `anthropics/claude-code-base-action` (a line that starts with `#` is left out, as the action leaves it
       out; a word that would be a warned option once a `$NAME` the action may put in as nothing is taken
       out is "cannot tell") and in `codex-args` of `openai/codex-action` (read as a JSON array when it
@@ -1000,11 +1008,10 @@ rules:
       `--yolo` and `--dangerously-skip-permissions`, Aider's `--yes-always`, Qwen Code's `--approval-mode
       auto`, the CLI's default, and `auto-edit`, Copilot CLI's `--allow-all-paths` and `--allow-all-urls`
       alone); Copilot CLI's other spellings (`--allowAllTools`, a beginning of an option), as its parser is
-      not in its public files; PR-Agent's warning against a `--config-branch` taken from a pull request,
-      which is about where a value comes from; GitHub Models' action, which runs Copilot CLI with options
-      built from its inputs; tools whose options are documented only on a web page, not in a file at a
-      commit (Kiro CLI, Amp), and CodeRabbit's reviewer action, whose repository could not be read; the
-      twelve entries with nothing to report say what was read in `no_warnings`; claude-code-action's
+      not in its public files; GitHub Models' action, which runs Copilot CLI with options built from its
+      inputs; tools whose options are documented only on a web page, not in a file at a commit (Kiro CLI,
+      Amp), and CodeRabbit's reviewer action, whose repository could not be read; the eleven entries with
+      nothing to report say what was read in `no_warnings`; claude-code-action's
       `display_report` (its
       warning is about the agent's text in the step summary), a model key written into a workflow in clear
       (a secret-scanning tool's case), and `ACTIONS_STEP_DEBUG`, which turns on full output; an agent action

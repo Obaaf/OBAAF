@@ -314,6 +314,7 @@ agent_tools:
     sources:
       - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/action.yaml
       - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/README.md
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/docs/docs/usage-guide/configuration_options.md
     # The-PR-Agent/pr-agent and qodo-ai/pr-agent served the same repository (the same commit) when read.
     actions:
       qodo-ai/pr-agent: {prompt_inputs: [artifact_instructions]}
@@ -328,13 +329,22 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
-    no_warnings: >-
-      Read on 2026-11-19: action.yaml, README.md and docs/docs at c601521. Two warnings, neither about a value
-      the checker can compare: running the action on `pull_request_target`
-      (docs/docs/installation/github.md, line 106), an event the event rules read; and never setting
-      `--config-branch` from untrusted or pull-request input
-      (docs/docs/usage-guide/configuration_options.md, lines 67 to 71), which is about where the value
-      comes from, not the value. Neither is reported by this rule.
+    # Command-line options (flagship slice 2d.5c2b), read where `pr-agent` is run. The warning is about a
+    # `--config-branch` taken from a pull request: the two spellings it names are its `equals`, and a value
+    # the checker cannot read (a variable, an expression) is "cannot tell", while a branch written out
+    # (`--config-branch=main`) is not reported. `PR_AGENT_CONFIG_BRANCH`, a variable, is not read. Its other
+    # warning, about running the action on `pull_request_target` (docs/docs/installation/github.md, line
+    # 106), is about an event, which the event rules read.
+    flags:
+      - id: config-branch
+        options: [--config-branch]
+        equals: ["$GITHUB_HEAD_REF", "${{ github.head_ref }}"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          **Never set the config branch from untrusted or PR-derived input** (e.g.
+          `--config-branch=$GITHUB_HEAD_REF` / `${{ github.head_ref }}` in CI).
+        source: https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/docs/docs/usage-guide/configuration_options.md#L70
     carried: ["the action Codium-ai/pr-agent"]
 
   - id: coderabbit
@@ -471,6 +481,7 @@ agent_tools:
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/README.md
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/utils/helpers.ts
     # The CLI's README gives `cline "<prompt>"` for a headless run, which the pattern below finds; the
     # action was in OBAAF's list before slice 2d.5b, and the repository had no action file when read.
     actions:
@@ -487,7 +498,9 @@ agent_tools:
     # Command-line options (flagship slice 2d.5c2b), read where `cline` is run, from the CLI's own help text
     # (commander). `-z, --zen` runs "with full tool auto-approval (same semantics as `--yolo`)" (README,
     # line 331) and `--auto-approve true` sets the same override as `--yolo` (program.ts, lines 145 to 160),
-    # so both are read with the sentence about `--yolo`, the wider reading (decision F-280). Not reported,
+    # so both are read with the sentence about `--yolo`, the wider reading (decision F-280). Before commander
+    # reads them, apps/cli/src/utils/helpers.ts (lines 509 to 526) turns `--autoapprove` into `--auto-approve`
+    # and puts `true` after one that is not followed by `true` or `false`, so it counts unless it is `false`. Not reported,
     # because no option says it: a one-shot run (`cline "prompt"`, or a prompt on standard input) is in yolo
     # mode by default unless it is given `--auto-approve false`, `--act` or `--plan` (README, lines 89 and
     # 338).
@@ -501,8 +514,8 @@ agent_tools:
           sandboxed environments.
         source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts#L28-L31
       - id: auto-approve-true
-        options: [--auto-approve]
-        equals: ["true"]
+        options: [--auto-approve, --autoapprove]
+        unless: ["false"]
         severity: high
         read: 2026-11-19
         says: >-
@@ -554,12 +567,16 @@ agent_tools:
       - 'gh\.io/copilot-install\b'
     settings: []
     shared_program: >-
-      AWS's Copilot CLI for containers on Amazon ECS is also `copilot` (`copilot svc deploy`), so a `copilot`
-      command the checker cannot read is "cannot tell" only where the step also runs `copilot -p`.
+      AWS's Copilot CLI for containers on Amazon ECS is also `copilot` (`copilot svc deploy`). A `copilot`
+      command the checker cannot read is not "cannot tell" where every place the step names `copilot` is
+      followed by one of AWS Copilot's own commands.
+    # AWS Copilot's commands that GitHub Copilot CLI does not also have (`app`, `init`, `version` and
+    # `completion` are both tools'; GitHub's are listed in cli-command-reference.md, lines 22 to 37).
+    other_program: '\s+(env|svc|job|pipeline|task|storage|secret|deploy|run|docs)(?![\w-])'
     # Command-line options (flagship slice 2d.5c2b), read where `copilot` is run. The CLI's documentation is
     # GitHub's, in github/docs. "These options" are `--allow-all-tools`, `--allow-all` and `--yolo` (lines 98
     # and 100). Not read: `--allow-all-paths` and `--allow-all-urls` alone (no sentence of warning names
-    # them), `--share` (a file the job keeps), the variable `COPILOT_ALLOW_ALL`, and spellings such as
+    # them), the variable `COPILOT_ALLOW_ALL`, and spellings such as
     # `--allowAllTools` or a beginning of an option: the CLI's parser is not in its public files.
     flags:
       - id: allow-all
@@ -591,6 +608,15 @@ agent_tools:
           Publish the session transcript as a secret GitHub gist after completion. Convenient for sharing
           results from CI. Note that session transcripts may contain sensitive information.
         source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L55
+      - id: share
+        options: [--share]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Export the session transcript to a markdown file after non-interactive completion (defaults to
+          `./copilot-session-<ID>.md`). Useful for auditing or archiving what the agent did. Note that session
+          transcripts may contain sensitive information.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L54
     carried: ["copilot -p and --prompt"]
 
   - id: qodo
@@ -733,8 +759,11 @@ agent_tools:
       - 'github\.com/(block|aaif-goose)/goose/releases/download/\S*/download_cli\.sh\b'
     settings: []
     shared_program: >-
-      pressly's database migration tool is also `goose` (`goose postgres "$DB" up`), so a `goose` command the
-      checker cannot read is "cannot tell" only where the step also runs `goose run`.
+      pressly's database migration tool is also `goose` (`goose postgres "$DB" up`). A `goose` command the
+      checker cannot read is not "cannot tell" where every place the step names `goose` is followed by that
+      tool's own options, database drivers or commands.
+    # pressly/goose's usage: `goose [OPTIONS] DRIVER DBSTRING COMMAND`, or `goose COMMAND` with GOOSE_DRIVER.
+    other_program: '\s+(-dir|-table|-allow-missing|-no-versioning|-certfile|-ssl-cert|-ssl-key|-s\b|-v\b|-h\b|postgres|mysql|sqlite3|mssql|redshift|tidb|clickhouse|vertica|ydb|turso|starrocks|up|up-by-one|up-to|down|down-to|redo|reset|status|create|fix|validate)(?![\w-])'
     # Command-line options (flagship slice 2d.5c2b), read where `goose` is run. goose's approval mode is the
     # variable `GOOSE_MODE`, not an option, and is not read.
     flags:

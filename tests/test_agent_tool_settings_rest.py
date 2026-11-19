@@ -25,7 +25,7 @@ PR_REVIEW = "OpenHands/extensions/plugins/pr-review@1902359eb285eb09bfb488e39283
 
 # Every entry, and what this slice found in its own files (S: a setting, F: an option, N: nothing).
 FOUND = {
-    "claude-code": "SF", "gemini-cli": "SF", "codex": "SF", "github-models": "N", "pr-agent": "N",
+    "claude-code": "SF", "gemini-cli": "SF", "codex": "SF", "github-models": "N", "pr-agent": "F",
     "coderabbit": "N", "openhands": "SF", "opencode": "F", "cline": "F", "aider": "N", "copilot-cli": "F",
     "qodo": "N", "claude-code-security-review": "N", "auggie": "N", "continue": "F", "jules": "N",
     "goose": "F", "kilo": "F", "kiro": "N", "qwen-code": "SF", "swe-agent": "N", "warp": "N", "amp": "N",
@@ -92,11 +92,16 @@ class TheDataTest(unittest.TestCase):
         self.assertEqual(problems(no_warnings="Read README.md at abc1234; nothing warns."), [])
         self.assertEqual(problems(flags=[flag]), [])
         self.assertEqual(problems(flags=[dict(flag, prefixes=True)]), [])
-        self.assertEqual(problems(flags=[flag], shared_program="Another tool is also `t`."), [])
+        self.assertEqual(problems(flags=[flag], shared_program="Another tool is also `t`.", other_program=r"\s+up"), [])
+        self.assertEqual(problems(flags=[dict(flag, unless=["false"])]), [])
         for entry, why in [
             ({"flags": [flag], "no_warnings": "nothing"}, "must not also say no_warnings"),
             ({"flags": [flag], "shared_program": ""}, "shared_program must name"),
-            ({"flags": [flag], "shared_program": "x", "commands": []}, "shared_program needs commands"),
+            ({"flags": [flag], "shared_program": "x"}, "go together"),
+            ({"flags": [flag], "other_program": "x"}, "go together"),
+            ({"flags": [flag], "shared_program": "x", "other_program": "("}, "other_program must be a pattern"),
+            ({"flags": [dict(flag, equals=["a"], unless=["b"])]}, "equals or unless, not both"),
+            ({"flags": [dict(flag, unless=[])]}, "unless must be a list"),
             ({}, "must say in no_warnings"),
             ({"no_warnings": ""}, "no_warnings must say"),
             ({"no_warnings": "   "}, "no_warnings must say"),
@@ -134,6 +139,11 @@ class SettingsTest(unittest.TestCase):
         # Both actions read the input through `fromJSON`: a JSON string is what it decodes to (the review).
         (GEMINI, "          gemini_debug: '\"true\"'\n", "gemini-cli/debug", "medium"),
         (QWEN, "          qwen_debug: '\"tr\\u0075e\"'\n", "qwen-code/debug", "medium"),
+        # The runner's reader (Newtonsoft) takes single quotes and reads only the first token (second review).
+        (GEMINI, "          gemini_debug: \"'true'\"\n", "gemini-cli/debug", "medium"),
+        (GEMINI, "          gemini_debug: 'true // off'\n", "gemini-cli/debug", "medium"),
+        (QWEN, "          qwen_debug: 'true off'\n", "qwen-code/debug", "medium"),
+        (QWEN, "          qwen_debug: '\"true\" x'\n", "qwen-code/debug", "medium"),
     ]
 
     def test_each_documented_setting_is_reported_with_its_words(self):
@@ -164,6 +174,7 @@ class SettingsTest(unittest.TestCase):
             (GEMINI, "          gemini_debug: ${{ vars.DEBUG }}\n", "gemini-cli/debug"),
             (QWEN, "          qwen_debug: ${{ inputs.debug }}\n", "qwen-code/debug"),
             (PR_REVIEW, "          enable-uv-cache: ${{ vars.CACHE }}\n", "openhands/uv-cache"),
+            (QWEN, "          qwen_debug: '/* off */ true'\n", "qwen-code/debug"),
         ]:
             with self.subTest(uses=uses):
                 hits = found(check(one_step(uses, inputs)))
@@ -216,6 +227,16 @@ class CommandLineTest(unittest.TestCase):
         ('cn -p "fix" --auto', "continue/auto", "medium"),
         ("opencode serve --hostname 0.0.0.0", "opencode/hostname-any", "medium"),
         ("opencode web --hostname=0.0.0.0", "opencode/hostname-any", "medium"),
+        ('uv --quiet tool run openhands --head -t "fix"', "openhands/headless", "high"),
+        ('uv tool --quiet run openhands --head -t "fix"', "openhands/headless", "high"),
+        ('uv -q run openhands --head -t "fix"', "openhands/headless", "high"),
+        ('uvx openhands[all] --head -t "fix"', "openhands/headless", "high"),
+        ('cline --auto-approve "fix"', "cline/auto-approve-true", "high"),
+        ('cline --autoapprove true "fix"', "cline/auto-approve-true", "high"),
+        ('cline --autoapprove=true "fix"', "cline/auto-approve-true", "high"),
+        ('cline --autoapprove', "cline/auto-approve-true", "high"),
+        ('copilot -p "fix" --share=transcript.md', "copilot-cli/share", "medium"),
+        ('pr-agent --pr_url "$U" --config-branch "$GITHUB_HEAD_REF" review', "pr-agent/config-branch", "high"),
     ]
 
     def test_each_documented_option_is_reported_once_with_its_words(self):
@@ -236,6 +257,9 @@ class CommandLineTest(unittest.TestCase):
             'qwen -dy=false -p hi',
             'cline --auto-approve false "fix"',
             'opencode serve --hostname 127.0.0.1',
+            'cline --autoapprove false "fix"',
+            'pr-agent --pr_url "$U" --config-branch=main review',
+            'pipx install openhands==1.0',
             'opencode run --auto "fix"',                    # described, not warned about (F-267)
             'opencode run --dangerously-skip-permissions "fix"',
             'aider --yes-always --message "fix"',
@@ -261,14 +285,18 @@ class CommandLineTest(unittest.TestCase):
                        'goose -dir ./migrations postgres ${{ secrets.DATABASE_URL }} up', 'goose postgres $DB up']:
             with self.subTest(script=script):
                 self.assertEqual(found(check(run_step(script))), [])
-        for script in ['copilot -p "fix" $FLAGS', 'goose run -t "fix" $FLAGS']:
+        for script in ['copilot -p "fix" $FLAGS', 'goose run -t "fix" $FLAGS', 'goose serve $FLAGS',
+                       'echo "$P" | copilot $FLAGS', 'copilot mcp add foo $X', 'copilot ${{ inputs.args }}',
+                       'copilot svc deploy --env $E\necho "use copilot -p for agents"']:
             with self.subTest(script=script):
                 self.assertEqual({(h.kind, h.severity) for h in found(check(run_step(script)))},
                                  {("command-computed", "medium")})
 
     def test_what_the_checker_cannot_read_is_cannot_tell_for_the_new_tools(self):
         for script in ['qwen -p "fix" $FLAGS', 'kilo run $FLAGS "fix"', 'cline $FLAGS "fix"',
-                       'openhands "--al$X" -t "fix"', 'cn -p "fix" $FLAGS', 'opencode serve --hostname $H']:
+                       'openhands "--al$X" -t "fix"', 'cn -p "fix" $FLAGS', 'opencode serve --hostname $H',
+                       'cline --auto-approve $V "fix"', 'pr-agent --pr_url "$U" --config-branch=${{ github.head_ref }} review',
+                       'BR=${{ github.head_ref }}\npr-agent --pr_url "$U" --config-branch=$BR review']:
             with self.subTest(script=script):
                 hits = found(check(run_step(script)))
                 self.assertTrue(hits, script)

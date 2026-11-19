@@ -81,8 +81,7 @@ _RUNS_ARGUMENTS = frozenset({
     "devbox", "poetry", "uv", "pipx", "mise", "asdf", "direnv", "dotenv",
     "op", "doppler", "infisical", "aws-vault", "with-contenv", "tini", "dumb-init", "catchsegv", "script", "su",
     "watch", "caffeinate", "npx", "bunx", "deno", "node", "nodejs", "ssh"})
-# Package runners that take a program with a version written after its name (`uvx openhands@1.2`).
-_PACKAGE_RUNNERS = frozenset({"uvx", "uv", "pipx"})
+# After a package runner (`uvx`, `uv ... run`, `pipx run`) a program may carry its version (`openhands@1.2`).
 _VERSION_SUFFIX_RE = re.compile(r"(@|==|===|~=|!=|>=|<=|>|<|\[).*$", re.S)
 # Commands whose arguments make another name for a program.
 _RENAMES = frozenset({"alias", "hash", "ln", "cp", "install", "mv", "rsync", "link", "update-alternatives"})
@@ -162,7 +161,13 @@ def _equals(value: str, flag: dict) -> bool:
 
 
 def _takes_value(flag: dict) -> bool:
-    return "equals" in flag
+    return "equals" in flag or "unless" in flag
+
+
+def _unless(value: str, flag: dict) -> bool:
+    """Whether a value is one of those that make an `unless` option not a match (Cline's `false`)."""
+    folded = value.strip(_JS_SPACE).strip("\"'").strip(_JS_SPACE).casefold()
+    return any(folded == str(v).strip().casefold() for v in flag.get("unless", []))
 
 
 def _match_known(words: list, flags: list, reading: Reading) -> None:
@@ -176,6 +181,19 @@ def _match_known(words: list, flags: list, reading: Reading) -> None:
             continue
         name, eq, after = low.partition("=")
         for flag in options.get(name, ()):
+            if "unless" in flag:
+                # An option that is on unless it is given one of these values (`cline --auto-approve "fix"`
+                # is `--auto-approve true`, found by 2d.5c2b's second review); a value not known is read below.
+                value = word[len(name) + 1:] if eq else (words[i + 1] if i + 1 < len(words) else None)
+                if value is not None and any(c in value for c in ("\x00", "\x02", "$", "`")):
+                    continue        # a value the checker cannot read: "cannot tell", below and in the reader
+                if eq:
+                    if not _unless(word[len(name) + 1:], flag):
+                        reading.hit(flag, word[:len(name)], word[len(name) + 1:])
+                elif i + 1 >= len(words) or not _unless(words[i + 1], flag):
+                    shown = words[i + 1] if i + 1 < len(words) and words[i + 1].strip().casefold() == "true" else None
+                    reading.hit(flag, word, shown)
+                continue
             if _takes_value(flag):
                 if eq:
                     if _equals(word[len(name) + 1:], flag):
@@ -954,13 +972,25 @@ def _read_command(command: Command, ctx: _Context) -> None:
         # A run-type word anywhere among them is read (an option's value spelled `build` decides nothing).
         if not any(t in runs for t in leading) and any(t in data for t in leading):
             return
-    if name0 in _DATA_COMMANDS and sub not in ("run", "exec", "x", "dlx") and not (
-            name0 == "uv" and sub == "tool" and first + 2 < len(words) and texts[first + 2] == "run"):
+    # uv takes its global options before and between its subcommand's words (`uv -q tool run`), so a `run`
+    # among its next words is enough (found by 2d.5c2b's second review).
+    uv_runs = name0 == "uv" and "run" in texts[first + 1:first + 12]
+    if name0 in _DATA_COMMANDS and sub not in ("run", "exec", "x", "dlx") and not uv_runs:
         return                      # `conda run`, `poetry run`, `uv run`, `uv tool run`, `npm exec` run what follows
+    # A package runner that runs what it is given: `uvx`, `uv ... run`, `pipx run` (not `pipx install`).
+    runner = name0 == "uvx" or uv_runs or (name0 == "pipx" and "run" in texts[first + 1:first + 4])
     # Any other command (`cross-env`, `tmux`, `docker run`, `ssh`, `trap`): a word among its arguments may
     # start the program, a shell or another runner, or be a command line of its own.
     for j in range(first + 1, len(words)):
         w = words[j]
+        if runner and w.glob and not (w.expr or w.unquoted or w.quoted or w.splits or w.brace) and (
+                _VERSION_SUFFIX_RE.sub("", _base(w.text)) in ctx.programs):
+            # `uvx openhands[all]`: bash passes a glob that matches nothing through as written.
+            name = _VERSION_SUFFIX_RE.sub("", _base(w.text))
+            bases = bases[:j] + [name] + bases[j + 1:]
+            if _start(words, bases, j, ctx, command, runs_input):
+                return
+            continue
         if w.computed:
             # A quoted command line with an expansion, given to another command (`tmux new -d "claude $F"`):
             # read as written inside its quotes, where the expansion is what it is.
@@ -973,7 +1003,7 @@ def _read_command(command: Command, ctx: _Context) -> None:
                     _read_nested(inner.replace('\\"', '"'), ctx)
             continue
         name = bases[j]
-        if name0 in _PACKAGE_RUNNERS and name not in ctx.programs:
+        if runner and name not in ctx.programs:
             # `uvx openhands@latest`, `uv tool run openhands==1.2`, `pipx run aider-chat>=0.80`: the package
             # runner runs the program named before its version (found by 2d.5c2b's review).
             bare = _VERSION_SUFFIX_RE.sub("", name)

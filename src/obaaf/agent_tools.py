@@ -17,7 +17,8 @@ import re
 
 # Every key an entry may have, and the ones it must have.
 FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "prompt_flags", "packages",
-          "installs", "install_urls", "settings", "flags", "no_warnings", "shared_program", "carried")
+          "installs", "install_urls", "settings", "flags", "no_warnings", "shared_program", "other_program",
+          "carried")
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
 # `args_inputs`: the inputs an action hands to the tool's program as command-line options (flagship slice
@@ -35,7 +36,9 @@ SEVERITIES = ("high", "medium", "low")
 # where the tool's program is run in a script and in the entry's actions' `args_inputs`.
 # `prefixes: true` (flagship slice 2d.5c2b): the tool's parser also takes any beginning of a long option
 # (Python's argparse does, unless told not to), so each beginning of each long spelling is read as it.
-FLAG_FIELDS = ("id", "options", "equals", "prefixes", "severity", "read", "says", "source")
+# `unless` (flagship slice 2d.5c2b): the option counts whatever follows it, except one of these values
+# (Cline's `--auto-approve`, which its own code turns into `--auto-approve true` unless `false` follows).
+FLAG_FIELDS = ("id", "options", "equals", "unless", "prefixes", "severity", "read", "says", "source")
 FLAG_REQUIRED = ("id", "options", "severity", "read", "says", "source")
 _OPTION_RE = re.compile(r"-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*")
 # A source is a file at a commit on GitHub, with the line or lines the words are on.
@@ -214,10 +217,18 @@ def problems(detection: dict) -> list[str]:
         # tool is `goose`): a command of that name the checker cannot read is "cannot tell" only where the step
         # also matches one of the entry's `commands`, which say it runs this tool (flagship slice 2d.5c2b).
         shared = entry.get("shared_program")
+        other = entry.get("other_program")
         if "shared_program" in entry and (not isinstance(shared, str) or not shared.strip()):
             out.append(f"agent tool {tool}: shared_program must name the other program")
-        elif shared and not entry.get("commands"):
-            out.append(f"agent tool {tool}: shared_program needs commands that tell the two apart")
+        if ("shared_program" in entry) != ("other_program" in entry):
+            out.append(f"agent tool {tool}: shared_program and other_program go together")
+        elif "other_program" in entry:
+            try:
+                re.compile(str(other))
+                if not isinstance(other, str) or not other.strip():
+                    raise re.error("empty")
+            except re.error as exc:
+                out.append(f"agent tool {tool}: other_program must be a pattern: {exc}")
         carried = entry.get("carried", [])
         if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
             out.append(f"agent tool {tool}: carried must be a list of text")
@@ -316,7 +327,9 @@ def _flag_problems(tool: str, flags: list, settings: list) -> list[str]:
                 if key in named and named[key] != fid:
                     out.append(f"{name}: option {option} is also flag {named[key]}'s")
                 named.setdefault(key, fid)
-        for key in ("equals",):
+        if "equals" in flag and "unless" in flag:
+            out.append(f"{name}: give equals or unless, not both")
+        for key in ("equals", "unless"):
             if key in flag and (not isinstance(flag[key], list) or not flag[key] or not all(
                     isinstance(v, str) and v.strip() for v in flag[key])):
                 out.append(f"{name}: {key} must be a list of values written as text")
@@ -440,15 +453,22 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
     return sorted(found)
 
 
-def shares_program(detection: dict, tool: str) -> bool:
-    """Whether the entry says another well-known program has its program's name (`shared_program`)."""
-    return any(isinstance(e, dict) and e.get("id") == tool and isinstance(e.get("shared_program"), str)
-               and e["shared_program"].strip() for e in tools(detection))
-
-
-def runs_tool(detection: dict, tool: str, text: str) -> bool:
-    """Whether text matches one of the entry's own `commands`, the agent lane's test that it runs the tool."""
-    for tid, _prefixes, patterns in _compiled(detection):
-        if tid == tool:
-            return any(p.search(text) for p in patterns)
-    return False
+def other_program_only(detection: dict, tool: str, programs: list, texts: list) -> bool:
+    """Whether every place the texts name the tool's program is followed by the words of the other program
+    that shares its name (`other_program`, matched right after the name): AWS Copilot's `copilot svc deploy`,
+    pressly's `goose postgres "$DB" up`. False where the entry has no `other_program`, or where any place
+    is not (the wider reading: `echo "use copilot -p"` beside AWS Copilot keeps "cannot tell")."""
+    entry = next((e for e in tools(detection) if isinstance(e, dict) and e.get("id") == tool), None)
+    other = entry.get("other_program") if entry else None
+    if not isinstance(other, str) or not other.strip() or not programs:
+        return False
+    after = re.compile(other)
+    names = re.compile(r"(?<![\w@.-])(?:" + "|".join(re.escape(p) for p in programs) + r")(?![\w.-])", re.I)
+    seen = False
+    for text in texts:
+        plain = re.sub(r"[\"'\\]", "", text)
+        for m in names.finditer(plain):
+            seen = True
+            if not after.match(plain, m.end()):
+                return False
+    return seen
