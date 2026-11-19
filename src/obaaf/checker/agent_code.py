@@ -1929,7 +1929,11 @@ def _loop_guard(code: _Code, k: int, at: int, pieces: list, in_list: bool, listy
     words: list = []
     for a, b in pieces:
         names = [toks[x].text for x in range(a, b + 1) if toks[x].kind == "name" and toks[x].text in loops]
-        unknown_loop = any(not loops[n] for n in names)
+        unknown_loop = any(loops[n] is None for n in names)
+        if a == b and names and not unknown_loop:
+            # A loop over literal strings: each is a word the change adds (`for f in ['--yolo']: cmd.append(f)`).
+            words.extend(af.Word(text=v, shown=v) for v in loops[names[0]])
+            continue
         if repeated and a <= b and toks[a].kind == "name" and toks[a].text not in loops and toks[a].text not in (
                 code.values):
             unknown_loop = True                 # a name the code never gives a value, in a repeated change: a
@@ -2004,37 +2008,44 @@ def _nearest(stack: list):
 
 def _loop_names(code: _Code) -> dict:
     """The names a loop gives its values to (`for a in ...`, `for (const a of ...)`, `|a|`, `foreach $a`):
-    name -> whether every loop that names it goes over a list of literal strings (`for t in ['Read', 'Edit']`),
-    whose values are then known words."""
+    name -> the strings every loop that names it goes over, where each goes over a list of literal strings
+    (`for t in ['Read', 'Edit']`), else None."""
     if "_loops" not in code.__dict__:
         names: dict = {}
         toks = code.toks
 
-        def literal_list(j: int) -> bool:
+        def literal_list(j: int) -> list | None:
+            """The strings of a list of literal strings that starts at token `j`, or None."""
             if j < len(toks) and toks[j].text in ("[", "(") and code.close[j] > j:
-                parts = _split_args(code, j + 1, code.close[j] - 1)
-                return bool(parts) and all(a == b and toks[a].kind == "str" and _literal(toks[a].parts) is not None
-                                           for a, b in (_strip_nl(code, x, y) for x, y in parts))
-            return False
+                parts = [_strip_nl(code, x, y) for x, y in _split_args(code, j + 1, code.close[j] - 1)]
+                if parts and all(a == b and toks[a].kind == "str" and _literal(toks[a].parts) is not None
+                                 for a, b in parts):
+                    return [_literal(toks[a].parts) for a, _b in parts]
+            return None
+
+        def record(name: str, values: list | None) -> None:
+            if name in names and (names[name] is None or values is None):
+                names[name] = None
+            else:
+                names[name] = (names.get(name) or []) + values if values is not None else None
         for k, t in enumerate(toks):
             if t.kind == "name" and t.text in ("for", "foreach", "each", "map") and k + 1 < len(toks):
                 for j in range(k + 1, min(k + 6, len(toks))):
                     if toks[j].kind == "name" and toks[j].text not in ("const", "let", "var", "my", "our", "local",
                                                                           "each", "do"):
                         over = j + 2 if j + 1 < len(toks) and toks[j + 1].text in ("in", "of") else -1
-                        known = over > 0 and literal_list(over)
-                        names[toks[j].text] = names.get(toks[j].text, True) and known
+                        record(toks[j].text, literal_list(over) if over > 0 else None)
                         break
             if t.kind == "op" and t.text == "|" and k + 2 < len(toks) and toks[k + 1].kind == "name" and toks[
                     k + 2].text in ("|", ","):
                 # A Ruby block's `|a|`, over a literal list where `[...].each do |a|` or `%w[...].each { |a|`.
                 opener = k - 1 if k >= 1 and toks[k - 1].text in ("{", "do") else -1
-                known = False
+                known = None
                 if opener >= 3 and toks[opener - 1].text == "each" and toks[opener - 2].text == "." and toks[
                         opener - 3].text == "]":
                     start = next((o for o in range(opener - 4, -1, -1) if code.close[o] == opener - 3), -1)
-                    known = start >= 0 and literal_list(start)
-                names[toks[k + 1].text] = names.get(toks[k + 1].text, True) and known
+                    known = literal_list(start) if start >= 0 else None
+                record(toks[k + 1].text, known)
         code.__dict__["_loops"] = names
     return code.__dict__["_loops"]
 

@@ -375,6 +375,10 @@ class SecondReviewTest(unittest.TestCase):
                                 "    cmd.append(t)\nsubprocess.run(cmd)"), "none"),
             (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in extra:\n    cmd.append('-v')\n"
                                 "subprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in ['" + DSP + "']:\n"
+                                "    cmd.append(f)\nsubprocess.run(cmd)"), "hit"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in ['" + DSP + "']:\n"
+                                "    cmd += [f]\nsubprocess.run(cmd)"), "hit"),
         ])
         Case.expect(self, [
             ("for (const pr of prs) {\n  const args = ['-p', prompt(pr)];\n  if (v) args.push('--verbose');\n"
