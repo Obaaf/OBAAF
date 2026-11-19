@@ -9,7 +9,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
 - **Review existing acceptances.** A 0.3.0 baseline accepts nothing until migrated. Each acceptance needs an owner, a reason with at least four letters or digits, and an expiry date within 366 days. The report opens with the risk still accepted and lists entries that no longer match.
-- **Review newly checked jobs.** The checker follows local composite actions and calls to local reusable workflows, recognises 23 named agent tools, and reports agent jobs that install tools at a version that can change (OBAAF-GHA-025). Ineffective lane declarations, checkout and permission handling, ownership of CI files, and revised egress checks can also change a gate's result.
+- **Review newly checked jobs.** The checker follows local composite actions and calls to local reusable workflows, recognises 23 named agent tools, reports agent jobs that install tools at a version that can change (OBAAF-GHA-025), and reports agent actions given a setting their own documentation warns about (OBAAF-GHA-026). Ineffective lane declarations, checkout and permission handling, ownership of CI files, and revised egress checks can also change a gate's result.
 - **Check repository settings separately.** The new `obaaf audit` command compares settings with workflow files and distinguishes findings, settings it could not read, and questions the rules could not answer. The workflow checker and the settings audit each have their own gate.
 - **Check consumers of the report.** The text report now starts with accepted risk and ends with the checker version. A named agent can change a finding's JSON facts and whether an existing acceptance matches. The self-assessment describes the tier earned from the answers supplied.
 
@@ -22,6 +22,19 @@ Slice 4.9 (issue #152). The form and checklist explain which answers count towar
 - The form and the checklist offer Yes, No, Not sure (counted as No) and, where an item allows it, N/A; the checklist has a Not sure box on every item. The file `obaaf assess init` writes says to leave an item `unanswered` if not sure, and `obaaf assess score` now also takes `not sure` for it.
 - Where the form, the checklist and the text and Markdown reports state a tier, they now say that it reflects the answers given and that OBAAF does not verify that they are true, in place of "a tier describes controls in place".
 - **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`, and its ranking sentence names the two counts it ranks by. The JSON report is unchanged.
+
+### Agent actions given a setting their own documentation warns about
+
+Slice 2d.5c1 (issue #81, part of part 2 of 2d.5); decision D-088. **New rule OBAAF-GHA-026. It can turn a passing gate red.**
+
+- It reports a step that gives an agent action a value its own documentation warns about.
+  - `openai/codex-action`: `safety-strategy: unsafe` (high) or `read-only` (medium), and `allow-users: "*"` (high).
+  - `anthropics/claude-code-action`: `allowed_non_write_users: "*"` (high) or any other value (medium), `allowed_bots: "*"` (medium) and `show_full_output: true` (medium); `show_full_output: true` on `anthropics/claude-code-base-action` too.
+- Each finding quotes the documentation's words and gives the file, commit and lines they were read from. The settings are data, under `settings` in each agent tool's entry in `detection.yaml`, and `obaaf catalog` refuses one without its words or with a source that is not a file at a commit.
+- A value is compared trimmed and in any letter case. A value the checker cannot read is "cannot tell" (case `computed`), at most medium: an expression, a list, a mapping, a value with a control, format, separator, private-use or unassigned character inside it other than a space, a tab, a carriage return or a line feed, and a `with:` that is neither a mapping nor empty (inputs written as one expression, `with: ${{ fromJSON(...) }}`).
+- The steps of local composite actions are read too, with the using step's inputs put in.
+- Not read yet: the same settings given as command-line options (`claude_args`, `codex-args`, `--dangerously-skip-permissions` and the like) and the other agent tools' settings (slice 2d.5c2); `display_report`, `ACTIONS_STEP_DEBUG` and keys written in clear; these actions inside another repository's composite action or reusable workflow; and a `uses:` with an empty path segment, a leading `/` or a backslash, which the checker does not match to an agent action at all (#245).
+- This repository's report and Expectrail's are byte-identical before and after (neither uses these actions).
 
 ### Agent tools are data, and the agent rules name the agent
 

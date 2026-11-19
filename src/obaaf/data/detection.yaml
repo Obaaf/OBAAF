@@ -35,8 +35,22 @@ version: 0.1.0
 #                 (flagship slice 2c.8), with the program each installs
 #   install_urls  install scripts, as regular expressions matched anywhere in a script line, however the
 #                 script is fetched and run; each installs the version the script chooses
-#   settings      the settings the tool's own documentation warns about, each with the sentence it rests
-#                 on (filled by flagship slice 2d.5c; empty until then)
+#   settings      the values of an agent action's inputs that the tool's own documentation warns about
+#                 (flagship slice 2d.5c1, OBAAF-GHA-026), each with:
+#                   id        a short name, unique in the entry; the finding's fact `setting` is `<tool>/<id>`
+#                   action    one of the entry's actions (matched as they are, so a path under it too)
+#                   input     the input's name, as the action reads it (A to Z in any case)
+#                   equals    the values warned about, compared trimmed and in any case (the wider reading:
+#                             the actions read some of them exactly); or
+#                   set       true: any value that is not empty, a value warned about whatever it is
+#                   severity  high, medium or low
+#                   read      the date the words were read
+#                   says      the documentation's own words, quoted exactly
+#                   source    where those words are: a file at a commit, with its lines
+#                 Where two settings of an entry name one input, the first that matches is reported. A
+#                 value set by an expression is "cannot tell" (OBAAF-GHA-026, case `computed`). Settings
+#                 given as command-line options (`claude_args`, `codex-args`, a CLI's own flags) are not
+#                 read yet (slice 2d.5c2).
 #   carried       facts kept from OBAAF's lists before slice 2d.5b that none of the sources shows (they
 #                 were not dropped, so that nothing found before is lost; none is a new finding)
 #
@@ -66,7 +80,59 @@ agent_tools:
     installs: {"@anthropic-ai/claude-code": claude}
     install_urls:
       - 'claude\.ai/install\.(sh|ps1|cmd)\b'
-    settings: []
+    settings:
+      - id: non-write-users-anyone
+        action: anthropics/claude-code-action
+        input: allowed_non_write_users
+        equals: ["*"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          WARNING: Use with extreme caution - this bypasses security checks and should only be used for
+          workflows with very limited permissions (e.g., issue labeling).
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L34-L45
+      - id: non-write-users
+        action: anthropics/claude-code-action
+        input: allowed_non_write_users
+        set: true
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: Use with extreme caution - this bypasses security checks and should only be used for
+          workflows with very limited permissions (e.g., issue labeling).
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L34-L45
+      - id: any-bot
+        action: anthropics/claude-code-action
+        input: allowed_bots
+        equals: ["*"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: On public repos with '*', external Apps may be able to invoke this action with prompts
+          they control.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L30-L33
+      - id: full-output
+        action: anthropics/claude-code-action
+        input: show_full_output
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: This outputs ALL Claude messages including tool execution results which may contain
+          secrets, API keys, or other sensitive information. These logs are publicly visible in GitHub
+          Actions.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L164-L167
+      - id: base-full-output
+        action: anthropics/claude-code-base-action
+        input: show_full_output
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: This outputs ALL Claude messages including tool execution results which may contain
+          secrets, API keys, or other sensitive information. These logs are publicly visible in GitHub
+          Actions.
+        source: https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml#L82-L85
     carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
   - id: gemini-cli
@@ -95,6 +161,7 @@ agent_tools:
     read: 2026-11-18
     sources:
       - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml
+      - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md
       - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/README.md
     actions:
       openai/codex-action: {prompt_inputs: [prompt, prompt-file]}
@@ -108,7 +175,40 @@ agent_tools:
     installs: {"@openai/codex": codex}
     install_urls:
       - 'chatgpt\.com/codex/install\.(sh|ps1)\b'
-    settings: []
+    settings:
+      - id: safety-unsafe
+        action: openai/codex-action
+        input: safety-strategy
+        equals: [unsafe]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          `unsafe` (NOT RECOMMENDED) Do not try to restrict Codex's privileges at all. This is extremely
+          dangerous, as the default user for this Action likely has sudo privileges, which means it can
+          read secrets stored in memory (such as the value of `openai-api-key`) and print them to the output
+          of the GitHub Action or exfiltrate them in other ways.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml#L100-L104
+      - id: safety-read-only
+        action: openai/codex-action
+        input: safety-strategy
+        equals: [read-only]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Note Codex will still run as the default user for this Action, which likely has sudo privileges,
+          so it could read `openai-api-key` from memory and reveal it by printing it to the output of the
+          GitHub Action.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml#L95-L99
+      - id: anyone
+        action: openai/codex-action
+        input: allow-users
+        equals: ["*"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          If you have effectively opened up your use of `openai/codex-action` to the world by configuring
+          `allow-users: "*"`, you might find yourself the target of API key abuse.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md#L66
 
   - id: github-models
     name: GitHub Models AI Inference

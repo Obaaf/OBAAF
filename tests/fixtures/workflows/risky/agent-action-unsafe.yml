@@ -1,0 +1,22 @@
+# obaaf-models: An agent action is given two settings its own documentation warns about: no privilege reduction, so the agent can read the model key from memory, and anyone may start it from an issue comment.
+# obaaf-expect: OBAAF-GHA-005 OBAAF-GHA-026
+name: Codex on comments
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: openai/codex-action@4aac6da4b686168e147798ca841cf64ff0f027b8
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: Answer the question in the comment.
+          safety-strategy: unsafe
+          allow-users: "*"
