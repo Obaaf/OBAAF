@@ -12,6 +12,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to your usual check command to see those actions and any scan or coverage warnings. The gate uses the same threshold in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
 - **The suggested `obaaf baseline migrate` command works for a path that begins with `-`.** It is written `./-name`, which the command reads as a path rather than an option.
 - **Review existing acceptances.** A 0.3.0 baseline accepts nothing until migrated. Each acceptance needs an owner, a reason with at least four letters or digits, and an expiry date within 366 days. The report opens with the risk still accepted and lists entries that no longer match.
