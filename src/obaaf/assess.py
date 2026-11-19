@@ -291,8 +291,8 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     if result.fixes:
         out.append("## What to fix next")
         out.append("")
-        out.append("Ranked lowest tier first, then lowest effort, then by the number of documented cases mapped to "
-                   "prevention, then to detection or containment. The last column lists both kinds.")
+        out.append("Ranked lowest tier first, then lowest effort, then most documented cases mapped to prevention, "
+                   "then most mapped to detection or containment. The Mapped cases column lists both kinds.")
         out.append("")
         out.append("| # | Item | Tier | Effort | Mapped cases | How to fix |")
         out.append("| --- | --- | --- | --- | --- | --- |")

@@ -16,8 +16,10 @@ from obaaf import assess, render
 from obaaf.catalog import load
 
 # What the site's truth table cuts or narrows (docs/site-truth-table.md, C109, C110, C123 and
-# C124), matched without regard to case or spacing.
-CUT = re.compile(r"yes[\s-]*or[\s-]*no\b|would\s+have\s+prevented|would\s+prevent\b|controls\s+in\s+place|"
+# C124), matched without regard to case or spacing. `prevents` as a JavaScript property or a
+# JSON key in the form's data is not prose.
+CUT = re.compile(r"\byes[\s/-]*(?:or[\s/-]*)?no\b|would(?:\s+\w+)?\s+have\s+(?:prevented|stopped)|would've|"
+                 r'would\s+prevent\b|(?<![."])\bprevents\b(?!")|\bcontrols\b[^.]{0,40}\bin\s+place|'
                  r"detects\s+or\s+limits|cases\s+it\s+addresses", re.IGNORECASE)
 TIER_SENTENCE = "The tier reflects the answers you supplied; OBAAF does not verify that they are true."
 
@@ -49,10 +51,11 @@ class AssessmentWordingTest(unittest.TestCase):
             "Markdown report": assess.to_markdown(all_no(), cls.c),
             "answer file": assess.template(cls.c),
         }
-        # Pages that describe the self-assessment. The papers' own pages (site/papers.html) and
-        # the dated truth table quote the old words on purpose and are not read.
+        # Pages that describe the self-assessment. The dated truth table quotes the old words on
+        # purpose and is not read.
         cls.pages = {path: read(path) for path in
-                     ("site/index.html", "README.md", "docs/architecture.md", "docs/threat-model.md")}
+                     ("site/index.html", "README.md", "docs/architecture.md", "docs/threat-model.md",
+                      "docs/self-assessment-walkthrough.md")}
 
     def test_no_surface_uses_a_cut_phrase(self):
         for name, text in self.texts.items():
@@ -96,6 +99,7 @@ class AssessmentWordingTest(unittest.TestCase):
                 self.assertIn('["na", "N/A"]', opts)
                 self.assertIn('["unanswered", "Not sure"]', opts)
                 self.assertIn("Choose Yes, No or Not sure; each item starts at Not sure, which counts as No.", text)
+                self.assertIn('if (value === "unanswered") input.checked = true;', text)
 
     def test_the_checklists_not_sure_is_an_answer_the_scorer_takes(self):
         for written in ("not sure", "Not sure", " NOT SURE ", "unanswered", "unsure"):
