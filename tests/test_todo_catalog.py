@@ -118,24 +118,25 @@ class ShippedCauseCatalogTest(unittest.TestCase):
 # (The review of #253 found OBAAF-GHA-026's command-line kinds from #255 under the cause written for
 # an action's inputs.) "" is a finding given no kind. Kinds built at run time are not seen here.
 REMAINDER_READ = {
-    "OBAAF-GHA-001": {"privileged", "privileged-environment", "pull-request"},
+    "OBAAF-GHA-001": {"privileged", "privileged-environment"},
     "OBAAF-GHA-002": {"checkout", "checkout-unresolved", "fetch", "fetch-unresolved"},
     "OBAAF-GHA-003": {"inherited", "undeclared", "write"},
     "OBAAF-GHA-004": {""},
     "OBAAF-GHA-005": {"secrets"},
     "OBAAF-GHA-006": {"called-restores", "needed-job-restores"},
     "OBAAF-GHA-007": {""},
-    "OBAAF-GHA-008": {"container", "image", "image-expression", "image-unreadable"},
+    "OBAAF-GHA-008": {"action", "container", "image", "image-expression", "image-unreadable", "reusable-workflow"},
     "OBAAF-GHA-009": {""},
-    "OBAAF-GHA-010": {"", "indirect", "through-env", "through-matrix"},
+    "OBAAF-GHA-010": {"", "indirect", "through-matrix"},
     "OBAAF-GHA-011": {""},
     "OBAAF-GHA-012": {"fetch", "fetch-unresolved", "head", "merge-commit", "unresolved"},
-    "OBAAF-GHA-015": {"", "capability", "capability-call", "environment", "pull-request"},
+    "OBAAF-GHA-014": {"", "capability"},
+    "OBAAF-GHA-015": {"", "capability-call", "environment"},
     "OBAAF-GHA-016": {"unchecked"},
     "OBAAF-GHA-017": {""},
-    "OBAAF-GHA-018": {"action", "any-secret", "command", "secrets"},
+    "OBAAF-GHA-018": {"action", "command", "secrets"},
     "OBAAF-GHA-019": {""},
-    "OBAAF-GHA-021": {"unchecked"},
+    "OBAAF-GHA-021": {"no-proposal", "no-record", "unchecked"},
     "OBAAF-GHA-022": {""},
     "OBAAF-GHA-023": {""},
     "OBAAF-GHA-024": {"caller", "environment-expression", "environment-not-a-name", "environment-unsure",
@@ -148,21 +149,44 @@ REMAINDER_READ = {
 }
 
 
+def _is_add(func):
+    """`self.add(...)` or `add(...)`, the calls that report a finding (not `self.applicable.add`)."""
+    if isinstance(func, ast.Name):
+        return func.id == "add"
+    return (isinstance(func, ast.Attribute) and func.attr == "add"
+            and isinstance(func.value, ast.Name) and func.value.id == "self")
+
+
+def _literals(node):
+    """The strings an expression is when it is a literal, or a choice between two literals."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        body, orelse = _literals(node.body), _literals(node.orelse)
+        return body | orelse if body and orelse else set()
+    return set()
+
+
+def _trees():
+    return [ast.parse(path.read_text(encoding="utf-8")) for path in sorted(SRC.rglob("*.py"))]
+
+
 def literal_kinds(rules):
     """Each (rule, kind) an `add` call in the package writes out, for the rules in `rules`."""
     found = set()
-    for path in SRC.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)):
-                continue
-            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            rule = node.args[0].value
-            if name != "add" or rule not in rules:
+    for tree in _trees():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and _is_add(node.func) and node.args
+                    and isinstance(node.args[0], ast.Constant) and node.args[0].value in rules):
                 continue
             kind = next((k.value for k in node.keywords if k.arg == "kind"), ast.Constant(""))
-            if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
-                found.add((rule, kind.value))
+            found.update((node.args[0].value, value) for value in _literals(kind))
     return found
+
+
+def string_literals():
+    return {node.value for tree in _trees() for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
 
 
 class LiteralKindsTest(unittest.TestCase):
@@ -188,3 +212,54 @@ class LiteralKindsTest(unittest.TestCase):
                               causes.for_finding("OBAAF-GHA-026", "computed").id}), 4)
         self.assertIn("CLI", option.sentence)
         self.assertIn("cannot read", unread.sentence)
+
+    def test_every_kind_the_catalogue_names_is_written_in_the_package(self):
+        # A misspelt kind on both sides of an exception would pass the consistency check, and the
+        # real kind would get the remainder's advice. Kinds built at run time are a literal, or a
+        # literal and a literal suffix that begins with "-" ("no-cache-mode" + "-self-hosted").
+        causes = load().causes
+        words = string_literals()
+        suffixes = {w for w in words if w.startswith("-")}
+        def written(kind):
+            return kind in words or any(kind.endswith(x) and kind[:-len(x)] in words for x in suffixes)
+        named = set(causes._exact)
+        self.assertEqual(sorted(pair for pair in named if not written(pair[1])), [])
+        for typo in ("entry-no-jobs", "not-utf-8", "no-cache-mode-selfhosted", "comand-option"):
+            with self.subTest(typo=typo):
+                self.assertFalse(written(typo))
+
+    def test_fix_kinds_follow_the_adoption_design(self):
+        # docs/adoption-experience-design.md: the first version has two tightening fixes, OBAAF-GHA-011's
+        # and OBAAF-GHA-025's; confinement is how the agent runs; Jenkins findings are by hand.
+        causes = load().causes
+        pairs = [(rule, cause) for rule, cause in causes._remaining.items()]
+        pairs += [(rule, cause) for (rule, _kind), cause in causes._exact.items()]
+        by_kind = {}
+        for rule, cause in pairs:
+            by_kind.setdefault(cause.fix_kind, set()).add(rule)
+        self.assertLessEqual(by_kind.get("tightening", set()), {"OBAAF-GHA-011", "OBAAF-GHA-025"})
+        self.assertLessEqual(by_kind.get("confinement", set()), {"OBAAF-GHA-005", "OBAAF-GHA-020"})
+        self.assertLessEqual(by_kind.get("paperwork", set()), {"OBAAF-CFG-001"})
+
+
+class CauseFieldChecksTest(unittest.TestCase):
+    def problems(self, **changes):
+        rows = [{**entry("all", rules=[JENKINS]), **changes}, entry("lanes", rules=[LANE])]
+        return CauseCatalog({"causes": rows}, {JENKINS, LANE}).problems
+
+    def test_the_shipped_shape_has_no_problem(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_each_field_check_reports_on_its_own(self):
+        cases = {
+            "fix kind not in the design": ({"fix_kind": "automatic"}, "invalid fix_kind"),
+            "id not lower-case words": ({"id": "All_Causes"}, "invalid id"),
+            "id with a trailing hyphen": ({"id": "all-"}, "invalid id"),
+            "selector repeated": ({"except_kinds": {JENKINS: ["a", "a"]}}, "repeated except_kinds"),
+            "exception for a rule not selected": ({"except_kinds": {LANE: ["x"]}}, "unknown rule"),
+            "empty sentence": ({"sentence": "  "}, "nonempty"),
+        }
+        for name, (changes, expected) in cases.items():
+            with self.subTest(name=name):
+                problems = self.problems(**changes)
+                self.assertTrue(any(expected in p for p in problems), problems)

@@ -829,6 +829,6 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Reason.** Two findings under the same rule can require different work. For example, a tool installed at a changeable version and an install line too long to inspect call for different advice. Naming both sides of an exception lets the catalogue catch a deleted assignment before a report gives the wrong advice.
 
-**Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule’s remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
+**Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule's remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
 
 **Status.** Proposed, 2026-11-19 (A1a, #252).
