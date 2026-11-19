@@ -19,6 +19,8 @@ obaaf catalog
 obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 ```
 
+The baseline holds one maintainer's acceptance of one finding in the release job (#238). It names that finding exactly, so the last command fails, until a maintainer rewrites the entry, after any of these: a new pin of `pypa/gh-action-pypi-publish` (the publish step has no name, so it is known by its pinned commit), a renamed verify step in `release-pypi.yml`, or a checker change to what OBAAF-GHA-016 records. `tests/test_release_job_acceptance.py` holds the entry to the one that was approved.
+
 ## Review responsibility
 
 The maintainers review, edit and test changes before merging them. Contributors are responsible for their submissions and must have the right to contribute them under the project's applicable terms. Proposed decisions remain pending in [DECISIONS.md](DECISIONS.md) until explicitly accepted, changed or rejected.
