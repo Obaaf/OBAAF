@@ -270,6 +270,7 @@ class Reading:
     detail: str
     kind: str
     values: dict
+    conditions: tuple[str, ...] = ()  # full action diagnostics for a confinement draft
 
 
 @dataclass

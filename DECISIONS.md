@@ -108,7 +108,9 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
+| D-107 | A Markdown work order for confinement | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
@@ -948,6 +950,7 @@ If another supported configuration name already exists, init shows any differenc
 **Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
 
 **Status.** Proposed, 2026-11-19 (3.3b, #84).
+
 ### D-102 Paperwork changes in the fix preview
 
 **Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away. With a partial check the preview withholds changes whose scope it cannot establish.
@@ -970,6 +973,14 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
 
+### D-105 Draft confinement for one agent job
+
+**Decision.** Preview one recognisable run step with the egress action at a listed release commit. Check the draft on a private copy and report the target job's control verdicts, including unmet conditions. Leave host selection, job splits and unsupported credential placement to the team.
+
+**Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
+
+**Status.** Proposed, 2026-11-19 (A3a, #281). No release commit is listed pending #248.
+
 ### D-106 Checkout credential tightening by kind or candidate name
 
 **Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.
@@ -979,6 +990,16 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 **Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, and edits whose precise effect cannot be proven remain for manual review. The checker reads the workflow offline.
 
 **Status.** Proposed, 2026-11-19 (slice A5a, #285).
+
+### D-107 A Markdown work order for confinement
+
+**Decision.** `obaaf fix egress --job NAME --brief` prints a Markdown task based on the same isolated draft and checker verdicts as the ordinary preview. Generate it from a trusted branch. The instructions and proof command come from OBAAF. Repository names and case-specific checker reasons appear as quoted, length-limited data. The work order identifies the original command by its step number.
+
+**Reason.** A person or coding agent can locate the proposed change without treating workflow commands, comments, or checker diagnostics containing repository text as instructions.
+
+**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft.
+
+**Status.** Proposed, 2026-11-19 (A6a, #286).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 

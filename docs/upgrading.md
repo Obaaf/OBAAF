@@ -105,6 +105,14 @@ Choose `low`, `medium`, or `high`. The proof checks the current repository with 
 
 On a pull request, the checker uses baseline and configuration data from the exact target commit. If the baseline exists only on the PR branch, that run has zero baseline acceptances. On pushes, the checker uses the pushed repository’s own policy. A policy read failure stops the job. The preview can upgrade an earlier, unedited init workflow and preserves the generated companion steps. For a custom workflow it prints the threshold and target-branch policy instructions for a manual edit. Apply requires a clean tracked workflow.
 
+### Preview confinement for one agent job
+
+Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs` key. The development catalogue currently lists no released egress-action commit. The command explains the hold and stops.
+
+Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
+
+Generate a Markdown work order on a branch you trust with `obaaf fix egress --job NAME --brief`. This option shares the draft’s release hold. Once available, it prints the job and step location as labelled data, the proposed credential placement, the checker’s predicted verdicts and a command for verifying the edit. Reasons for unresolved controls and egress-action conditions appear as bounded, quoted diagnostic data. Supply any path variables from your trusted check invocation. Review the result before removing an obsolete acceptance.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |
