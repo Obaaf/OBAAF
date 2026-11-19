@@ -375,6 +375,51 @@ class FoundByThePropertiesTest(unittest.TestCase):
         self.assertTrue(any("too many to read for template placeholders" in e for e in result.errors), result.errors)
         self.assertTrue({"OBAAF-GHA-002", "OBAAF-GHA-008"} <= {f.rule for f in result.findings})
 
+    def test_one_placeholder_reached_through_many_aliases_is_one_finding_per_place(self):
+        """From the third review: each alias of a text was a path of its own, so 200 steps each
+        reaching a list of 2,000 aliases of one placeholder made 402,001 findings."""
+        lines = ["on: push", "permissions:", "  contents: read", "jobs:", "  one:", "    runs-on: ubuntu-latest",
+                 "    steps:", "      - run: echo", "        env:", "          S: &s OBAAF_OWNER",
+                 "          L: &l [" + ", ".join(["*s"] * 2000) + "]"]
+        for n in range(200):
+            lines += [f"      - run: echo {n}", "        env: {L: *l}"]
+        found = self._placeholders("\n".join(lines) + "\n")
+        self.assertEqual(len(found), 201)
+        twice = ("on: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n"
+                 "        env:\n          A: OBAAF_OWNER\n          B: OBAAF_OWNER\n")
+        self.assertEqual(len(self._placeholders(twice)), 2, "a placeholder written twice is two places")
+
+    def test_too_many_values_with_a_local_action_keeps_the_other_findings(self):
+        """From the third review: the pass over local actions' steps ran out again and dropped the
+        file's findings."""
+        lines = ["on: pull_request_target", "jobs:", "  one:", "    runs-on: ubuntu-latest", "    steps:",
+                 "      - uses: actions/checkout@v4", "        with:", "          ref: ${{ github.event.pull_request.head.sha }}",
+                 "      - uses: ./.github/actions/a", "      - run: make", "        env: &m",
+                 "          L: [" + ", ".join(["{a: b}"] * 3000) + "]"]
+        for n in range(200):
+            lines += [f"      - run: echo {n}", "        env: *m"]
+        with TempDir() as tmp:
+            root = tmp / "repo"
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "actions" / "a").mkdir(parents=True)
+            (root / ".github" / "actions" / "a" / "action.yml").write_text(
+                "runs:\n  using: composite\n  steps:\n    - run: echo\n      shell: bash\n", encoding="utf-8")
+            (root / ".github" / "workflows" / "wf.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = checker.check(root)
+        self.assertEqual(sum("too many to read for template placeholders" in e for e in result.errors), 1,
+                         result.errors)
+        self.assertTrue({"OBAAF-GHA-002", "OBAAF-GHA-008"} <= {f.rule for f in result.findings})
+
+    def test_gh_run_download_is_the_command_not_a_later_word(self):
+        from obaaf.checker.workflow import _gh_run_download
+        for text in ("gh run download 1", "gh -R o/r run download", "gh run --repo o/r download",
+                     "gh --repo=o/r run -R x download", "FOO=1 gh -Ro/r run download", "sudo gh run download",
+                     "/usr/bin/gh run download"):
+            self.assertTrue(_gh_run_download(text), text)
+        for text in ("gh run rerun 1  # then download the logs", "gh workflow run download -f x=1",
+                     "gh run list", "echo gh run download", "gh api download"):
+            self.assertFalse(_gh_run_download(text), text)
+
     def test_an_alias_bomb_costs_little_and_is_reported_once_per_place(self):
         """From the review of the first fix: giving what a shared value holds again at every path that
         reaches it made ten nested lists of ten aliases a million findings and minutes of work."""

@@ -600,6 +600,7 @@ class WorkflowRules:
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
                                firewall=self.firewall)
         second._through = True
+        second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
         order = {"high": 0, "medium": 1, "low": 2}
         standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
@@ -660,8 +661,9 @@ class WorkflowRules:
         reader. Each place (a top-level key, a job's key, a step) is walked on its own, each list and
         mapping in it once, so a step shared by two jobs, or used twice in one job, is reported at each
         (slice 2d.3: it was reported at the first place only). Each text is searched once, however
-        often it is reached. A file whose places together reach more values than the checker reads
-        is an error for the file, never a pass; the rule's findings so far stand."""
+        often it is reached, and a text with a placeholder reached again in the same place is that
+        place's once. A file whose places together reach more values than the checker reads is an
+        error for the file, never a pass; the rule's findings so far, and the other rules', stand."""
         found: list = []
         budget = [self._PLACEHOLDER_WALK]
         searched: dict = {}
@@ -684,7 +686,14 @@ class WorkflowRules:
                         return
                     seen.add(id(value))
                 if isinstance(value, str):
-                    for placeholder in held(value, where):
+                    placeholders = held(value, where)
+                    if placeholders:
+                        # A text reached again through an alias in the same place is that place's once,
+                        # as a list or mapping is; a text written out twice is two objects, and two places.
+                        if id(value) in seen:
+                            return
+                        seen.add(id(value))
+                    for placeholder in placeholders:
                         found.append((line, job, step, where, placeholder))
                 elif isinstance(value, dict):
                     for key, sub in value.items():
@@ -709,10 +718,10 @@ class WorkflowRules:
         except self._WalkExceeded:
             message = ("values reached through YAML aliases are too many to read for template placeholders; the "
                        "checker cannot tell whether one is left")
-            if getattr(self, "_through", False):
-                raise expr_mod.TooComplex(message) from None
-            if message not in self.wf.problems:
-                self.wf.problems.append(message)
+            problems = getattr(self, "_problems", None)
+            problems = self.wf.problems if problems is None else problems
+            if message not in problems:
+                problems.append(message)
         self._placeholder_findings(found)
 
     def _placeholder_places(self, visit) -> None:

@@ -3658,13 +3658,27 @@ ARTIFACT_API_RE = re.compile(
 
 
 def _gh_run_download(text: str) -> bool:
-    """Whether a command in the text is `gh ... run ... download`, with any options between the words
-    (`gh -R repo run download`, `gh run --repo=repo download`). Word by word, so linear in the text."""
+    """Whether a command in the text is `gh run download`, with options before either word (`gh -R repo
+    run download`, `gh run --repo=repo download`): `run` must be the first word after `gh` that is
+    not an option or an option's value, and `download` the first after `run`, before any comment.
+    Word by word, so linear in the text."""
+    def commands(words: list) -> list:
+        out, skip = [], False
+        for word in words:
+            if word.startswith("#"):
+                break
+            if skip:
+                skip = False
+            elif word in ("-R", "--repo"):
+                skip = True
+            elif not word.startswith("-"):
+                out.append(word)
+        return out
+
     for segment in command_segments(text):
-        words = [word.rsplit("/", 1)[-1] for word in segment.split()]
-        if words and words[0] == "gh" and "run" in words:
-            if "download" in words[words.index("run") + 1:]:
-                return True
+        words = segment.split()
+        if words and words[0].rsplit("/", 1)[-1] == "gh" and commands(words[1:])[:2] == ["run", "download"]:
+            return True
     return False
 
 
@@ -3674,7 +3688,7 @@ def _downloads_from_trigger_run(job: Job) -> bool:
     or `artifact-download` (dawidd6's and its forks); `actions/download-artifact` given a `run-id` other than
     `${{ github.run_id }}` (this run), or a `repository`, whatever the value, or inputs that are not a
     mapping the checker can read, or naming `workflow_run` in any letter case; and the artifacts API
-    or `gh run download` (with options anywhere between the words) in the run script, a github-script
+    or `gh run download` (with options before either word) in the run script, a github-script
     script, the command OBAAF's egress action runs or a `docker://` step's arguments, with lines
     continued with a backslash joined and quotes taken out. The inputs of other actions (a retry
     wrapper's `command`) and what a variable or `gh alias` stands for are not read.
