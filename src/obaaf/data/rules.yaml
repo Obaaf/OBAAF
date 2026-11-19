@@ -767,7 +767,12 @@ rules:
     description: >-
       A workflow started by another workflow's run downloads that run's output and can write to the
       repository, but neither it nor a job it needs both verifies the agent-run record and checks the
-      proposal before applying it. Doing only one of the two is reported at medium. The checks count
+      proposal before applying it. Doing only one of the two is reported at medium. A download is
+      another run's when `actions/download-artifact` is given a `run-id` other than `${{
+      github.run_id }}` or a `repository`, in any spelling, or inputs the checker cannot read, or
+      names `workflow_run` in any letter case; dawidd6's download action and the artifacts API in a
+      script always are (flagship slice 2d.3: before, only an input that held `workflow_run` as
+      written counted). The checks count
       only before the first step that may apply (anything but a checkout, a download of artifacts, a
       GitHub setup action, or a `setup-obaaf` from a repository named `obaaf`, which is trusted because
       the templates may point at a fork), each where its failure stops the job as for OBAAF-GHA-016, in

@@ -3658,9 +3658,30 @@ ARTIFACT_API_RE = re.compile(
 
 
 def _downloads_from_trigger_run(job: Job) -> bool:
+    """Whether a step can bring another run's files into the job: dawidd6's download action, any
+    `actions/download-artifact` given a run or a repository (except `${{ github.run_id }}`, this
+    run), one whose inputs are not a mapping the checker can read, or one that names `workflow_run`
+    in any letter case, and the artifacts API in a script.
+
+    Before slice 2d.3 only an input that held the text `workflow_run` as written counted, so
+    `run-id: ${{ GITHUB.EVENT.WORKFLOW_RUN.ID }}`, `${{ github.event['workflow_run'].id }}` read as
+    the same run by the expression reader but spelled otherwise, or a run id passed through `env`
+    took the job out of the effect lane and with it OBAAF-GHA-021 and 022."""
     for step in job.steps:
-        if step.uses_action("actions/download-artifact") or step.uses_action("dawidd6/action-download-artifact"):
-            if "workflow_run" in str(step.with_) or step.uses_action("dawidd6/action-download-artifact"):
+        if step.uses_action("dawidd6/action-download-artifact"):
+            return True
+        if step.uses_action("actions/download-artifact"):
+            given = step.raw.get("with")
+            if given is not None and not isinstance(given, dict):
+                return True
+            if "workflow_run" in str(step.with_).lower():
+                return True
+            for name in ("run-id", "repository"):
+                value = step.with_.get(name)
+                if value is None or as_text(value).strip() == "":
+                    continue
+                if name == "run-id" and "".join(as_text(value).split()).lower() == "${{github.run_id}}":
+                    continue
                 return True
         if ARTIFACT_API_RE.search(step.text()):
             return True
