@@ -1212,6 +1212,12 @@ script_inputs:
   addnab/docker-run-action: [run]
   uraimo/run-on-arch-action: [run, install]
   cypress-io/github-action: [build, start, command]
+  # From the zizmor parity test (flagship slice 2d.3b): zizmor's test workflows at v1.32.0 report both, and
+  # each runs its input as code. mikefarah/yq at b534aa9 passes `cmd` to its image, whose
+  # github-action/entrypoint.sh runs `eval "$1"` in sh; Amadevus/pwsh-script at 97a8b21 runs `script`
+  # as PowerShell (its action.yml gives it to action.ps1 as PWSH_SCRIPT_ACTION_TEXT).
+  mikefarah/yq: [cmd]
+  amadevus/pwsh-script: [script]
 
 # Secret names that hold a credential for publishing a release: a package registry, an app store, a
 # game store, a container registry (OBAAF-GHA-015, flagship slice 2d.2d). Matched without regard to
