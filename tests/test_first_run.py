@@ -163,7 +163,8 @@ class TheTextReportTest(unittest.TestCase):
             repository(tmp, {"plain.yml": PLAIN})
             out = run_cli("check", tmp, "--fail-on", "never")[1]
         lines = out.splitlines()
-        self.assertEqual(lines[-3:], [report.FIRST_RUN_CONFIG, report.FIRST_RUN_OTHER_TOOLS,
+        self.assertEqual(lines[-4:], [report.FIRST_RUN_CONFIG, report.FIRST_RUN_OTHER_TOOLS,
+                                      "What to do next: 0 findings, 0 things to do",
                                       f"Checked by obaaf {__version__}."])
         for name in ("--lanes", ".github/obaaf.yml", "zizmor", "actionlint", "poutine", "code scanning"):
             self.assertIn(name, out)
