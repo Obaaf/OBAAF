@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Init handoff and explicit gate activation
+
+`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and `--apply` writes the proven edit. Pull requests use the target commit’s baseline and configuration. A missing target baseline accepts zero findings.
+
 ### Upgrading from 0.3.0
 
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.

@@ -33,25 +33,66 @@ jobs:
             /.github/obaaf.yml
             /.github/obaaf.yaml
             /obaaf.yml
+            /.github/obaaf-baseline.json
           sparse-checkout-cone-mode: false
 
       - name: Report findings
         shell: bash
         run: |
+          set -euo pipefail
           config=()
+          tree=source
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            tree=policy
+            if [[ ! -d policy/.git ]]; then
+              echo "The target commit checkout is missing." >&2
+              exit 1
+            fi
             policy="$RUNNER_TEMP/obaaf-policy.yml"
             echo '{}' > "$policy"
             for name in .github/obaaf.yml .github/obaaf.yaml obaaf.yml; do
-              if [[ -L policy/.github || -L "policy/$name" ]]; then
+              mode=$(git -C policy --literal-pathspecs ls-tree --format='%(objectmode)' HEAD -- "$name")
+              if [[ -L policy/.github || ( -n "$mode" && "$mode" != 100644 && "$mode" != 100755 ) ]]; then
                 echo 'The target branch checker configuration must be a regular file.' >&2
                 exit 1
               fi
-              if [[ -f "policy/$name" ]]; then
-                cp "policy/$name" "$policy"
+              if [[ -n "$mode" ]]; then
+                git -C policy cat-file blob "HEAD:$name" > "$policy"
                 break
               fi
             done
             config=(--config "$policy")
           fi
+          # Used only after a team explicitly enables its gate.
+          gate_check() {
+            local path=$1
+            shift
+            local parent mode staged
+            local baseline=()
+            parent=$(dirname -- "$path")
+            while [[ "$parent" != . ]]; do
+              if [[ -L "$tree/$parent" || -L "source/$parent" ]]; then
+                echo "The baseline path must stay inside its checkout." >&2
+                return 1
+              fi
+              parent=$(dirname -- "$parent")
+            done
+            mode=$(git -C "$tree" --literal-pathspecs ls-tree --format='%(objectmode)' HEAD -- "$path")
+            if [[ -n "$mode" ]]; then
+              if [[ "$mode" != 100644 && "$mode" != 100755 ]]; then
+                echo "The gate baseline must be a regular file." >&2
+                return 1
+              fi
+              if [[ "$tree" == policy ]]; then
+                # Keep the baseline at its repository path for the CODEOWNERS check.
+                parent="source/$(dirname -- "$path")"
+                mkdir -p -- "$parent"
+                staged=$(mktemp "$parent/.obaaf-baseline-XXXXXX")
+                git -C policy cat-file blob "HEAD:$path" > "$staged"
+                mv -T -- "$staged" "source/$path"
+              fi
+              baseline=(--baseline "source/$path")
+            fi
+            obaaf check source "${config[@]}" "${baseline[@]}" "$@"
+          }
           obaaf check source "${config[@]}" --fail-on never

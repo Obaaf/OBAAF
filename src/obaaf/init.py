@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import shlex
 import sys
 from collections import defaultdict
 from importlib.resources import files
@@ -142,6 +143,34 @@ def _show_diff(old: bytes, proposed: bytes, old_name: str, new_name: str) -> Non
             print(r"\ No newline at end of file")
 
 
+def _handoff(root: Path, display_path: str, missing: dict[str, bytes], apply: bool) -> None:
+    from obaaf.checker.report import to_summary
+    from obaaf.fix_copy import PrivateCopyError, private_copy
+
+    def summary(tree):
+        result = checker.check(tree)
+        result.checked = display_path
+        return to_summary(result).rstrip()
+
+    if missing and not apply:
+        try:
+            with private_copy(root) as tree:
+                _install(tree, missing)
+                text = summary(tree)
+        except (PrivateCopyError, OSError) as exc:
+            print("Could not simulate the proposed setup: " + one_line(exc))
+            print("Current repository before applying either file:")
+            text = summary(root)
+        else:
+            print("Proposed setup on a temporary copy:")
+    else:
+        text = summary(root)
+        print("Current repository:")
+    print(text)
+    path = [] if display_path == "." else ["--", display_path]
+    print("Preview available fixes with " + one_line(shlex.join(["obaaf", "fix", *path])))
+
+
 def run(args) -> int:
     root = Path(args.path).resolve()
     try:
@@ -189,6 +218,14 @@ def run(args) -> int:
                 print(f"Wrote {name}")
         elif missing:
             print("Review both files, then run obaaf init with --apply to write them.")
+        try:
+            _handoff(root, args.path, missing, args.apply)
+        except (OSError, ValueError) as exc:
+            state = "Setup files installed." if missing and args.apply else "Setup review complete."
+            command = shlex.join(["obaaf", "check", "--summary", "--", args.path])
+            print(f"{state} The follow-up summary was unavailable: {one_line(exc)}", file=sys.stderr)
+            print("To check the current repository, run " + one_line(command))
+            print("Preview available fixes with " + one_line(shlex.join(["obaaf", "fix", "--", args.path])))
         return 0
     except (OSError, ValueError) as error:
         print(f"error: {one_line(error)}", file=sys.stderr)

@@ -108,6 +108,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 
 ---
 
@@ -965,3 +966,15 @@ If another supported configuration name already exists, init shows any differenc
 The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
+
+### D-109 The handoff from init to a gate
+
+**Decision.** A successful first init preview shows the checker’s to-do list with the proposed setup on a private copy. If copying is unavailable, label the current repository’s list and give the reason. Apply checks the actual files. Both end with the corresponding fix-preview command.
+
+Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing at a threshold. Match the complete workflow that init generated, including the exact generated companion steps. Recognize the earlier report-only workflow by its content digest. Show manual instructions for a custom workflow. Prove the precise edit with zero promised finding or acceptance changes and use the existing clean-file writer on apply.
+
+**Consequence.** Select the conventional `.github/obaaf-baseline.json` or name an existing baseline explicitly. If the PR’s target commit lacks that baseline, count every outstanding finding at the threshold. A target policy that cannot be read stops the job. The preview reports how many findings currently count, and creating or changing any acceptance remains an independent decision.
+
+**Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
+
+**Status.** Proposed, 2026-11-19 (A7a, #292).

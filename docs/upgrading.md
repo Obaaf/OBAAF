@@ -31,6 +31,8 @@ Init reads GitHub workflow files locally. It proposes agent lanes for catalogued
 
 The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job.
 
+Init ends with the checker’s to-do list and the command to preview fixes. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
+
 #### Optional companion checks
 
 Add `--with-scanner` once for each companion you want in the preview. Supply the same options when applying it. For example:
@@ -64,6 +66,19 @@ obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
 ```
 
 Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
+
+### Enable the generated workflow’s gate
+
+After reviewing outstanding findings and any acceptances, commit the generated workflow. Run these commands from the repository root, reviewing the first command’s diff and count before running the second.
+
+```sh
+obaaf fix --gate medium
+obaaf fix --gate medium --apply
+```
+
+Choose `low`, `medium`, or `high`. The proof checks the current repository with that threshold and leaves existing acceptances alone. The gate uses `.github/obaaf-baseline.json` when present. Supply `--baseline FILE` on both invocations to use another existing baseline. Without a baseline, each outstanding finding at the threshold counts. Creating acceptances remains a separate, explicit decision.
+
+On a pull request, the checker uses baseline and configuration data from the exact target commit. If the baseline exists only on the PR branch, that run has zero baseline acceptances. On pushes, the checker uses the pushed repository’s own policy. A policy read failure stops the job. The preview can upgrade an earlier, unedited init workflow and preserves the generated companion steps. For a custom workflow it prints the threshold and target-branch policy instructions for a manual edit. Apply requires a clean tracked workflow.
 
 ### What can turn a passing gate red
 

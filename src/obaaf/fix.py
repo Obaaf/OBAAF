@@ -38,7 +38,7 @@ def _paths(args):
             raise ProofError(f"check input must be inside the repository: {value}")
         return path.relative_to(root)
 
-    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform, args.fail_on)
+    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform, "medium" if args.fail_on is None else args.fail_on)
 
 
 def _show_diff(edit):
@@ -160,6 +160,11 @@ def run(args):
     from obaaf.fix_proof import ProofError, check_copy_matches, check_inputs, prove
 
     try:
+        if args.gate is not None:
+            from obaaf.fix_gate import run as run_gate
+            root, options = _paths(args)
+            with (apply_lock(root) if args.apply else nullcontext()) as lock:
+                return run_gate(args, root, options, lock, _show_diff)
         if (args.reason is not None or args.expires is not None) and not all((args.owner, args.reason, args.expires, args.baseline)):
             raise ValueError("baseline migration needs --baseline, --owner, --reason and --expires together")
         root, options = _paths(args)
