@@ -79,14 +79,14 @@ causes:
     sentence: "The workflow may put untrusted or agent work on a persistent self-hosted runner."
     rules: [OBAAF-GHA-013]
     fix_kind: by-hand
-    next: "Check which runner each reported job can select and use an isolated ephemeral runner for untrusted work. The checker cannot see that a runner is ephemeral, so then accept the finding with that reason."
+    next: "Run the reported job on a GitHub-hosted runner. If it must run on your own runner, use an isolated ephemeral one for untrusted work; the checker cannot see that a runner is ephemeral, so then accept the finding with that reason."
   - id: release-environment
     sentence: "The checker cannot establish an environment gate for a job that may publish."
     rules: [OBAAF-GHA-014]
     fix_kind: by-hand
     next: "Put the job behind a named release environment and configure its reviewer and branch restrictions."
   - id: untrusted-release-trigger
-    sentence: "An outsider-influenced event can reach work with release authority."
+    sentence: "A job with release authority, or one that calls a release workflow, can be started by an event an outsider can influence."
     rules: [OBAAF-GHA-015]
     except_kinds:
       OBAAF-GHA-015: [pull-request, capability]
@@ -329,9 +329,9 @@ causes:
     kinds:
       OBAAF-GHA-010: [through-env]
     fix_kind: by-hand
-    next: "In the script, use the variable as a quoted shell variable such as \"$NAME\" instead of the ${{ env.NAME }} expression."
+    next: "Read the value from the environment instead of the ${{ env.NAME }} expression: \"$NAME\" in a POSIX shell, $env:NAME in PowerShell, process.env.NAME in actions/github-script."
   - id: release-from-pull-request
-    sentence: "A release job runs on pull requests, where a branch pushed by anyone with write access gets its secrets and write token."
+    sentence: "A release job runs on pull requests, where a branch pushed by anyone with write access gets whatever secrets and token permissions the job has."
     kinds:
       OBAAF-GHA-015: [pull-request]
     fix_kind: by-hand
@@ -341,7 +341,7 @@ causes:
     kinds:
       OBAAF-GHA-015: [capability]
     fix_kind: by-hand
-    next: "If the job does not release, remove the publishing permissions or secrets it does not need, or accept the finding with that reason. If it does release, start it only from trusted events."
+    next: "If the job does not release, remove the publishing permissions or secrets it does not need and name its environment in plain text, or accept the finding with that reason. If it does release, start it only from trusted events."
   - id: job-reads-every-secret
     sentence: "A job can read every secret, so the checker cannot tell that no signing key is among them."
     kinds:

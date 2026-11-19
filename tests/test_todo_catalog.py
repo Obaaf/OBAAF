@@ -184,9 +184,42 @@ def literal_kinds(rules):
     return found
 
 
-def string_literals():
-    return {node.value for tree in _trees() for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+def _own_nodes(function):
+    """The nodes of a function's body, without those of the functions defined inside it."""
+    todo = list(ast.iter_child_nodes(function))
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            todo.extend(ast.iter_child_nodes(node))
+
+
+# Rules whose kinds are written outside the function that reports them, and only there.
+KINDS_WRITTEN_IN = {"OBAAF-INS-001": "_examine_instruction_file"}
+
+
+def kind_words(rules):
+    """For each rule, the string literals of the functions that report it: its kinds can only be
+    one of them, or one followed by another that begins with "-" ("no-cache-mode" + "-self-hosted")."""
+    from obaaf.checker import _IDLE_TEMPLATES
+
+    words = {"OBAAF-CFG-001": set(_IDLE_TEMPLATES)}
+    functions = [node for tree in _trees() for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for function in functions:
+        own = list(_own_nodes(function))
+        literals = {n.value for n in own if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        for node in own:
+            if (isinstance(node, ast.Call) and _is_add(node.func) and node.args
+                    and isinstance(node.args[0], ast.Constant) and node.args[0].value in rules
+                    and node.args[0].value not in KINDS_WRITTEN_IN):
+                words.setdefault(node.args[0].value, set()).update(literals)
+    for rule, name in KINDS_WRITTEN_IN.items():
+        for function in functions:
+            if function.name == name:
+                words.setdefault(rule, set()).update(
+                    n.value for n in _own_nodes(function) if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    return words
 
 
 class LiteralKindsTest(unittest.TestCase):
@@ -213,20 +246,28 @@ class LiteralKindsTest(unittest.TestCase):
         self.assertIn("CLI", option.sentence)
         self.assertIn("cannot read", unread.sentence)
 
-    def test_every_kind_the_catalogue_names_is_written_in_the_package(self):
+    def test_every_kind_the_catalogue_names_is_written_where_its_rule_is_reported(self):
         # A misspelt kind on both sides of an exception would pass the consistency check, and the
-        # real kind would get the remainder's advice. Kinds built at run time are a literal, or a
-        # literal and a literal suffix that begins with "-" ("no-cache-mode" + "-self-hosted").
+        # real kind would get the remainder's advice. A kind is a literal of a function that reports
+        # its rule, or two of them joined, the second beginning with "-" (see kind_words).
         causes = load().causes
-        words = string_literals()
-        suffixes = {w for w in words if w.startswith("-")}
-        def written(kind):
-            return kind in words or any(kind.endswith(x) and kind[:-len(x)] in words for x in suffixes)
-        named = set(causes._exact)
-        self.assertEqual(sorted(pair for pair in named if not written(pair[1])), [])
-        for typo in ("entry-no-jobs", "not-utf-8", "no-cache-mode-selfhosted", "comand-option"):
-            with self.subTest(typo=typo):
-                self.assertFalse(written(typo))
+        words = kind_words(set(load().rules))
+
+        def written(rule, kind):
+            own = words.get(rule, set())
+            return kind in own or any(kind == a + b for a in own for b in own if b.startswith("-"))
+
+        self.assertEqual(sorted(pair for pair in causes._exact if not written(*pair)), [])
+        for rule, typo in (("OBAAF-CFG-001", "entry-no-jobs"), ("OBAAF-INS-001", "not-utf-8"),
+                           ("OBAAF-INS-001", "not-loaded"), ("OBAAF-GHA-006", "no-cache-mode-selfhosted"),
+                           ("OBAAF-GHA-006", "no-cache-mode-agent"), ("OBAAF-GHA-026", "comand-option"),
+                           ("OBAAF-GHA-001", "pull-request-agent")):
+            with self.subTest(rule=rule, typo=typo):
+                self.assertFalse(written(rule, typo))
+        for rule, real in (("OBAAF-GHA-006", "no-cache-mode-self-hosted"), ("OBAAF-GHA-007", "unreadable"),
+                           ("OBAAF-INS-001", "not-utf8"), ("OBAAF-CFG-001", "entry-no-stage")):
+            with self.subTest(rule=rule, real=real):
+                self.assertTrue(written(rule, real))
 
     def test_fix_kinds_follow_the_adoption_design(self):
         # docs/adoption-experience-design.md: the first version has two tightening fixes, OBAAF-GHA-011's
