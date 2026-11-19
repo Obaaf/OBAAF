@@ -167,6 +167,12 @@ class StillReportedTest(unittest.TestCase):
         self.assertEqual(len(found(job_env)), 1)
         container = workflow().replace("    steps:\n", "    container: node:16\n    steps:\n", 1)
         self.assertEqual(len(found(container)), 1)
+        # Found by the third review: a service is another image, running as root for the whole job.
+        service = workflow().replace("    steps:\n", "    services:\n      helper:\n        image: example/helper:1\n"
+                                     "        volumes: ['/opt/hostedtoolcache:/t']\n    steps:\n", 1)
+        self.assertEqual(len(found(service)), 1)
+        working = workflow().replace("    steps:\n", "    defaults:\n      run:\n        working-directory: .\n    steps:\n", 1)
+        self.assertEqual(found(working), [])
         expression_env = workflow().replace("    steps:\n", "    env: ${{ fromJSON(vars.ENV) }}\n    steps:\n", 1)
         self.assertEqual(len(found(expression_env)), 1)
         for env in ("SHELLOPTS: xtrace", "BASHOPTS: extglob", "PS4: x", "EXECIGNORE: x", "BASH_XTRACEFD: 3",

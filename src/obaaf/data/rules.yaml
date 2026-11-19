@@ -624,7 +624,7 @@ rules:
       stops it. An upload that is `npm publish --provenance` signs its own provenance and is not counted
       (flagship slice 2d.12), only in the form npm's documentation gives: the step's whole script is
       `npm publish` with only `--provenance`, `--access public` and `--tag NAME`, each read as written; the
-      job holds `id-token: write`, runs only on GitHub-hosted runners and in no container; an earlier
+      job holds `id-token: write`, runs only on GitHub-hosted runners, with no container and no services; an earlier
       `actions/setup-node` step sets Node.js 20 or later (npm 9.5.0 or later), and every earlier step is
       `actions/checkout`, such a setup-node step (npm's own registry, if any), or `npm ci`, `npm install`,
       `npm test` or `npm run NAME`, none with an `env`, an `if` or `continue-on-error`, with no default

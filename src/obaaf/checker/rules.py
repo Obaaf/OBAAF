@@ -4924,7 +4924,7 @@ class WorkflowRules:
         - the step's whole script is one command, `npm publish` followed only by `--provenance` (or
           `--provenance=true`), `--access public` and `--tag NAME`, each read as written;
         - the job's permissions, or its workflow's when it declares none, give `id-token: write`;
-        - every runner it may run on is GitHub-hosted, and it runs in no container;
+        - every runner it may run on is GitHub-hosted, and it has no `container` and no `services`;
         - its shell is a POSIX shell the checker reads, nothing runs beside it, and no `env` of the step, the
           job or the workflow is one expression or names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
           `EXECIGNORE`, a `BASH...`, `LD_...` or `NPM_CONFIG_...` variable, or a `NODE_...` one but
@@ -4935,7 +4935,7 @@ class WorkflowRules:
           `node-version`, `registry-url` (npm's own registry), `scope`, `cache`, `package-manager-cache`,
           `always-auth` and `check-latest`, or a `run` step whose lines are `npm ci`, `npm install`,
           `npm test` or `npm run NAME`, in the runner's default shell (neither the job nor the workflow sets
-          `defaults`).
+          a default `shell`).
 
         Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm, Yarn,
         an action that publishes, a folder or package to publish, any other option or earlier step) is not
@@ -4947,8 +4947,9 @@ class WorkflowRules:
             return False
         sets = job.runner_label_sets()
         if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
-                               for labels in sets) or job.raw.get("container") is not None:
-            return False
+                               for labels in sets) or job.raw.get("container") is not None \
+                or job.raw.get("services") is not None:
+            return False        # a container or a service is another image, which can change npm (third review)
         shell = self._failfast_shell(job, step)
         if shell is None or self._bash_env(job, step):
             return False
