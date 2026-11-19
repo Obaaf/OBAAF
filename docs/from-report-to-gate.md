@@ -4,7 +4,7 @@ How a team moves `obaaf check` from something it reads to something that fails a
 
 **If you have release 0.3.0**, start with `obaaf check . --fail-on never` for a report and `obaaf check . --lanes` to review job classification. Keep your existing gate’s configuration, baseline and threshold. Before using the development steps below, review the upgrade guidance. Release 0.3.0 lacks `obaaf init`, `obaaf fix` and the baseline owner, reason and expiry options. [Upgrading](upgrading.md)
 
-**Development status.** The to-do catalogue, JSON grouping, terminal action list and accepted-risk summary have merged into the development branch. The complete first-sitting flow below was checked on local integration commits for prospective 0.4.0. On `8cab61d`, a disposable repository started with seven findings. Two reviewed workflow changes left five to accept. The medium gate then passed and a later permissions change made it fail with three new findings. A second 21-command rehearsal at `3bb1a09` included the accepted-risk summary and returned the expected exit statuses. Separate tests for #303 ran the printed checkout and pin commands with an explicit settings snapshot. These are local results. Publication of the combined release, verification of the generated CI pin and the timed trial with a first user remain pending.
+**Development status.** The development branch includes the to-do list and accepted-risk summary. The complete walkthrough was rehearsed locally at `93be00a` on a disposable repository. Two reviewed workflow edits reduced seven findings to five. After those five were explicitly accepted, the medium gate passed. A later workflow change introduced three new findings and the gate failed. All 21 commands returned their expected status. The final hosted checker pin, production egress listing and timed first-user trial still need verification. [Rehearsal results](https://github.com/Obaaf/OBAAF/issues/295#issuecomment-7025513204)
 
 ## Install and preview report-only CI
 
@@ -60,9 +60,11 @@ If you approve the preview, repeat the same command with `--apply`. It recompute
 Two development fixes can affect how a job runs. Request each separately. The values below illustrate syntax. Choose an exact package version your team has approved.
 
 - `obaaf fix . --tighten checkout-credentials` previews setting `persist-credentials: false` on eligible checkout steps. Check whether a later step needs authenticated Git access.
-- `obaaf fix . --pin @openai/codex=1.2.3` previews eligible installs of that package at the supplied version. OBAAF performs no version lookup.
+- `obaaf fix . --pin @openai/codex=1.2.3` previews eligible installs of that package at the supplied version. The report gives separate counts for eligible pins and installs that need a hand edit. Choose a version your team has verified. OBAAF performs no version lookup.
 
-For either kind, inspect the diff, then add `--apply` only to the reviewed invocation. A change that would disturb an existing acceptance is held back. Read the affected findings before requesting the specific step with the preview’s `--candidate` selector. Pin other actions to reviewed commits, check job permissions and decide which team should own any uncovered paths in CODEOWNERS. Handle ambiguous edits, unsupported install forms and Jenkinsfile changes by hand. Rerun the report after edits.
+For either kind, inspect the diff and add `--apply` only to the invocation you reviewed. If an edit would disturb an existing acceptance, the preview names the affected finding. The printed `--candidate` command checks that step on its own. If the same acceptance still prevents the edit, the named request exits 1 and leaves the workflow and acceptance untouched, including with `--apply`. Review the baseline or ignore entry with its owner. If the team approves a change to that entry, review and commit it separately, then rerun the named preview. You can also keep the existing acceptance and leave that step as it is.
+
+Pin other actions to reviewed commits, check job permissions and decide which team should own any uncovered paths in CODEOWNERS. Handle ambiguous edits, unsupported install forms and Jenkinsfile changes by hand. Rerun the report after edits.
 
 ## 4. Accept what is left, in somebody's name and until a date
 
