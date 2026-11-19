@@ -8,11 +8,11 @@
 
 OBAAF finds the right things and then leaves the user alone with them. Measured on 19 November 2026 on a read-only copy of Expectrail (`d702ee2`) with the development checker (`b1a9d3d`) and Expectrail's own CI command:
 
-- The report is 608 lines, about 16,700 words, for 69 findings.
+- The report is 470 lines for 69 findings as Expectrail's CI prints it, with `--no-fixes`. Without that option, as a newcomer sees it, with each finding's reason and fix, it is 608 lines and about 16,700 words.
 - The 69 findings have five causes.
-- One existing command (`obaaf baseline migrate`) brings 69 down to 50. Two hand edits to `.github/obaaf.yml` (an owner on 18 `ignore` entries, one dead lane line) bring 50 down to 31. Nothing OBAAF has addresses the last 31: 19 agent jobs holding secrets and 12 agent tool installs.
-- Every finding prints a paragraph on how to fix it. Nothing produces the change.
-- The most common high finding for a team that runs agents, OBAAF-GHA-005 (a secret available to an agent job), can be accepted and can never be cleared. One of its five controls is a repository setting `obaaf check` does not read.
+- One existing command (`obaaf baseline migrate`) brings 69 down to 50. Two hand edits to `.github/obaaf.yml` (an owner on 18 `ignore` entries, one dead lane line) bring 50 down to 31. No command of OBAAF's changes the workflows behind the last 31 (19 agent jobs holding secrets and 12 agent tool installs): they can be accepted in bulk or fixed by hand.
+- Every finding prints a paragraph on how to fix it. Only the baseline's conversion has a command that makes the change.
+- Expectrail's most common high finding, OBAAF-GHA-005 (a secret available to an agent job), can be accepted and can never be cleared. One of its five controls is a repository setting `obaaf check` does not read.
 
 A stranger who meets this stops, or accepts everything. Neither is adoption.
 
@@ -24,7 +24,7 @@ Sean's direction, 19 November: adopting OBAAF should be seamless and still secur
 
 ## Goals
 
-1. Every `obaaf check` text report ends with a to-do list: one line per cause, how many findings it covers, and the next command.
+1. Every `obaaf check` text report ends with a to-do list, just above its closing version line: one entry per cause, how many findings it covers, and the next command.
 2. `obaaf fix` previews, and on request applies, the fixes that cannot break a build.
 3. One-line workflow fixes are previewed and applied by kind.
 4. For an agent job, OBAAF prints the job's agent step rewritten to run through the egress action, says what the checker makes of the result, and writes a work order.
@@ -60,16 +60,19 @@ What to do next: 69 findings, 5 things to do
      obaaf fix --baseline FILE --owner @you --reason "..." --expires DATE
 2. 18 accepted risks name no owner                                18 findings
      obaaf fix --owner @you            you are accepting these; they are listed first
-3. 19 agent jobs hold secrets their agent can read                19 high
-     obaaf fix egress --job NAME       drafts the change for one job
-4. 12 agent tools are installed at a version that can change      12 high
+3. 12 agent tools are installed at a version that can change      12 high
      obaaf fix --pin PACKAGE=VERSION   2 can be pinned; 10 are by hand
+4. 19 agent jobs hold secrets their agent can read                19 high
+     19 were accepted before; OBAAF now records more about them, so those entries no longer match
+     obaaf fix egress --job NAME       drafts the change for one job
 5. 1 lane name is not a lane                                       1 high
      by hand: 'probe' is not close to any lane name
 
 obaaf fix shows every change before it makes one.
 To block only new risk after that: accept what remains, then turn the gate on (below).
 ```
+
+The sketch assumes a commit of the egress action is listed; until one is, line 4 says the draft is not available yet.
 
 `obaaf check --summary` prints only this list. Every command in it carries the options the check was run with, as the report's other lines already do.
 
@@ -80,7 +83,8 @@ $ obaaf fix --baseline .github/obaaf-baseline.json --owner @sean --reason "accep
 
 You are accepting risk (37 findings). Nothing else below accepts anything.
   .github/obaaf.yml            owner added to 18 entries (their reasons and dates are yours, unchanged)
-  .github/obaaf-baseline.json  converted; 19 findings carried over, none added
+  .github/obaaf-baseline.json  converted; 19 findings carried over, none added;
+                               19 entries that no longer match any finding removed (listed below)
   [the 37 findings, one line each]
 
 Corrections: none.
@@ -92,7 +96,7 @@ Checked on a copy: 37 accepted, 32 other findings, no finding new, no entry left
 Run again with --apply to write this. [unified diff follows]
 ```
 
-After an upgrade, acceptances that stopped matching are paired with the findings that replaced them (same rule, file and job) and shown as one cause: "19 accepted risks need accepting again: OBAAF now records more about them", with the command. This is display only. Nothing is carried over.
+After an upgrade, a baseline entry that stopped matching is paired with an unaccepted finding of the same rule, file and job, and the cause's entry says so, as line 4 does above. This is display only. Nothing is carried over, and the finding stays under its own cause.
 
 ## The path to a gate
 
@@ -100,18 +104,18 @@ After an upgrade, acceptances that stopped matching are paired with the findings
 2. `obaaf check .` ends with the list.
 3. `obaaf fix` previews; `--apply` writes.
 4. **Accept what remains.** This is the existing command, `obaaf check . --write-baseline FILE --owner ... --reason ... --expires ...`. It stays the one way to accept in bulk. The list shows it last, with the count by severity.
-5. **Turn the gate on.** `obaaf fix --gate LEVEL` previews the one-line change to the workflow `obaaf init` wrote (the baseline and `--fail-on`). It works only on that workflow, whose shape OBAAF knows. A team that wrote its own CI step is shown the line to change.
+5. **Turn the gate on.** `obaaf fix --gate LEVEL` previews the one-line change to the workflow `obaaf init` wrote (the baseline and `--fail-on`). It is a step of its own, asked for by name, and not one of the kinds of fix below: its purpose is to let CI fail. It works only on that workflow, whose shape OBAAF knows. A team that wrote its own CI step is shown the line to change. On a pull request the gate reads the baseline from the target branch, as the template already reads the configuration, so a pull request cannot accept its own new risk.
 
 ## The kinds of fix
 
 | Kind | What it touches | Can it break a build? | How it is applied | First version |
 | --- | --- | --- | --- | --- |
-| Paperwork | OBAAF's own files: the configuration and the baseline | No | Together, from one preview | Convert an old-format baseline. Add the owner the user names to `ignore` entries that have none. Correct a lane value one edit away from a real lane name. Remove an entry whose finding a fix in the same preview cleared. Turn the gate on in the workflow `init` wrote. |
+| Paperwork | OBAAF's own files: the configuration and the baseline | No | Together, from one preview | Convert an old-format baseline. Add the owner the user names to `ignore` entries that have none. Correct a lane value one edit away from a real lane name. Remove an entry that no longer matches any finding. |
 | Tightening | One line of a workflow | Yes, where a job relied on the looseness | By kind, each on request | `persist-credentials: false` on a checkout (OBAAF-GHA-011). An exact version on an agent tool install, when the user gives the version (OBAAF-GHA-025). |
 | Confinement | How the agent runs | Yes | Never applied. Printed as a draft. | `obaaf fix egress --job NAME` |
 
 - The baseline conversion and the owner make an acceptance count that did not count before. They need `--owner`, and the baseline also `--reason` and `--expires`. They are the "You are accepting risk" block, and without those options they are not offered.
-- **Entries.** `obaaf fix` may remove a baseline or `ignore` entry whose finding is gone. It never adds one and never changes what one covers.
+- **Entries.** `obaaf fix` may remove a baseline or `ignore` entry that no longer matches any finding, and the preview lists each one it removes. It never adds one and never changes what one covers.
 - **A fix that disturbs other acceptances.** An edit to a workflow can change how another, accepted finding in the same file is described, so its acceptance stops matching. Such a fix is held back and listed with the number of findings that would need accepting again. The user can ask for it by name.
 - **Code owners.** A missing CODEOWNERS rule is not fixed automatically. It changes who must approve changes, and OBAAF cannot check offline that the owner exists. The list prints the lines to add.
 
@@ -134,8 +138,8 @@ Which tightening fixes come next is decided by evidence: the result files first 
 The draft says these things before anything else:
 
 - **No listed commit, no draft.** Until a commit of the action is listed (pull request #248, Sean's decision), the command says so and stops.
-- **The checker asks more of the job than one step.** For the egress control to be verified, no step but `actions/upload-artifact` may run after or beside the action, no other step and no `env` of the job or the workflow may be given a secret or the job's token, the job must not be able to request OIDC tokens, the allow-list must be written out, and the runner must be GitHub-hosted `ubuntu-24.04` (the full list is in `docs/egress-control.md`). A job that commits, comments or opens a pull request after its agent has to be split in two. The draft does not do that. It names each condition the job does not meet.
-- **The action holds only two keys.** `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` can be kept out of the agent's reach. A job whose agent uses another provider's key is still network-limited by the draft, but the key stays within reach, so OBAAF-GHA-005 stands and is accepted. Seventeen of Expectrail's 19 agent jobs are in this case; two use only `ANTHROPIC_API_KEY`.
+- **The checker asks more of the job than one step.** For the egress control to be verified, no step but `actions/upload-artifact` may run after or beside the action, no other step and no `env` of the job or the workflow may be given a secret or the job's token, the job must not be able to request OIDC tokens or give its token the `models` permission, the allow-list must be written out and hold no public suffix, and the job must run on GitHub-hosted `ubuntu-24.04`, not in a container (the full list is in `docs/checker-configuration.md`, under "Egress controls"). A job that commits, comments or opens a pull request after its agent has to be split in two. The draft does not do that. It names each condition the job does not meet.
+- **The action holds only two keys.** `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` can be kept out of the agent's reach. A job whose agent uses another provider's key is still network-limited by the draft, but the key stays within reach, so OBAAF-GHA-005 stands, and the team decides whether to accept it or to put the key behind a proxy of its own. Seventeen of Expectrail's 19 agent jobs are in this case; two use only `ANTHROPIC_API_KEY`.
 - What the command can no longer do (write outside its scratch copy, reach other hosts, read the job's other secrets), and how to find the hosts it needs (the action's `denied` output after one run).
 
 The work order (`--brief`) is the same content as a Markdown task: what to change, where, what must not change (no `ignore` or baseline entry may be added or widened; one whose finding is gone is removed), and the command that proves it. Names taken from the repository are quoted and length-limited as the settings report quotes them, and labelled as data. It tells the reader to generate it from a branch they trust.
@@ -145,8 +149,8 @@ The work order (`--brief`) is the same content as a Markdown task: what to chang
 The second of its five controls is that the secret is stored only in the environment named in `protected_secrets`, and that only protected branches may use that environment. `obaaf audit` reads those settings and can save them (`--snapshot-out`).
 
 - `obaaf check --settings FILE` takes such a snapshot. The second control is verified only when the snapshot shows, as read and not as assumed, every setting the control needs: the environment's secret names, the repository's and the organisation's secret names, and the environment's branch rule. Where the snapshot says a setting was not read, the control stays "cannot tell", with the snapshot's own reason.
-- The finding states the snapshot's date. A snapshot older than a limit is not believed; the limit is a proposed decision for Sean (this document suggests 30 days).
-- **Forgery.** A snapshot is evidence a pull request could alter. It is read only from the path the user passes. That file counts among the files that need a code owner, as a baseline does. The CI template reads it from the target branch, as it reads the configuration.
+- The finding states the snapshot's date. A snapshot older than 30 days is not believed. Sean approved that limit with this design; it is recorded as a decision when it is built.
+- **Forgery.** A snapshot is evidence a pull request could alter. It is read only from the path the user passes. That file counts among the files that need a code owner, as a baseline does. On a pull request the CI template must read it from the target branch, as it reads the configuration.
 - With all five controls verified the finding is cleared, as OBAAF-GHA-020 is by its one control. This is the only change to a finding's lifecycle in this design, and it is recorded as a proposed decision.
 - `obaaf check` still sends no request. Taking the snapshot is `obaaf audit`'s job, with read access only.
 
@@ -159,7 +163,7 @@ There are two kinds of cause.
 
 A finding counts under exactly one cause: an acceptance that does not count first, otherwise its rule and kind. Accepted and cleared findings are in no cause. Causes that OBAAF can fix now come first, then the rest by severity and count.
 
-JSON gains a `todo` array: for each cause its id, its kind, the sentence, the count by severity, the kind of fix and the command. Nothing else in JSON changes, and SARIF does not change.
+JSON gains a `todo` array: for each cause its id, its kind, the sentence, the count by severity, the kind of fix and the command. Nothing else in JSON changes, apart from what the settings snapshot adds to OBAAF-GHA-005's own entry (its second control's verdict and the snapshot's date), and SARIF does not change otherwise.
 
 ## Constraints
 
@@ -181,7 +185,7 @@ Each step is useful without the next.
 6. The work order.
 7. `obaaf init`'s last output, the gate switch, the documents, and the timed run again. This waits for `obaaf init` itself.
 
-All seven steps are P0. None is left for after the first users.
+All seven steps are P0. None is left for after the first users. Steps 3 and 6 need a listed commit of the egress action, which only Sean can list (pull request #248). Until he does, they can be built and tested against a test catalogue, and not finished.
 
 ## Approaches considered
 
