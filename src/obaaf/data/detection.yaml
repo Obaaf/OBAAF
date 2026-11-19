@@ -68,8 +68,8 @@ agent_tools:
       - https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml
       - https://github.com/anthropics/claude-code/blob/154c06539c4309e172b8ce6f2b07388987617d68/README.md
     actions:
-      anthropics/claude-code-action: {prompt_inputs: [prompt]}
-      anthropics/claude-code-base-action: {prompt_inputs: [prompt, prompt_file]}
+      anthropics/claude-code-action: {prompt_inputs: [prompt], args_inputs: [claude_args]}
+      anthropics/claude-code-base-action: {prompt_inputs: [prompt, prompt_file], args_inputs: [claude_args]}
     commands:
       - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
       - '@anthropic-ai/claude-code'
@@ -133,6 +133,27 @@ agent_tools:
           secrets, API keys, or other sensitive information. These logs are publicly visible in GitHub
           Actions.
         source: https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml#L82-L85
+    # Command-line options (flagship slice 2d.5c2a), read where `claude` is run and in `claude_args`. The
+    # action's own test for "turns off permission checks" is SKIPS_PERMISSION_CHECKS, lines 80 and 81 of the
+    # same file: `--(allow-)?dangerously-skip-permissions` or `--permission-mode bypassPermissions`.
+    flags:
+      - id: skip-permissions
+        options: [--dangerously-skip-permissions, --allow-dangerously-skip-permissions]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          claude_args turns off permission checks, so commands that are not on the deny list run without
+          approval.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/src/github/validation/untrusted-pr.ts#L214-L218
+      - id: bypass-permissions-mode
+        options: [--permission-mode]
+        equals: [bypassPermissions]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          If `claude_args` turns off permission checks, for example with `bypassPermissions`, commands outside
+          the list run without approval, and the action logs a warning.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md#L102
     carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
   - id: gemini-cli
@@ -155,6 +176,24 @@ agent_tools:
     installs: {"@google/gemini-cli": gemini}
     install_urls: []
     settings: []
+    # Command-line options (flagship slice 2d.5c2a), read where `gemini` is run. The same documentation says
+    # the sandbox is turned on by default with `--yolo` (docs/reference/configuration.md, line 3095), which is
+    # why these are medium. Gemini CLI reads its options with yargs, which also takes `--y` for `-y` and the
+    # camel-case `--approvalMode`.
+    flags:
+      - id: yolo
+        options: [--yolo, -y, --y]
+        severity: medium
+        read: 2026-11-19
+        says: "`yolo`: A mode where all tools are auto-approved (use with extreme caution)."
+        source: https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md#L212
+      - id: approval-mode-yolo
+        options: [--approval-mode, --approvalMode]
+        equals: [yolo]
+        severity: medium
+        read: 2026-11-19
+        says: "`yolo`: A mode where all tools are auto-approved (use with extreme caution)."
+        source: https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md#L212
 
   - id: codex
     name: Codex
@@ -164,7 +203,7 @@ agent_tools:
       - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md
       - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/README.md
     actions:
-      openai/codex-action: {prompt_inputs: [prompt, prompt-file]}
+      openai/codex-action: {prompt_inputs: [prompt, prompt-file], args_inputs: [codex-args]}
     commands:
       - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
       - '@openai/codex'
@@ -209,6 +248,26 @@ agent_tools:
           If you have effectively opened up your use of `openai/codex-action` to the world by configuring
           `allow-users: "*"`, you might find yourself the target of API key abuse.
         source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md#L66
+    # Command-line options (flagship slice 2d.5c2a), read where `codex` is run and in `codex-args`, from the
+    # CLI's own help text. `--sandbox danger-full-access` is not here: neither the CLI's files nor the
+    # action's give a sentence of warning for it (as for the action's `sandbox` input, F-267).
+    flags:
+      - id: bypass-approvals-and-sandbox
+        options: [--dangerously-bypass-approvals-and-sandbox, --yolo]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY DANGEROUS. Intended
+          solely for running in environments that are externally sandboxed.
+        source: https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs#L52-L59
+      - id: bypass-hook-trust
+        options: [--dangerously-bypass-hook-trust]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Run enabled hooks without requiring persisted hook trust for this invocation. DANGEROUS. Intended only
+          for automation that already vets hook sources.
+        source: https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs#L61-L64
 
   - id: github-models
     name: GitHub Models AI Inference

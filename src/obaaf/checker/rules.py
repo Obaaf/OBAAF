@@ -14,6 +14,7 @@ from pathlib import Path
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
+from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
@@ -26,6 +27,27 @@ from obaaf.checker.workflow import (
 )
 
 PLACEHOLDER_SHA = "0" * 40
+
+
+def _base_word(line: str) -> str:
+    """The first word of a line, without its directories, quotes or a Windows suffix, in lower case."""
+    words = line.strip().split()
+    first = words[0].strip("&'\"") if words else ""
+    return re.sub(r"\.(exe|cmd|bat|ps1)$", "", first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1], flags=re.I).lower()
+
+
+def _strings_in(value, limit: int) -> list:
+    """The strings in a value of lists and mappings (a matrix), at most `limit` of them, each node once."""
+    out: list = []
+    stack, seen = [value], set()
+    while stack and len(out) < limit:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, (list, dict)) and id(node) not in seen:
+            seen.add(id(node))
+            stack.extend(node.values() if isinstance(node, dict) else node)
+    return out
 _OWNER_PLACEHOLDER_RE = re.compile(r"obaaf_owner", re.I)
 _SHA_PLACEHOLDER_RE = re.compile(r"@0{40}(?![0-9a-fA-F])")
 
@@ -1601,7 +1623,11 @@ class WorkflowRules:
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                     out[name] = None
                     continue
-                text = str(value)
+                try:
+                    text = str(value)
+                except ValueError:          # an integer too long for Python to print (found by 2d.5c2a's review)
+                    out[name] = None
+                    continue
                 out[name] = None if "$" in text or len(text) > 10_000 else text
         return out
 
@@ -1820,16 +1846,22 @@ class WorkflowRules:
         a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
         most medium. An input that is not given has the action's default, which no setting names."""
         known = agent_tools.settings(self.detection)
-        if not known:
+        readers = agent_tools.flag_readers(self.detection)
+        if not known and not readers:
             return
+        if readers:
+            self._agent_flags(job, readers)
         for step in job.steps:
             if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
                 continue
             written = step.raw.get("with")
             if written is not None and not isinstance(written, dict):
                 # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
-                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review).
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review), and so is
+                # every flag of an input it hands the program as options (slice 2d.5c2a).
                 mine = [c for c in known if step.uses_action(c[2]["action"])]
+                mine += [(tool, name, flag) for tool, name, flags, _programs, _packages, args in readers
+                         if any(step.uses_action(a) for a in args) for flag in flags]
                 if mine:
                     self._agent_setting(job, step, written, mine, whole=True)
                 continue
@@ -1845,11 +1877,207 @@ class WorkflowRules:
             for key, candidates in by_input.items():
                 self._agent_setting(job, step, given[key], candidates)
 
+    def _agent_flags(self, job: Job, readers: list) -> None:
+        """OBAAF-GHA-026 for command-line options (flagship slice 2d.5c2a): an option an agent tool's own
+        files warn about, given where the tool's program is run in a step's script (its `run`, a
+        github-script script, the command OBAAF's egress action runs, and any other input, `env` value or
+        `docker://` argument that is a command running the program) or in an input one of the tool's actions
+        hands the program as options (`claude_args`, `codex-args`). `agent_flags` says how each is read and
+        what is "cannot tell"."""
+        for step in job.steps:
+            given = step.with_ if step.uses and not step.is_local else {}
+            written = step.raw.get("with")
+            for tool, name, flags, programs, packages, args in readers:
+                # The inputs an action of the tool hands its program as options. A `with:` that is one
+                # expression is "cannot tell" for them in `agent_tool_settings`.
+                if given and isinstance(written, dict):
+                    for action, inputs in args.items():
+                        if not step.uses_action(action):
+                            continue
+                        for key in dict.fromkeys(input_name(i) for i in inputs):
+                            if key in given:
+                                self._agent_args(job, step, tool, name, flags, action, key, given[key])
+                self._agent_command(job, step, tool, name, flags, programs, packages)
+
+    def _agent_args(self, job: Job, step: Step, tool: str, name: str, flags: list, action: str, key: str,
+                    raw) -> None:
+        if raw is None:
+            return
+        text = ("true" if raw else "false") if isinstance(raw, bool) else as_text(raw) if isinstance(
+            raw, (str, int, float)) else None
+        candidates = [(tool, name, dict(flag, input=key)) for flag in flags]
+        if text is None or "${{" in text:
+            # The same case as a setting's value the checker cannot read (a list, a mapping, an expression).
+            self._agent_setting(job, step, raw, candidates)
+            return
+        codex = action.lower() == "openai/codex-action"
+        # claude-code-action leaves out a line that starts with `#` and puts in an unset variable as nothing
+        # (shell-quote); codex-action reads `[` as JSON and keeps every other word (string-argv).
+        reading, unknown = agent_flags.read_args(text, flags, json_array=codex, comments=not codex,
+                                                 expands=not codex)
+        odd = any(unicodedata.category(ch)[0] in "CZ" and ch not in agent_flags.JS_SPACE for ch in text)
+        if odd or unknown:
+            # A character either side may read otherwise, or a variable the action may put in as nothing.
+            self._agent_setting(job, step, raw, [c for c in candidates if c[2]["id"] not in reading.hits],
+                                force_computed=True)
+        shown_action = (step.action or "").lower()
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` the option `{option}`, which {tool}'s "
+                     "own documentation warns about: \"{says}\" ({source}).", job, step,
+                     severity=flag["severity"], kind="option", action=shown_action, input=key,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+
+    _COMMAND_INPUTS = frozenset({"run", "command", "commands", "cmd", "script", "shell", "args", "arguments",
+                                 "entrypoint", "exec", "execute", "build-command", "test-command"})
+
+    _FOREIGN_SPECIAL_RE = re.compile(r"[$@`%^(]")
+
+    def _later_writes(self, job: Job) -> list:
+        """The indexes of the job's steps that can set a variable for the steps after them, worked out once."""
+        cache = self.__dict__.setdefault("_later_writes_cache", {})
+        if job.id not in cache:
+            cache[job.id] = [n for n, s in enumerate(job.steps) if self._SETS_FOR_LATER_RE.search(
+                (s.run or "") + " " + " ".join(str(v) for v in s.with_.values() if isinstance(v, str)) + " "
+                + " ".join(str(v) for v in s.env.values() if isinstance(v, str)))]
+        return cache[job.id]
+
+    _EXEC_CALL_RE = re.compile(r"\b(exec|execSync|execFile|execFileSync|spawn|spawnSync|getExecOutput|run|call|"
+                               r"check_call|check_output|Popen|system)\s*\(|\$`|child_process|\.apply\s*\(")
+
+    def _step_shell(self, job: Job, step: Step) -> str:
+        """The shell a `run` step's script is given to: its `shell`, else the job's and then the workflow's
+        `defaults.run.shell`, else bash (pwsh on a Windows runner)."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
+                run = defaults.get("run") if isinstance(defaults, dict) else None
+                if isinstance(run, dict) and isinstance(run.get("shell"), str):
+                    shell = run["shell"]
+                    break
+        if not isinstance(shell, str):
+            windows = any("windows" in str(label).lower() for label in job.runs_on)
+            return "pwsh" if windows else "bash"
+        first = shell.split()[0] if shell.split() else ""
+        return first.rsplit("/", 1)[-1].lower()
+
+    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
+                       packages: list) -> None:
+        # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
+        parts: list = []
+        if step.run:
+            shell_name = self._step_shell(job, step)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            parts.append((step.run.replace("^", "") if shell_name in ("cmd", "cmd.exe") else step.run,
+                          shell_name in ("bash", "sh")))
+        given = step.with_ if step.uses else {}
+        script = given.get("script") if step.uses_action("actions/github-script") else None
+        if isinstance(script, str):
+            parts.append((script, False))
+        if step.confines and isinstance(given.get("run"), str):
+            parts.append((given["run"], True))
+        # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
+        if step.run:
+            for shell in (step.raw.get("shell"), *(d.get("run", {}).get("shell") for d in (
+                    job.raw.get("defaults"), self.wf.raw.get("defaults")) if isinstance(d, dict) and isinstance(
+                    d.get("run"), dict))):
+                if isinstance(shell, str):
+                    parts.append((shell.replace("{0}", "script.sh"), True))
+                    break
+        own = {id(text) for text, _bash in parts}
+        # (text, whether its input's name says it is a command): other inputs, `env` values, and a
+        # `docker://` step's entrypoint and arguments, which GitHub hands the container as one command line.
+        others = [(v, k in self._COMMAND_INPUTS) for k, v in given.items() if isinstance(v, str) and id(v) not in own
+                  and not (k == "script" and script is not None) and not (k == "run" and step.confines)]
+        if step.uses and step.uses.strip().lower().startswith("docker://"):
+            entry, args = given.get("entrypoint"), given.get("args")
+            others.append((" ".join(v for v in (entry, args) if isinstance(v, str)), True))
+        others += [(v, False) for v in step.env.values() if isinstance(v, str)]
+        named = [text for text, _bash in parts] + [v for v, _c in others] + [
+            v for scope in (job.env, self.wf.env) if isinstance(scope, dict) for v in scope.values() if isinstance(v, str)]
+        matrix = job.raw.get("strategy")
+        if isinstance(matrix, dict):
+            named += _strings_in(matrix.get("matrix"), 2000)
+        scopes = [step.raw.get("env"), job.raw.get("env"), self.wf.raw.get("env")]
+        # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
+        scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+        scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        if not any(agent_flags.appears(t, programs, packages) for t in named):
+            # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
+            # where the script has a `$` and an assignment, with a regular expression (kept cheap).
+            if not any("$" in text and "=" in text and agent_flags.appears(agent_flags.put_in_cheaply(
+                    text, scopes), programs, packages) for text, _b in parts):
+                return              # the tool's name is nowhere in the step (the common case, kept cheap)
+        # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
+        # the job's and workflow's `env` values are then not known; the step's own `env` is.
+        writes = self._later_writes(job)
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        later = any(n < index for n in writes)
+        trust_env = [scoped, scoped and not later, scoped and not later]
+        known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
+        mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
+        reading = agent_flags.Reading()
+        for text, bash in parts:
+            variables, unread = known[id(text)]
+            if bash:
+                reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                      mentioned=mentioned, unread=unread, loose=True))
+            else:
+                # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
+                # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
+                # JavaScript or another shell is read the widest way; "cannot tell" where it names the tool and
+                # holds the start of a warned option it cannot complete (`"--dangerously-" + "skip-..."`).
+                if agent_flags.appears(text, programs, packages):
+                    reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                          mentioned=agent_flags.mentions(text, programs, packages),
+                                                          bash=False, loose=True))
+                    if script is not text:
+                        # In another shell, a variable or splat among the program's words (`claude @a`,
+                        # `claude $flags`, `claude %F%`) is "cannot tell", as an unquoted one is in bash.
+                        for line in text.split("\n"):
+                            if _base_word(line) in programs and re.search(r"(?<!\S)[@$%]\w|%\w+%", line):
+                                for flag in flags:
+                                    if flag["id"] not in reading.hits:
+                                        reading.cannot_tell(flag, one_line(line.strip(), 120))
+        for other, command_like in others:
+            # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
+            # starts a command with it, or that names the tool in an input whose name says it is a command.
+            if agent_flags.starts_program(other, programs, packages) or (
+                    command_like and agent_flags.appears(other, programs, packages)):
+                variables, unread = agent_flags.known_variables(scopes, other, trust_env)
+                reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
+                                                      unread=unread, prose=not command_like))
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with `{option}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=flag["severity"],
+                     kind="command-option", program=tool,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+        open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_:
+            words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
+            shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
+            worst = max((f["severity"] for f in open_), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with words the checker cannot read ({words}), "
+                     "so it cannot tell whether they hold an option that {tool}'s own documentation warns about "
+                     "({settings}).", job, step, severity=severity, kind="command-computed", program=tool,
+                     words=Fact([bounded(w) for w in words], shown), tool=Note(name),
+                     settings=sorted(f"{tool}/{f['id']}" for f in open_))
+
     # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
     # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
     _TRIMMED = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
 
-    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False) -> None:
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False,
+                       force_computed: bool = False) -> None:
         action = (step.action or "").lower()
         tool_name = candidates[0][1]
         input_shown = "with" if whole else candidates[0][2]["input"]
@@ -1867,7 +2095,9 @@ class WorkflowRules:
         # A control, format or separator character left inside the value (a NUL, which ends an environment
         # variable, U+200B, a no-break space) can make the action read another value than the one written.
         odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
-        if text is None or "${{" in text or odd:
+        if text is None or "${{" in text or odd or force_computed:
+            if not candidates:
+                return
             # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
             # any of it changes (found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo`
             # become `unsafe`). A list or a mapping, which GitHub refuses as inputs, is named by its kind, as
