@@ -54,11 +54,23 @@ Every tool that ci-agent-audit recognised at its commit `4a88ee6` (2026-11-07) h
 
 A value only another scanner's data calls dangerous is not reported. The actions' defaults, `safety-strategy: drop-sudo` or `unprivileged-user`, and named users or bots in `allow-users` and `allowed_bots` give no finding; an empty `allowed_non_write_users` also gives no finding. The documented warning for `allowed_bots: "*"` concerns public repositories. The checker reports the literal without checking repository visibility. A value is compared with white space taken off its ends as either Python or JavaScript trims it (U+FEFF included); a value with a control, format, separator, private-use or unassigned character left inside it other than a space, a tab, a carriage return or a line feed, and a `with:` that is neither a mapping nor empty (inputs written as one expression, `with: ${{ fromJSON(...) }}`), are "cannot tell". Not read: claude-code-action's `display_report`, a key written in clear, `ACTIONS_STEP_DEBUG`, these actions inside another repository's composite action or reusable workflow, and a `uses:` with an empty path segment, a leading `/` or a backslash (#245).
 
+**Options the tool's own documentation warns about** (OBAAF-GHA-026, slice 2d.5c2a, decision D-090). An entry's `flags` lists command-line options its own files warn about, each with the option's spellings, the values warned about where it takes one, the words, quoted, and the file, commit and lines they were read from; an action's `args_inputs` name the inputs it hands the program as options. They are read in those inputs (case `option`) and wherever a step runs the tool's program or package (case `command-option`). Read on 2026-11-19:
+
+| Tool | Option | Severity | Read in |
+| --- | --- | --- | --- |
+| `claude-code` | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` | high | `claude`, `claude_args` of `anthropics/claude-code-action` and its base action |
+| `claude-code` | `--permission-mode bypassPermissions` | high | the same |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox`, `--yolo` | high | `codex`, `codex-args` of `openai/codex-action` |
+| `codex` | `--dangerously-bypass-hook-trust` | medium | the same |
+| `gemini-cli` | `--yolo`, `-y`, `--approval-mode yolo` | medium (its documentation turns the sandbox on with them) | `gemini` |
+
+An option is matched in any letter case, as `--name=value` and `--name value`, and a one-letter option inside a group (`-yp`); quotes, backslashes and `$'...'` are taken out as a shell takes them out, and a variable the step's, job's or workflow's `env` gives a plain value is put in. An option written inside a prompt's text is read as given. What the checker cannot read in the command is a medium `command-computed` finding: a variable or substitution outside quotes, `"$@"`, any `${{ }}` expression, `xargs` running the program, and a warned option given a value it cannot read. To clear one, write the options out in the step, or quote the variable. A quoted word that starts with a variable (`claude -p "$PROMPT"`) is read as one word that is not an option. Not read: Codex's `--sandbox danger-full-access` and `-c` overrides, options in a configuration file or in an environment variable the tool reads, and the other 20 tools' options.
+
 **What the entries do not cover**, as read on 2026-11-18:
 - Docker images that run an agent (`docker://...pr-agent`, Amp's review image): an image is not matched to an entry.
 - A form of a tool's command its documentation did not give where it was read: Auggie's `-p`, Kiro's `kiro` and `q` programs, OpenHands' and SWE-agent's packages, Amp's package, and any command of Cline but its program name.
 - CodeRabbit's other actions: their repositories asked for a sign-in, so nothing could be read.
-- The settings of the other tools, and settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as `--dangerously-skip-permissions`): slice 2d.5c2. The two actions' settings below are read since slice 2d.5c1.
+- The settings and options of the other 20 tools: slice 2d.5c2b. The two actions' settings are read since slice 2d.5c1, and the options of Claude Code, Codex and Gemini CLI since slice 2d.5c2a.
 - An agent that no entry names, such as a project's own model entry points: name it in `agents.actions` or `agents.commands`, or declare the job an agent job.
 - A command written as text is read as run. The patterns are matched anywhere in a step's command lines, as they were before the slice, so `echo "goose run the migrator"` or a comment `# use kilo run` makes an agent job, and such text names an agent in the `agents` fact; editing it can change the finding.
 - The Jenkins rules: their reading of piped installs still knows only the agent names it knew before (`claude`, `gemini`, `codex`, `opencode`, `aider`, `copilot`, `qodo`).

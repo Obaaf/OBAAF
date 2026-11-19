@@ -23,6 +23,20 @@ Slice 4.9 (issue #152). The form and checklist explain which answers count towar
 - Where the form, the checklist and the text and Markdown reports state a tier, they now say that it reflects the answers given and that OBAAF does not verify that they are true, in place of "a tier describes controls in place".
 - **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`, and its ranking sentence names the two counts it ranks by. The JSON report is unchanged.
 
+### Agent CLIs run with an option their own documentation warns about
+
+Slice 2d.5c2a (issue #81, part of part 2 of 2d.5); decision D-090. **OBAAF-GHA-026 now also reads command-line options. It can turn a passing gate red.**
+
+- It reports an option the tool's own files warn about, in three new cases:
+  - `option`: in `claude_args` of `anthropics/claude-code-action` and `anthropics/claude-code-base-action`, and in `codex-args` of `openai/codex-action` (a value that starts with `[` is read as a JSON array, as the action reads it).
+  - `command-option`: where a step runs the tool's program or package (`claude`, `codex`, `gemini`, `npx @anthropic-ai/claude-code`, a path to one, behind `sudo`, `env`, `timeout`, `bash -c` or `eval`), in its `run`, a github-script script, the command OBAAF's egress action runs, or another input, `env` value or `docker://` argument that is such a command.
+  - `command-computed`: "cannot tell", at most medium, for a variable or substitution outside quotes in that command, any `${{ }}` expression in it, the program run by `xargs`, a warned option given a value the checker cannot read, and a quoted word whose written start is the start of a warned option.
+- Read on 2026-11-19: Claude Code's `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` and `--permission-mode bypassPermissions` (high); Codex's `--dangerously-bypass-approvals-and-sandbox` and `--yolo` (high) and `--dangerously-bypass-hook-trust` (medium); Gemini CLI's `--yolo`, `-y` and `--approval-mode yolo` (medium). Each finding quotes the words and gives the file, commit and lines. The options are data, under `flags` in each tool's entry in `detection.yaml`, and an action's `args_inputs` name the inputs it hands the program.
+- An option is matched in any letter case, as `--name=value` and `--name value`, and a one-letter option inside a group (`-yp`). Quotes, backslashes and `$'...'` are taken out as a shell takes them out, and a variable the step's, job's or workflow's `env` gives a plain value is put in. An option written inside a prompt's text is read as given (the wider reading).
+- A `with:` written as one expression now names these options among the settings it cannot tell, so that finding's `settings` fact is longer for the two actions.
+- Not read: a quoted word that starts with a variable (`claude -p "$PROMPT"`) is taken for one word that is not an option; Codex's `--sandbox danger-full-access` (no sentence of warning in the CLI's or the action's files); options in a configuration file, an environment variable the tool reads, or a Codex `-c` override; the other 20 agent tools' settings and options (slice 2d.5c2b).
+- This repository's report and Expectrail's are byte-identical before and after (neither runs these CLIs in a workflow).
+
 ### Agent actions given a setting their own documentation warns about
 
 Slice 2d.5c1 (issue #81, part of part 2 of 2d.5); decision D-088. **New rule OBAAF-GHA-026. It can turn a passing gate red.**

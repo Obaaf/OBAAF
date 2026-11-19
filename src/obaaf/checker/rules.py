@@ -14,6 +14,7 @@ from pathlib import Path
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
+from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
@@ -1820,16 +1821,22 @@ class WorkflowRules:
         a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
         most medium. An input that is not given has the action's default, which no setting names."""
         known = agent_tools.settings(self.detection)
-        if not known:
+        readers = agent_tools.flag_readers(self.detection)
+        if not known and not readers:
             return
+        if readers:
+            self._agent_flags(job, readers)
         for step in job.steps:
             if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
                 continue
             written = step.raw.get("with")
             if written is not None and not isinstance(written, dict):
                 # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
-                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review).
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review), and so is
+                # every flag of an input it hands the program as options (slice 2d.5c2a).
                 mine = [c for c in known if step.uses_action(c[2]["action"])]
+                mine += [(tool, name, flag) for tool, name, flags, _programs, _packages, args in readers
+                         if any(step.uses_action(a) for a in args) for flag in flags]
                 if mine:
                     self._agent_setting(job, step, written, mine, whole=True)
                 continue
@@ -1844,6 +1851,92 @@ class WorkflowRules:
                         by_input.setdefault(key, []).append((tool, name, setting))
             for key, candidates in by_input.items():
                 self._agent_setting(job, step, given[key], candidates)
+
+    def _agent_flags(self, job: Job, readers: list) -> None:
+        """OBAAF-GHA-026 for command-line options (flagship slice 2d.5c2a): an option an agent tool's own
+        files warn about, given where the tool's program is run in a step's script (its `run`, a
+        github-script script, the command OBAAF's egress action runs, and any other input, `env` value or
+        `docker://` argument that is a command running the program) or in an input one of the tool's actions
+        hands the program as options (`claude_args`, `codex-args`). `agent_flags` says how each is read and
+        what is "cannot tell"."""
+        for step in job.steps:
+            given = step.with_ if step.uses and not step.is_local else {}
+            written = step.raw.get("with")
+            for tool, name, flags, programs, packages, args in readers:
+                # The inputs an action of the tool hands its program as options. A `with:` that is one
+                # expression is "cannot tell" for them in `agent_tool_settings`.
+                if given and isinstance(written, dict):
+                    for action, inputs in args.items():
+                        if not step.uses_action(action):
+                            continue
+                        for key in dict.fromkeys(input_name(i) for i in inputs):
+                            if key in given:
+                                self._agent_args(job, step, tool, name, flags, action, key, given[key])
+                self._agent_command(job, step, tool, name, flags, programs, packages)
+
+    def _agent_args(self, job: Job, step: Step, tool: str, name: str, flags: list, action: str, key: str,
+                    raw) -> None:
+        if raw is None:
+            return
+        text = ("true" if raw else "false") if isinstance(raw, bool) else as_text(raw) if isinstance(
+            raw, (str, int, float)) else None
+        if text is None or "${{" in text:
+            # The same case as a setting's value the checker cannot read (a list, a mapping, an expression).
+            self._agent_setting(job, step, raw, [(tool, name, dict(flag, input=key)) for flag in flags])
+            return
+        reading = agent_flags.read_args(text, flags, json_array=action.lower() == "openai/codex-action")
+        shown_action = (step.action or "").lower()
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` the option `{option}`, which {tool}'s "
+                     "own documentation warns about: \"{says}\" ({source}).", job, step,
+                     severity=flag["severity"], kind="option", action=shown_action, input=key,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+
+    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
+                       packages: list) -> None:
+        names = [p.casefold() for p in programs + packages]
+        own = step._command_text()
+        others = [v for v in step.with_.values() if isinstance(v, str)] if step.uses else []
+        others += [v for v in step.env.values() if isinstance(v, str)]
+        if not any(n in re.sub(r"[\"'\\]", "", t).casefold() for t in [own, *others] for n in names):
+            return
+        variables = agent_flags.plain_variables([step.env, job.env, self.wf.env], own)
+        reading = agent_flags.read_script(own, programs, packages, flags, variables)
+        if others:
+            # Another input, an `env` value or a `docker://` argument that is a command running the program,
+            # as `Step.agent_text` finds one: read the second, widest way (its text is not a script of the step).
+            pattern = re.compile("(" + "|".join(re.escape(n) for n in names) + r")(@\S*)?(\s|$)", re.I)
+            extra = step.agent_text([pattern])
+            if extra and extra != own:
+                more = agent_flags.Reading()
+                agent_flags._read_segments(extra, [p.casefold() for p in programs],
+                                           [p.casefold() for p in packages], flags, more)
+                reading.merge(more)
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with `{option}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=flag["severity"],
+                     kind="command-option", program=tool,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+        open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_:
+            words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
+            shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
+            worst = max((f["severity"] for f in open_), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with words the checker cannot read ({words}), "
+                     "so it cannot tell whether they hold an option that {tool}'s own documentation warns about "
+                     "({settings}).", job, step, severity=severity, kind="command-computed", program=tool,
+                     words=Fact([bounded(w) for w in words], shown), tool=Note(name),
+                     settings=sorted(f"{tool}/{f['id']}" for f in open_))
 
     # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
     # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
