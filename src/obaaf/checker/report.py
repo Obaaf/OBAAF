@@ -275,7 +275,23 @@ def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options or ())]
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult) -> str:
+    if "obaaf check . --lanes" not in text:
+        return text
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    if command != one_line(command):
+        return "Use the original check paths and options; they cannot be printed as a one-line command."
+    return text.replace("obaaf check . --lanes", command)
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
@@ -294,13 +310,7 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
         if "pinCandidates" in group:
             lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
                          f"{group['byHand']} require manual review.")
-        action = group["nextAction"]
-        if "obaaf check . --lanes" in action:
-            args = _check_args(result)
-            if result.baseline_path:
-                args.append("--baseline=" + str(result.baseline_path))
-            args.extend(["--fail-on", result.fail_on, "--lanes"])
-            action = action.replace("obaaf check . --lanes", shlex.join(args))
+        action = _lane_advice(group["nextAction"], result)
         if group["command"] and result.errors:
             action = "Resolve the scan errors before migrating the baseline."
         if action != one_line(action):
@@ -399,7 +409,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + (_lane_advice(fix, result) if result.settings_path else fix))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "

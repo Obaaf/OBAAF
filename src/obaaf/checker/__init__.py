@@ -18,7 +18,10 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from obaaf.settings_evidence import SettingsEvidence
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
@@ -2309,6 +2312,7 @@ class CheckResult:
     today: date | None = None                                # the day acceptances were judged against
 
     fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
+    settings_path: str = ""  # only check accepts this explicit evidence input
 
     @property
     def workflow_files(self) -> list[str]:
@@ -2415,7 +2419,7 @@ def _resolve(target: Path, platform: str) -> tuple[Path, list[Path], list[Path],
 
 def check(target: Path, files: list[Path] | None = None, config: Config | None = None,
           catalog: Catalog | None = None, today: date | None = None, platform: str = "auto",
-          gate_files: list[Path] | None = None) -> CheckResult:
+          gate_files: list[Path] | None = None, settings: SettingsEvidence | None = None) -> CheckResult:
     """Check a repository root (workflows, Jenkinsfiles and repository files) or specific files.
 
     platform: auto (both kinds of CI definition), github (workflows only) or jenkins (Jenkinsfiles only).
@@ -2436,6 +2440,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             jenkins_paths = [f for f in files if platform == "jenkins" or jenkins_mod.is_jenkinsfile(f)
                              or f.suffix.lower() == ".groovy"]
             files = [f for f in files if f not in jenkins_paths]
+    if settings is not None:
+        settings = settings.for_scan(root, is_repo)
+        gate_files = [*(gate_files or []), settings.source]
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
     jenkins_sought = is_repo and platform != "github" and target == root
@@ -2513,7 +2520,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                            agents=config.agents, firewall=firewall).run()
+                                            agents=config.agents, firewall=firewall, settings=settings).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")

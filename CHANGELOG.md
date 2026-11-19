@@ -8,6 +8,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 `obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and `--apply` writes the proven edit. Pull requests use the target commit’s baseline and configuration. A missing target baseline accepts zero findings.
 
+### Offline settings evidence
+
+`obaaf check --settings FILE` reads an explicitly named audit snapshot, reports its date and checks its code ownership. Evidence older than 30 days or missing required observations stays uncertain. OBAAF-GHA-005 uses this evidence for its environment control and clears when all five controls verify. The production catalogue still lists no released egress action commit for its credential-isolation control.
+
 ### Upgrading from 0.3.0
 
 - **Pin an agent tool to a version you choose.** `obaaf fix --pin PACKAGE=VERSION` previews exact npm pins on directly identified OBAAF-GHA-025 installs. The to-do list keeps candidate and manual counts together. Use the displayed step name to request one occurrence and append `--apply` to write its proven diff.

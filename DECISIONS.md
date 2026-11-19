@@ -108,12 +108,14 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
 | D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-107 | A Markdown work order for confinement | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
 
 ---
 
@@ -973,6 +975,20 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
 
+### D-104 What a saved settings snapshot establishes
+
+**Decision.** The approved adoption design sets a 30-day lifetime. Measure elapsed UTC time from the audit producer’s `taken_at`. Exactly 30 days is eligible. A future timestamp or an older observation supplies no proof. Read a snapshot only from an explicit `--settings FILE`, with the audit command’s existing strict format reader. Match the observed GitHub API host and repository to the checked clone’s github.com origin. An unestablished or different identity leaves the result uncertain.
+
+An assessment concerns a literal secret and its required literal environment. Require a complete environment list and complete secret-name inventories for all environments, the repository, and the organisation. A recorded observation that the owner is a user can establish that organisation secrets do not apply. An unread or partial setting carries its recorded reason forward. A matching name must appear only in the required environment. For selected branches, all allowed names must be literal branches read as protected. For the protected-branches-only setting, require an observed classic branch protection rule, because the absence of rules permits all branches. See [GitHub deployment branches and tags](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags).
+
+**Consequence.** The explicit evidence path in the repository requires a code owner. A single-file scan, a lane listing, or an external snapshot cannot verify the evidence because the repository ownership check does not cover the snapshot in those cases. The optional CI template setting reads a pull request’s snapshot from its target commit. This slice reports the assessment separately and leaves finding verdicts to A4b.
+
+**Evidence.** `tests/test_settings_evidence.py` exercises the audit producer with recorded responses and tests timestamp boundaries, identity, exclusivity, branch policies, partial reads and the public CLI. `TheTemplateStepTest.test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin` exercises the selected snapshot and checker support in the template.
+
+**Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
+
+**Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
+
 ### D-105 Draft confinement for one agent job
 
 **Decision.** Preview one recognisable run step with the egress action at a listed release commit. Check the draft on a private copy and report the target job's control verdicts, including unmet conditions. Leave host selection, job splits and unsupported credential placement to the team.
@@ -1032,3 +1048,13 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review.
 
 **Status.** Proposed, 2026-11-19 (slice A5b, #291).
+
+### D-111 Apply settings evidence to OBAAF-GHA-005
+
+**Decision.** For each concrete secret a job reads, assess the environment named by its configuration and declared in the workflow against the explicitly selected D-104 snapshot. Record the timestamp and reasons on the environment control. Caller-supplied secrets, unresolved names and ambiguous environments cannot establish exclusive storage.
+
+**Consequence.** All five controls must verify for the finding to count as fixed. A missing code owner remains a separate repository finding. Snapshots do not change the identity of an acceptance. The production catalogue currently lists no egress action release for credential isolation.
+
+**Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
+
+**Status.** Proposed, 2026-11-19 (A4b, #300).
