@@ -5,7 +5,7 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 ## Versions, and what to pin
 
 - **A release** has three numbers (`0.3.0`). It is on PyPI (`pip install obaaf==0.3.0`) and has a tag (`v0.3.0`).
-- **Between releases** the code on `main` calls itself a development number (`0.4.0.dev0` on the way to 0.4.0). It is not a release, and it changes without notice. The JSON and SARIF reports, a baseline file and the generated documents say which version wrote them; the text report does not (`obaaf --version` does).
+- **The development build** at `80db1e6` on `flagship` reports `0.4.0.dev0`. Development commits can share a version, so record the commit as well. The development text report ends with `Checked by obaaf VERSION.`; JSON and SARIF reports, baselines and generated documents also record the version.
 - **Pin what your gate runs**: a release from PyPI, or the `setup-obaaf` action at a full commit SHA. A gate that follows `main` can fail because OBAAF changed, on a day nobody chose.
 - How a release is made is in [releasing.md](releasing.md). What each release changed is in the [changelog](../CHANGELOG.md).
 
@@ -14,12 +14,12 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 Move the pin in a pull request of its own, so that the gate runs once with the new version and nothing else changes with it.
 
 1. Read the section below for the version you are moving to.
-2. With the new version, run the report without failing anything: `obaaf check . --fail-on never`, with `--baseline FILE` if your gate uses one. Read its first lines and anything marked "Not accepted".
+2. With the new version, run the report without failing on finding severity: `obaaf check . --fail-on never`, with `--baseline FILE` if your gate uses one. Read its first lines and anything marked "Not accepted".
 3. Run your gate's own command and look at the exit status. If it is 1, the report says why: each finding that counts says under it what its acceptance lacks, and an old baseline is named with the command that converts it.
 4. Do what the section says: convert the baseline, complete the `ignore` entries, correct the declarations.
 5. Run the gate's command again. Commit the pin together with the changed baseline and configuration, and have the baseline reviewed like a workflow.
 
-## From 0.3.0 to the code on `main` (0.4.0, not released)
+## From 0.3.0 to the prospective 0.4.0 release
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
@@ -142,7 +142,7 @@ The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycl
 
 ### One upgrade, start to finish
 
-A repository with two workflows, a baseline written by 0.3.0 that accepts its four findings, and one job declared `OBAAF_LANE: agnet`. With 0.3.0 its gate, `obaaf check . --baseline .github/obaaf-baseline.json --fail-on low`, passes: "4 finding(s) accepted by the baseline, 0 new", and a note about the declaration. With the code on `main` the same command ends with status 1:
+A repository with two workflows, a baseline written by 0.3.0 that accepts its four findings, and one job declared `OBAAF_LANE: agnet`. With 0.3.0 its gate, `obaaf check . --baseline .github/obaaf-baseline.json --fail-on low`, passes: "4 finding(s) accepted by the baseline, 0 new", and a note about the declaration. With the development checker the same command ends with status 1:
 
 ```text
 Baseline: 0 finding(s) accepted by the baseline, 5 new.
@@ -176,10 +176,18 @@ obaaf check . --write-baseline .github/obaaf-baseline.json \
 
 ### The first adopter
 
-Expectrail, which is the author's own project, runs OBAAF pinned to the commit `d014b63` and sees none of this until it moves its pin. On a copy of its files at `776ddd3`, with its own command, the code on `main` ends with status 1 and 40 findings that count: the 38 its old-format baseline covers, one whose `ignore` entry has no owner, and one lane declaration that does nothing. When it moves its pin it has three things to do, each in a pull request its maintainer makes, because they touch its baseline or its configuration:
+Expectrail is maintained by one of OBAAF's authors. Its gate runs this command:
 
-1. `obaaf baseline migrate .github/obaaf-baseline.json --owner ... --reason ... --expires ...`.
-2. `owner:` on the one entry under `ignore:` in `.github/obaaf.yml`.
-3. Its entry `byo-smoke.yml#byo-smoke: probe` under `lanes:`. `probe` is not a lane of OBAAF's. It is a label Expectrail's own audit script reads. Either accept the finding in the baseline with that as the reason, or declare the job `trusted` and keep the list of probes in the script.
+```bash
+obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes
+```
 
-After the first step alone, on the same copy: 38 accepted, 2 new. No other adopter's upgrade has been observed.
+On 2026-11-19 UTC the development checker at `80db1e6` ran that command on a read-only copy of the public Expectrail source at `6bc5dce7`, with one restricted path excluded. It exited 1 with **69 new findings (46 high, 3 medium, 20 low) and zero accepted**. Of the 69, 37 were named by baseline or ignore entries that did not count. Separately, the report listed 19 baseline entries that no longer matched a finding. Twelve of the 69 findings were OBAAF-GHA-025. These counts describe that checkout and checker commit. The result after migration and the result with the final release have yet to be measured on that checkout.
+
+An earlier migration exercise on 2026-11-12 explains how the command behaves. On a copy of Expectrail at `776ddd3`, the development checker of that day counted 40 findings. Migrating the baseline alone accepted 38 and left two new. One was named by an ignore entry without an owner. The other came from the lane declaration `byo-smoke.yml#byo-smoke: probe`; Expectrail used `probe` as a label for its own script. [Recorded migration exercise](https://github.com/Obaaf/OBAAF/pull/110)
+
+For a similar gate:
+
+1. Run `obaaf baseline migrate .github/obaaf-baseline.json --owner OWNER --reason REASON --expires YYYY-MM-DD` using the owner, reason and expiry approved by the maintainer.
+2. Review ignore entries and complete each acceptance that still applies. For a project-specific lane label, move it out of OBAAF's lane declarations or record why the configuration finding is accepted.
+3. Rerun the gate. Review new findings and stale entries individually before committing changes to the baseline or configuration.
