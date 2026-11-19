@@ -1550,9 +1550,8 @@ def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 
         return [_unknown(shown, True)]
     if t.kind == "op" and t.text in ("*", "...") and a + 1 == b and toks[b].kind == "name":
         value = _value_at(code, toks[b].text, b)
-        if value is not None and toks[value[0]].text == "[" and code.close[value[0]] == value[1] and not _changed(
-                code, toks[b].text, value[0] - 2, b):
-            return _word(code, value[0], value[1], False, callee, depth + 1, joined)    # `[...common]`
+        if value is not None and toks[value[0]].text == "[" and code.close[value[0]] == value[1]:
+            return _word(code, b, b, False, callee, depth + 1, joined, listy=True)     # `[...common]`, `*c`
     if t.kind == "op" and t.text in ("*", "**", "...", "&"):
         return [_unknown(shown, True)]
     if t.kind == "name" and t.sigil in ("@", "%") and fam in ("perl", "pwsh"):
@@ -1598,7 +1597,7 @@ def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 
                 # Changed: read where each change adds words it can read (`args.push('--verbose')`).
                 for u in _uses(code, t.text, va - 2):
                     if va - 2 < u < a and _changes(code, u):
-                        added = _change_words(code, u)
+                        added = _change_words(code, u, va - 2)
                         if added is None:
                             return [_unknown(shown, True)]
                         words = words + added
@@ -1844,6 +1843,10 @@ def _changes(code: _Code, k: int) -> bool:
     p = code.parent[k]
     if p >= 0 and toks[p].text == "(" and code.callee(p) in _OUTPUT_CALLS:
         return False                        # logged: `console.log(...args)`, `print(*cmd)`
+    if before is not None and before.kind == "op" and before.text in ("*", "...") and p >= 0 and toks[
+            p].text in ("(", "[") and (_is_runner(code, p) if toks[p].text == "(" else False) and after is not None and (
+                after.text in (")", ",")):
+        return False                        # the list given whole to the runner (`system(*c)`): read there
     if after is not None and after.kind == "op":
         if after.text in (".", "->", "?."):
             method = toks[k + 2] if k + 2 < len(toks) else None
@@ -1879,7 +1882,7 @@ def _changed(code: _Code, name: str, at: int, until: int) -> bool:
     return n < len(changes) and changes[n] < until
 
 
-def _change_words(code: _Code, k: int) -> list | None:
+def _change_words(code: _Code, k: int, at: int = -1) -> list | None:
     """The words a change at token `k` adds to a held list, where it adds literal ones or values in a list's
     places (`cmd.append('--verbose')`, `args.push('--model', m)`, `cmd += ['--model', m]`); None where they
     are not known."""
@@ -1898,11 +1901,13 @@ def _change_words(code: _Code, k: int) -> list | None:
         words: list = []
         whole = toks[k + 2].text.lower() in ("extend", "concat")
         loops = _loop_names(code)
-        if _in_loop(code, k):
+        loop = _in_loop(code, k)
+        if loop is not None and _in_loop(code, at) != loop if at >= 0 else loop is not None:
             return None                         # added once for each turn of a loop: any number of words
         for a, b in args:
             a, b = _strip_nl(code, a, b)
-            if any(toks[x].kind == "name" and toks[x].text in loops for x in range(a, b + 1)):
+            if any(toks[x].kind == "name" and toks[x].text in loops for x in range(a, b + 1)) and (
+                    loop is None or at < 0 or _in_loop(code, at) != loop):
                 return None                     # a loop's value (`a`, `extra[i]`): any number of words
             words.extend(_word(code, a, b, not whole, "", listy=whole))
         return words
@@ -1922,38 +1927,60 @@ _LOOP_CALLS = frozenset({"foreach", "each", "map", "flatmap", "flat_map", "times
                          "downto", "for_each", "reduce", "filter", "every", "some", "array_map", "array_walk"})
 
 
-def _in_loop(code: _Code, k: int) -> bool:
-    """Whether token `k` is inside a loop: a callback given to `forEach`, `each`, `map` and the like, a block
-    after `for (...)` or `while (...)`, or (Python) a line indented under a `for` or `while` line."""
+def _in_loop(code: _Code, k: int):
+    """The loop token `k` is inside, or None: a callback given to `forEach`, `each`, `map` and the like (its
+    bracket), a block after `for (...)` or `while (...)` (its brace), or, in Python and Ruby, the `for`,
+    `while` or `... do` line it is indented under (that line's first token)."""
     toks = code.toks
     p = code.parent[k]
     while p >= 0:
         if toks[p].text == "(" and code.callee(p) in _LOOP_CALLS:
-            return True
+            return ("bracket", p)
         if toks[p].text == "{" and p >= 1 and toks[p - 1].text == ")":
             opener = next((o for o in range(p - 2, -1, -1) if code.close[o] == p - 1), -1)
             if opener >= 1 and toks[opener - 1].kind == "name" and toks[opener - 1].text in ("for", "while", "foreach"):
-                return True
+                return ("bracket", p)
         if toks[p].text == "{" and p >= 1 and toks[p - 1].kind == "name" and code.callee(p) in _LOOP_CALLS:
-            return True                         # Ruby's `extra.each { |f| ... }`
+            return ("bracket", p)                 # Ruby's `extra.each { |f| ... }`
         p = code.parent[p]
     if code.family in ("python", "ruby"):
-        text = code.text
-        start = text.rfind("\n", 0, toks[k].start) + 1
-        indent = len(text[start:toks[k].start]) - len(text[start:toks[k].start].lstrip())
-        pos = start - 1
-        while pos > 0:
-            prev = text.rfind("\n", 0, pos) + 1
-            line = text[prev:pos]
-            stripped = line.lstrip()
-            if stripped and len(line) - len(stripped) < indent:
-                if re.match(r"(for|while|until)\b", stripped) or re.search(r"\b(each|times|map)\b.*\bdo\b", stripped):
-                    return True
-                indent = len(line) - len(stripped)
-                if indent == 0:
-                    break
-            pos = prev - 1
-    return False
+        lines = _loop_lines(code)
+        n = bisect.bisect_right(lines[0], k) - 1
+        loop = lines[1][n] if n >= 0 else None
+        return ("line", loop) if loop is not None else None
+    return None
+
+
+def _loop_lines(code: _Code) -> tuple:
+    """For Python and Ruby, worked out once: the first token of each logical line (after a line end the
+    tokenizer keeps, so not inside a string or brackets), and the loop line each is indented under."""
+    if "_loop_lines" in code.__dict__:
+        return code.__dict__["_loop_lines"]
+    toks, text = code.toks, code.text
+    starts = [0] + [k + 1 for k, t in enumerate(toks) if t.kind == "nl" and k + 1 < len(toks)]
+    loops: list = []
+    stack: list = []            # (indent, the first token of a loop line or None)
+    for k in starts:
+        if k >= len(toks) or toks[k].kind == "nl":
+            loops.append(stack[-1][1] if stack and stack[-1][1] is not None else _nearest(stack))
+            continue
+        line_start = text.rfind("\n", 0, toks[k].start) + 1
+        indent = toks[k].start - line_start
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        loops.append(_nearest(stack))
+        line = text[toks[k].start:text.find("\n", toks[k].start) if "\n" in text[toks[k].start:] else len(text)]
+        is_loop = bool(re.match(r"(for|while|until)\b", line) or re.search(r"\b(each|times|map)\b.*\bdo\b", line))
+        stack.append((indent, k if is_loop else None))
+    code.__dict__["_loop_lines"] = (starts, loops)
+    return code.__dict__["_loop_lines"]
+
+
+def _nearest(stack: list):
+    for _indent, loop in reversed(stack):
+        if loop is not None:
+            return loop
+    return None
 
 
 def _loop_names(code: _Code) -> set:
@@ -2030,7 +2057,7 @@ def _held_lists(code: _Code) -> None:
                         return
                 continue
             if _changes(code, k):
-                added = _change_words(code, k)
+                added = _change_words(code, k, at)
                 if added is not None:
                     added_all.extend(added)
                     continue

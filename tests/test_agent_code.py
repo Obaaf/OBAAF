@@ -346,6 +346,31 @@ class SecondReviewTest(unittest.TestCase):
             ("const r = /" + "a" * 1001 + "'/;\nawait exec.exec('claude', flags) // '", "cannot"),
         ], make=script_step)
 
+    def test_the_fourth_pass(self):
+        # A list built afresh on each turn of a loop, with a literal added, is read as it is (it was "cannot
+        # tell" at a2defae); the indentation walk skips strings and is worked out once.
+        tq = "'" * 3
+        Case.expect(self, [
+            (heredoc("python3", "import subprocess\nfor p in prompts:\n    cmd = ['claude', '-p', p]\n    if v:\n"
+                                "        cmd.append('--verbose')\n    subprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ndef main():\n    prompt = " + tq + "\nfor each file, review it\n    "
+                                + tq + "\n    cmd = ['claude', '-p', prompt]\n    if verbose:\n"
+                                "        cmd.append('--verbose')\n    subprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\nfor p in prompts:\n    cmd = ['claude', '-p', p]\n"
+                                "    cmd.append('" + DSP + "')\n    subprocess.run(cmd)"), "hit"),
+            (heredoc("ruby", "c = ['claude']\nc.push('-v')\nsystem(*c)"), "none"),
+        ])
+        Case.expect(self, [
+            ("for (const pr of prs) {\n  const args = ['-p', prompt(pr)];\n  if (v) args.push('--verbose');\n"
+             "  await exec.exec('claude', args);\n}", "none"),
+            ("await Promise.all(prs.map(async pr => { const args = ['-p', pr]; args.push('--output-format', 'json');"
+             " await exec.exec('claude', args) }))", "none"),
+        ], make=script_step)
+        start = time.monotonic()
+        check(run_step(heredoc("python3", "import subprocess\ncmd = ['claude', '-p', p]\n" + "cmd.append('-v')\n" * 12000
+                                          + "subprocess.run(cmd)")))
+        self.assertLess(time.monotonic() - start, 10)
+
     def test_a_long_chain_of_unary_operators_does_not_end_the_check(self):
         text = script_step("const x = " + "!" * 3000 + "y\nawait exec.exec('claude', flags)")
         self.assertEqual(kinds(check(text)), ["command-computed"])
