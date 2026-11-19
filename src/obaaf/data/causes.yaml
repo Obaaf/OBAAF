@@ -4,6 +4,8 @@ causes:
   - id: untrusted-workflow-secrets
     sentence: "An outsider-triggered workflow may receive secrets."
     rules: [OBAAF-GHA-001]
+    except_kinds:
+      OBAAF-GHA-001: [pull-request]
     fix_kind: by-hand
     next: "Move the steps that need secrets into a reviewed workflow and pass only untrusted data between the two."
   - id: privileged-checkout
@@ -33,11 +35,15 @@ causes:
   - id: release-cache
     sentence: "A release job may restore shared cache data directly or through another job."
     rules: [OBAAF-GHA-006]
+    except_kinds:
+      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
     fix_kind: by-hand
     next: "Review the release job and any named producer. Remove shared cache restores, declare cache-mode: none on the affected job, and rebuild release inputs from trusted sources."
   - id: untrusted-cache-write
     sentence: "A workflow an outsider can trigger may write to the default branch's cache."
     rules: [OBAAF-GHA-007]
+    except_kinds:
+      OBAAF-GHA-007: [unreadable]
     fix_kind: by-hand
     next: "Set cache-mode explicitly to none or read on the affected job."
   - id: dependency-revision
@@ -55,6 +61,8 @@ causes:
   - id: untrusted-script-text
     sentence: "Text influenced by an outsider is used to construct a script."
     rules: [OBAAF-GHA-010]
+    except_kinds:
+      OBAAF-GHA-010: [through-env]
     fix_kind: by-hand
     next: "Pass the text as data through an environment variable and use it quoted in the script."
   - id: checkout-credentials
@@ -71,15 +79,17 @@ causes:
     sentence: "The workflow may put untrusted or agent work on a persistent self-hosted runner."
     rules: [OBAAF-GHA-013]
     fix_kind: by-hand
-    next: "Check which runner each reported job can select. Use an isolated ephemeral runner for untrusted work."
+    next: "Run the reported job on a GitHub-hosted runner. If it must run on your own runner, use an isolated ephemeral one for untrusted work; the checker cannot see that a runner is ephemeral, so then accept the finding with that reason."
   - id: release-environment
     sentence: "The checker cannot establish an environment gate for a job that may publish."
     rules: [OBAAF-GHA-014]
     fix_kind: by-hand
     next: "Put the job behind a named release environment and configure its reviewer and branch restrictions."
   - id: untrusted-release-trigger
-    sentence: "An outsider-influenced event can reach work with release authority."
+    sentence: "A job with release authority, or one that calls a release workflow, can be started by an event an outsider can influence."
     rules: [OBAAF-GHA-015]
+    except_kinds:
+      OBAAF-GHA-015: [pull-request, capability]
     fix_kind: by-hand
     next: "Restrict release work to trusted triggers and keep release permissions out of jobs that process unreviewed changes."
   - id: upload-verification
@@ -97,6 +107,8 @@ causes:
   - id: build-signing-key
     sentence: "Build steps may have access to signing key material."
     rules: [OBAAF-GHA-018]
+    except_kinds:
+      OBAAF-GHA-018: [any-secret]
     fix_kind: by-hand
     next: "Move signing into a dedicated job backed by a managed signing service and remove key material from build steps."
   - id: unsafe-checkout-option
@@ -140,7 +152,7 @@ causes:
     sentence: "An agent action receives an input its own documentation warns about."
     rules: [OBAAF-GHA-026]
     except_kinds:
-      OBAAF-GHA-026: [computed]
+      OBAAF-GHA-026: [computed, command-option, command-computed]
     fix_kind: by-hand
     next: "Read the warning quoted in the finding. Remove the override or set the input to a value appropriate for this job."
   - id: ineffective-lane
@@ -191,10 +203,10 @@ causes:
     fix_kind: by-hand
     next: "Pin the reported image to a digest, library to a reviewed commit, or agent CLI to an exact version."
   - id: jenkins-untrusted-command
-    sentence: "Untrusted text may be interpolated into a Jenkins command."
+    sentence: "Untrusted text may be interpolated into a Jenkins command, into Groovy code, or into a parameter of a job the pipeline starts."
     rules: [OBAAF-JEN-009]
     fix_kind: by-hand
-    next: "Pass external text through the environment and quote its expansion in the shell."
+    next: "Treat the text as data: pass it through the environment and quote its expansion in the shell, never build code that load or evaluate runs from it, and check that a job started with it never runs it as a command."
   - id: jenkins-artifact-source
     sentence: "The pipeline may take artifacts from a build selected by a moving reference."
     rules: [OBAAF-JEN-010]
@@ -251,7 +263,7 @@ causes:
     kinds:
       OBAAF-GHA-005: [environment]
     fix_kind: by-hand
-    next: "Review the environment’s secrets. Remove the environment from the agent job if it is unnecessary, or move work that needs its credentials to a separate trusted job."
+    next: "Review the environment's secrets. Remove the environment from the agent job if it is unnecessary, or move work that needs its credentials to a separate trusted job."
   - id: agent-inherited-oidc
     sentence: "A reusable agent job can inherit permission to request OIDC tokens."
     kinds:
@@ -282,6 +294,60 @@ causes:
       OBAAF-GHA-026: [computed]
     fix_kind: by-hand
     next: "Inspect how the input is constructed. Use an explicit reviewed literal or leave the input at its documented default."
+  - id: agent-cli-option
+    sentence: "An agent CLI is run with an option its own documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-option]
+    fix_kind: by-hand
+    next: "Read the warning quoted in the finding and remove the option from the command that runs the agent."
+  - id: agent-cli-option-unresolved
+    sentence: "The checker cannot read the words an agent CLI is run with to compare them with the options its documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-computed]
+    fix_kind: by-hand
+    next: "Inspect how the command line is built. Write the agent's options as literal words in the step, or check that none of the named options can be among them."
+  - id: pull-request-branch-secrets
+    sentence: "A job that runs on pull requests receives secrets. Forks get none, but a branch pushed by anyone with write access does."
+    kinds:
+      OBAAF-GHA-001: [pull-request]
+    fix_kind: by-hand
+    next: "Check whether the job needs these secrets on pull requests. Remove them, or move the steps that use them to a job that runs only on reviewed code, such as a push to a protected branch."
+  - id: release-cache-mode-unset
+    sentence: "A release job does not declare cache-mode: none, so a cache step added later would read caches other workflows wrote."
+    kinds:
+      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
+    fix_kind: by-hand
+    next: "Declare cache-mode: none on the release job."
+  - id: unreadable-cache-mode
+    sentence: "A job an outsider can start declares a cache-mode the checker cannot read."
+    kinds:
+      OBAAF-GHA-007: [unreadable]
+    fix_kind: by-hand
+    next: "Write the key as cache-mode, in lower case, with none or read as its plain value, and remove any other spelling of the key."
+  - id: untrusted-script-text-env
+    sentence: "A script expands, as an expression, an environment value that holds text an outsider can influence."
+    kinds:
+      OBAAF-GHA-010: [through-env]
+    fix_kind: by-hand
+    next: "Read the value from the environment instead of the ${{ env.NAME }} expression: \"$NAME\" in a POSIX shell, $env:NAME in PowerShell, %NAME% in cmd, process.env.NAME in actions/github-script. For a script an action runs elsewhere, such as over SSH, pass the variable through the action's own environment input."
+  - id: release-from-pull-request
+    sentence: "A release job runs on pull requests, where a branch pushed by anyone with write access gets whatever secrets and token permissions the job has."
+    kinds:
+      OBAAF-GHA-015: [pull-request]
+    fix_kind: by-hand
+    next: "Start the release job only from trusted events, such as a push to a protected branch, a tag or a release, and keep pull request work in a separate job."
+  - id: release-capability-unresolved
+    sentence: "A job an outsider-influenced event can start holds what publishing needs, and the checker cannot tell whether it releases."
+    kinds:
+      OBAAF-GHA-015: [capability]
+    fix_kind: by-hand
+    next: "If the job does not release, remove the publishing permissions or secrets it does not need and, if its environment is an expression, name it in plain text, or accept the finding with that reason. If it does release, start it only from trusted events."
+  - id: job-reads-every-secret
+    sentence: "A job can read every secret, so the checker cannot tell that no signing key is among them."
+    kinds:
+      OBAAF-GHA-018: [any-secret]
+    fix_kind: by-hand
+    next: "Pass only the secrets the job needs, each by its literal name, instead of secrets: inherit, toJSON(secrets) or a computed secret name."
   - id: instruction-file-size
     sentence: "An instruction file exceeds the amount of text the checker scans."
     kinds:
@@ -302,7 +368,7 @@ causes:
     fix_kind: by-hand
     next: "Create a CODEOWNERS file in a location GitHub reads and assign reviewers for the paths in the findings."
   - id: unloaded-codeowners
-    sentence: "GitHub cannot load the repository’s CODEOWNERS file."
+    sentence: "GitHub cannot load the repository's CODEOWNERS file."
     kinds:
       OBAAF-REPO-001: [not-loaded]
       OBAAF-REPO-002: [not-loaded]
