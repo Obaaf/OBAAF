@@ -176,3 +176,50 @@ class SummaryCliTest(unittest.TestCase):
             code, short, _ = run_cli("check", root, "--summary", "--baseline", baseline, "--fail-on", "never")
             self.assertIn("Stale baseline entries:", short)
             self.assertIn("Review stale entries before deciding whether to replace the baseline.", short)
+
+    def test_the_other_guards_and_the_baseline_in_the_lanes_command(self):
+        import json
+        from datetime import date, timedelta
+
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            # The migrate command for a baseline whose path cannot be printed on one line is left out.
+            odd = tmp / "bl\nnl.json"
+            odd.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
+            code, short, _ = run_cli("check", repo, "--baseline", odd, "--fail-on", "low", "--summary")
+            self.assertEqual(1, code)
+            self.assertIn("Use the original check paths and options; they cannot be printed", short)
+            self.assertNotIn("bl\\nnl.json", short)
+            # With a scan error, the list does not suggest migrating the baseline.
+            bad = repo / ".github" / "workflows" / "zz-bad.yml"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("jobs: [", encoding="utf-8")
+            code, short, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low", "--summary")
+            self.assertIn("Resolve the scan errors before migrating the baseline.", short)
+            self.assertNotIn("obaaf baseline migrate", short)
+        with TempDir() as root:
+            path = root / ".github" / "workflows" / "w.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text("on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n"
+                            "      OBAAF_LANE: agnet\n    steps:\n      - run: echo hi\n", encoding="utf-8")
+            baseline = root / "base line.json"
+            soon = (date.today() + timedelta(days=30)).isoformat()
+            run_cli("check", root, "--write-baseline", baseline, "--owner", "@someone", "--reason",
+                    "accepted for this test", "--expires", soon, "--fail-on", "never")
+            data = json.loads(baseline.read_text(encoding="utf-8"))
+            lane = [e for e in data["findings"] if e["rule"] == "OBAAF-CFG-001"]
+            self.assertEqual(1, len(lane), data)
+            # An expired entry: the list asks for a review instead of offering to write the baseline.
+            lane[0]["expires"] = (date.today() - timedelta(days=1)).isoformat()
+            baseline.write_text(json.dumps(data), encoding="utf-8")
+            code, short, _ = run_cli("check", root, "--baseline", baseline, "--fail-on", "low", "--summary")
+            self.assertIn("Review invalid baseline acceptances before deciding whether to write the baseline.", short)
+            self.assertNotIn("--write-baseline=", short)
+            # Without that entry the lane finding is outstanding, and the lanes command keeps the baseline.
+            data["findings"] = [e for e in data["findings"] if e["rule"] != "OBAAF-CFG-001"]
+            baseline.write_text(json.dumps(data), encoding="utf-8")
+            code, short, _ = run_cli("check", root, "--baseline", baseline, "--fail-on", "low", "--summary")
+            command, = [line.strip() for line in short.splitlines() if line.strip().endswith("--lanes")]
+            self.assertIn(f"--baseline={baseline}", shlex.split(command))

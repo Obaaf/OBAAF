@@ -328,11 +328,19 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
             action = action.replace("obaaf check . --lanes", "the command below")
         if group["command"] and result.errors:
             action, command = "Resolve the scan errors before migrating the baseline.", None
-        lines.append("   " + one_line(action))
+        if command is not None and command != one_line(command):
+            if group["command"]:
+                action = "Use the original check paths and options; they cannot be printed as a one-line command."
+            else:
+                action = action.replace(
+                    "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
+                    "printed as a one-line command)")
+            command = None
+        if action != one_line(action):
+            action = "Use the original check paths and options; they cannot be printed as a one-line command."
+        lines.append("   " + action)
         if command is not None:
-            lines.append("      " + command if command == one_line(command) else
-                         "      (The check's paths or options cannot be printed as a one-line command: use "
-                         "the original paths and options.)")
+            lines.append("      " + command)
     if result.errors or not groups or result.baseline_format == baseline_mod.FORMAT_V1:
         return lines
     if result.baseline_stale:
