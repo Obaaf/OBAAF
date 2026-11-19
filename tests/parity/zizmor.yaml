@@ -1,0 +1,99 @@
+# OBAAF's parity test against zizmor (flagship slice 2d.3b, decision F-19).
+#
+# For the GitHub Actions rules OBAAF shares with zizmor, OBAAF should report what zizmor reports on
+# the same workflow, or say here why it does not. scripts/zizmor_parity.py reads this file:
+#
+# - CI's advisory job `zizmor-parity` installs the zizmor below with the SHA-256 of every file PyPI
+#   publishes for it (zizmor-requirements.txt), runs it on each set, checks that what it reports for
+#   the mapped audits is what zizmor-cases.json records, and compares OBAAF's findings with it;
+# - the ordinary test suite (tests/test_zizmor_parity.py) compares OBAAF's findings with the
+#   recorded cases of every set whose files are in this repository, so a change to OBAAF that makes
+#   it silent where zizmor reports fails without zizmor installed.
+#
+# A case is one (file, job, audit) zizmor reports, in its default persona. It is answered when OBAAF
+# reports one of the audit's rules on the same file and job (or on the file, where zizmor names no
+# job, or OBAAF's finding names none), in any state but `fixed`. A case that is not answered fails the
+# test unless an entry under `silent` names it with a reason. An entry under `silent` that names no
+# case, or a case OBAAF now answers, fails too, so this file cannot say more than the tools do.
+format: obaaf-zizmor-parity/v1
+
+zizmor:
+  # The version pinned in zizmor-requirements.txt, and the one zizmor-cases.json was recorded with.
+  version: 1.32.0
+  # Passed to every run. Offline: zizmor's online audits (impostor commits, known-vulnerable actions,
+  # ref confusion, stale refs) need the network and a token, and are not among the mapped audits.
+  # No configuration and the default persona, as a team running zizmor with no setup would see it.
+  arguments: [--offline, --no-config, --no-exit-codes, --no-progress, --format, json-v1]
+
+# zizmor audit -> the OBAAF rules that answer it (landscape.md, "Where OBAAF overlaps").
+audits:
+  template-injection: [OBAAF-GHA-010]
+  unpinned-uses: [OBAAF-GHA-008]
+  excessive-permissions: [OBAAF-GHA-009]
+  artipacked: [OBAAF-GHA-011]
+  cache-poisoning: [OBAAF-GHA-006]
+
+# The workflow files compared. Each is checked by OBAAF on its own, with no configuration
+# (`obaaf check FILE`), as zizmor is run on it with none. Composite actions (action.yml) are left
+# out: OBAAF reads one only through a workflow step that uses it.
+sets:
+  risky:
+    about: OBAAF's published risky workflows, written by OBAAF's authors.
+    root: tests/fixtures/workflows/risky
+    include: ["*.yml"]
+  zizmor-tests:
+    about: >-
+      zizmor's own test workflows for the five mapped audits at its release v1.32.0, written by
+      zizmor's authors (MIT licence). They are not copied into this repository: CI checks them out
+      at the commit below.
+    repository: zizmorcore/zizmor
+    commit: 21bd300700d43d9ba04b0c1fce72a89391ac80b4
+    root: crates/zizmor/tests/integration/test-data
+    include:
+      - template-injection.yml
+      - template-injection/**/*.yml
+      - unpinned-uses.yml
+      - unpinned-uses/**/*.yml
+      - excessive-permissions.yml
+      - excessive-permissions/**/*.yml
+      - artipacked.yml
+      - artipacked/**/*.yml
+      - cache-poisoning.yml
+      - cache-poisoning/**/*.yml
+    exclude:
+      - "**/action.yml"
+      # zizmor configuration files, not workflows.
+      - unpinned-uses/configs/**
+
+# Cases zizmor reports and OBAAF is silent on, each with the reason.
+silent: []
+
+# OBAAF-GHA-002, 013 and 019 have no matching zizmor audit. They are held to what poutine and CodeQL
+# reported on the same files when they were run for landscape.md (both on 2026-11-11, in parts 1 and
+# 2); those tools are not run here. OBAAF must report one of the rules on the file.
+recorded:
+  - tool: poutine 1.1.6
+    result: untrusted_checkout_exec
+    set: risky
+    file: pwn-request.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: poutine 1.1.6
+    result: untrusted_checkout_exec
+    set: risky
+    file: unsafe-checkout-opt-in.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: poutine 1.1.6
+    result: pr_runs_on_self_hosted
+    set: risky
+    file: pytorch-self-hosted.yml
+    rules: [OBAAF-GHA-013]
+  - tool: CodeQL 2.27.4, codeql/actions-queries 0.6.39
+    result: actions/untrusted-checkout/critical
+    set: risky
+    file: pwn-request.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: CodeQL 2.27.4, codeql/actions-queries 0.6.39
+    result: actions/untrusted-checkout/critical
+    set: risky
+    file: unsafe-checkout-opt-in.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]

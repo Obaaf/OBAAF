@@ -161,6 +161,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  zizmor-parity:
+    # The parity test of plan slice 2d.3b (F-19): on the rules OBAAF shares with zizmor, OBAAF must
+    # report what a pinned zizmor reports on the same workflows, or tests/parity/zizmor.yaml must say
+    # why it does not. It runs zizmor on OBAAF's risky workflows and on zizmor's own test workflows,
+    # checks that what zizmor reports is what tests/parity/zizmor-cases.json records, and compares.
+    name: Parity with zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: it depends on PyPI and github.com, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # zizmor's test workflows at the commit tests/parity/zizmor.yaml names (its release v1.32.0).
+      # They are read by zizmor and OBAAF, and nothing in them is run.
+      - name: Check out zizmor's test workflows
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zizmorcore/zizmor
+          ref: 21bd300700d43d9ba04b0c1fce72a89391ac80b4
+          path: third-party/zizmor
+          persist-credentials: false
+          sparse-checkout: crates/zizmor/tests/integration/test-data
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+
+      # tests/parity/zizmor-requirements.txt must hold PyPI's SHA-256 for every file of the pinned
+      # zizmor. When it does not, the file it should be is printed on one line (LOCK) for a reviewer to
+      # check and commit.
+      - name: Check the zizmor pin against PyPI
+        id: lock
+        run: python scripts/zizmor_parity.py lock --check
+
+      - name: Print the expected zizmor pin
+        if: failure() && steps.lock.outcome == 'failure'
+        run: python scripts/zizmor_parity.py lock --print
+
+      - name: Install the pinned zizmor
+        run: |
+          python -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            --requirement tests/parity/zizmor-requirements.txt
+
+      - name: Run zizmor on each set
+        run: |
+          python scripts/zizmor_parity.py run --zizmor "$RUNNER_TEMP/zizmor/bin/zizmor" --out "$RUNNER_TEMP/parity" \
+            --root zizmor-tests=third-party/zizmor/crates/zizmor/tests/integration/test-data
+
+      - name: Compare OBAAF with zizmor
+        run: |
+          python scripts/zizmor_parity.py ci \
+            --zizmor risky="$RUNNER_TEMP/parity/risky.json" \
+            --zizmor zizmor-tests="$RUNNER_TEMP/parity/zizmor-tests.json" \
+            --root zizmor-tests=third-party/zizmor/crates/zizmor/tests/integration/test-data
+
+      - name: Keep zizmor's output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zizmor-parity
+          path: ${{ runner.temp }}/parity/
+          if-no-files-found: warn
+          retention-days: 7
+
   actionlint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
