@@ -104,6 +104,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
+| D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 
 ---
 
@@ -918,3 +919,15 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
 **Status.** Proposed, 2026-11-19 (A2b, #275).
+
+### D-103 Applying the paperwork preview
+
+**Decision.** `obaaf fix --apply` runs the preview again with the supplied check and acceptance options, prints the unified diff, flushes it, and reproves those exact edits on a fresh private copy. Before writing any file it checks every target's original bytes and executable mode against HEAD, the index and the proven working file. Each target must be tracked, clean and an existing regular file. Unrelated local changes can remain. The command leaves the Git index alone and makes no commit.
+
+**Reason.** The adoption design asks for a change an adopter can review as its own commit. Using the same preview and proof keeps both invocations on the same rules. Checking actual contents also covers files on which Git's index has an assume-unchanged flag.
+
+**Consequence.** A directory lock serializes concurrent OBAAF applies. All replacement bytes are prepared before installation. Each original is retained through validation of the complete set. A recoverable failure restores the originals in reverse order. The replacement must preserve ownership, group, permission bits and every extended attribute visible to the process, including Linux POSIX access ACLs. Inherited attributes that the original lacked are removed. The command verifies this before installation and again before releasing the originals. A filesystem that cannot represent the original metadata, or a file with a capability or integrity signature, requires manual editing. It supports ordinary Git text line-ending conversion and declines targets with external filters, working-tree encodings or ident expansion. Repeating apply when the checker offers no further edit succeeds without writing.
+
+The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
+
+**Status.** Proposed, 2026-11-19 (slice A2c, #279).

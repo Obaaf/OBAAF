@@ -7,6 +7,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 ### Upgrading from 0.3.0
 
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
+- **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git. The command preserves its permissions and leaves the changes unstaged for review.
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
