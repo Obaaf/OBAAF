@@ -150,9 +150,10 @@ def _keys(entry, allowed: set, where: str) -> dict:
     return entry
 
 
-def load_mapping(path: Path = MAPPING) -> Mapping:
+def load_mapping(path: Path | None = None) -> Mapping:
     from obaaf import yamlutil
 
+    path = path or MAPPING
     try:
         data = yamlutil.load(path.read_text(encoding="utf-8"))   # refuses duplicate keys
     except Exception as exc:
@@ -362,8 +363,9 @@ def digests(fileset: FileSet, base: Path) -> dict:
 CASE_KEYS = {"file", "job", "audit", "severity", "confidence", "lines", "steps", "job_level"}
 
 
-def load_cases(path: Path = CASES) -> dict:
+def load_cases(path: Path | None = None) -> dict:
     """The recorded cases: {"zizmor": version, "sets": {set: [Case, ...]}, "digests": {set: {file: sha256}}}."""
+    path = path or CASES
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("format") != CASES_FORMAT or set(data) != {
             "format", "zizmor", "sets", "digests"}:

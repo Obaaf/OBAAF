@@ -11,7 +11,11 @@
     "confidence": "low",
     "lines": [
      14
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "clinejection-release.yml",
@@ -21,7 +25,11 @@
     "confidence": "low",
     "lines": [
      13
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "clinejection-release.yml",
@@ -31,7 +39,11 @@
     "confidence": "low",
     "lines": [
      14
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "clinejection-release.yml",
@@ -42,7 +54,12 @@
     "lines": [
      13,
      14
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "clinejection-triage.yml",
@@ -52,7 +69,9 @@
     "confidence": "medium",
     "lines": [
      9
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "clinejection-triage.yml",
@@ -63,7 +82,12 @@
     "lines": [
      12,
      15
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "expression-spellings.yml",
@@ -74,7 +98,12 @@
     "lines": [
      19,
      20
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "nx-title-injection.yml",
@@ -85,7 +114,11 @@
     "lines": [
      13,
      14
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "promptpwnd-issue-agent.yml",
@@ -95,7 +128,11 @@
     "confidence": "low",
     "lines": [
      17
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "promptpwnd-issue-agent.yml",
@@ -106,7 +143,12 @@
     "lines": [
      17,
      18
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "pwn-request.yml",
@@ -116,7 +158,11 @@
     "confidence": "low",
     "lines": [
      11
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "pwn-request.yml",
@@ -126,7 +172,9 @@
     "confidence": "medium",
     "lines": [
      8
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "pwn-request.yml",
@@ -136,7 +184,11 @@
     "confidence": "high",
     "lines": [
      11
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "pytorch-self-hosted.yml",
@@ -146,7 +198,11 @@
     "confidence": "low",
     "lines": [
      9
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "pytorch-self-hosted.yml",
@@ -156,7 +212,9 @@
     "confidence": "medium",
     "lines": [
      6
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "pytorch-self-hosted.yml",
@@ -166,7 +224,11 @@
     "confidence": "high",
     "lines": [
      9
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "tj-actions-unpinned.yml",
@@ -176,7 +238,11 @@
     "confidence": "high",
     "lines": [
      18
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    }
   ],
   "zizmor-tests": [
@@ -188,7 +254,11 @@
     "confidence": "low",
     "lines": [
      22
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning.yml",
@@ -198,7 +268,11 @@
     "confidence": "low",
     "lines": [
      13
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-enabled-by-default.yml",
@@ -208,7 +282,11 @@
     "confidence": "low",
     "lines": [
      21
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-not-configurable.yml",
@@ -218,7 +296,11 @@
     "confidence": "low",
     "lines": [
      23
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-opt-in-boolean-toggle.yml",
@@ -228,7 +310,11 @@
     "confidence": "low",
     "lines": [
      19
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-opt-in-boolish-toggle.yml",
@@ -238,7 +324,11 @@
     "confidence": "low",
     "lines": [
      17
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-opt-in-expression.yml",
@@ -248,7 +338,11 @@
     "confidence": "low",
     "lines": [
      19
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/caching-opt-in-multi-value-toggle.yml",
@@ -258,7 +352,11 @@
     "confidence": "low",
     "lines": [
      18
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/dangerous-trigger-write-cache-job.yml",
@@ -268,7 +366,9 @@
     "confidence": "high",
     "lines": [
      16
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "cache-poisoning/dangerous-trigger-write-cache.yml",
@@ -278,7 +378,9 @@
     "confidence": "high",
     "lines": [
      7
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "cache-poisoning/issue-1081-repro.yml",
@@ -290,7 +392,13 @@
      15,
      18,
      23
-    ]
+    ],
+    "steps": [
+     0,
+     1,
+     2
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/issue-1152-repro.yml",
@@ -301,7 +409,12 @@
     "lines": [
      16,
      20
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/issue-1152-repro.yml",
@@ -311,7 +424,11 @@
     "confidence": "low",
     "lines": [
      42
-    ]
+    ],
+    "steps": [
+     2
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/issue-2320-repro.yml",
@@ -323,7 +440,13 @@
      19,
      24,
      29
-    ]
+    ],
+    "steps": [
+     0,
+     1,
+     2
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/issue-343-repro.yml",
@@ -335,7 +458,13 @@
      28,
      34,
      41
-    ]
+    ],
+    "steps": [
+     1,
+     2,
+     3
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/issue-642-repro.yml",
@@ -345,7 +474,11 @@
     "confidence": "low",
     "lines": [
      15
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/publisher-step.yml",
@@ -355,7 +488,11 @@
     "confidence": "low",
     "lines": [
      23
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/ramsey-composer-install.yml",
@@ -366,7 +503,12 @@
     "lines": [
      13,
      15
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/trigger-heuristics/tag-and-branch.yml",
@@ -377,7 +519,12 @@
     "lines": [
      17,
      23
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/trigger-heuristics/tag-only.yml",
@@ -388,7 +535,12 @@
     "lines": [
      16,
      22
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/workflow-release-branch-trigger.yml",
@@ -398,7 +550,11 @@
     "confidence": "low",
     "lines": [
      22
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/workflow-release-trigger-object.yml",
@@ -408,7 +564,11 @@
     "confidence": "low",
     "lines": [
      23
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "cache-poisoning/workflow-tag-trigger.yml",
@@ -418,7 +578,11 @@
     "confidence": "low",
     "lines": [
      23
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "excessive-permissions.yml",
@@ -428,7 +592,9 @@
     "confidence": "high",
     "lines": [
      12
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/issue-472-repro.yml",
@@ -438,7 +604,9 @@
     "confidence": "medium",
     "lines": [
      20
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/jobs-broaden-permissions.yml",
@@ -448,7 +616,9 @@
     "confidence": "high",
     "lines": [
      11
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/jobs-broaden-permissions.yml",
@@ -458,7 +628,9 @@
     "confidence": "high",
     "lines": [
      20
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/reusable-workflow-call.yml",
@@ -468,7 +640,9 @@
     "confidence": "medium",
     "lines": [
      7
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
@@ -478,7 +652,9 @@
     "confidence": "medium",
     "lines": [
      1
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
@@ -488,7 +664,9 @@
     "confidence": "medium",
     "lines": [
      11
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
@@ -498,7 +676,9 @@
     "confidence": "medium",
     "lines": [
      19
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/workflow-default-perms.yml",
@@ -508,7 +688,9 @@
     "confidence": "medium",
     "lines": [
      14
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/workflow-read-all.yml",
@@ -518,7 +700,9 @@
     "confidence": "high",
     "lines": [
      5
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/workflow-write-all.yml",
@@ -528,7 +712,9 @@
     "confidence": "high",
     "lines": [
      5
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "excessive-permissions/workflow-write-explicit.yml",
@@ -540,7 +726,9 @@
      7,
      8,
      9
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "template-injection.yml",
@@ -550,7 +738,11 @@
     "confidence": "high",
     "lines": [
      19
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/addnab-docker-run-action.yml",
@@ -561,7 +753,12 @@
     "lines": [
      20,
      26
-    ]
+    ],
+    "steps": [
+     0,
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/codeql-sinks.yml",
@@ -571,7 +768,11 @@
     "confidence": "high",
     "lines": [
      17
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/dataflow.yml",
@@ -585,7 +786,12 @@
      23,
      28,
      29
-    ]
+    ],
+    "steps": [
+     1,
+     2
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/input-caps.yml",
@@ -595,7 +801,11 @@
     "confidence": "high",
     "lines": [
      18
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/issue-1903-repro.yml",
@@ -605,7 +815,11 @@
     "confidence": "low",
     "lines": [
      21
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/issue-2490-repro.yml",
@@ -615,7 +829,11 @@
     "confidence": "high",
     "lines": [
      19
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/issue-2502-repro.yml",
@@ -625,7 +843,11 @@
     "confidence": "high",
     "lines": [
      19
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/issue-339-repro.yml",
@@ -635,7 +857,11 @@
     "confidence": "low",
     "lines": [
      30
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/multiline-expression.yml",
@@ -646,7 +872,11 @@
     "lines": [
      19,
      20
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/patterns.yml",
@@ -658,7 +888,11 @@
      30,
      31,
      32
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/pr-317-repro.yml",
@@ -668,7 +902,11 @@
     "confidence": "medium",
     "lines": [
      28
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/pwsh-script.yml",
@@ -678,7 +916,11 @@
     "confidence": "high",
     "lines": [
      16
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/static-env.yml",
@@ -690,7 +932,13 @@
      43,
      50,
      55
-    ]
+    ],
+    "steps": [
+     3,
+     4,
+     5
+    ],
+    "job_level": false
    },
    {
     "file": "template-injection/template-injection-dynamic-matrix.yml",
@@ -700,7 +948,11 @@
     "confidence": "medium",
     "lines": [
      26
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "unpinned-uses.yml",
@@ -710,7 +962,11 @@
     "confidence": "high",
     "lines": [
      16
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "unpinned-uses/issue-1543-repro.yml",
@@ -720,7 +976,11 @@
     "confidence": "high",
     "lines": [
      18
-    ]
+    ],
+    "steps": [
+     1
+    ],
+    "job_level": false
    },
    {
     "file": "unpinned-uses/issue-659-repro.yml",
@@ -730,7 +990,11 @@
     "confidence": "high",
     "lines": [
      24
-    ]
+    ],
+    "steps": [
+     0
+    ],
+    "job_level": false
    },
    {
     "file": "unpinned-uses/menagerie-of-uses.yml",
@@ -744,7 +1008,15 @@
      22,
      24,
      26
-    ]
+    ],
+    "steps": [
+     0,
+     1,
+     3,
+     4,
+     5
+    ],
+    "job_level": false
    },
    {
     "file": "unpinned-uses/reusable-workflow-unpinned.yml",
@@ -754,7 +1026,9 @@
     "confidence": "high",
     "lines": [
      17
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    },
    {
     "file": "unpinned-uses/reusable-workflow-unpinned.yml",
@@ -764,8 +1038,111 @@
     "confidence": "high",
     "lines": [
      21
-    ]
+    ],
+    "steps": [],
+    "job_level": true
    }
   ]
+ },
+ "digests": {
+  "risky": {
+   "agent-action-unsafe.yml": "69b7f422689071f5747820b0ffe7df9f78b1cdf122c2f8fd4bf538c42c5e7bc3",
+   "agent-cli-skip-permissions.yml": "be85d22b01cd832dccf56360d80dbf14d47976d3498156e8a27ac9a149f3687e",
+   "agent-cli-unpinned.yml": "b7a6855016fa4320ad466ed9853985f556f00ae25e0a3f7609325354091d7f00",
+   "agent-lane-misspelled.yml": "f51f382101ba3ee0bde07d6a777a0b819a8d5875c64bc39c29cbb928fe0acc66",
+   "claude-action-toctou.yml": "54d920b214c638d4aba289e5c987d2c2e0dbef6ab88b02813461ca75d8e3189a",
+   "clinejection-release.yml": "fdb71dbdb9fb55fbd444beab6e3317c919ba07aa6e3fe11520d46d6f85705401",
+   "clinejection-triage.yml": "b683867fbf64fe7ff1a9dfdd9fefcebf5cb98fed053d47fe3dde51eb6e475fd0",
+   "effect-without-checks.yml": "c1ccb66f55f1f0d6be74ea8663b3716fb8cbe373545ba50910b4e3c0fe104215",
+   "expression-spellings.yml": "4cb11e06bd6a8ca7bb14c287e52e2569161be553a6f64782f0c072c23e65c019",
+   "nx-title-injection.yml": "69e840f4e8cc763d07a788b835262f0aaac5b31f4d79bc2e3aaec9cb87c4e15c",
+   "promptpwnd-issue-agent.yml": "9a7fcbab8f9586ab06b0d023c737c7979f689a3429090e76d3791fa46f9b004b",
+   "protected-secret-repo-scope.yml": "d08ed420c39091df5b55238c5ccd1b0f5f42da9e55e56f31dab74ef20586367a",
+   "pwn-request.yml": "3448f6765f45f7c6e32739f7a3829aa55e8c0f5969f64aa62d4558131bb15b6a",
+   "pytorch-self-hosted.yml": "ea7f025725e1414b53d9ea84489016a5d7691921fa3e5a33ade3c5673146c873",
+   "release-from-comment.yml": "37575e36dd29752b6a9ccd0a9b37d79524d37d979da30701a7a7651011798b31",
+   "signing-key-in-build.yml": "47b566ef333eca4eb96c4b2ead0b4291f15d3c84b96d8715c3308526938308d5",
+   "template-placeholder.yml": "af068b1c344d45d00eea2de77b097331449123f443fe66ef011999355b56335c",
+   "tj-actions-unpinned.yml": "3a464081c68e853758bf5534fee1820e3c5fa36d40790fb8ef4974d54cf9c8a2",
+   "unsafe-checkout-opt-in.yml": "5a04c56c8c1eb79b09600cec713c2a4ccf975d053aba8f8911f579058b8f4981"
+  },
+  "zizmor-tests": {
+   "artipacked.yml": "12cba4f8752bfd922aae52069ab2e75b27cafc5ebffabc64e88f02b2c9048788",
+   "artipacked/issue-1709-repro.yml": "ebcae81b11104d9393771d09f7172b4dad97c69e6a9e33c950b35edbd7363f01",
+   "artipacked/issue-447-repro.yml": "e405cdbaa53f925385d1b3b00ca500db0b9c287c742510ebd731439cd326239c",
+   "cache-poisoning.yml": "1ca531c19da92a36f1fe1be8160e20de9e176e53ff3c00d95b78d956db7be7c4",
+   "cache-poisoning/caching-disabled-by-default.yml": "eaa3ea2669240563637908c8246f82743d340f2bba4dddfb867eb4a8abf6b728",
+   "cache-poisoning/caching-enabled-by-default.yml": "cbed8b7821ec9a88f2617c1d0cc934971906742cc8b3bd60f5be424811694fc0",
+   "cache-poisoning/caching-not-configurable.yml": "0d2e588c0af589a8cc815fc71a542c860156e3dea02924c1d5658f341eefcacf",
+   "cache-poisoning/caching-opt-in-boolean-toggle.yml": "3526da3d78fe82db0c12e7b5de1d194c5ee0b90147f8b64f4bce897bf91c4574",
+   "cache-poisoning/caching-opt-in-boolish-toggle.yml": "70720ada74c401245ff4b28638b63e5d815273a3070423c7c0a585d7d85f46a9",
+   "cache-poisoning/caching-opt-in-expression.yml": "1ac894c7859e062d830e198c5652d753068f2cd8c6d0b35a89e9ea81912fc4a1",
+   "cache-poisoning/caching-opt-in-multi-value-toggle.yml": "9f5821b7ed2306bafb0fc96bbc49ee508aa0f25fbf495a70435857e13745bea2",
+   "cache-poisoning/caching-opt-out.yml": "737ddcd41d23feeaf0162bb49638778ac117843823a79835b5b3653d1c7b746f",
+   "cache-poisoning/dangerous-trigger-write-cache-job.yml": "cb34278a4b0c29d2c4637141e29ebb2b4ac6bc623d83934df9c44d69b9e90c2c",
+   "cache-poisoning/dangerous-trigger-write-cache.yml": "b77fa637c4935e994589a45064127239e771e5297d4b90beafff3017ce997723",
+   "cache-poisoning/issue-1081-repro.yml": "c610c82e473326ca350d82ea52c00b47bb2a2319b7ec161ba6a8ed63931ed03e",
+   "cache-poisoning/issue-1152-repro.yml": "2499301a6ac315ebfed55e11c7c8bd35f91eeccad2d202933195bcd6ee341d8b",
+   "cache-poisoning/issue-1485-repro.yml": "395c2f3cb50d1bb93b04de10ae4aaef3130747d8e6767b3dd4b5c409a3338040",
+   "cache-poisoning/issue-1940-repro.yml": "fa639cc0d3f5cf8a1343310c18af606453e3d0a6427fff84c4068076cc5a3106",
+   "cache-poisoning/issue-2320-repro.yml": "1de224b4421c68d3a87b085ccf9c72fb8d980a5b3050c7f393e891b7722f79a1",
+   "cache-poisoning/issue-343-repro.yml": "96d9bdf91be018c26f5228d2154d87a6c860b1c5b1fce324545bfa7b20a8bd58",
+   "cache-poisoning/issue-378-repro.yml": "2f66be77aa95236be95a0e9bd8c841c48a35882ee21b7e7479b5b96b787d69af",
+   "cache-poisoning/issue-642-repro.yml": "476f54cadb816195485a790841fb5a5afc9a369a8fe5ba6624fee6a8ce67ddf9",
+   "cache-poisoning/job-effective-cache-mode-none.yml": "4f3aa6d7d9e5e9dea0a93ddec38948c8378f8626cf5df7f2a66d81897d4b080f",
+   "cache-poisoning/no-cache-aware-steps.yml": "6792f5e6666e5abf664febed82b40493e79712c9dd13b362d87c49f371e9558a",
+   "cache-poisoning/publisher-step.yml": "a4d02677af83166302d6166258b1394a8ba2a44c0c71e1b8d85d92d4495e8698",
+   "cache-poisoning/ramsey-composer-install.yml": "8bb27e785860d9886342d8c06a5b4f5a707302c127d1d828b08f70b93832eb08",
+   "cache-poisoning/trigger-heuristics/tag-and-branch.yml": "72e917d4dfb3aa901a666fc67bdb5a652f68aae06f8f6c1a0df6467d83f0d5f1",
+   "cache-poisoning/trigger-heuristics/tag-and-release.yml": "3dd24cbab00eaff93e79786c51f13d182b1b026df8873fba17c41ce315b53f5c",
+   "cache-poisoning/trigger-heuristics/tag-only.yml": "1d41a5856dc1d1818b01c9aaf305c4f58570e2e473db3fd6aa2a1529b0ab4704",
+   "cache-poisoning/workflow-effective-cache-mode-none.yml": "5343a813f00c19640926558a138a974e66c26de5acfb0546af3ec22c95e78dbc",
+   "cache-poisoning/workflow-release-branch-trigger.yml": "03f2e9e3b8c07e29c1128c8928bddaceb403ed8febe3d955d207657a73d1a14e",
+   "cache-poisoning/workflow-release-trigger-object.yml": "327acb86323fb992dda32b70af879c37d81d3d94ae69111ccb78b2478c9909c3",
+   "cache-poisoning/workflow-tag-trigger.yml": "f06414eb85fa9d2ef533b8cdc7621dec8be52814695803286a20306b9a955dab",
+   "excessive-permissions.yml": "086b4e88667b948a05305a99e2a14060758d40f4b13dd37e31a4dc7b5bca9d5a",
+   "excessive-permissions/issue-336-repro.yml": "df2c2fce22202db6f737cecd6f0dddb3cd88834f85993d1a819aa43804a0c6e7",
+   "excessive-permissions/issue-472-repro.yml": "58af3eacdfcc551b2da648e90802a7185909005ede03ecdb28e6954b32cba822",
+   "excessive-permissions/jobs-broaden-permissions.yml": "f3cd4fe12ebdc77623a372963e26f977c0f9f848059bc7c9b60bd52373b8e071",
+   "excessive-permissions/reusable-workflow-call.yml": "8939f7f39b4ae3e78079dc60c1731fcc8d807f8ffd1014aa36a035285e084719",
+   "excessive-permissions/reusable-workflow-other-triggers.yml": "7ba6b5f63d11fad91bdacb3a64bd5ac5f9230efbb044a73ed3c62bd58ccbdd74",
+   "excessive-permissions/workflow-default-perms-all-jobs-explicit.yml": "e14b2373e4bdd7bef93d6b8180da4c70945db54b570d7255dd3dd7161d490297",
+   "excessive-permissions/workflow-default-perms.yml": "b3b22163fa800e78f413b133d1abb73bbf912e3212d593758381f23b6c993746",
+   "excessive-permissions/workflow-empty-perms.yml": "d47e9e2e7c5dc2e2f9a0e398a6113d207e25c6a3d26f39fc07bab0b5eade0ac6",
+   "excessive-permissions/workflow-read-all.yml": "3a12394e0df968359648f31fc5510b7f60908199ae57cc9c03a5d78e53ac5f91",
+   "excessive-permissions/workflow-write-all.yml": "3b12228e849ab715821e9aa1ebd02862745577a6743233b96f3985c1d315f74c",
+   "excessive-permissions/workflow-write-explicit.yml": "4e5288cc28ac5326bb3664002d4d606bc808537c88d98545d9eae6cef5ac061c",
+   "template-injection.yml": "2ac1a06049a061b8fe0050580796aa67b91e989cc9fe364ca2ebde77704d965c",
+   "template-injection/addnab-docker-run-action.yml": "7d1f695d0582bf3e9575179f074b224b9eca2270aa8cfd11463304a94f5059bb",
+   "template-injection/codeql-sinks.yml": "3de4481f02f2a1802c93add129507f3b3bdeb29b6e6bb75991c483bf1e762c6e",
+   "template-injection/dataflow.yml": "6fd971588f11c757f44318ec7438eb72c1ae3bbef5799f7db26064d6f48a0795",
+   "template-injection/false-positive-menagerie.yml": "58d94e0cdcab6d92da68c9b813981cce2936f5ac77f0e3ba78b315a2cb68b184",
+   "template-injection/input-caps.yml": "50f9d50081b65b60074658022b73d10202ece04d4006594482665f77db7089bb",
+   "template-injection/issue-1638-repro.yml": "9a789b2cb9067f1c606cab945f1f34f86c211e4e1fb0ec93999e426f87326930",
+   "template-injection/issue-1664-repro.yml": "66bd6a66cff1fed36b366781e68c8e2a2f26e834a1161872dd1f51209ae6e649",
+   "template-injection/issue-1802-repro.yml": "545000dbebba8bcdcf3084b52ebf0bddbec498d26acdd08f2038e9c80881f1c1",
+   "template-injection/issue-1903-repro.yml": "d2264cf1d9f96a774eb1224c253181b4669141407707751f647186d279a0a6d1",
+   "template-injection/issue-2197-repro.yml": "cd637cb3b87a1b4c8adc86a9c0617aa9c5dc9ac6c3529846189c644dc387e498",
+   "template-injection/issue-22-repro.yml": "afe795d45eb668538e78a1f5039e07781008e7d09d30ad7eefe881f62fee9f74",
+   "template-injection/issue-2490-repro.yml": "a1cac674611972230bc1aa99a926666152b7614eb41b377453e190736765dc14",
+   "template-injection/issue-2502-repro.yml": "a5ae2354b587e5b5320edecac4fcd49afdeee428613b6e3c6dd440874b0c1508",
+   "template-injection/issue-339-repro.yml": "c55003cac1e2fea2a462b994a8ccfe278bff61343f5ef8803464c6e6cc40ec63",
+   "template-injection/issue-418-repro.yml": "7de2fd552c09ad21b4b7f64da32b035074c688cb85996a40721fde61dae3e98a",
+   "template-injection/issue-749-repro.yml": "56a9c52033fa4209e98e1824ac998c61fd2e71569c1e62560ebc5a052435cbdc",
+   "template-injection/issue-988-repro.yml": "04a9a78242b3a95198750446cfe00c20a51608c42c2adaaa9ecc4ce3afb98f8a",
+   "template-injection/multiline-expression.yml": "84fdab95302e2e75d9ef8f4d4ff4de2031d13a394fa581943da5b4d5ba289f3e",
+   "template-injection/patterns.yml": "75ef47dd565df1e376b3f03bf14996cf15b61022438c1f1a2ab839de55f80ffd",
+   "template-injection/pr-317-repro.yml": "fbe757c7883f0c47565a8c3e9088a00d256019a5727928b5e11bc4864990cc92",
+   "template-injection/pwsh-script.yml": "7d7809517cb54a01bdc4ecc04827ec3842693bda635d864a572c33d2e162ed64",
+   "template-injection/static-env.yml": "d76977f50f8c600df795260ff8765883fbcb4c11e1b23bfa43328e1f0452d975",
+   "template-injection/template-injection-dynamic-matrix.yml": "f85fa953a84c5e994187b55c6240bbb986f1ee769d7d2552ad15f2b8c1afca79",
+   "template-injection/template-injection-static-matrix.yml": "6034a697c4c8f08c2205b7dcd4c79fbe2c8d733608850ff5b118c55cb6d8d362",
+   "unpinned-uses.yml": "ca6b3f1ec7b63eaedcdfbfeb3ba1951a0af79af6b559aaf0d44f1bc2653e1be5",
+   "unpinned-uses/issue-1543-repro.yml": "8ad3443678f866d313c8d703082eac8758f0a8511531c2f802d3b52c03c45d1f",
+   "unpinned-uses/issue-433-repro.yml": "ae9d7b88f6c9c289a0e285b587a455dbd81d883a8b469f9524077e99e120a322",
+   "unpinned-uses/issue-659-repro.yml": "25a471696f2ce04c97c33e65631a0308e331553f988f19fff1067d6aecbcb991",
+   "unpinned-uses/menagerie-of-uses.yml": "5a0a6cb2a0075774fd055af44f535db77e34175f76a4df1f21adda1969cea0e7",
+   "unpinned-uses/reusable-workflow-unpinned.yml": "46baa622d8e470331e9966952ec2d0e30398ad2419b34de078fe7c2626818046"
+  }
  }
 }
