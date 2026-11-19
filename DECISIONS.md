@@ -105,6 +105,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
 
 ---
 
@@ -933,3 +934,13 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
 
 **Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
+
+### D-111 Apply settings evidence to OBAAF-GHA-005
+
+**Decision.** For each concrete secret a job reads, assess the environment named by its configuration and declared in the workflow against the explicitly selected D-104 snapshot. Record the timestamp and reasons on the environment control. Caller-supplied secrets, unresolved names and ambiguous environments cannot establish exclusive storage.
+
+**Consequence.** All five controls must verify for the finding to count as fixed. A missing code owner remains a separate repository finding. Snapshots do not change the identity of an acceptance. The production catalogue currently lists no egress action release for credential isolation.
+
+**Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
+
+**Status.** Proposed, 2026-11-19 (A4b, #300).

@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from helpers import run_cli
 from obaaf.audit import snapshot
@@ -95,6 +96,72 @@ class EvidenceTests(unittest.TestCase):
         self.settings["repository"]["value"]["owner_type"] = "User"
         self.assertEqual(self.result().verdict, "verified")
 
+    def test_cli_clears_only_with_five_verified_controls(self):
+        from test_egress_recognised import catalog, keyed, workflow
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
+                        "https://github.com/example-studio/game.git"], check=True)
+        folder = self.root / ".github"
+        (folder / "workflows").mkdir(parents=True)
+        (folder / "CODEOWNERS").write_text("* @example/build\n")
+        (folder / "obaaf.yml").write_text("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n"
+                                         "lanes: {'.github/workflows/ci.yml#agent': agent}\n")
+        step = keyed(step_env={"ANTHROPIC_API_KEY": "${{ secrets.PACKAGE_INDEX_TOKEN }}"})
+        workflow_path = folder / "workflows/ci.yml"
+        workflow_path.write_text(workflow(step, job_extra="    environment: release"))
+        self.data["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        args = ("check", str(self.root), "--format", "json", "--fail-on", "never")
+        rule = "OBAAF-GHA-005"
+
+        def report(*flags):
+            status, out, err = run_cli(*args, *flags)
+            self.assertEqual(status, 0, err)
+            return json.loads(out)
+
+        with patch("obaaf.checker.load", return_value=catalog()):
+            before = report()
+            snapshot.write(self.data, self.path)
+            selected = ("--settings", str(self.path))
+            complete = report(*selected)
+            finding = next(f for f in complete["fixed"] if f["rule"] == rule)
+            self.assertEqual([c["verdict"] for c in finding["controls"]], ["verified"] * 5)
+            self.assertIn(self.data["taken_at"], finding["controls"][1]["detail"])
+            self.assertFalse(any(f["rule"] == rule for f in complete["findings"]))
+            self.assertEqual(complete["summary"]["fixed"], before["summary"]["fixed"] + 1)
+            (folder / "CODEOWNERS").write_text("/.github/ @example/build\n")
+            unowned = report(*selected)
+            self.assertTrue(any(f["rule"] == rule for f in unowned["fixed"]))
+            self.assertTrue(any(f["rule"] == "OBAAF-REPO-001" and "policy/settings.json" in f["message"]
+                                for f in unowned["findings"]))
+            self.assertGreater(unowned["summary"]["new"], complete["summary"]["new"])
+            workflow_path.write_text(workflow(step, job_extra="    environment: release", on="issues"))
+            outstanding = next(f for f in report(*selected)["findings"] if f["rule"] == rule)
+            self.assertEqual(outstanding["controls"][1]["verdict"], "verified")
+            self.assertNotEqual(outstanding["controls"][2]["verdict"], "verified")
+            workflow_path.write_text(workflow(step, job_extra="    environment: release"))
+            with (folder / "obaaf.yml").open("a") as config:
+                config.write("ignore:\n  - rule: OBAAF-GHA-005\n    path: .github/workflows/ci.yml\n"
+                             "    job: agent\n    owner: '@example/build'\n"
+                             "    reason: The build team reviewed this temporary credential risk\n"
+                             f"    until: {(datetime.now(timezone.utc) + timedelta(days=7)).date()}\n")
+            self.assertTrue(any(f["rule"] == rule for f in report(*selected)["fixed"]))
+            self.settings["repository_secrets"]["value"].append("PACKAGE_INDEX_TOKEN")
+            snapshot.write(self.data, self.path)
+            outstanding = next(f for f in report(*selected)["findings"] if f["rule"] == rule)
+            self.assertEqual(outstanding["controls"][1]["verdict"], "not met")
+            self.assertEqual(outstanding["state"], "accepted")
+            self.settings["organization_secrets"] = {"status": "unread", "reason_code": "forbidden",
+                                                     "reason": "inventory not available", "needs": "read"}
+            snapshot.write(self.data, self.path)
+            outstanding = next(f for f in report(*selected)["findings"] if f["rule"] == rule)
+            self.assertEqual(outstanding["controls"][1]["verdict"], "cannot tell")
+            self.assertIn("inventory not available", outstanding["controls"][1]["detail"])
+            self.data["taken_at"] = "2020-01-01T00:00:00Z"
+            snapshot.write(self.data, self.path)
+            outstanding = next(f for f in report(*selected)["findings"] if f["rule"] == rule)
+            self.assertEqual(outstanding["controls"][1]["verdict"], "cannot tell")
+            self.assertIn("30 days", outstanding["controls"][1]["detail"])
+
     def test_normal_cli_reads_only_selected_file_and_checks_ownership(self):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
@@ -128,7 +195,27 @@ jobs:
         self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
         found = json.loads(out)["findings"]
         self.assertTrue(any(f["rule"] == "OBAAF-REPO-001" and "policy/settings.json" in str(f) for f in found))
-        self.assertEqual([f for f in found if f["rule"] != "OBAAF-REPO-001"], before)
+        other = lambda rows: [f for f in rows if f["rule"] not in {"OBAAF-REPO-001", "OBAAF-GHA-005"}]
+        self.assertEqual(other(found), other(before))
+        control = next(f for f in found if f["rule"] == "OBAAF-GHA-005")["controls"][1]
+        self.assertEqual(control["verdict"], "verified")
+        self.assertIn(self.data["taken_at"], control["detail"])
+        # The library enrolls the snapshot itself, even if the caller supplies no gate_files.
+        from obaaf import checker
+        evidence = SettingsEvidence.load(self.path, "example-studio/game")
+        config = checker.Config.load(self.root)
+        workflow_path = folder / "workflows/ci.yml"
+        for target, files in [(workflow_path, None), (self.root, [workflow_path]), (self.root, None)]:
+            with self.subTest(target=target, files=files):
+                result = checker.check(target, files=files, config=config, settings=evidence)
+                setting = next(f for f in result.findings if f.rule == "OBAAF-GHA-005").controls[1]
+                if target == self.root and files is None:
+                    self.assertEqual(setting.verdict, "verified")
+                    self.assertTrue(any(f.rule == "OBAAF-REPO-001" and "policy/settings.json" in f.message
+                                        for f in result.findings))
+                else:
+                    self.assertEqual(setting.verdict, "cannot tell")
+                    self.assertIn("does not check snapshot code ownership", setting.detail)
         workflow = folder / "workflows/ci.yml"
         partials = [(str(workflow), "--config", str(folder / "obaaf.yml")), (str(self.root), "--lanes")]
         for partial in partials:

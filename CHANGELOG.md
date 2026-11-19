@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Offline settings evidence
 
-`obaaf check --settings FILE` reads an explicitly named audit snapshot, reports its date and checks its code ownership. Evidence older than 30 days or missing required observations stays uncertain. This first increment reports the evidence separately while OBAAF-GHA-005 keeps its existing verdict.
+`obaaf check --settings FILE` reads an explicitly named audit snapshot, reports its date and checks its code ownership. Evidence older than 30 days or missing required observations stays uncertain. OBAAF-GHA-005 uses this evidence for its environment control and clears when all five controls verify. The production catalogue still lists no released egress action commit for its credential-isolation control.
 
 ### Upgrading from 0.3.0
 
