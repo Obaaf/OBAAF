@@ -1061,6 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(prog="obaaf fix egress", description="Preview confinement for one agent job.")
         _fix_check_options(parser)
         parser.add_argument("--job", required=True, help="GitHub Actions job ID")
+        parser.add_argument("--brief", action="store_true", help="print a Markdown work order for a trusted branch")
         parser.set_defaults(func=run)
         argv = argv[2:]
     else:

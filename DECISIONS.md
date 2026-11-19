@@ -926,3 +926,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
 
 **Status.** Proposed, 2026-11-19 (A3a, #281). No release commit is listed pending #248.
+
+### D-107 A Markdown work order for confinement
+
+**Decision.** `obaaf fix egress --job NAME --brief` prints a Markdown task based on the same isolated draft and checker verdicts as the ordinary preview. Generate it from a trusted branch. The instructions and proof command come from OBAAF. Repository names and case-specific checker reasons appear as quoted, length-limited data. The work order identifies the original command by its step number.
+
+**Reason.** A person or coding agent can locate the proposed change without treating workflow commands, comments, or checker diagnostics containing repository text as instructions.
+
+**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft.
+
+**Status.** Proposed, 2026-11-19 (A6a, #286).

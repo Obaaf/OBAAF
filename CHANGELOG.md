@@ -8,6 +8,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
 
+- **Generate a confinement work order.** Add `--brief` to `obaaf fix egress --job NAME` on a trusted branch to print a Markdown task with the target step, predicted verdicts and proof command. Availability follows the egress action’s release hold.
 - **Preview confinement for one agent job.** The development command `obaaf fix egress --job NAME [PATH]` reports that the draft is unavailable until a released egress-action commit is listed. With a listed commit, it checks the proposed job on a private copy and prints the control verdicts and remaining manual work.
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.

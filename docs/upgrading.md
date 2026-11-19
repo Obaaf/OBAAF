@@ -42,6 +42,8 @@ Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs`
 
 Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
 
+Generate a Markdown work order on a branch you trust with `obaaf fix egress --job NAME --brief`. This option shares the draft’s release hold. Once available, it prints the job and step location as labelled data, the proposed credential placement, the checker’s predicted verdicts and a command for verifying the edit. Reasons for unresolved controls and egress-action conditions appear as bounded, quoted diagnostic data. Supply any path variables from your trusted check invocation. Review the result before removing an obsolete acceptance.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |

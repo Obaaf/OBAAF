@@ -74,7 +74,7 @@ def _rewrite(job, text, name, catalog, agents, pin):
     expected["jobs"][name]["steps"][index] = new
     if yamlutil.load(edited) != expected:
         raise ValueError("could not preserve the surrounding workflow; review this job by hand")
-    return edited, expected["jobs"][name], blocked
+    return edited, expected["jobs"][name], blocked, index
 
 
 def run(args, catalog=None):
@@ -94,9 +94,13 @@ def run(args, catalog=None):
             before = check_inputs(copy, options, today, catalog)
             check_copy_matches(root, check_inputs(root, options, today, catalog), before)
             path, text, job = _job(copy, options, before, args.job)
-            edited, draft, blocked = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
+            edited, draft, blocked, index = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
             path.write_text(edited, encoding="utf-8")
             after = check_inputs(copy, options, today, catalog)
+            if args.brief:
+                from obaaf.fix_egress_brief import work_order
+                print(work_order(job, index, draft["steps"][index], blocked, options, after))
+                return 0
             print("Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "
                   "evaluates this exact placeholder list. If you adopt the draft, review the action's denied "
                   "output after a run. Under confinement, the command can write only to its scratch copy. "
@@ -130,5 +134,9 @@ def run(args, catalog=None):
             print(yaml.safe_dump(json.loads(json.dumps({args.job: draft})), sort_keys=False), end="")
         return 0
     except (ValueError, OSError, StopIteration, TypeError, yaml.YAMLError) as error:
-        print("Draft unavailable: " + workflow.one_line(str(error) or "unsupported workflow shape"), file=sys.stderr)
+        if args.brief:
+            print("Work order unavailable. Run the ordinary egress preview on a trusted branch "
+                  "to inspect its diagnostic.", file=sys.stderr)
+        else:
+            print("Draft unavailable: " + workflow.one_line(str(error) or "unsupported workflow shape"), file=sys.stderr)
         return 2
