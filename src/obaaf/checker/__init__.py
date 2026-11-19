@@ -276,6 +276,9 @@ def _is_local_like(uses) -> bool:
     return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
 
 
+_OUTSIDE = "its path leads outside the repository"
+
+
 def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
     """The folders a local `uses` may name, relative to the repository, and why none can be read when
     there are none. Whether GitHub takes what follows an `@` as part of the path, and a backslash as a
@@ -292,7 +295,7 @@ def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
     for candidate in candidates:
         folder = posixpath.normpath(candidate.strip("/") or ".")
         if folder == ".." or folder.startswith("../"):
-            return [], "its path leads outside the repository"
+            return [], _OUTSIDE
         if folder not in out:
             out.append(folder)
     return out, None
@@ -1469,6 +1472,12 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
     out = _ActionReading()
     shown = wf_mod.one_line(uses, 120)
     folders, why = _local_action_folders(uses)
+    if not folders and why == _OUTSIDE:
+        # The runner keeps the whole repository of each action the job uses in one folder beside the
+        # workspace, so a path out of the repository can reach an agent's action the job never names
+        # (flagship slice 2d.11, from its review). The job is put in the agent lane, so no note says it is not.
+        out.agent = f"uses {shown}, a path out of its repository that can reach any action the job downloads"
+        return out
     if not folders:
         out.unread.append((shown, why))
         return out
@@ -1513,7 +1522,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
         len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict) and isinstance(raw["runs"].get("steps"), list)
         else 1 for _, raw in raws)
     _charge(cache, cost)
-    if not raws:
+    linked_out = next((why for why in missing if why.endswith(" leads outside the repository")), None)
+    if linked_out:
+        # A link in the repository that leads out of it can reach the same folder as `./..` (flagship slice
+        # 2d.11, from its second review).
+        out.agent = (f"uses {shown}, whose {linked_out.removesuffix(' leads outside the repository')} leads "
+                     "outside the repository, where it can reach any action the job downloads")
+    elif not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
     for folder, raw in raws:
         runs = raw.get("runs")
@@ -2252,9 +2267,19 @@ class Config:
             if not isinstance(given, list) or not all(isinstance(v, str) and v.strip() for v in given):
                 raise ConfigError(f"{path}: agents.{key} must be a list of text")
         for entry in agents.get("actions") or []:
-            if not wf_mod.action_name(entry.strip()).rstrip("/"):
-                raise ConfigError(f"{path}: agents.actions: {wf_mod.one_line(entry, 80)!r} names no action "
-                                  "(an owner, owner/repo or owner/repo/path, before any @)")
+            text = entry.strip()
+            if not wf_mod.action_name(text).rstrip("/") or text.startswith(("./", "$/", ".\\", "docker://")) \
+                    or "\\" in text:
+                raise ConfigError(f"{path}: agents.actions: {wf_mod.one_line(entry, 80)!r} names no action of "
+                                  "another repository (owner, owner/repo or owner/repo/path, before any @). A "
+                                  "local action is read through; declare its job with OBAAF_LANE: agent if the "
+                                  "checker cannot")
+        for entry in agents.get("commands") or []:
+            try:
+                re.compile(entry, re.M)
+            except re.error as exc:
+                raise ConfigError(f"{path}: agents.commands: {wf_mod.one_line(entry, 80)!r} is not a Python "
+                                  f"regular expression: {exc}") from None
         lanes = data.get("lanes") or {}     # left empty, it declares nothing
         if not isinstance(lanes, dict):
             raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")

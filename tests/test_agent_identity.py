@@ -19,6 +19,7 @@ approval check's inputs are its own (`action.yml` at f431ada).
 """
 
 import copy
+import json
 import dataclasses
 import datetime
 import unittest
@@ -208,13 +209,15 @@ class CalledWorkflowTest(unittest.TestCase):
                 found = [f for f in check(call, config=Config(agents={"actions": [entry]})).findings
                          if f.rule in AGENT_RULES]
                 self.assertTrue(found)
-                self.assertTrue(all(f.facts["agents"] == [f"agents.actions: {entry}"] for f in found))
+                self.assertTrue(all(f.facts["agents"] == [f"agents.actions: {entry.strip()}"] for f in found))
         step = job_with("      - uses: my-org/agent/run@v2\n")
         self.assertTrue(is_agent_job(check(step, config=Config(agents={"actions": ["my-org/agent/@v1"]}))))
 
     def test_a_configured_action_that_names_nothing_is_refused(self):
         for agents in ({"actions": "my-org/agent"}, {"actions": ["@v1"]}, {"actions": [""]}, {"actions": ["/"]},
-                       {"actions": [3]}, {"commands": "run-agent"}, {"commands": [" "]}):
+                       {"actions": [3]}, {"actions": ["./.github/actions/run-agent"]}, {"actions": ["$/x"]},
+                       {"actions": ["docker://ghcr.io/x/agent"]}, {"actions": ["my-org\\agent"]},
+                       {"commands": "run-agent"}, {"commands": [" "]}, {"commands": ["("]}):
             with self.subTest(agents=agents), self.assertRaises(checker.ConfigError):
                 Config.from_data({"agents": agents}, "obaaf.yml")
         Config.from_data({"agents": {"actions": ["my-org"], "commands": ["run-agent"]}}, "obaaf.yml")
@@ -257,9 +260,10 @@ class OutOfTheRepositoryTest(unittest.TestCase):
         for uses in self.ESCAPES:
             with self.subTest(uses=uses):
                 self.assertTrue(wf_mod.leaves_repository(uses))
-                result = check(job_with(APPROVAL_STEP + f"      - uses: {uses!r}\n"))
+                # As a YAML double-quoted string, so each backslash is one backslash.
+                result = check(job_with(APPROVAL_STEP + f"      - uses: {json.dumps(uses)}\n"))
                 self.assertTrue(is_agent_job(result))
-                self.assertTrue(is_agent_job(check(job_with(f"      - uses: {uses!r}\n"))))
+                self.assertTrue(is_agent_job(check(job_with(f"      - uses: {json.dumps(uses)}\n"))))
 
     def test_a_path_that_stays_is_not(self):
         for uses in self.STAYS:
@@ -279,6 +283,26 @@ class OutOfTheRepositoryTest(unittest.TestCase):
         self.assertIn("a path out of its repository", reason)
         result = check(job_with(f"      - uses: {self.ESCAPES[4]}\n"))
         self.assertEqual(agents_of(result), [None])
+
+    def test_a_link_out_of_the_repository_is_one_too(self):
+        # Found by the second review of slice 2d.11: a link committed in the repository that leads out of it
+        # reaches the same folder as `./..`.
+        for target in ("../../../../_actions/anthropics/claude-code-action/" + APPROVAL_SHA,
+                       "/home/runner/work/_actions/anthropics/claude-code-action/" + APPROVAL_SHA):
+            with self.subTest(target=target), TempDir() as tmp:
+                root = tmp / "repo"
+                (root / ".github" / "workflows").mkdir(parents=True)
+                (root / ".github" / "workflows" / "wf.yml").write_text(
+                    job_with(APPROVAL_STEP + "      - uses: ./.github/actions/gate\n"), encoding="utf-8")
+                (root / ".github" / "CODEOWNERS").write_text("* @example/maintainers\n", encoding="utf-8")
+                (root / ".github" / "actions").mkdir()
+                (root / ".github" / "actions" / "gate").symlink_to(target, target_is_directory=True)
+                result = checker.check(root)
+                self.assertTrue(is_agent_job(result))
+                self.assertFalse([n for n in result.notes if n.startswith("Local actions were not read through")])
+                ((_f, _job, lane, reason),) = checker.lanes(root)
+                self.assertEqual(lane, "agent")
+                self.assertIn("leads outside the repository", reason)
 
     def test_inside_a_local_composite_action_and_before_the_egress_action(self):
         files = {".github/actions/gate/action.yml":

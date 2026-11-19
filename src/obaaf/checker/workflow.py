@@ -107,7 +107,7 @@ def names_action(action: str, prefix: str) -> bool:
 
 
 def leaves_repository(uses) -> bool:
-    """Whether a step's or job's `uses:` names a path that leaves its repository (flagship slice 2d.11,
+    """Whether a step's `uses:` names a path that leaves its repository (flagship slice 2d.11,
     from its review): a local `./`, `$/` or `.\\` path whose `..` climbs above the workspace, or another
     repository's action whose `..` climbs to or above `owner/repo` (`action_name` stops `..` there, so the
     name it gives is not what the runner would look for). The runner puts every action a job uses in one

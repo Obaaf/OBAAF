@@ -515,7 +515,7 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
     configured = configured or {}
     entries = _compiled(detection)
     from obaaf.checker.workflow import AgentActions, matches_any     # the checker is loaded by now
-    extra_actions = [(str(a), AgentActions({}, [str(a)])) for a in (configured.get("actions") or ())]
+    extra_actions = [(str(a).strip(), AgentActions({}, [str(a)])) for a in (configured.get("actions") or ())]
     extra_commands = [(str(p), re.compile(str(p), re.M)) for p in (configured.get("commands") or ())]
     every = [rx for _id, _a, rxs in entries for rx in rxs] + [rx for _p, rx in extra_commands]
     found: set = set()
