@@ -72,7 +72,7 @@ A value only another scanner's data calls dangerous is not reported. The actions
 | `--yolo`, `-y`, and `--zen`, `-z`, and `--auto-approve` or `--autoapprove` with any value but `false`, which do what `--yolo` does (Cline puts `true` after a bare one) | `cline` (slice 2d.5c2b) | high | `cline` |
 | `--allow-all-tools`, `--allow-all`, `--yolo` | `copilot-cli` (slice 2d.5c2b; the sentences are in GitHub's documentation, `github/docs`) | high | `copilot` |
 | Copilot CLI's `--show-secrets`, `--trust-folder`, `--share-gist`, `--share` | `copilot-cli` | medium | `copilot` |
-| PR-Agent's `--config-branch` given `$GITHUB_HEAD_REF` or `${{ github.head_ref }}` (a value the checker cannot read is "cannot tell"; a branch written out is not reported) | `pr-agent` (slice 2d.5c2b) | high | `pr-agent` |
+| PR-Agent's `--config-branch` given `$GITHUB_HEAD_REF` (a value the checker cannot read, such as `${{ github.head_ref }}`, is medium "cannot tell"; a branch written out is not reported) | `pr-agent` (slice 2d.5c2b) | high | `pr-agent` |
 | `--always-approve`, `--yolo`, `--headless`, and any beginning of them (`--always`, `--yol`, `--head`), as Python's argparse takes it | `openhands` (slice 2d.5c2b) | high | `openhands` |
 | Continue's `cn --auto` | `continue` (slice 2d.5c2b) | medium | `cn` |
 | OpenCode's `--hostname 0.0.0.0` | `opencode` (slice 2d.5c2b) | medium | `opencode` |

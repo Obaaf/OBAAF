@@ -463,7 +463,8 @@ def other_program_only(detection: dict, tool: str, programs: list, texts: list) 
     if not isinstance(other, str) or not other.strip() or not programs:
         return False
     after = re.compile(other)
-    names = re.compile(r"(?<![\w@.-])(?:" + "|".join(re.escape(p) for p in programs) + r")(?![\w.-])", re.I)
+    names = re.compile(r"(?<![\w@.-])(?:" + "|".join(re.escape(p) for p in programs)
+                       + r")(?:\.(?:exe|cmd|bat|ps1|com))?(?![\w.-])", re.I)
     seen = False
     for text in texts:
         plain = re.sub(r"[\"'\\]", "", text)

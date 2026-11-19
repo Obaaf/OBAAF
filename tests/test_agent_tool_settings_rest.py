@@ -287,7 +287,8 @@ class CommandLineTest(unittest.TestCase):
                 self.assertEqual(found(check(run_step(script))), [])
         for script in ['copilot -p "fix" $FLAGS', 'goose run -t "fix" $FLAGS', 'goose serve $FLAGS',
                        'echo "$P" | copilot $FLAGS', 'copilot mcp add foo $X', 'copilot ${{ inputs.args }}',
-                       'copilot svc deploy --env $E\necho "use copilot -p for agents"']:
+                       'copilot svc deploy --env $E\necho "use copilot -p for agents"',
+                       'copilot svc deploy --env $E\ncopilot.exe $FLAGS']:
             with self.subTest(script=script):
                 self.assertEqual({(h.kind, h.severity) for h in found(check(run_step(script)))},
                                  {("command-computed", "medium")})

@@ -330,15 +330,16 @@ agent_tools:
     install_urls: []
     settings: []
     # Command-line options (flagship slice 2d.5c2b), read where `pr-agent` is run. The warning is about a
-    # `--config-branch` taken from a pull request: the two spellings it names are its `equals`, and a value
-    # the checker cannot read (a variable, an expression) is "cannot tell", while a branch written out
+    # `--config-branch` taken from a pull request: `$GITHUB_HEAD_REF`, the spelling it names that a script
+    # holds as text, is its `equals`; a value the checker cannot read (another variable, an expression such
+    # as the `${{ github.head_ref }}` it also names) is "cannot tell", and a branch written out
     # (`--config-branch=main`) is not reported. `PR_AGENT_CONFIG_BRANCH`, a variable, is not read. Its other
     # warning, about running the action on `pull_request_target` (docs/docs/installation/github.md, line
     # 106), is about an event, which the event rules read.
     flags:
       - id: config-branch
         options: [--config-branch]
-        equals: ["$GITHUB_HEAD_REF", "${{ github.head_ref }}"]
+        equals: ["$GITHUB_HEAD_REF"]
         severity: high
         read: 2026-11-19
         says: >-
