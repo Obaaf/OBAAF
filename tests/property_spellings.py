@@ -81,7 +81,7 @@ def _share(root, rng) -> None:
                 continue
             shape = _shape(child, memo)
             earlier = first.setdefault(shape, child)
-            if earlier is child or rng.random() < 0.3:
+            if earlier is child or rng.random() < 0.1:
                 continue
             if isinstance(node, yaml.SequenceNode):
                 node.value[index] = earlier
@@ -130,7 +130,7 @@ def respell_yaml(text: str, rng, root=None) -> str:
                 rng.shuffle(node.value)
         elif isinstance(node, yaml.SequenceNode):
             node.flow_style = rng.random() < flow
-    if rng.random() < 0.5:
+    if rng.random() < 0.8:
         _share(root, rng)
     out = yaml.serialize(root, Dumper=yaml.SafeDumper, indent=rng.randint(2, 8),
                          width=rng.choice([60, 80, 120, 4096]), explicit_start=rng.random() < 0.3,
@@ -350,10 +350,10 @@ def respell_forms(text: str, rng) -> str | None:
                         changed = True
     on = data.get("on")
     if isinstance(on, str) and rng.random() < 0.7:
-        data["on"] = [on] if rng.random() < 0.5 else {on: None}
+        data["on"] = [on] if rng.random() < 0.5 else {on: rng.choice([None, {}])}
         changed = True
     elif isinstance(on, list) and all(isinstance(e, str) for e in on) and rng.random() < 0.7:
-        data["on"] = {e: None for e in on}
+        data["on"] = {e: rng.choice([None, {}]) for e in on}
         changed = True
     for job in data["jobs"].values():
         if not isinstance(job, dict):

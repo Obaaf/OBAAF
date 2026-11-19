@@ -3653,22 +3653,31 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
 
 
 ARTIFACT_API_RE = re.compile(
-    r"gh\s+run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|/actions/runs/\S*/artifacts|"
+    r"gh\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)?run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|"
+    r"listArtifactsForRepo|archive_download_url|artifacts_url|/actions/runs/\S*/artifacts|/actions/artifacts\b|"
     r"/actions/artifacts/\S*/(zip|\{archive_format\})", re.I)
 
 
 def _downloads_from_trigger_run(job: Job) -> bool:
-    """Whether a step can bring another run's files into the job: dawidd6's download action, any
-    `actions/download-artifact` given a run or a repository (except `${{ github.run_id }}`, this
-    run), one whose inputs are not a mapping the checker can read, or one that names `workflow_run`
-    in any letter case, and the artifacts API in a script.
+    """Whether a step can bring another run's files into the job. Counted: an action other than
+    `actions/download-artifact` whose name says it downloads artifacts (dawidd6's and its forks, as
+    OBAAF-GHA-008 reads them); `actions/download-artifact` given a `run-id` other than
+    `${{ github.run_id }}` (this run), or a `repository`, whatever the value, or inputs that are not a
+    mapping the checker can read, or naming `workflow_run` in any letter case; and the artifacts API
+    or `gh run download` in anything the step runs as a command line, read as the shell reads it
+    (lines continued with a backslash joined, quotes taken out), the command OBAAF's egress action
+    runs included.
 
     Before slice 2d.3 only an input that held the text `workflow_run` as written counted, so
-    `run-id: ${{ GITHUB.EVENT.WORKFLOW_RUN.ID }}`, `${{ github.event['workflow_run'].id }}` read as
-    the same run by the expression reader but spelled otherwise, or a run id passed through `env`
-    took the job out of the effect lane and with it OBAAF-GHA-021 and 022."""
+    `run-id: ${{ GITHUB.EVENT.WORKFLOW_RUN.ID }}`, a run id passed through `env` or an input, or a
+    `repository` took the job out of the effect lane, and with it OBAAF-GHA-021 and 022; so did
+    `gh run \\` continued on the next line, `gh 'run' download`, `gh -R repo run download` and the
+    API's `archive_download_url`. Counting `run-id` or `repository` without `github-token` is the
+    wide reading: download-artifact may ignore them then."""
     for step in job.steps:
-        if step.uses_action("dawidd6/action-download-artifact"):
+        action = (step.action or "").lower()
+        if action != "actions/download-artifact" and (
+                action.endswith("download-artifact") or "/download-artifact" in action or "artifact-download" in action):
             return True
         if step.uses_action("actions/download-artifact"):
             given = step.raw.get("with")
@@ -3683,7 +3692,7 @@ def _downloads_from_trigger_run(job: Job) -> bool:
                 if name == "run-id" and "".join(as_text(value).split()).lower() == "${{github.run_id}}":
                     continue
                 return True
-        if ARTIFACT_API_RE.search(step.text()):
+        if ARTIFACT_API_RE.search(step.text()) or any(ARTIFACT_API_RE.search(r) for r in _readings(step.scripts())):
             return True
     return False
 

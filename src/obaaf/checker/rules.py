@@ -642,6 +642,10 @@ class WorkflowRules:
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
+    # Lists and mappings OBAAF-GHA-023 walks in one file, each place counted on its own: a large workflow
+    # has a few thousand.
+    _PLACEHOLDER_WALK = 200_000
+
     def placeholders(self) -> None:
         """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
         The values are read as YAML gives them, so an escape (`OBAAF\\x5FOWNER`, a line joined inside
@@ -650,54 +654,47 @@ class WorkflowRules:
         case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros.
 
         A value written once under a YAML anchor and reached through aliases is one object to the
-        reader. It is walked once, and what was found in it is given again at every other place that
-        reaches it (slice 2d.3: a step shared by two jobs was reported for the first job only)."""
+        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each value in
+        it once, so a step shared by two jobs, or used twice in one job, is reported at each (slice
+        2d.3: it was reported at the first place only), and an alias of an alias costs no more than the
+        values themselves. A file whose places together hold more values than the checker walks is an
+        error, never a pass."""
         found: list = []
-        # (id of a list or mapping, under `uses`) -> (path inside it, placeholder, line) for what is under it.
-        memo: dict = {}
-
-        def inside(value, line: int, last: str) -> list:
-            """What `value` holds, as (parts of the path below it, placeholder, line). `last` is the
-            name of the key `value` is under, which decides whether an all-zero ref is a placeholder."""
-            if isinstance(value, str):
-                return [((), placeholder, line) for placeholder in _placeholders_in(value, last)]
-            if not isinstance(value, (dict, list)):
-                return []
-            # Only whether the key is `uses` changes what a value holds (an all-zero ref is a placeholder there).
-            mark = (id(value), last == "uses")
-            if mark in memo:
-                return memo[mark]
-            memo[mark] = []             # a value that holds itself is read once
-            out: list = []
-            if isinstance(value, dict):
-                for key, sub in value.items():
-                    name = as_text(key)
-                    for placeholder in _placeholders_in(name, last):
-                        out.append(((("key", name),), placeholder, line))
-                    sub_line = line
-                    if hasattr(value, "line_of"):
-                        try:
-                            sub_line = max(int(value.line_of(key) or 0), line)
-                        except (TypeError, ValueError):
-                            pass
-                    out.extend(((("key", name),) + parts, placeholder, at)
-                               for parts, placeholder, at in inside(sub, sub_line, name))
-            else:
-                for n, sub in enumerate(value):
-                    out.extend(((("index", n),) + parts, placeholder, at)
-                               for parts, placeholder, at in inside(sub, line, f"{last}[{n}]"))
-            memo[mark] = out
-            return out
-
-        def joined(where: str, parts: tuple) -> str:
-            for kind, part in parts:
-                where = (f"{where}.{part}" if where else part) if kind == "key" else f"{where}[{part}]"
-            return where
+        budget = [self._PLACEHOLDER_WALK]
 
         def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
-            last = where.rsplit(".", 1)[-1]
-            for parts, placeholder, at in inside(value, line, last):
-                found.append((at, job, step, joined(where, parts), placeholder))
+            seen: set = set()
+
+            def walk(value, where: str, line: int) -> None:
+                if isinstance(value, (dict, list)):
+                    if id(value) in seen:
+                        return
+                    seen.add(id(value))
+                    budget[0] -= 1
+                    if budget[0] < 0:
+                        raise expr_mod.TooComplex(
+                            "values reached through YAML aliases are too many to read for template placeholders; "
+                            "the checker cannot tell whether one is left")
+                if isinstance(value, str):
+                    for placeholder in _placeholders_in(value, where):
+                        found.append((line, job, step, where, placeholder))
+                elif isinstance(value, dict):
+                    for key, sub in value.items():
+                        name = as_text(key)
+                        for placeholder in _placeholders_in(name, where):
+                            found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
+                        sub_line = line
+                        if hasattr(value, "line_of"):
+                            try:
+                                sub_line = max(int(value.line_of(key) or 0), line)
+                            except (TypeError, ValueError):
+                                pass
+                        walk(sub, f"{where}.{name}" if where else name, sub_line)
+                elif isinstance(value, list):
+                    for n, sub in enumerate(value):
+                        walk(sub, f"{where}[{n}]", line)
+
+            walk(value, where, line)
 
         jobs_raw = self.wf.raw.get("jobs")
         for key, sub in self.wf.raw.items():

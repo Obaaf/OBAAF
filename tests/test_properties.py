@@ -91,8 +91,8 @@ def lost(before, after) -> list[str]:
     out = []
     for f in sorted(before.findings, key=lambda f: f.sort_key()):
         match = next((key for key in available if key[0] == identity(f) and available[key] > 0
-                      and SEVERITY.get(key[1], 0) >= SEVERITY.get(f.severity, 0)
-                      and NEARNESS.get(key[2], 0) <= NEARNESS.get(f.state, 0)), None)
+                      and SEVERITY[key[1]] >= SEVERITY[f.severity]
+                      and NEARNESS[key[2]] <= NEARNESS[f.state]), None)
         if match is None:
             out.append(f"{f.rule} {f.severity} {f.state} job={f.job} step={f.step} kind={f.kind}: {f.message[:120]}")
         else:
@@ -320,13 +320,55 @@ class FoundByThePropertiesTest(unittest.TestCase):
         found = self._placeholders(self.PLACEHOLDER.format(same="      - *setup\n"))
         self.assertEqual(len(found), 6, found)
 
-    def test_a_value_that_holds_itself_is_read_once(self):
-        text = ("on: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n    env: &loop\n      A: OBAAF_OWNER\n"
-                "    steps:\n      - run: echo\n        with: {x: *loop}\n")
+    def test_placeholders_outside_steps_are_reported_where_they_are(self):
+        """From the review of the first fix: a memo keyed by the identity of short-lived values gave
+        one key's results to the next, so placeholders at workflow and job level were lost or put on
+        the wrong job."""
+        zeros = "0" * 40
+        call = ("on: push\npermissions:\n  contents: read\njobs:\n  call:\n"
+                f"    uses: OBAAF_OWNER/obaaf/.github/workflows/x.yml@{zeros}\n")
+        self.assertEqual(self._placeholders(call), [("call", None, zeros), ("call", None, "OBAAF_OWNER")])
+        levels = ("env:\n  A: OBAAF_OWNER\non: push\nrun-name: OBAAF_OWNER\npermissions:\n  contents: read\n"
+                  "jobs:\n  one:\n    runs-on: OBAAF_OWNER\n    container: OBAAF_OWNER/image\n"
+                  "    env:\n      B: OBAAF_OWNER\n    steps:\n      - run: echo\n")
         with TempDir() as tmp:
-            started = time.monotonic()
-            run(tmp, "wf.yml", text, None)
-            self.assertLess(time.monotonic() - started, 5)
+            found = sorted((f.job or "", f.facts["where"]) for f in run(tmp, "wf.yml", levels, None).findings
+                           if f.rule == "OBAAF-GHA-023")
+        self.assertEqual(found, [("", "env.A"), ("", "run-name"), ("one", "container"), ("one", "env.B"),
+                                 ("one", "runs-on")])
+
+    def test_an_alias_bomb_costs_little_and_is_reported_once_per_place(self):
+        """From the review of the first fix: giving what a shared value holds again at every path that
+        reaches it made ten nested lists of ten aliases a million findings and minutes of work."""
+        lines = ["on: push", "permissions:", "  contents: read", "jobs:", "  one:", "    runs-on: ubuntu-latest",
+                 "    steps:", "      - run: echo", "        env:", '          L0: &l0 ["OBAAF_OWNER"]']
+        for depth in range(1, 10):
+            lines.append(f"          L{depth}: &l{depth} [" + ", ".join([f"*l{depth - 1}"] * 10) + "]")
+        started = time.monotonic()
+        found = self._placeholders("\n".join(lines) + "\n")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(found, [("one", "step 1", "OBAAF_OWNER")])
+
+    def test_the_effect_lanes_download_is_read_as_the_shell_reads_it(self):
+        """From the review: the artifacts API and `gh run download` were matched in the text as
+        written, so a line continued with a backslash, a quoted word or `-R` before `run` hid them."""
+        both = ["OBAAF-GHA-021", "OBAAF-GHA-022"]
+        head = ("on:\n  workflow_run:\n    workflows: [Agent]\n    types: [completed]\npermissions:\n"
+                "  contents: write\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n")
+        tail = "      - run: git apply patch.diff && git push origin HEAD:agent-fix\n"
+        for step in ("      - run: |\n          gh run \\\n            download ${{ github.event.workflow_run.id }}\n",
+                     "      - run: gh 'run' download 1 -n patch\n",
+                     "      - run: gh -R $GITHUB_REPOSITORY run download 1 -n patch\n",
+                     "      - run: gh --repo=$GITHUB_REPOSITORY run download 1 -n patch\n",
+                     "      - run: curl -sL \"$(gh api repos/$R/actions/artifacts --jq '.artifacts[0].archive_download_url')\"\n",
+                     "      - run: curl -s ${{ github.event.workflow_run.artifacts_url }}\n",
+                     "      - uses: Legit-Labs/action-download-artifact@1111111111111111111111111111111111111111\n",
+                     "      - uses: actions/github-script@1111111111111111111111111111111111111111\n"
+                     "        with:\n          script: |\n            github.rest.actions.listArtifactsForRepo({owner: 'o', repo: 'r'})\n"):
+            with self.subTest(step=step.strip()[:60]), TempDir() as tmp:
+                rules = sorted({f.rule for f in run(tmp, "apply.yml", head + step + tail, None).findings}
+                               & set(both))
+                self.assertEqual(rules, both)
 
 
 def _strings(value):
