@@ -832,3 +832,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule's remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
 
 **Status.** Proposed, 2026-11-19 (A1a, #252).
+
+### D-092 Group outstanding findings by their next action
+
+**Decision.** Count each outstanding finding once. An invalid acceptance takes priority over its rule. Prohibited acceptances, severity increases and legacy entries take priority over missing fields. Keep each remaining validation reason separate. Show a stale baseline match only for a shared rule, file and job, with at most one hint per stale entry and per finding. Skip ambiguous groups. These hints never accept a finding. List a currently available mechanical action first, then use highest severity, count and cause ID for reproducible ordering.
+
+**Reason.** Someone upgrading a baseline needs to know which decision to make first. Counting a finding twice would inflate the work. Similar locations give an upgrade clue without establishing that an old entry still covers the risk.
+
+**Consequence.** JSON gains a `todo` array. A changeable tool version is one cause with counts for pin candidates and manual fixes. An eligible literal install can be considered for a user-supplied pin. The later fix command must still prove the patch. Existing JSON fields, SARIF, gate results and acceptance identities are preserved.
+
+**Status.** Proposed, 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.

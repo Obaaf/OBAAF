@@ -110,6 +110,8 @@ class Finding:
     # v0.1 baseline entry (identified by its message) still names it and `obaaf baseline migrate` carries
     # it over. Empty where the message is unchanged. It is never shown and is not part of a v0.2 identity.
     legacy: str = ""
+    # Display-only evidence for the to-do list. A checked patch still needs an exact version and proof.
+    pin_candidate: str | None = field(default=None, compare=False, repr=False)
 
     def sort_key(self) -> tuple:
         order = {"high": 0, "medium": 1, "low": 2}
@@ -531,7 +533,7 @@ class WorkflowRules:
 
     def add(self, rule: str, line: int, template: str, job: Job | None = None, step: Step | None = None,
             severity: str | None = None, *, kind: str = "", controls: list | None = None, legacy: str = "",
-            **values) -> None:
+            pin_candidate: str | None = None, **values) -> None:
         """Report a finding. `template` is the message, with `{job}`, `{step}` and one `{name}` for
         each of `values`; `kind` tells a rule's cases apart (see `compose`). `controls` are the
         controls that would clear the finding, each with what the checker established about it."""
@@ -554,6 +556,7 @@ class WorkflowRules:
             facts=facts,
             controls=list(controls or []),
             legacy=legacy if legacy != message else "",
+            pin_candidate=pin_candidate,
         ))
 
     def run(self) -> list[Finding]:
@@ -1740,6 +1743,31 @@ class WorkflowRules:
                 return True
         return False
 
+    def _pin_candidate(self, step: Step, shell: str, windows: bool = False) -> str | None:
+        """One literal package in a direct workflow run. Normalized detection text loses its origin."""
+        raw = step.raw.get("run")
+        if step.via is not None or step.uses is not None or not isinstance(raw, str):
+            return None
+        # A `run` written once under a YAML anchor and reached through aliases is one edit for every
+        # step that reaches it, so none of them is a candidate (review of #258).
+        if "run" in getattr(step.raw, "shared_keys", ()):
+            return None
+        # A called workflow may already contain values substituted from a caller. A Windows runner's
+        # default shell is PowerShell, as agent_tool_installs reads it.
+        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash") or (windows and not shell):
+            return None
+        # Exactly one package token on one install line. The optional second line may
+        # only query the installed CLI's version, using the catalogue's own spelling.
+        match = re.fullmatch(r"(?:sudo[ \t]+)?npm[ \t]+install[ \t]+-g[ \t]+([^\s]+)"
+                             r"(?:[ \t]*\r?\n[ \t]*([^\s]+)[ \t]+--version)?", raw.strip(" \t\r\n"))
+        if not match:
+            return None
+        package, queried_cli = match.groups()
+        cli = (self.detection.get("agent_installs") or {}).get(package)
+        if cli and (queried_cli == cli or queried_cli is None and not raw.lstrip().startswith("sudo")):
+            return package
+        return None
+
     def agent_tool_installs(self, job: Job) -> None:
         """OBAAF-GHA-025: an agent job installs or runs a tool at a version it does not fix (flagship slice
         2d.5a, control R6). One finding per step and case, with what was found as its facts."""
@@ -1832,6 +1860,8 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
+                         pin_candidate=self._pin_candidate(step, shell, windows) if len(installs) == 1 and not piped
+                         else None,
                          **agents)
 
     # -------------------------------------------------------------- GHA-026
