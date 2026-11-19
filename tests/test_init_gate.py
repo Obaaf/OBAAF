@@ -3,6 +3,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -56,6 +57,31 @@ class GateTests(unittest.TestCase):
         self.assertEqual(preview.split("What to do next:")[-1], applied.split("What to do next:")[-1])
         self.assertIn("What to do next: 1 finding", preview)
         self.assertTrue(applied.rstrip().endswith(f"obaaf fix -- {self.root}"))
+
+    def test_followup_keeps_a_printable_relative_path(self):
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        directory = Path("-team repo")
+        directory.mkdir()
+        status, output = command("init", "--", directory)
+        self.assertEqual(status, 0, output)
+        last = output.splitlines()[-1].removeprefix("Preview available fixes with ")
+        self.assertEqual(shlex.split(last), ["obaaf", "fix", "--", str(directory)])
+
+    @unittest.skipIf(os.name == "nt", "a Windows directory name cannot contain a newline")
+    def test_followup_for_a_multiline_directory_uses_the_current_directory(self):
+        directory = self.root / "team\nrepo"
+        directory.mkdir()
+        advice = "From inside the selected repository, run "
+        for args in ((), ("--apply",)):
+            status, output = command("init", directory, *args)
+            self.assertEqual(status, 0, output)
+            self.assertEqual(output.splitlines()[-1], advice + "obaaf fix")
+        with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+            status, output = command("init", directory)
+        self.assertEqual(status, 0, output)
+        self.assertEqual(output.splitlines()[-2:], [advice + "obaaf check --summary", advice + "obaaf fix"])
 
     def test_copy_refusal_labels_the_actual_repository_and_writes_nothing(self):
         from obaaf.fix_copy import PrivateCopyError

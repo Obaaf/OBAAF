@@ -980,6 +980,8 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 ### D-109 The handoff from init to a gate
 
+If init cannot display the selected path faithfully on one line, its next command runs from inside the selected repository. This applies to fix previews and to the summary command shown after a recovery.
+
 **Decision.** A successful first init preview shows the checker’s to-do list with the proposed setup on a private copy. If copying is unavailable, label the current repository’s list and give the reason. Apply checks the actual files. Both end with the corresponding fix-preview command.
 
 Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing at a threshold. Match the complete workflow that init generated, including the exact generated companion steps. Recognize the earlier report-only workflow by its content digest. Show manual instructions for a custom workflow. Prove the precise edit with zero promised finding or acceptance changes and use the existing clean-file writer on apply.

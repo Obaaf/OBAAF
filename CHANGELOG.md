@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Init handoff and explicit gate activation
 
-`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and `--apply` writes the proven edit. Pull requests use the target commit’s baseline and configuration. A missing target baseline accepts zero findings.
+`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and `--apply` writes the proven edit. Pull requests use the target commit’s baseline and configuration. A missing target baseline accepts zero findings. Init gives commands to run from inside the selected repository when its path cannot be displayed on one line.
 
 ### Upgrading from 0.3.0
 
