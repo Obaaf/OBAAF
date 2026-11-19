@@ -100,7 +100,7 @@ causes:
     fix_kind: by-hand
     next: "Move signing into a dedicated job backed by a managed signing service and remove key material from build steps."
   - id: unsafe-checkout-option
-    sentence: "Checkout explicitly permits an unsafe pull request checkout."
+    sentence: "Checkout enables unsafe pull request checkout or uses a value the checker cannot establish is false."
     rules: [OBAAF-GHA-019]
     fix_kind: by-hand
     next: "Remove the unsafe checkout option and build the change in a read-only pull request workflow."
