@@ -1898,19 +1898,8 @@ def _change_words(code: _Code, k: int, at: int = -1) -> list | None:
             return None
         if toks[k + 2].text.lower() == "insert" and args:
             args = args[1:]                     # `cmd.insert(1, x)`: the index is not a word
-        words: list = []
         whole = toks[k + 2].text.lower() in ("extend", "concat")
-        loops = _loop_names(code)
-        loop = _in_loop(code, k)
-        if loop is not None and _in_loop(code, at) != loop if at >= 0 else loop is not None:
-            return None                         # added once for each turn of a loop: any number of words
-        for a, b in args:
-            a, b = _strip_nl(code, a, b)
-            if any(toks[x].kind == "name" and toks[x].text in loops for x in range(a, b + 1)) and (
-                    loop is None or at < 0 or _in_loop(code, at) != loop):
-                return None                     # a loop's value (`a`, `extra[i]`): any number of words
-            words.extend(_word(code, a, b, not whole, "", listy=whole))
-        return words
+        return _loop_guard(code, k, at, [_strip_nl(code, a, b) for a, b in args], not whole, whole)
     if after.text == "+" and k + 2 < len(toks) and toks[k + 2].text == "[" and code.close[k + 2] > 0 and not (
             code.close[k + 2] + 1 < len(toks) and toks[code.close[k + 2] + 1].kind == "op" and toks[
                 code.close[k + 2] + 1].text in _EXTENDS_AFTER):
@@ -1921,14 +1910,36 @@ def _change_words(code: _Code, k: int, at: int = -1) -> list | None:
             toks[end + 1].text in ("if", "unless")         # `args << '--verbose' if v`
         if end < 0 or not (_statement_end(code, end + 1) or modifier):
             return None
-        loop = _in_loop(code, k)
-        if loop is not None and (at < 0 or _in_loop(code, at) != loop):
-            return None                         # added once for each turn of a loop: any number of words
-        if any(toks[x].kind == "name" and toks[x].text in _loop_names(code) for x in range(k + 2, end + 1)) and (
-                loop is None or at < 0 or _in_loop(code, at) != loop):
-            return None                         # a loop's value (`f`, `extra[i]`): any number of words
-        return _word(code, k + 2, end, after.text == "<<", "", listy=after.text == "+=")
+        if after.text == "+=" and toks[k + 2].text == "[" and code.close[k + 2] == end:
+            # `cmd += ['--allowedTools', t]`: the list's own places.
+            return _loop_guard(code, k, at, _split_args(code, k + 3, end - 1), True, False)
+        return _loop_guard(code, k, at, [(k + 2, end)], after.text == "<<", after.text == "+=")
     return None
+
+
+def _loop_guard(code: _Code, k: int, at: int, pieces: list, in_list: bool, listy: bool) -> list | None:
+    """The words a change at token `k` adds, one piece at a time; None where a piece is a value of a loop
+    over what the checker cannot read (`for f in extra: cmd.append(f)`, `extra[i]`), added on its own rather
+    than as the value of an option the same change adds before it (`cmd += ['--allowedTools', t]`): such a
+    value, added once for each turn, is any number of words."""
+    toks = code.toks
+    loops = _loop_names(code)
+    loop = _in_loop(code, k)
+    repeated = loop is not None and (at < 0 or _in_loop(code, at) != loop)
+    words: list = []
+    for a, b in pieces:
+        names = [toks[x].text for x in range(a, b + 1) if toks[x].kind == "name" and toks[x].text in loops]
+        unknown_loop = any(not loops[n] for n in names)
+        if repeated and a <= b and toks[a].kind == "name" and toks[a].text not in loops and toks[a].text not in (
+                code.values):
+            unknown_loop = True                 # a name the code never gives a value, in a repeated change: a
+                                                # callback's parameter (`extra.forEach(f => args.push(f))`)
+        if unknown_loop and (repeated or loop is None):
+            after_option = bool(words) and not words[-1].computed and words[-1].text.startswith("-")
+            if not after_option:
+                return None
+        words.extend(_word(code, a, b, in_list, "", listy=listy))
+    return words
 
 
 _LOOP_CALLS = frozenset({"foreach", "each", "map", "flatmap", "flat_map", "times", "each_with_index", "upto",
@@ -1991,21 +2002,39 @@ def _nearest(stack: list):
     return None
 
 
-def _loop_names(code: _Code) -> set:
-    """The names a loop gives its values to (`for a in ...`, `for (const a of ...)`, `|a|`, `foreach $a`)."""
+def _loop_names(code: _Code) -> dict:
+    """The names a loop gives its values to (`for a in ...`, `for (const a of ...)`, `|a|`, `foreach $a`):
+    name -> whether every loop that names it goes over a list of literal strings (`for t in ['Read', 'Edit']`),
+    whose values are then known words."""
     if "_loops" not in code.__dict__:
-        names: set = set()
+        names: dict = {}
         toks = code.toks
+
+        def literal_list(j: int) -> bool:
+            if j < len(toks) and toks[j].text in ("[", "(") and code.close[j] > j:
+                parts = _split_args(code, j + 1, code.close[j] - 1)
+                return bool(parts) and all(a == b and toks[a].kind == "str" and _literal(toks[a].parts) is not None
+                                           for a, b in (_strip_nl(code, x, y) for x, y in parts))
+            return False
         for k, t in enumerate(toks):
             if t.kind == "name" and t.text in ("for", "foreach", "each", "map") and k + 1 < len(toks):
                 for j in range(k + 1, min(k + 6, len(toks))):
                     if toks[j].kind == "name" and toks[j].text not in ("const", "let", "var", "my", "our", "local",
                                                                           "each", "do"):
-                        names.add(toks[j].text)
+                        over = j + 2 if j + 1 < len(toks) and toks[j + 1].text in ("in", "of") else -1
+                        known = over > 0 and literal_list(over)
+                        names[toks[j].text] = names.get(toks[j].text, True) and known
                         break
             if t.kind == "op" and t.text == "|" and k + 2 < len(toks) and toks[k + 1].kind == "name" and toks[
                     k + 2].text in ("|", ","):
-                names.add(toks[k + 1].text)     # a Ruby block's `|a|`
+                # A Ruby block's `|a|`, over a literal list where `[...].each do |a|` or `%w[...].each { |a|`.
+                opener = k - 1 if k >= 1 and toks[k - 1].text in ("{", "do") else -1
+                known = False
+                if opener >= 3 and toks[opener - 1].text == "each" and toks[opener - 2].text == "." and toks[
+                        opener - 3].text == "]":
+                    start = next((o for o in range(opener - 4, -1, -1) if code.close[o] == opener - 3), -1)
+                    known = start >= 0 and literal_list(start)
+                names[toks[k + 1].text] = names.get(toks[k + 1].text, True) and known
         code.__dict__["_loops"] = names
     return code.__dict__["_loops"]
 

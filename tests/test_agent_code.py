@@ -366,6 +366,15 @@ class SecondReviewTest(unittest.TestCase):
                                 "subprocess.run(cmd)"), "cannot"),
             (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor i in range(n):\n    cmd += [extra[i]]\n"
                                 "subprocess.run(cmd)"), "cannot"),
+            # A loop's value as the value of an option the same change adds, or a loop over literals (sixth pass).
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor t in ['Read', 'Edit']:\n"
+                                "    cmd += ['--allowedTools', t]\nsubprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor t in tools:\n"
+                                "    cmd += ['--allowedTools', t]\nsubprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor t in ['Read', 'Edit']:\n"
+                                "    cmd.append(t)\nsubprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in extra:\n    cmd.append('-v')\n"
+                                "subprocess.run(cmd)"), "none"),
         ])
         Case.expect(self, [
             ("for (const pr of prs) {\n  const args = ['-p', prompt(pr)];\n  if (v) args.push('--verbose');\n"
