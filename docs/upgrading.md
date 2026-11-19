@@ -23,6 +23,19 @@ Move the pin in a pull request of its own, so that the gate runs once with the n
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
+### Preview the changes to your OBAAF files
+
+In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
+
+To see which old acceptances would carry over, supply the owner, reason and expiry you intend to record. For example, replace the values in this command before using it.
+
+```sh
+obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
+  --owner @YOUR-TEAM --reason "Your reason for retaining these risks" --expires YYYY-MM-DD
+```
+
+Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |

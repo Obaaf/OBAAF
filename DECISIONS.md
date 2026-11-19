@@ -103,6 +103,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
+| D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 
 ---
 
@@ -907,3 +908,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A2b will call this proof for its paperwork preview. The preview lists each refused candidate under “Could not be made automatically”, together with the proof's single-line reason. It offers only candidates that pass. A proof needs working directory-descriptor and no-follow support and a writable temporary directory outside Git working trees and the source. The first implementation declines external check inputs, external or absolute links, nested repositories and filesystems, submodules, hard-linked files, special files and a Git index whose instruction list differs from the private copy. It edits existing regular files. A malformed document, unexpected file change, failed check read, missing CI input, changed source bytes, or difference between the original and unedited-copy results also withholds the candidate. For Git working trees, an advisory about folder pruning may appear only on the private copy. The proof checks that the actual CI and Jenkins files, Jenkins coverage and all other notes agree. It declines edits that change Jenkins file selection.
 
 **Status.** Proposed, 2026-11-19 (slice A2a, #261).
+
+### D-102 Paperwork changes in the fix preview
+
+**Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away. With a partial check the preview withholds changes whose scope it cannot establish.
+
+**Reason.** An acceptance changes which risk counts at the gate. The user needs to see its owner, reason and expiry before deciding whether to take it. A unique spelling correction can be checked on a copy. Plausible alternatives need a human decision.
+
+**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
+
+**Status.** Proposed, 2026-11-19 (A2b, #275).

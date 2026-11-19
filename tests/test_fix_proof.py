@@ -52,13 +52,13 @@ class FixProofTest(unittest.TestCase):
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
     def test_unexpected_file_change_during_check_is_detected(self):
-        run = fix_proof._run
+        run = fix_proof.check_inputs
         def recording(root, *args):
             result = run(root, *args)
             if root != self.root and (root / self.file).read_bytes() != self.old:
                 (root / "unexpected").write_bytes(b"some other writer")
             return result
-        with patch.object(fix_proof, "_run", recording), self.assertRaisesRegex(ProofError, "outside"):
+        with patch.object(fix_proof, "check_inputs", recording), self.assertRaisesRegex(ProofError, "outside"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
 
     def test_explicit_config_baseline_and_gate_are_used_for_acceptance(self):
