@@ -60,7 +60,7 @@ class ZizmorOutput(unittest.TestCase):
         cases = zp.cases_from_zizmor([finding("template-injection", [
             location("a.yml", ["jobs", "build", "steps", 0, "run"], kind="Related", row=9),
             location("a.yml", ["jobs", "build", "steps", 1, "run"], row=12)])], AUDITS)
-        self.assertEqual([("a.yml", "build", "template-injection", "high", "high", (13,), (1,), False)],
+        self.assertEqual([("a.yml", "build", "template-injection", "high", "high", (13,), ((1,),), False)],
                          [(c.file, c.job, c.audit, c.severity, c.confidence, c.lines, c.steps, c.job_level)
                           for c in cases])
 
@@ -77,7 +77,7 @@ class ZizmorOutput(unittest.TestCase):
         ], AUDITS)
         self.assertEqual(1, len(cases))
         c = cases[0]
-        self.assertEqual(("low", "high", (3, 5), (0, 3), True), (c.severity, c.confidence, c.lines, c.steps,
+        self.assertEqual(("low", "high", (3, 5), ((0,), (3,)), True), (c.severity, c.confidence, c.lines, c.steps,
                                                                  c.job_level))
 
     def test_unmapped_and_ignored_findings_are_not_cases(self):
@@ -148,6 +148,9 @@ jobs:
 """
 
 
+S1, S2 = (6, "step 1"), (7, "step 2")
+
+
 class Comparison(unittest.TestCase):
     """The comparison, with OBAAF's findings given by hand. Steps of WORKFLOW's job `build` are at lines 6
     and 7 (OBAAF's reader puts a step at the line of its first key)."""
@@ -164,7 +167,7 @@ class Comparison(unittest.TestCase):
     def run_compare(self, cases, hits, silent=(), recorded=(), errors=None):
         def findings(path):
             return zp.FileResult(hits.get(path.name, []), (errors or {}).get(path.name, []),
-                                 {"build": [6, 7], "deploy": [11]})
+                                 {"build": {(0,): {S1}, (1,): {S2}}, "deploy": {(0,): {(11, "step 1")}}})
         return zp.compare(mapping(silent, recorded), "s", cases, self.base, findings=findings)
 
     @staticmethod
@@ -172,7 +175,7 @@ class Comparison(unittest.TestCase):
         return zp.Case(file, job, audit, "high", "high", (3,), tuple(steps), job_level)
 
     def test_answered_by_the_mapped_rule_on_the_same_job(self):
-        result = self.run_compare([self.case()], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 6)]})
+        result = self.run_compare([self.case()], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", S1)]})
         self.assertEqual(["answered"], [o.status for o in result.outcomes])
         self.assertEqual(0, result.failures)
 
@@ -184,19 +187,44 @@ class Comparison(unittest.TestCase):
                 self.assertEqual(["unexplained"], [o.status for o in result.outcomes])
                 self.assertEqual(1, result.failures)
 
-    def test_each_step_zizmor_names_needs_a_finding_on_it_or_on_the_job(self):
-        case = self.case(steps=(1,), job_level=False)
-        on_other_step = {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 6)]}
+    def test_each_step_zizmor_names_needs_a_finding_on_that_step(self):
+        case = self.case(steps=((1,),), job_level=False)
+        on_other_step = {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", S1)]}
         result = self.run_compare([case], on_other_step)
         self.assertEqual(["unexplained"], [o.status for o in result.outcomes])
         self.assertEqual(["step 2 (line 7)"], result.outcomes[0].unmet)
-        self.assertEqual(0, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 7)]}).failures)
-        self.assertEqual(0, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]}).failures)
-        both = self.case(steps=(0, 1), job_level=False)
+        self.assertEqual(0, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", S2)]}).failures)
+        # A finding on the job as a whole answers no step (OBAAF-GHA-006's `no-cache-mode` is one).
+        self.assertEqual(1, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]}).failures)
+        both = self.case(steps=((0,), (1,)), job_level=False)
         self.assertEqual(1, self.run_compare([both], on_other_step).failures)
 
+    def test_a_finding_on_the_job_answers_the_job_zizmor_names_but_no_step(self):
+        case = self.case(steps=((1,),), job_level=True)
+        result = self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]})
+        self.assertEqual(["step 2 (line 7)"], result.outcomes[0].unmet)
+        self.assertEqual(0, self.run_compare([self.case(job_level=True)],
+                                             {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]}).failures)
+
+    def test_a_restores_finding_answers_the_steps_it_covers(self):
+        case = self.case(audit="excessive-permissions", steps=((0,), (1,)), job_level=False)
+        one = zp.Hit("OBAAF-GHA-009", "build", "new", S1, frozenset({S1}))
+        self.assertEqual(1, self.run_compare([case], {"a.yml": [one]}).failures)
+        both = zp.Hit("OBAAF-GHA-009", "build", "new", S1, frozenset({S1, S2}))
+        self.assertEqual(0, self.run_compare([case], {"a.yml": [both]}).failures)
+
+    def test_a_reason_for_a_case_obaaf_partly_answers_must_be_judged_again(self):
+        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.",
+                          "narrower")
+        case = self.case(steps=((0,), (1,)), job_level=False)
+        result = self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]},
+                                  silent=[entry])
+        self.assertEqual(["silent"], [o.status for o in result.outcomes])
+        self.assertEqual(1, result.failures)
+        self.assertIn("judge the reason again", result.stale[0][1])
+
     def test_a_step_or_job_obaaf_s_reader_does_not_have_is_an_error(self):
-        for case in (self.case(steps=(5,), job_level=False), self.case(job="nope", steps=(0,), job_level=False)):
+        for case in (self.case(steps=((5,),), job_level=False), self.case(job="nope", steps=((0,),), job_level=False)):
             with self.subTest(case=case), self.assertRaises(zp.ParityError):
                 self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", case.job, "new", None)]})
 
@@ -272,16 +300,69 @@ class Comparison(unittest.TestCase):
         self.assertIn("gap (#1): OBAAF covers agent jobs", text)
 
 
-class StepLines(unittest.TestCase):
-    def test_obaaf_findings_gives_the_line_of_each_step_and_of_the_step_a_finding_names(self):
+class StepPlaces(unittest.TestCase):
+    def test_obaaf_findings_gives_each_place_s_step_and_the_step_a_finding_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "w.yml"
             path.write_text(WORKFLOW.replace("echo two", "echo ${{ github.event.pull_request.title }}"),
                             encoding="utf-8")
             result = zp.obaaf_findings(path)
-        self.assertEqual({"build": [6, 7], "deploy": [11]}, result.steps)
-        self.assertIn(zp.Hit("OBAAF-GHA-010", "build", "new", 7), result.hits)
+        self.assertEqual({"build": {(0,): {S1}, (1,): {S2}}, "deploy": {(0,): {(11, "step 1")}}}, result.steps)
+        self.assertIn(zp.Hit("OBAAF-GHA-010", "build", "new", S2), result.hits)
         self.assertEqual([], result.errors)
+
+    def test_parallel_groups_and_steps_on_one_line_keep_their_places(self):
+        text = ("on: pull_request_target\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - parallel:\n          - run: echo ${{ github.event.pull_request.title }}\n"
+                "          - run: echo two\n"
+                "      - run: echo ${{ github.event.discussion.labels[0].name }}\n"
+                "  k:\n    runs-on: ubuntu-latest\n"
+                "    steps: [{run: 'echo ${{ github.event.pull_request.body }}'}, {run: echo two}]\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "w.yml"
+            path.write_text(text, encoding="utf-8")
+            result = zp.obaaf_findings(path)
+        self.assertEqual({(0, 0), (0, 1), (1,)}, set(result.steps["j"]))
+        self.assertEqual(3, len({k for keys in result.steps["j"].values() for k in keys}))
+        self.assertEqual(2, len({k for keys in result.steps["k"].values() for k in keys}))
+        case_on = {
+            ("j", (1,)): 1,      # the labels step: OBAAF reports nothing there
+            ("j", (0, 0)): 0,    # the first step of the group
+            ("k", (1,)): 1,      # the second step on the one line: nothing there
+            ("k", (0,)): 0,
+        }
+        for (job, place), failures in case_on.items():
+            with self.subTest(job=job, place=place):
+                case = zp.Case("w.yml", job, "template-injection", "high", "high", (1,), (place,), False)
+                found, unmet = zp.answer(case, ["OBAAF-GHA-010"], result)
+                self.assertEqual(failures, len(unmet), (found, unmet))
+
+    def test_obaaf_gha_006_against_a_case_on_several_cache_steps(self):
+        """The review's probes: OBAAF-GHA-006 reports one `restores` finding at the first cache step, and a
+        low `no-cache-mode` finding on the job when it sees no cache step."""
+        uv = "        uses: astral-sh/setup-uv@" + "1" * 40 + "\n"
+        restoring = ("on: release\njobs:\n  p:\n    runs-on: ubuntu-latest\n    environment: pypi\n    steps:\n"
+                     "      - name: a\n" + uv + "      - name: b\n" + uv + "        with: {enable-cache: true}\n"
+                     "      - run: uv publish\n")
+        unknown = restoring.replace("astral-sh/setup-uv", "example/not-a-cache-action")
+        for text, unmet in ((restoring, 0), (unknown, 2)):
+            with self.subTest(unmet=unmet), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "w.yml"
+                path.write_text(text, encoding="utf-8")
+                result = zp.obaaf_findings(path)
+                self.assertTrue([h for h in result.hits if h.rule == "OBAAF-GHA-006"], result.hits)
+                case = zp.Case("w.yml", "p", "cache-poisoning", "high", "low", (8, 10), ((0,), (1,)), False)
+                found, missing = zp.answer(case, ["OBAAF-GHA-006", "OBAAF-GHA-007"], result)
+                self.assertEqual(unmet, len(missing), (found, missing))
+                self.assertTrue(found)
+
+    def test_zizmor_s_route_into_a_parallel_group(self):
+        cases = zp.cases_from_zizmor([finding("template-injection", [
+            location("a.yml", ["jobs", "j", "steps", 2, "parallel", 1, "run"])])], AUDITS)
+        self.assertEqual(((2, 1),), cases[0].steps)
+        with self.assertRaises(zp.ParityError):
+            zp.cases_from_zizmor([finding("template-injection", [
+                location("a.yml", ["jobs", "j", "steps", 2, "parallel"])])], AUDITS)
 
 
 class Commands(unittest.TestCase):

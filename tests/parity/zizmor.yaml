@@ -13,9 +13,11 @@
 # A case is one (file, job, audit) zizmor reports, in its default persona, with the steps it names.
 # It is answered when OBAAF reports one of the audit's rules, in any state but `fixed`, on the same
 # job (anywhere in the file, where zizmor names no job), and for each step zizmor names, on that step
-# or on the job as a whole. A case that is not answered fails the test unless an entry under `silent`
-# names it with a reason. An entry under `silent` that names no case, or a case OBAAF now answers,
-# fails too, and so does a file OBAAF could not read, so this file cannot say more than the tools do.
+# (OBAAF-GHA-006's one `restores` finding counts for each cache step of its job); a finding on the job
+# as a whole answers the job, never a step. A case that is not answered fails the test unless an entry
+# under `silent` names it with a reason. An entry under `silent` that names no case, or a case OBAAF
+# now answers in whole or in part, fails too, and so does a file OBAAF could not read, so this file
+# cannot say more than the tools do.
 # zizmor-cases.json also holds the SHA-256 of each file the cases were read from; a changed file fails
 # the test until the cases are recorded again from CI.
 format: obaaf-zizmor-parity/v1
@@ -171,8 +173,9 @@ silent:
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
       release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
       or a tag push starts for one. This job, started by a tag push and named goreleaser, only sets
-      up Go; it runs no goreleaser or other publishing step, though it is given `contents: write`,
-      which no step uses.
+      up Go; it runs no goreleaser or other publishing step. It is given `contents: write`, which
+      none of its steps needs (setup-go reads the token only to download Go); whether such a job
+      should be "cannot tell" is part of #289.
   - set: zizmor-tests
     file: cache-poisoning/issue-642-repro.yml
     job: issue-642-true-positive

@@ -233,8 +233,9 @@ def load_mapping(path: Path | None = None) -> Mapping:
 @dataclass(frozen=True)
 class Case:
     """What zizmor reported for one audit on one job of one file (job None: the file as a whole): the
-    steps it named, by their index in the job's `steps` as zizmor's route gives it, and whether it also
-    named the job itself or a part of it that is not a step."""
+    steps it named, each by its place in the job's `steps` as zizmor's route gives it ((N,), or (N, M)
+    for the M-th step of a `parallel` group at N), and whether it also named the job itself or a part of
+    it that is not a step."""
 
     file: str
     job: str | None
@@ -250,7 +251,7 @@ class Case:
 
     def as_dict(self) -> dict:
         return {"file": self.file, "job": self.job, "audit": self.audit, "severity": self.severity,
-                "confidence": self.confidence, "lines": list(self.lines), "steps": list(self.steps),
+                "confidence": self.confidence, "lines": list(self.lines), "steps": [list(p) for p in self.steps],
                 "job_level": self.job_level}
 
 
@@ -343,7 +344,11 @@ def cases_from_zizmor(findings, audits) -> list[Case]:
                 raise ParityError(f"zizmor route with a job that is not a name: {route!r}")
             job = route[1]
             if len(route) > 3 and route[2] == "steps" and isinstance(route[3], int):
-                step = route[3]
+                step = (route[3],)
+                if len(route) > 4 and route[4] == "parallel":
+                    if len(route) < 6 or not isinstance(route[5], int):
+                        raise ParityError(f"zizmor route into a parallel group not read: {route!r}")
+                    step = (route[3], route[5])
         key = (path, job, finding["ident"])
         sev, conf, lines, steps, whole = grouped.get(key, ("informational", "low", set(), set(), False))
         grouped[key] = (max(sev, severity, key=SEVERITIES.index), max(conf, confidence, key=CONFIDENCES.index),
@@ -377,7 +382,7 @@ def load_cases(path: Path | None = None) -> dict:
             if not isinstance(item, dict) or set(item) != CASE_KEYS:
                 raise ParityError(f"{path}: set {name}: not a case: {item!r:.200}")
             out.append(Case(item["file"], item["job"], item["audit"], item["severity"], item["confidence"],
-                            tuple(item["lines"]), tuple(item["steps"]), bool(item["job_level"])))
+                            tuple(item["lines"]), tuple(tuple(p) for p in item["steps"]), bool(item["job_level"])))
         sets[name] = out
     if not isinstance(data["digests"], dict) or set(data["digests"]) != set(sets):
         raise ParityError(f"{path}: digests must name the same sets as the cases")
@@ -400,30 +405,55 @@ class Hit:
     rule: str
     job: str | None
     state: str
-    step_line: int | None = None   # the line of the step the finding names, None for a finding on the job
+    step: tuple | None = None      # the step the finding names, as (line, name); None for one on the job
+    covers: frozenset = frozenset()   # for OBAAF-GHA-006's `restores` finding: every step it is about
 
 
 @dataclass
 class FileResult:
     hits: list
     errors: list
-    steps: dict    # job id -> the line of each of its steps, in order
+    steps: dict    # job id -> {(N,) or (N, M): the (line, name) of OBAAF's step(s) at that place}
+
+
+def _step_places(job) -> dict:
+    """Each place in a job's written `steps` ((N,), and (N, M) inside a `parallel` group) and the OBAAF
+    steps there, matched by the YAML node itself, so steps on one line or inside groups stay apart."""
+    raw = job.raw.get("steps") if isinstance(job.raw, dict) else None
+    places: dict = {}
+    if not isinstance(raw, list):
+        return places
+    for n, item in enumerate(raw):
+        inner = item.get("parallel") if isinstance(item, dict) and "parallel" in item else None
+        targets = [((n, m), sub) for m, sub in enumerate(inner)] if isinstance(inner, list) else [((n,), item)]
+        for place, node in targets:
+            places[place] = {(st.line, st.name) for st in job.steps if st.raw is node}
+    return places
 
 
 def obaaf_findings(path: Path) -> FileResult:
-    """What `obaaf check FILE` (no configuration, GitHub Actions) finds on one workflow file, and where
-    OBAAF's reader puts each job's steps."""
+    """What `obaaf check FILE` (no configuration, GitHub Actions) finds on one workflow file, and which of
+    OBAAF's steps is at each place of each job's `steps`."""
     from obaaf import checker
     from obaaf.checker import workflow as wf_mod
+    from obaaf.checker.rules import WorkflowRules
 
     config = checker.Config.load(path.parent, None)
     result = checker.check(path, config=config, platform="github")
     errors = list(result.errors)
     parsed = wf_mod.parse(path.name, path.read_text(encoding="utf-8"))
-    if parsed.error:
+    if parsed.error and not errors:
         errors.append(parsed.error)
-    steps = {job_id: [step.line for step in job.steps] for job_id, job in parsed.jobs.items()}
-    hits = [Hit(f.rule, f.job, f.state, f.line if f.step is not None else None) for f in result.findings]
+    steps = {job_id: _step_places(job) for job_id, job in parsed.jobs.items()}
+    hits = []
+    for f in result.findings:
+        covers = frozenset()
+        job = parsed.jobs.get(f.job) if f.job is not None else None
+        if f.rule == "OBAAF-GHA-006" and f.kind.startswith("restores") and job is not None:
+            # One finding for all the job's cache steps, at the first; the others are in its facts. The
+            # steps are the ones the rule counts (WorkflowRules._restores_cache), not a match of the facts.
+            covers = frozenset((st.line, st.name) for st in job.steps if WorkflowRules._restores_cache(st))
+        hits.append(Hit(f.rule, f.job, f.state, (f.line, f.step) if f.step is not None else None, covers))
     return FileResult(hits, errors, steps)
 
 
@@ -450,11 +480,16 @@ class Comparison:
                 + sum(not ok for _, ok, _ in self.recorded) + len(self.errors))
 
 
+def _place(place: tuple) -> str:
+    return f"step {place[0] + 1}" + (f", parallel step {place[1] + 1}" if len(place) > 1 else "")
+
+
 def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
-    """OBAAF's findings that answer a case, and what in the case none answers. A finding answers when it
-    is of a mapped rule, not `fixed`, and on the case's job (any job, for a case on the file). Each step
-    zizmor named needs a finding on that step or on the job as a whole; the job, when zizmor named it
-    or a part of it that is not a step, needs any finding on it."""
+    """OBAAF's findings on a case's job, and what in the case none of them answers. A finding counts when
+    it is of a mapped rule and not `fixed`, and is on the case's job (anywhere, for a case on the file).
+    The job itself, when zizmor named it or a part of it that is not a step, is answered by any such
+    finding. Each step zizmor named is answered only by a finding on that step, or by OBAAF-GHA-006's
+    `restores` finding when it is about that step: a finding on the job as a whole answers no step."""
     found = [h for h in result.hits if h.rule in rules and h.state != "fixed"
              and (case.job is None or h.job == case.job)]
     if case.job is None:
@@ -462,14 +497,16 @@ def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
     unmet = []
     if case.job_level and not found:
         unmet.append(f"job {case.job}")
-    lines = result.steps.get(case.job)
-    if case.steps and lines is None:
+    places = result.steps.get(case.job)
+    if case.steps and places is None:
         raise ParityError(f"{case.file}: OBAAF's reader has no job {case.job!r}, which zizmor names")
-    for index in case.steps:
-        if index >= len(lines):
-            raise ParityError(f"{case.file}: job {case.job!r} has no step {index + 1}, which zizmor names")
-        if not any(h.step_line is None or h.step_line == lines[index] for h in found):
-            unmet.append(f"step {index + 1} (line {lines[index]})")
+    for place in case.steps:
+        keys = places.get(tuple(place))
+        if not keys:
+            raise ParityError(f"{case.file}: job {case.job!r} has no {_place(place)} OBAAF reads, which zizmor names")
+        if not any(h.step in keys or keys & h.covers for h in found):
+            line = min(k[0] for k in keys)
+            unmet.append(f"{_place(place)} (line {line})")
     return found, unmet
 
 
@@ -495,15 +532,23 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
             raise ParityError(f"set {set_name}: a silent entry names {entry.file}, which is not among its files")
     used: set = set()
     outcomes = []
+    partly: set = set()
     for case in cases:
         if case.audit not in mapping.audits:
             continue
-        found, unmet = answer(case, mapping.audits[case.audit], result_of(case.file))
+        result = result_of(case.file)
         entry = silent.get(case.key())
+        if result.errors:
+            # OBAAF could not read the file: no reason recorded about it can be checked (a failure of its own).
+            found, unmet = [], ["a file OBAAF could not read"]
+        else:
+            found, unmet = answer(case, mapping.audits[case.audit], result)
         if not unmet:
             outcomes.append(Outcome(case, "answered", found))
         elif entry is not None:
             used.add(case.key())
+            if found:
+                partly.add(case.key())
             label = f"{entry.kind}: " if entry.kind == "narrower" else f"gap ({entry.issue}): "
             outcomes.append(Outcome(case, "silent", found, label + entry.reason, unmet))
         else:
@@ -513,6 +558,9 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
     for key, entry in silent.items():
         if key in answered:
             stale.append((entry, "OBAAF now answers this case; remove the entry"))
+        elif key in partly:
+            stale.append((entry, "OBAAF now reports a mapped rule on this job, though not on all zizmor names; "
+                                 "judge the reason again"))
         elif key not in used:
             stale.append((entry, "zizmor reports no such case; remove or correct the entry"))
     recorded = []
@@ -533,7 +581,7 @@ def render(comparison: Comparison) -> str:
         c = o.case
         where = f"{c.file}#{c.job}" if c.job else f"{c.file} (file)"
         lines_of = ",".join(str(n) for n in c.lines)
-        hits = " ".join(sorted({f"{h.rule}/{h.job or '-'}/{h.state}" + (f"@{h.step_line}" if h.step_line else "")
+        hits = " ".join(sorted({f"{h.rule}/{h.job or '-'}/{h.state}" + (f"@{h.step[0]}" if h.step else "")
                                 for h in o.hits}))
         if o.status == "answered":
             detail = hits
