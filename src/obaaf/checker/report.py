@@ -346,6 +346,16 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None) -> str:
     lines = [f"error: {one_line(error)}" for error in result.errors]
     if result.errors:
         lines.append("The scan is incomplete and fails regardless of its findings.")
+    if result.jenkins_files:
+        unknown = [row for row in result.coverage if row["status"] == "unknown"]
+        if unknown:
+            files = len({row["path"] for row in unknown})
+            lines.append(f"Jenkins coverage is advisory: {len(unknown)} unknown rule results "
+                         f"across {files} Jenkinsfile{'s' if files != 1 else ''}. See the full coverage report.")
+        else:
+            lines.append("Jenkins coverage is advisory. The full report states what the checker could verify.")
+    if result.notes:
+        lines.append(f"The full report contains {len(result.notes)} advisory notes about this scan.")
     if result.baseline_stale:
         gated = result.stale_gating(result.fail_on, catalog)
         lines.append(f"Stale baseline entries: {len(result.baseline_stale)}. "

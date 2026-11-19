@@ -48,3 +48,14 @@ class SummaryCliTest(unittest.TestCase):
                     self.assertEqual(code, 2)
                     self.assertIn("--summary", err)
             self.assertFalse(baseline.exists())
+
+    def test_summary_keeps_incomplete_jenkins_coverage_visible(self):
+        with TempDir() as root:
+            path = root / "Jenkinsfile"
+            path.write_text("node { parallel generateBranches(['a']) }", encoding="utf-8")
+            full_code, full, _ = run_cli("check", path)
+            code, summary, err = run_cli("check", path, "--summary")
+            self.assertEqual(full_code, 0, full)
+            self.assertEqual(code, full_code, err)
+            self.assertIn("15 unknown", full)
+            self.assertIn("15 unknown rule results across 1 Jenkinsfile", summary)
