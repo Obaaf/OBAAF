@@ -295,17 +295,28 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
             lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
                          f"{group['byHand']} require manual review.")
         action = group["nextAction"]
+        command = None
         if "obaaf check . --lanes" in action:
+            # The command goes on a line of its own, so that copying it takes no full stop with it, and a
+            # path or option that cannot be printed on one line loses only the command, not the advice.
             args = _check_args(result)
             if result.baseline_path:
                 args.append("--baseline=" + str(result.baseline_path))
             args.extend(["--fail-on", result.fail_on, "--lanes"])
-            action = action.replace("obaaf check . --lanes", shlex.join(args))
+            command = shlex.join(args)
+            action = action.replace("obaaf check . --lanes", "the command below")
         if group["command"] and result.errors:
-            action = "Resolve the scan errors before migrating the baseline."
+            action, command = "Resolve the scan errors before migrating the baseline.", None
+        if command is not None and command != one_line(command):
+            action, command = action.replace(
+                "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
+                "printed as a one-line command)"), None
         if action != one_line(action):
+            # The catalogue's own command, such as `obaaf baseline migrate` with the baseline's path.
             action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)
+        if command is not None:
+            lines.append("      " + command)
     if result.errors or not groups or result.baseline_format == baseline_mod.FORMAT_V1:
         return lines
     if result.baseline_stale:
@@ -332,6 +343,8 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
                           "--write-baseline=" + destination, "--owner", "OWNER",
                           "--reason", "REASON", "--expires", "YYYY-MM-DD"])
     if command != one_line(command):
+        lines.append("Optional bulk acceptance is not shown: the check's paths or options cannot be printed as a "
+                     "one-line command.")
         return lines
     lines.append(f"Optional bulk acceptance: {len(fresh)} eligible outstanding "
                  f"finding{'s' if len(fresh) != 1 else ''} ({_severities(_by_severity(fresh))}). "
@@ -342,10 +355,18 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
     return lines
 
 
-def to_summary(result: CheckResult, catalog: Catalog | None = None) -> str:
-    """The same list as the full text report, plus scan errors and stale baseline entries."""
+def to_summary(result: CheckResult, catalog: Catalog | None = None,
+               expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
+    """The same list as the full text report, after the report's opening lines (the accepted risk first,
+    D-043) and with scan errors, an old-format baseline and stale baseline entries."""
     catalog = catalog or load()
-    lines = [f"error: {one_line(error)}" for error in result.errors]
+    # The opening lines are the full report's; the stale entries they point to are listed only there.
+    lines = [line.replace("; they are listed below.", "; the full report lists them.")
+             for line in _lead_lines(result, accepted_risk(result, expiring_within))]
+    if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
+        lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
+                     "finding until it is converted. The full report gives the command.")
+    lines += [f"error: {one_line(error)}" for error in result.errors]
     if result.errors:
         lines.append("The scan is incomplete and fails regardless of its findings.")
     if result.jenkins_files:
@@ -357,7 +378,8 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None) -> str:
         else:
             lines.append("Jenkins coverage is advisory. The full report states what the checker could verify.")
     if result.notes:
-        lines.append(f"The full report contains {len(result.notes)} advisory notes about this scan.")
+        lines.append(f"The full report contains {len(result.notes)} advisory "
+                     f"note{'s' if len(result.notes) != 1 else ''} about this scan.")
     if result.baseline_stale:
         gated = result.stale_gating(result.fail_on, catalog)
         lines.append(f"Stale baseline entries: {len(result.baseline_stale)}. "
