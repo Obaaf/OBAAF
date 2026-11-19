@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
-    digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
+    bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
@@ -110,8 +111,10 @@ class Finding:
 
 class Note(str):
     """Text a finding's message shows that is not one of its facts, because the facts already hold
-    it: a count of the files or characters that are listed in full as a fact. Every other value
-    given to `compose` is a fact. A note must never say something the facts do not."""
+    it: a count of the files or characters that are listed in full as a fact, or what the catalogue
+    gives for a fact (the words of documentation an OBAAF-GHA-026 finding's `setting` names, and where
+    they are, flagship slice 2d.5c1). Every other value given to `compose` is a fact. A note must never
+    say something the facts do not."""
 
 
 class Fact:
@@ -541,6 +544,7 @@ class WorkflowRules:
             self.script_injection(job)
             self.agent_rules(job)
             self.agent_tool_installs(job)
+            self.agent_tool_settings(job)
             self.release_rules(job)
             self.unpinned(job)
             self.persisted_credentials(job)
@@ -1803,6 +1807,101 @@ class WorkflowRules:
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
                          **agents)
+
+    # -------------------------------------------------------------- GHA-026
+    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
+
+    def agent_tool_settings(self, job: Job) -> None:
+        """OBAAF-GHA-026: a step gives an agent action a setting the tool's own documentation warns about
+        (flagship slice 2d.5c1). The settings are data, under each agent tool's entry in the detection
+        data, each with the documentation's words and where they are. One finding per step and input: for
+        the first of the settings for that input whose values the given value is (compared trimmed and in
+        any letter case, the wider reading), or, where the value is not plain text (an expression, a list,
+        a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
+        most medium. An input that is not given has the action's default, which no setting names."""
+        known = agent_tools.settings(self.detection)
+        if not known:
+            return
+        for step in job.steps:
+            if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
+                continue
+            written = step.raw.get("with")
+            if written is not None and not isinstance(written, dict):
+                # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review).
+                mine = [c for c in known if step.uses_action(c[2]["action"])]
+                if mine:
+                    self._agent_setting(job, step, written, mine, whole=True)
+                continue
+            given = step.with_
+            if not given:
+                continue
+            by_input: dict = {}
+            for tool, name, setting in known:
+                if step.uses_action(setting["action"]):
+                    key = input_name(setting["input"])
+                    if key in given:
+                        by_input.setdefault(key, []).append((tool, name, setting))
+            for key, candidates in by_input.items():
+                self._agent_setting(job, step, given[key], candidates)
+
+    # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
+    # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
+    _TRIMMED = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
+
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False) -> None:
+        action = (step.action or "").lower()
+        tool_name = candidates[0][1]
+        input_shown = "with" if whole else candidates[0][2]["input"]
+        if raw is None:
+            return          # `input:` with nothing after it is an empty value, which no setting names
+        if whole:
+            text = None
+        elif isinstance(raw, bool):
+            text = "true" if raw else "false"
+        elif isinstance(raw, (str, int, float)):
+            text = as_text(raw)
+        else:
+            text = None
+        core = text.strip(self._TRIMMED) if text is not None else None
+        # A control, format or separator character left inside the value (a NUL, which ends an environment
+        # variable, U+200B, a no-break space) can make the action read another value than the one written.
+        odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
+        if text is None or "${{" in text or odd:
+            # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
+            # any of it changes (found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo`
+            # become `unsafe`). A list or a mapping, which GitHub refuses as inputs, is named by its kind, as
+            # `value_identity` names it: walking it would expand every YAML alias in it (the fourth review).
+            if text is None:
+                fact = shown = value_identity(raw)
+            else:
+                fact, shown = bounded(text), one_line(text, 120)
+            worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` a value the checker cannot read "
+                     "({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
+                     "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
+                     input=input_shown, value=Fact(fact, shown),
+                     tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
+            return
+        value = core
+        folded = value.casefold()
+        for tool, name, setting in candidates:
+            if "equals" in setting:
+                hit = any(folded == str(v).strip().casefold() for v in setting["equals"])
+            else:
+                hit = folded != ""
+            if not hit:
+                continue
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}: {value}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=setting["severity"],
+                     kind="setting", action=action, input=setting["input"],
+                     value=Fact(value, one_line(value, 120)), setting=f"{tool}/{setting['id']}",
+                     tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
+                     source=Note(str(setting["source"])))
+            return
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
