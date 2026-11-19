@@ -25,6 +25,17 @@ Slice 4.9 (issue #152). The form and checklist explain which answers count towar
 - Where the form, the checklist and the text and Markdown reports state a tier, they now say that it reflects the answers given and that OBAAF does not verify that they are true, in place of "a tier describes controls in place".
 - **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`, and its ranking sentence names the two counts it ranks by. The JSON report is unchanged.
 
+### The other agent tools' settings and options
+
+Slice 2d.5c2b (issue #81, the rest of part 2 of 2d.5); decision D-094. **OBAAF-GHA-026 reads more settings and options. It can turn a passing gate red.**
+
+- Settings (medium): `gemini_debug: true` on `google-github-actions/run-gemini-cli`, `qwen_debug: true` on `QwenLM/qwen-code-action`, and `enable-uv-cache: true` or `auto` on `OpenHands/extensions/plugins/pr-review`.
+- Options, where a step runs the program: Qwen Code's `--yolo`, `-y`, `--y`, `--approval-mode yolo` and `--approvalMode yolo` (high); Kilo Code's `--auto` and its hidden `--yolo`, `--dangerously-skip-permissions` and `--dangerouslySkipPermissions` (high); Cline's `--yolo` and `-y` (high); GitHub Copilot CLI's `--allow-all-tools`, `--allow-all` and `--yolo` (high); OpenHands' `--always-approve` and `--yolo`, and any beginning of either, as Python's argparse takes it (high); goose's `--dangerously-unauthenticated` (medium). Each finding quotes the tool's own words with the file, commit and lines.
+- A step that runs one of these six programs in a way the checker cannot read is now "cannot tell" (medium), as for Claude Code, Codex and Gemini CLI.
+- `detection.yaml`: a new field `no_warnings` says, for the fourteen entries whose files warn about nothing (or could not be read), what was read; `obaaf catalog` refuses an entry with no settings, no flags and no `no_warnings`. A flag may say `prefixes: true`. Three older entries now list among their `sources` the files their settings and flags cite.
+- OBAAF-GHA-026's `Why:` line now also names "a way to other jobs or clients".
+- Not reported: a dangerous mode a tool runs in by default (a one-shot `cline "prompt"`, OpenHands' headless mode, and the three actions that run their CLI with `--yolo` themselves); options described with no sentence of warning (OpenCode's `--auto`, Continue's `cn --auto`, Aider's `--yes-always`); Kiro CLI and Amp, documented only on web pages; environment variables such as `COPILOT_ALLOW_ALL` and `GOOSE_MODE`.
+
 ### Agent CLIs run with an option their own documentation warns about
 
 Slice 2d.5c2a (issue #81, part of part 2 of 2d.5); decision D-090. **OBAAF-GHA-026 now also reads command-line options. It can turn a passing gate red.**

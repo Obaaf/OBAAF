@@ -67,6 +67,8 @@ agent_tools:
       - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/base-action/action.yml
       - https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml
       - https://github.com/anthropics/claude-code/blob/154c06539c4309e172b8ce6f2b07388987617d68/README.md
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/src/github/validation/untrusted-pr.ts
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md
     actions:
       anthropics/claude-code-action: {prompt_inputs: [prompt], args_inputs: [claude_args]}
       anthropics/claude-code-base-action: {prompt_inputs: [prompt, prompt_file], args_inputs: [claude_args]}
@@ -163,6 +165,7 @@ agent_tools:
       - https://github.com/google-github-actions/run-gemini-cli/blob/387c8ddb7a72078825da941758b811b9153c71e8/action.yml
       - https://github.com/google-gemini/gemini-cli-action/blob/a2b9c0548a45588c2e82fa67fb15e6b050ced328/action.yml
       - https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/README.md
+      - https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md
     actions:
       google-github-actions/run-gemini-cli: {prompt_inputs: [prompt]}
       google-gemini/gemini-cli-action: {prompt_inputs: [prompt]}
@@ -175,7 +178,21 @@ agent_tools:
       npm: ["@google/gemini-cli"]
     installs: {"@google/gemini-cli": gemini}
     install_urls: []
-    settings: []
+    # Both actions run `gemini --yolo` themselves, whatever their inputs say (run-gemini-cli's action.yml,
+    # lines 309 and 316; gemini-cli-action's, line 85), so no input turns it on or off and none is reported
+    # for it (flagship slice 2d.5c2b). The action passes `gemini_debug` through `fromJSON`, so only the JSON
+    # `true` turns debugging on.
+    settings:
+      - id: debug
+        action: google-github-actions/run-gemini-cli
+        input: gemini_debug
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Gemini CLI debug logging is enabled. This will stream responses, which could reveal sensitive
+          information if processed with untrusted inputs.
+        source: https://github.com/google-github-actions/run-gemini-cli/blob/387c8ddb7a72078825da941758b811b9153c71e8/action.yml#L307
     # Command-line options (flagship slice 2d.5c2a), read where `gemini` is run. The same documentation says
     # the sandbox is turned on by default with `--yolo` (docs/reference/configuration.md, line 3095), which is
     # why these are medium. Gemini CLI reads its options with yargs, which also takes `--y` for `-y` and the
@@ -202,6 +219,7 @@ agent_tools:
       - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml
       - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md
       - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/README.md
+      - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs
     actions:
       openai/codex-action: {prompt_inputs: [prompt, prompt-file], args_inputs: [codex-args]}
     commands:
@@ -283,6 +301,9 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19: actions/ai-inference's action.yml, README.md and SECURITY.md at 41caef4. None of
+      them warns about an input's value, and the action runs no agent program with options.
 
   - id: pr-agent
     name: PR-Agent
@@ -304,6 +325,10 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19: action.yaml, README.md and docs/docs/installation/github.md at c601521. The one
+      warning is about running the action on `pull_request_target` (github.md, line 106), an event, not
+      an input or an option; the event rules read events.
     carried: ["the action Codium-ai/pr-agent"]
 
   - id: coderabbit
@@ -321,6 +346,9 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      coderabbitai/ai-pr-reviewer could not be read on 2026-11-19: GitHub refused an anonymous read of the
+      repository. Nothing is reported until its own files can be read.
     carried: ["the action coderabbitai/ai-pr-reviewer"]
 
   - id: openhands
@@ -333,6 +361,8 @@ agent_tools:
       - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/vulnerability-remediation/action.yml
       - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/issue-duplicate-checker/action.yml
       - https://docs.openhands.dev/openhands/usage/cli/headless
+      - https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx
+      - https://github.com/OpenHands/OpenHands-CLI/blob/283c6ac3610f4299f405f7389f65766dcb83e12a/openhands_cli/argparsers/util.py
     # All-Hands-AI/OpenHands was in OBAAF's list before slice 2d.5b; its default branch had no action
     # file when read, so it is kept for workflows pinned to an older commit.
     actions:
@@ -349,7 +379,35 @@ agent_tools:
     packages: {}
     installs: {}
     install_urls: []
-    settings: []
+    # The pr-review action hands `enable-uv-cache` to astral-sh/setup-uv@v6 as `enable-cache`, whose
+    # default, `auto`, turns the cache on on GitHub-hosted runners (setup-uv's README at d0cc045, line 207),
+    # so `auto` is read as `true` (flagship slice 2d.5c2b).
+    settings:
+      - id: uv-cache
+        action: OpenHands/extensions/plugins/pr-review
+        input: enable-uv-cache
+        equals: ["true", "auto"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Default is 'false' for security: shared caches can become a pivot into more privileged workflows
+          (prompt-injected reviewer could write a malicious wheel into cache; subsequent higher-privilege
+          workflow hits poisoned cache). Only opt in when you control the runner environment (e.g.
+          self-hosted, single-tenant) and accept the trade-off.
+        source: https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/pr-review/action.yml#L105-L113
+    # Command-line options (flagship slice 2d.5c2b), read where `openhands` is run. `--yolo` is the same
+    # option as `--always-approve` (OpenHands-CLI's openhands_cli/argparsers/util.py, lines 12 to 17), and
+    # Python's argparse takes any beginning of either (`--always`, `--yol`). High: nothing in the sentence's
+    # page puts the actions in a sandbox. Headless mode always approves every action (headless.mdx, line
+    # 28), which no option says and the checker does not report.
+    flags:
+      - id: always-approve
+        options: [--always-approve, --yolo]
+        prefixes: true
+        severity: high
+        read: 2026-11-19
+        says: "Auto-approve all actions (use with caution)"
+        source: https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx#L62
     carried: ["the action All-Hands-AI/OpenHands"]
 
   - id: opencode
@@ -372,6 +430,12 @@ agent_tools:
     install_urls:
       - 'opencode\.ai/(v2/)?install\b'
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 007afb1: the CLI's options (packages/cli/src/commands/commands.ts) and its
+      documentation (services/site/src/docs). `--auto` is described as "Auto-approve permissions that
+      are not explicitly denied", and the hidden `--yolo` and `--dangerously-skip-permissions` do the
+      same (packages/cli/src/commands/handlers/run.ts, line 34), with no sentence of warning, so none is
+      reported (decision F-267). Kilo Code, which shares this command, does warn; see its entry.
     carried: ["opencode run", "the package opencode-ai", "the install script opencode.ai/install"]
 
   - id: cline
@@ -380,6 +444,7 @@ agent_tools:
     sources:
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/README.md
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/README.md
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx
     # The CLI's README gives `cline "<prompt>"` for a headless run, which the pattern below finds; the
     # action was in OBAAF's list before slice 2d.5b, and the repository had no action file when read.
     actions:
@@ -393,6 +458,20 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `cline` is run. The CLI's README calls
+    # `-y, --yolo` yolo mode (apps/cli/README.md, lines 91 and 271); the warning is the documentation's for
+    # YOLO mode. Not reported, because no option says it: a one-shot run (`cline "prompt"`, or a prompt on
+    # standard input) is in yolo mode by default unless it is given `--auto-approve false`, `--act` or
+    # `--plan` (README, lines 89 and 338).
+    flags:
+      - id: yolo
+        options: [--yolo, -y]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          **Warning: This is dangerous.** YOLO mode disables all safety checks. Cline executes whatever it
+          decides without asking permission.
+        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx#L78
     carried: ["the action cline/cline"]
 
   - id: aider
@@ -411,6 +490,10 @@ agent_tools:
     install_urls:
       - 'aider\.chat/install\.(sh|ps1)\b'
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 5dc9490: README.md and aider/website/docs (config/options.md, scripting.md).
+      `--yes-always` is described as "Always say yes to every confirmation" (options.md, line 711) with
+      no sentence of warning, so it is not reported.
     carried: ["the install scripts aider.chat/install.sh and .ps1"]
 
   - id: copilot-cli
@@ -418,6 +501,7 @@ agent_tools:
     read: 2026-11-18
     sources:
       - https://github.com/github/copilot-cli/blob/020bbc0a39e97deaf58327cb880167f845461690/README.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md
     actions: {}
     commands:
       - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
@@ -430,6 +514,17 @@ agent_tools:
     install_urls:
       - 'gh\.io/copilot-install\b'
     settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `copilot` is run. The CLI's documentation is
+    # GitHub's, in github/docs. "These options" are `--allow-all-tools`, `--allow-all` and `--yolo` (lines 98
+    # and 100). Not read: `--allow-all-paths` and `--allow-all-urls` alone (no sentence of warning names
+    # them) and the variable `COPILOT_ALLOW_ALL`.
+    flags:
+      - id: allow-all
+        options: [--allow-all-tools, --allow-all, --yolo]
+        severity: high
+        read: 2026-11-19
+        says: It is strongly recommended that you only use these options in an isolated environment.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md#L104-L105
     carried: ["copilot -p and --prompt"]
 
   - id: qodo
@@ -451,6 +546,10 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at e08f6fc: action.yml and README.md. The README says the action was retired on
+      2026-11-01 and that every invocation returns a retirement error before it reads credentials or
+      runs a prompt; nothing warns about an input's value.
 
   - id: claude-code-security-review
     name: Claude Code Security Reviewer
@@ -467,6 +566,11 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 0c6a49f: action.yml and README.md. The README warns that the action is not
+      hardened against prompt injection and should only review trusted pull requests (line 45), which is
+      about which events run it, not about an input's value; `run-every-commit`'s warning is about false
+      positives.
 
   - id: auggie
     name: Augment Auggie
@@ -488,6 +592,10 @@ agent_tools:
     installs: {"@augmentcode/auggie": auggie}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19: augmentcode/augment-action at a2c41eb, augmentcode/augment-agent at cd94b92 and
+      augmentcode/auggie at 8bd7186 (action files, README files and docs). The only warning is that the
+      tokens are credentials, which is not about a setting's value.
 
   - id: continue
     name: Continue
@@ -508,6 +616,10 @@ agent_tools:
     install_urls:
       - 'raw\.githubusercontent\.com/continuedev/continue/[^/\s]+/extensions/cli/scripts/install\.(sh|ps1)\b'
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 5522c6f: the general-review action and the CLI's documentation (docs/cli). `cn
+      --auto` is described as "Allow all tools without prompting" (docs/cli/tool-permissions.mdx, line
+      82) with no sentence of warning, so it is not reported.
 
   - id: jules
     name: Jules
@@ -523,6 +635,10 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at bff7875: action.yaml and README.md. The README warns that issue-triggered
+      workflows can be exploited (line 159), which is about events, not an input; the action sends
+      `requirePlanApproval: false` itself (action.yaml, line 74), which no input changes.
 
   - id: goose
     name: goose
@@ -531,6 +647,7 @@ agent_tools:
       - https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/README.md
       - https://goose-docs.ai/docs/guides/running-tasks
       - https://www.mankier.com/1/goose-run
+      - https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/documentation/docs/guides/goose-cli-commands.md
     actions: {}
     # `goose run` only: another tool named goose (database migrations) has no `run` command.
     commands:
@@ -542,6 +659,15 @@ agent_tools:
     install_urls:
       - 'github\.com/(block|aaif-goose)/goose/releases/download/\S*/download_cli\.sh\b'
     settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `goose` is run. goose's approval mode is the
+    # variable `GOOSE_MODE`, not an option, and is not read.
+    flags:
+      - id: unauthenticated
+        options: [--dangerously-unauthenticated]
+        severity: medium
+        read: 2026-11-19
+        says: Only use `--dangerously-unauthenticated` with local trusted clients.
+        source: https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/documentation/docs/guides/goose-cli-commands.md#L712
 
   - id: kilo
     name: Kilo Code
@@ -549,6 +675,7 @@ agent_tools:
     sources:
       - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/github/action.yml
       - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/README.md
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/packages/opencode/src/cli/cmd/run.ts
     actions:
       Kilo-Org/kilocode/github: {prompt_inputs: [prompt]}
     commands:
@@ -562,6 +689,19 @@ agent_tools:
     install_urls:
       - 'kilo\.ai/cli/install\b'
     settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `kilo` is run, from the CLI's own help text.
+    # `--yolo` and `--dangerously-skip-permissions` are hidden options of the same command (run.ts, lines
+    # 261 to 270) that skip the permission checks `--auto` only answers (lines 298 and 780), so they are
+    # read with the sentence about `--auto`, the wider reading; yargs also takes the camel-case
+    # `--dangerouslySkipPermissions`. The README says the same of `--auto` (line 144: "Only use it in
+    # trusted environments.").
+    flags:
+      - id: auto
+        options: [--auto, --yolo, --dangerously-skip-permissions, --dangerouslySkipPermissions]
+        severity: high
+        read: 2026-11-19
+        says: "auto-approve permissions that are not explicitly denied (dangerous!)"
+        source: https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/packages/opencode/src/cli/cmd/run.ts#L256-L260
 
   - id: kiro
     name: Kiro CLI
@@ -578,6 +718,9 @@ agent_tools:
     install_urls:
       - 'cli\.kiro\.dev/install\b'
     settings: []
+    no_warnings: >-
+      Kiro CLI's options are documented on kiro.dev, which is not a file at a commit; kirodotdev/Kiro at
+      efac9e3 documents none of them. Nothing is reported until a file at a commit says something.
 
   - id: qwen-code
     name: Qwen Code
@@ -585,6 +728,8 @@ agent_tools:
     sources:
       - https://github.com/QwenLM/qwen-code-action/blob/05f81718976f3b7da657422e6e8e4d372b8621d7/action.yml
       - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/README.md
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/packages/cli/src/config/top-level-options.ts
     actions:
       QwenLM/qwen-code-action: {prompt_inputs: [prompt]}
     commands:
@@ -597,7 +742,45 @@ agent_tools:
     installs: {"@qwen-code/qwen-code": qwen}
     install_urls:
       - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.(sh|ps1)\b'
-    settings: []
+    # The action runs `qwen --yolo` itself, whatever its inputs say (action.yml, line 232), so no input turns
+    # it on or off and none is reported for it (flagship slice 2d.5c2b).
+    settings:
+      - id: debug
+        action: QwenLM/qwen-code-action
+        input: qwen_debug
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Qwen Code debug logging is enabled. This will stream responses, which could reveal sensitive
+          information if processed with untrusted inputs.
+        source: https://github.com/QwenLM/qwen-code-action/blob/05f81718976f3b7da657422e6e8e4d372b8621d7/action.yml#L228
+    # Command-line options (flagship slice 2d.5c2b), read where `qwen` is run. High: the same sentence says
+    # `--yolo` turns on no sandbox, so every tool runs at the runner's privilege (Gemini CLI's is medium
+    # because its sandbox comes on with it). Qwen Code reads its options with yargs (`-y` is `--yolo`'s
+    # alias in packages/cli/src/config/top-level-options.ts, lines 250 to 256), which also takes `--y` and
+    # the camel-case `--approvalMode`. Its other approval modes are not here: `auto` is the CLI's default
+    # (packages/cli/src/config/config.ts, line 2009) and `auto-edit` allows less than it.
+    flags:
+      - id: yolo
+        options: [--yolo, -y, --y]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call,
+          including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at
+          the host process's privilege level.
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md#L338
+      - id: approval-mode-yolo
+        options: [--approval-mode, --approvalMode]
+        equals: [yolo]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call,
+          including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at
+          the host process's privilege level.
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md#L338
 
   - id: swe-agent
     name: SWE-agent
@@ -613,6 +796,9 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 3ea751c: docs/usage/cli.md and docs/config. None of them warns about an option's
+      value.
 
   - id: warp
     name: Warp Oz
@@ -630,6 +816,9 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Read on 2026-11-19: warpdotdev/oz-agent-action at b0c640e and warpdotdev/warp-agent-action at fee7dc8
+      (action files and READMEs). None of them warns about an input's value.
 
   - id: amp
     name: Amp
@@ -645,6 +834,9 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
+    no_warnings: >-
+      Amp's options are documented on ampcode.com, which is not a file at a commit, and no public repository
+      of Amp's own was found. Nothing is reported.
 
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.

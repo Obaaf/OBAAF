@@ -17,7 +17,7 @@ import re
 
 # Every key an entry may have, and the ones it must have.
 FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "prompt_flags", "packages",
-          "installs", "install_urls", "settings", "flags", "carried")
+          "installs", "install_urls", "settings", "flags", "no_warnings", "carried")
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
 # `args_inputs`: the inputs an action hands to the tool's program as command-line options (flagship slice
@@ -31,7 +31,9 @@ SEVERITIES = ("high", "medium", "low")
 # A command-line option the tool's own files warn about (flagship slice 2d.5c2a, OBAAF-GHA-026): the option's
 # spellings (`options`), the values warned about when it takes one (`equals`), and the words. It is read
 # where the tool's program is run in a script and in the entry's actions' `args_inputs`.
-FLAG_FIELDS = ("id", "options", "equals", "severity", "read", "says", "source")
+# `prefixes: true` (flagship slice 2d.5c2b): the tool's parser also takes any beginning of a long option
+# (Python's argparse does, unless told not to), so each beginning of each long spelling is read as it.
+FLAG_FIELDS = ("id", "options", "equals", "prefixes", "severity", "read", "says", "source")
 FLAG_REQUIRED = ("id", "options", "severity", "read", "says", "source")
 _OPTION_RE = re.compile(r"-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*")
 # A source is a file at a commit on GitHub, with the line or lines the words are on.
@@ -196,6 +198,14 @@ def problems(detection: dict) -> list[str]:
             if flags and not (entry.get("programs") or reads_args):
                 out.append(f"agent tool {tool}: has flags but neither programs nor an action's args_inputs, "
                            "so nothing reads them")
+        # What was read and found to warn about nothing (flagship slice 2d.5c2b): an entry with no settings
+        # and no flags says so, in words, so that "not read" and "read, nothing to report" differ.
+        quiet = entry.get("no_warnings")
+        if "no_warnings" in entry and (not isinstance(quiet, str) or not quiet.strip()):
+            out.append(f"agent tool {tool}: no_warnings must say what was read and why nothing is reported")
+        elif not entry.get("settings") and not entry.get("flags") and "no_warnings" not in entry:
+            out.append(f"agent tool {tool}: has no settings and no flags, so it must say in no_warnings what "
+                       "was read and why nothing is reported")
         carried = entry.get("carried", [])
         if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
             out.append(f"agent tool {tool}: carried must be a list of text")
@@ -296,6 +306,11 @@ def _flag_problems(tool: str, flags: list, settings: list) -> list[str]:
             if key in flag and (not isinstance(flag[key], list) or not flag[key] or not all(
                     isinstance(v, str) and v.strip() for v in flag[key])):
                 out.append(f"{name}: {key} must be a list of values written as text")
+        if "prefixes" in flag and flag["prefixes"] is not True:
+            out.append(f"{name}: prefixes must be true (or left out)")
+        elif flag.get("prefixes") and isinstance(options, list) and not any(
+                isinstance(o, str) and o.startswith("--") for o in options):
+            out.append(f"{name}: prefixes needs a long option (--name) to take the beginnings of")
         if flag.get("severity") not in SEVERITIES:
             out.append(f"{name}: severity must be one of {', '.join(SEVERITIES)}")
         if not isinstance(flag.get("read"), datetime.date):

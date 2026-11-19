@@ -78,7 +78,8 @@ class TheDataTest(unittest.TestCase):
         detection = load().detection
         self.assertEqual(agent_tools.problems(raw_detection()), [])
         readers = {r[0]: r for r in agent_tools.flag_readers(detection)}
-        self.assertEqual(sorted(readers), ["claude-code", "codex", "gemini-cli"])
+        self.assertEqual(sorted(readers), ["claude-code", "cline", "codex", "copilot-cli", "gemini-cli", "goose",
+                                           "kilo", "openhands", "qwen-code"])          # slice 2d.5c2b added six
         for tool, (_t, _n, flags, programs, _packages, args) in readers.items():
             self.assertTrue(programs, tool)
             for flag in flags:

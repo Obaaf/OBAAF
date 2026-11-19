@@ -136,6 +136,17 @@ def _table(flags: list) -> tuple:
             options.setdefault(o, []).append(flag)
             if len(o) == 2 and o[0] == "-" and o[1] != "-":
                 letters.setdefault(o[1], []).append(flag)
+        if flag.get("prefixes") is True:
+            # The tool's parser takes any beginning of a long option that no other option shares (argparse);
+            # the checker does not know the tool's other options, so every beginning is read as the option,
+            # the wider reading (one the tool finds ambiguous it refuses, and nothing runs).
+            for option in flag["options"]:
+                o = option.casefold()
+                if o.startswith("--") and len(o) > 3:
+                    for end in range(3, len(o)):
+                        bucket = options.setdefault(o[:end], [])
+                        if flag not in bucket:
+                            bucket.append(flag)
     if len(_TABLES) >= 16:
         _TABLES.clear()
     _TABLES[key] = (flags, (options, letters))

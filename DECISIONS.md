@@ -98,6 +98,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-088 | OBAAF reports, as OBAAF-GHA-026, a step that gives an agent action a value of an input that the tool's own documentation warns about, with the documentation's words and source; the values are data in each agent tool's entry; a value the checker cannot read is "cannot tell" at most medium | Proposed |
 | D-089 | Init previews both files, applies explicitly, stops on conflicts and starts CI in report mode | Accepted, 2026-11-18 |
 | D-090 | OBAAF-GHA-026 also reports a command-line option an agent tool's own files warn about, in an action's argument input or where a step runs the tool's program, with the words and source; the options are data; what the checker cannot read in the command is "cannot tell" at most medium | Proposed |
+| D-094 | The other twenty agent tools' entries are read: each warned setting or option is data with its words and source, an entry with none says in `no_warnings` what was read, and a Python CLI's option is read with every beginning argparse takes | Proposed |
 
 ---
 
@@ -842,3 +843,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** JSON gains a `todo` array. A changeable tool version is one cause with counts for pin candidates and manual fixes. An eligible literal install can be considered for a user-supplied pin. The later fix command must still prove the patch. Existing JSON fields, SARIF, gate results and acceptance identities are preserved.
 
 **Status.** Proposed, 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.
+
+### D-094 The other agent tools' settings and options
+
+**Decision.** Every entry of `agent_tools` either lists the settings and options its own files warn about, each with the words and the file, commit and lines (as D-088 and D-090), or says in a new field, `no_warnings`, what was read and why nothing is reported; `obaaf catalog` refuses an entry with neither. Read on 2026-11-19 for the twenty entries D-088 and D-090 left: `gemini_debug: true` on run-gemini-cli, `qwen_debug: true` on qwen-code-action and `enable-uv-cache: true` or `auto` on OpenHands' pr-review action (medium); Qwen Code's `--yolo` and `--approval-mode yolo`, Kilo Code's `--auto` with its hidden `--yolo` and `--dangerously-skip-permissions`, Cline's `--yolo`, Copilot CLI's `--allow-all-tools`, `--allow-all` and `--yolo`, and OpenHands' `--always-approve` and `--yolo` (high); goose's `--dangerously-unauthenticated` (medium). A flag may say `prefixes: true` when the tool's parser takes any beginning of a long option, as Python's argparse does; every beginning is then read as the option. Fourteen entries have `no_warnings`.
+
+**Reason.** The plan asks that each entry's documented settings and options be read, each citing its sentence, or that the entry say the tool documents none (slice 2d.5c2b), and that a setting only another scanner's data calls dangerous not be reported (D-088). A field, not a comment, makes "read and found nothing" a fact `obaaf catalog` can check. Where a tool's files describe a mode with no sentence of warning (OpenCode's `--auto`, Continue's `cn --auto`, Aider's `--yes-always`), nothing is reported, as F-267 decided for the actions. Kilo Code's hidden options do more than `--auto`, so they are read with its sentence, the wider reading. Qwen Code's yolo is high where Gemini CLI's is medium because Qwen's documentation says `--yolo` turns on no sandbox.
+
+**Consequence.** A gate can fail where it passed: a step that runs `qwen`, `kilo`, `cline`, `copilot`, `openhands` or `goose` with one of these options, or in a way the checker cannot read, and the three action inputs. A dangerous mode a tool runs in by default (a one-shot `cline` run, OpenHands' headless mode, the three actions that run their CLI with `--yolo` themselves) is not reported, because no setting names it. Kiro CLI and Amp document their options only on web pages, which a source at a commit cannot cite.
+
+**Status.** Proposed, 2026-11-19 (slice 2d.5c2b, #81).
