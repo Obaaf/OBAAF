@@ -348,11 +348,9 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None) -> str:
         lines.append("The scan is incomplete and fails regardless of its findings.")
     if result.baseline_stale:
         gated = result.stale_gating(result.fail_on, catalog)
-        lines.append(f"Stale baseline entries: {len(result.baseline_stale)}; {len(gated)} "
-                     f"fail the current --fail-on {result.fail_on} gate.")
-        for entry in result.baseline_stale:
-            where = f" [{entry.get('scope') or 'job'} {entry['job']}]" if entry.get("job") else ""
-            lines.append(one_line(f"  {entry.get('severity', '')} {entry.get('rule', '')} {entry.get('path', '')}{where}"))
+        lines.append(f"Stale baseline entries: {len(result.baseline_stale)}. "
+                     f"The current --fail-on {result.fail_on} gate counts {len(gated)}. "
+                     "The full report lists the entries.")
     if lines:
         lines.append("")
     return "\n".join(lines + _todo_lines(result, catalog)) + "\n"
