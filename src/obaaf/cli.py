@@ -226,7 +226,7 @@ def cmd_check(args) -> int:
         print(_nothing_checked(target, args.platform), file=sys.stderr)
         return EXIT_USAGE
     if args.summary:
-        text = report.to_summary(result)
+        text = report.to_summary(result, expiring_within=args.expiry_warning)
     elif args.format == "json":
         text = report.to_json(result, expiring_within=args.expiry_warning)
     elif args.format == "sarif":
@@ -824,7 +824,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto",
                    help="which CI definitions to check: auto (GitHub Actions workflows and Jenkinsfiles), github "
                         "or jenkins. Jenkins results are advisory (see docs/jenkins.md).")
-    x.add_argument("--summary", action="store_true", help="show the to-do list with scan, coverage and stale-entry warnings")
+    x.add_argument("--summary", action="store_true", help="show the accepted risk and the to-do list with scan, coverage and baseline warnings "
+                        "(a text check only: not with --format json or sarif, --lanes or --write-baseline)")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
     x.add_argument("--fail-on", default="medium",
