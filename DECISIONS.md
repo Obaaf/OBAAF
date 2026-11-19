@@ -917,3 +917,11 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+### D-113 Install the GitHub Actions templates from the distribution
+
+**Decision.** Ship the resources used by the GitHub Actions template installer in the OBAAF wheel and source distribution. By default the installer uses the templates that came with the installed version. An explicit `--source` selects the caller’s directory. The caller supplies the OBAAF repository and immutable commit for the generated workflows.
+
+**Reason.** A build engineer who installs OBAAF from a wheel can set up a repository offline without acquiring a second checkout. Keeping the tracked templates as the single source ties their contents to the package build.
+
+**Status.** Proposed, 2026-11-19 (slice 3.3, #142).
