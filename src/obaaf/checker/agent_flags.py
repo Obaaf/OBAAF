@@ -1225,7 +1225,8 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
         if skip:
             skip = False
             continue
-        if t in ("-m", "-W", "-X", "-r", "--require", "--import", "--loader", "-I", "-M", "-x", "--env-file"):
+        if t in ("-m", "-W", "-X", "-r", "--require", "--import", "--loader", "-I", "-M", "-x", "--env-file") and (
+                t not in options):      # php's `-r` is code (found by slice 2d.5c2c), node's is a module
             if t == "-m":
                 return False            # a module is run (`python -m pkg`): not read, as a repository script is not
             skip = True
@@ -1257,8 +1258,15 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
         if code is not None and code.computed and mentions(code.shown, ctx.programs, ctx.packages):
             for flag in ctx.flags:
                 ctx.reading.cannot_tell(flag, f"{family}: {code.shown}")
-        elif mentions(text, ctx.programs, ctx.packages):
-            _fragments(text, ctx.flags, ctx.reading, family)
+        else:
+            if mentions(text, ctx.programs, ctx.packages):
+                _fragments(text, ctx.flags, ctx.reading, family)
+            if appears(text, ctx.programs, ctx.packages):
+                # The code read by its tokens: argument lists, command lines in strings, options in pieces
+                # (flagship slice 2d.5c2c); `appears`, because a string's prefix (`f"claude ..."`) is
+                # glued to the name once quotes are taken out.
+                from obaaf.checker import agent_code
+                agent_code.read_code(text, family, ctx)
     return True
 
 
@@ -1476,13 +1484,15 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
 
 def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
                 mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
-                written_files: set | None = None, loose: bool | None = None, prose: bool = False) -> Reading:
+                written_files: set | None = None, loose: bool | None = None, prose: bool = False,
+                language: str = "") -> Reading:
     """Each warned flag a script gives the tool's program, and what the checker cannot read there.
     `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
     workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
     the script is in another shell or language, which is read only the widest way, and "cannot tell" where
-    it names the tool and nothing is found. `unread`: `env` values the checker cannot read, shown with a
-    word that uses them."""
+    it names the tool and nothing is found; `language` (a shell's or an interpreter's name, or
+    `github-script`) says how `agent_code` reads it by its tokens as well. `unread`: `env` values the checker
+    cannot read, shown with a word that uses them."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1516,6 +1526,11 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     _read_widest(text, programs, packages, flags, reading, anywhere=not bash)
     if not bash and mentioned:
         _fragments(text, flags, reading, "a script the checker does not read as bash")
+    if not bash and loose:
+        if language:
+            from obaaf.checker import agent_code
+            ctx = _Context(list(programs), packages, flags, {}, True, set(), reading, loose=True)
+            agent_code.read_language(text, language, ctx)
     return reading
 
 

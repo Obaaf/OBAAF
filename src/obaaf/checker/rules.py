@@ -29,13 +29,6 @@ from obaaf.checker.workflow import (
 PLACEHOLDER_SHA = "0" * 40
 
 
-def _base_word(line: str) -> str:
-    """The first word of a line, without its directories, quotes or a Windows suffix, in lower case."""
-    words = line.strip().split()
-    first = words[0].strip("&'\"") if words else ""
-    return re.sub(r"\.(exe|cmd|bat|ps1)$", "", first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1], flags=re.I).lower()
-
-
 def _strings_in(value, limit: int) -> list:
     """The strings in a value of lists and mappings (a matrix), at most `limit` of them, each node once."""
     out: list = []
@@ -1998,15 +1991,18 @@ class WorkflowRules:
                        packages: list) -> None:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
         parts: list = []
+        languages: dict = {}
         if step.run:
             shell_name = self._step_shell(job, step)
             # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
             parts.append((step.run.replace("^", "") if shell_name in ("cmd", "cmd.exe") else step.run,
                           shell_name in ("bash", "sh")))
+            languages[id(parts[-1][0])] = shell_name
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
             parts.append((script, False))
+            languages[id(script)] = "github-script"
         if step.confines and isinstance(given.get("run"), str):
             parts.append((given["run"], True))
         # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
@@ -2060,18 +2056,15 @@ class WorkflowRules:
                 # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
                 # JavaScript or another shell is read the widest way; "cannot tell" where it names the tool and
                 # holds the start of a warned option it cannot complete (`"--dangerously-" + "skip-..."`).
+                # The language is read by its tokens too (`agent_code`, flagship slice 2d.5c2c): argument lists
+                # held in variables, command lines joined with values, options in pieces; in another shell, a
+                # variable or splat among the program's words (`claude @a`, `& claude $flags`, `claude %F%`)
+                # is "cannot tell", as an unquoted one is in bash.
                 if agent_flags.appears(text, programs, packages):
                     reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
                                                           mentioned=agent_flags.mentions(text, programs, packages),
-                                                          bash=False, loose=True))
-                    if script is not text:
-                        # In another shell, a variable or splat among the program's words (`claude @a`,
-                        # `claude $flags`, `claude %F%`) is "cannot tell", as an unquoted one is in bash.
-                        for line in text.split("\n"):
-                            if _base_word(line) in programs and re.search(r"(?<!\S)[@$%]\w|%\w+%", line):
-                                for flag in flags:
-                                    if flag["id"] not in reading.hits:
-                                        reading.cannot_tell(flag, one_line(line.strip(), 120))
+                                                          bash=False, loose=True,
+                                                          language=languages.get(id(text), "")))
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that names the tool in an input whose name says it is a command.

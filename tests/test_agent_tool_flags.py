@@ -477,11 +477,12 @@ class ReviewCasesTest(unittest.TestCase):
                 "      - uses: actions/github-script@" + "b" * 40 + "\n        with:\n          script: |\n")
         self.assertEqual(kinds(check(text + f"            await exec.exec('claude', ['{self.DSP}'])\n")),
                          ["command-option"])
-        # Options held whole in a variable are not read in another language, as a quoted variable is not
-        # in bash (#254); an option written in pieces is "cannot tell".
-        self.assertEqual(kinds(check(text + "            await exec.exec('claude', flags)\n")), [])
-        self.assertEqual(kinds(check(text + "            await exec.exec('claude', ['--dangerously-' + 'skip-permissions'])\n")),
+        # An argument list held in a variable is "cannot tell" (slice 2d.5c2c; it was quiet before); an option
+        # written in literal pieces is joined and matched.
+        self.assertEqual(kinds(check(text + "            await exec.exec('claude', flags)\n")),
                          ["command-computed"])
+        self.assertEqual(kinds(check(text + "            await exec.exec('claude', ['--dangerously-' + 'skip-permissions'])\n")),
+                         ["command-option"])
         self.assertEqual(kinds(check(text + "            await github.rest.issues.createComment({body: '@claude'})\n")),
                          [])
 
@@ -727,9 +728,10 @@ class ThirdReviewCasesTest(unittest.TestCase):
         self.expect([
             ("python3 -c 'import subprocess; subprocess.run([\"claude\", \"--version\"])'", "none"),
             ("python3 <<'EOF'\nimport subprocess\nsubprocess.run([\"claude\",\"-p\",prompt,\"--output-format\",\"json\"])\nEOF", "none"),
-            ("perl -e 'system \"claude --dangerously-\" . \"skip-permissions -p x\"'", "cannot"),
+            # Literal pieces are joined and matched (slice 2d.5c2c; they were "cannot tell" before).
+            ("perl -e 'system \"claude --dangerously-\" . \"skip-permissions -p x\"'", "hit"),
             ("ruby -e 'puts %x(claude --dangerously-#{\"skip\"}-permissions -p x)'", "cannot"),
-            ("awk 'BEGIN { cmd = \"claude --dangerously-\" \"skip-permissions\"; print \"\" | cmd }'", "cannot"),
+            ("awk 'BEGIN { cmd = \"claude --dangerously-\" \"skip-permissions\"; print \"\" | cmd }'", "hit"),
             (f"perl -e 'system \"claude {d}\"'", "hit"),
         ])
 
