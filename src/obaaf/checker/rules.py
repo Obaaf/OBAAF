@@ -4886,15 +4886,33 @@ class WorkflowRules:
     # The Node.js versions that ship npm 9.5.0 or later, which npm's documentation asks for (line 37 of
     # generating-provenance-statements.mdx at 507a73e): Node.js 20.0.0 shipped npm 9.6.4; an older one
     # may ship npm 8, which does not know `--provenance`.
-    _NODE_VERSION_RE = re.compile(r"v?(\d+)(\.(\d+|x|\*)){0,2}\Z")
+    _NODE_VERSION_RE = re.compile(r"v?([0-9]+)(\.([0-9]+|x|\*)){0,2}\Z")
     _NODE_ALIASES = frozenset({"lts/*", "latest", "current", "node"})
     _SETUP_NODE_INPUTS = frozenset({"node-version", "registry-url", "scope", "cache", "package-manager-cache",
                                     "always-auth", "check-latest"})
     # The commands an earlier step may run: they install the package's dependencies and run its own scripts,
     # and change neither npm nor the job's environment in the workflow's text.
     _NPM_EARLIER_RE = re.compile(r"npm (ci|install|test|run [A-Za-z0-9:_.-]+)\Z")
-    # Variables that change what `npm` or Node.js runs, in a step's, the job's or the workflow's `env`.
-    _NPM_ENV_KEYS = frozenset({"PATH", "NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV"})
+    # Variables that change what `npm`, Node.js or the shell runs, or where npm sends the package, in the
+    # publishing step's, the job's or the workflow's `env`; also any `BASH...`, `LD_...`, `NPM_CONFIG_...`
+    # and `NODE_...` name but `NODE_AUTH_TOKEN` (`_npm_env_changes`). Bash runs `SHELLOPTS` and expands
+    # `PS4` at start (found by the second review of slice 2d.12).
+    _NPM_ENV_KEYS = frozenset({"PATH", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "EXECIGNORE"})
+    _NPM_REGISTRY = frozenset({"https://registry.npmjs.org", "https://registry.npmjs.org/"})
+
+    def _npm_env_changes(self, env) -> bool:
+        """Whether an `env` mapping may change what `npm`, Node.js or the shell runs, or where npm sends the
+        package; an `env` that is not a mapping (one expression) may."""
+        if env is None:
+            return False
+        if not isinstance(env, dict):
+            return True
+        for key in env:
+            name = str(key).strip().upper()
+            if name in self._NPM_ENV_KEYS or name.startswith(("BASH", "LD_", "NPM_CONFIG_")) or (
+                    name.startswith("NODE_") and name != "NODE_AUTH_TOKEN"):
+                return True
+        return False
 
     def _npm_provenance_publish(self, job: Job, step: Step) -> bool:
         """Whether a step publishes to npm with provenance that npm signs as it publishes (flagship slice
@@ -4907,15 +4925,17 @@ class WorkflowRules:
           `--provenance=true`), `--access public` and `--tag NAME`, each read as written;
         - the job's permissions, or its workflow's when it declares none, give `id-token: write`;
         - every runner it may run on is GitHub-hosted, and it runs in no container;
-        - its shell is a POSIX shell the checker reads, and no `env` of the step, the job or the workflow
-          names `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, a `BASH_FUNC` or `LD_` variable, or
-          is one expression;
+        - its shell is a POSIX shell the checker reads, nothing runs beside it, and no `env` of the step, the
+          job or the workflow is one expression or names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+          `EXECIGNORE`, a `BASH...`, `LD_...` or `NPM_CONFIG_...` variable, or a `NODE_...` one but
+          `NODE_AUTH_TOKEN`;
         - an earlier step is `actions/setup-node` with a Node.js version that ships npm 9.5.0 or later (20
-          and up, or `lts/*`, `latest`, `current` or `node`), and every earlier step is `actions/checkout`,
-          such a setup-node step with no input beyond `node-version`, `registry-url`, `scope`, `cache`,
-          `package-manager-cache`, `always-auth` and `check-latest`, or a `run` step in the default shell
-          whose lines are `npm ci`, `npm install`, `npm test` or `npm run NAME`, with none of those
-          variables in its `env`.
+          and up, or `lts/*`, `latest`, `current` or `node`), and every earlier step, with no `env`, `if` or
+          `continue-on-error`, is `actions/checkout`, such a setup-node step with no input beyond
+          `node-version`, `registry-url` (npm's own registry), `scope`, `cache`, `package-manager-cache`,
+          `always-auth` and `check-latest`, or a `run` step whose lines are `npm ci`, `npm install`,
+          `npm test` or `npm run NAME`, in the runner's default shell (neither the job nor the workflow sets
+          `defaults`).
 
         Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm, Yarn,
         an action that publishes, a folder or package to publish, any other option or earlier step) is not
@@ -4932,17 +4952,19 @@ class WorkflowRules:
         shell = self._failfast_shell(job, step)
         if shell is None or self._bash_env(job, step):
             return False
-        for scope in (step.raw, job.raw, self.wf.raw):
-            env = scope.get("env") if isinstance(scope, dict) else None
-            if env is None:
-                continue
-            if not isinstance(env, dict):
-                return False
-            for key in env:
-                name = str(key).strip().upper()
-                if name in self._NPM_ENV_KEYS or name.startswith(("BASH_FUNC", "LD_")):
-                    return False
+        if any(self._npm_env_changes(scope.get("env")) for scope in (step.raw, job.raw, self.wf.raw)
+               if isinstance(scope, dict)):
+            return False
+        # Nothing runs beside it (a parallel group, or an earlier step left running in the background), and
+        # the steps before it read with the job's and the workflow's own default shell, if they set one.
         earlier = job.steps[:step.index]
+        if step.group is not None or any(other.background or other.group is not None for other in earlier):
+            return False
+        for scope in (job.raw, self.wf.raw):
+            defaults = scope.get("defaults") if isinstance(scope, dict) else None
+            if defaults is not None and not (isinstance(defaults, dict) and set(map(str, defaults)) <= {"run"} and (
+                    isinstance(defaults.get("run"), dict) and "shell" not in defaults["run"])):
+                return False
         if not all(self._npm_earlier_step_reads(job, other) for other in earlier) or not any(
                 other.action and other.action.lower() == "actions/setup-node" for other in earlier):
             return False
@@ -4989,24 +5011,30 @@ class WorkflowRules:
     def _npm_earlier_step_reads(self, job: Job, step: Step) -> bool:
         """Whether a step before `npm publish --provenance` is one that leaves npm as it is (see
         `_npm_provenance_publish`)."""
+        # No earlier step is given an `env` (an action runs in its own Node.js, which `NODE_OPTIONS` can
+        # make load a file; found by the second review of slice 2d.12), and none may be skipped or fail
+        # without stopping the job.
+        if step.raw.get("env") is not None or step.raw.get("if") is not None or step.raw.get("continue-on-error") \
+                is not None:
+            return False
         if step.uses:
-            if step.uses_action("actions/checkout") and step.action and step.action.lower() == "actions/checkout":
+            if step.action and step.action.lower() == "actions/checkout":
                 return True
             if not (step.action and step.action.lower() == "actions/setup-node"):
                 return False
             given = step.raw.get("with")
             if not isinstance(given, dict) or set(map(str, given)) - self._SETUP_NODE_INPUTS:
                 return False
+            registry = given.get("registry-url")
+            if registry is not None and as_text(registry).strip() not in self._NPM_REGISTRY:
+                return False
             version = given.get("node-version")
-            if version is None:
+            if version is None or isinstance(version, (bool, float)) or not isinstance(version, (str, int)):
                 return False        # the runner's own Node.js, whose npm the checker does not know
             text = as_text(version).strip()
             match = self._NODE_VERSION_RE.match(text)
             return text in self._NODE_ALIASES or bool(match and int(match.group(1)) >= 20)
-        env = step.raw.get("env")
-        if not isinstance(step.run, str) or step.raw.get("shell") is not None or (env is not None and not (
-                isinstance(env, dict) and not any(str(k).strip().upper() in self._NPM_ENV_KEYS or str(k).strip()
-                                                  .upper().startswith(("BASH_FUNC", "LD_")) for k in env))):
+        if not isinstance(step.run, str) or step.raw.get("shell") is not None:
             return False
         lines = [" ".join(line.split()) for line in step.run.split("\n") if line.strip() and not line.strip().startswith("#")]
         return bool(lines) and all(self._NPM_EARLIER_RE.match(line) for line in lines)

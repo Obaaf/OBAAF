@@ -44,7 +44,11 @@ def found(text, files=None):
             path = tmp / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body, encoding="utf-8")
-        return [f for f in checker.check(tmp).findings if f.rule == RULE]
+        result = checker.check(tmp)
+        # A file the checker could not read reports nothing, which would pass a test that expects nothing.
+        assert not result.errors, result.errors
+        assert any(f.rule == "OBAAF-GHA-016" or f.rule == RULE for f in result.findings), "no release job read"
+        return [f for f in result.findings if f.rule == RULE]
 
 
 class CreditedTest(unittest.TestCase):
@@ -72,8 +76,7 @@ class CreditedTest(unittest.TestCase):
         for version in ("20", "'20.11.1'", "'22.x'", "24", "lts/*", "latest", "node", "current", "v20"):
             with self.subTest(version=version):
                 self.assertEqual(found(workflow().replace("node-version: '24.x'", f"node-version: {version}")), [])
-        extra = ("      - run: npm run build\n      - run: |\n          npm test\n          npm run lint:ci\n"
-                 "        env:\n          CI: true\n")
+        extra = "      - run: npm run build\n      - run: |\n          npm test\n          npm run lint:ci\n"
         self.assertEqual(found(workflow(extra_steps=extra)), [])
 
     def test_a_hosted_matrix_is_read(self):
@@ -142,7 +145,13 @@ class StillReportedTest(unittest.TestCase):
                       f"      - uses: example/setup-tools@{PIN}\n", "      - run: npm ci && npm run build\n",
                       f"      - uses: actions/cache@{PIN}\n        with: {{path: ~/.npm, key: k}}\n",
                       "      - run: npm ci\n        shell: bash -e {0}\n",
-                      "      - run: npm ci\n        env:\n          NODE_OPTIONS: --require ./x.js\n"):
+                      "      - run: npm ci\n        env:\n          NODE_OPTIONS: --require ./x.js\n",
+                      # Found by the second review: an action runs in its own Node.js, which an `env` can
+                      # change; bash runs `SHELLOPTS` and expands `PS4` when it starts.
+                      f"      - uses: actions/checkout@{PIN}\n        env:\n          NODE_OPTIONS: --require ./evil.js\n",
+                      "      - run: npm ci\n        env:\n          SHELLOPTS: xtrace\n          PS4: '$(npm i -g npm@8)'\n",
+                      "      - run: npm ci\n        env:\n          CI: true\n",
+                      "      - run: npm ci\n        if: github.event_name == 'release'\n"):
             with self.subTest(extra=extra):
                 self.assertEqual(len(found(workflow(extra_steps=extra))), 1)
 
@@ -160,6 +169,28 @@ class StillReportedTest(unittest.TestCase):
         self.assertEqual(len(found(container)), 1)
         expression_env = workflow().replace("    steps:\n", "    env: ${{ fromJSON(vars.ENV) }}\n    steps:\n", 1)
         self.assertEqual(len(found(expression_env)), 1)
+        for env in ("SHELLOPTS: xtrace", "BASHOPTS: extglob", "PS4: x", "EXECIGNORE: x", "BASH_XTRACEFD: 3",
+                    "NPM_CONFIG_REGISTRY: https://relay.example", "npm_config_registry: https://relay.example",
+                    "NODE_TLS_REJECT_UNAUTHORIZED: 0", "NODE_EXTRA_CA_CERTS: ./ca.pem"):
+            with self.subTest(env=env):
+                self.assertEqual(len(found(workflow(top="env:\n  " + env + "\n"))), 1)
+        token = "      - run: npm publish --provenance --access public\n        env:\n          NODE_AUTH_TOKEN: x\n"
+        self.assertEqual(found(workflow(token)), [])
+
+    def test_a_default_shell_another_registry_or_a_setup_node_that_may_be_skipped(self):
+        shell = "defaults:\n  run:\n    shell: 'bash -c \"npm i -g npm@8 && bash -e {0}\"'\n"
+        self.assertEqual(len(found(workflow(top=shell))), 1)
+        job_shell = workflow().replace("    steps:\n", "    defaults:\n      run:\n        shell: bash\n    steps:\n", 1)
+        self.assertEqual(len(found(job_shell)), 1)
+        relay = workflow().replace("registry-url: 'https://registry.npmjs.org'", "registry-url: 'https://relay.example'")
+        self.assertEqual(len(found(relay)), 1)
+        skipped = workflow().replace(f"      - uses: actions/setup-node@{PIN}\n", f"      - uses: actions/setup-node@{PIN}\n        if: false\n")
+        self.assertEqual(len(found(skipped)), 1)
+        for version in ("20.10", "true", "'２０'", "[20]"):
+            with self.subTest(version=version):
+                self.assertEqual(len(found(workflow().replace("node-version: '24.x'", f"node-version: {version}"))), 1)
+        parallel = workflow().replace("      - run: npm ci\n", "      - run: npm ci\n        background: true\n")
+        self.assertEqual(len(found(parallel)), 1)
 
     def test_two_commands_in_the_step(self):
         publish = "      - run: |\n          npm run build\n          npm publish --provenance\n"
