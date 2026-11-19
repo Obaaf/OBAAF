@@ -188,6 +188,27 @@ class CannotTellTest(unittest.TestCase):
                 self.assertEqual([(h.kind, h.severity) for h in hits], [("computed", "medium")])
 
 
+    def test_a_list_on_several_lines_is_named_users_not_cannot_tell(self):
+        for uses, name in ((CLAUDE, "allowed_bots"), (CODEX, "allow-users"), (CLAUDE, "allowed_non_write_users")):
+            with self.subTest(input=name):
+                hits = found(check(one_step(uses, f"          {name}: |\n            alice,\n            bob\n")))
+                self.assertEqual([h.kind for h in hits], ["setting"] if name == "allowed_non_write_users" else [])
+
+    def test_the_whole_value_is_the_fact_so_an_acceptance_stops_matching_when_it_changes(self):
+        # Found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo` become `unsafe`.
+        def fact(mode):
+            text = ("on: issue_comment\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                    "    steps:\n      - uses: " + CODEX + "\n        with: ${{ fromJSON('{\"prompt\":"
+                    "\"review the change please\",\"safety-strategy\":\"" + mode + "\"}') }}\n")
+            hits = found(check(text))
+            self.assertEqual([h.kind for h in hits], ["computed"])
+            return hits[0].facts["value"]
+        self.assertNotEqual(fact("drop-sudo"), fact("read-only"))
+        self.assertIn("read-only", fact("read-only"))
+        hits = found(check(one_step(CODEX, "          allow-users: [alice, '*']\n")))
+        self.assertEqual(hits[0].facts["value"], '["alice", "*"]')
+
+
 class WhereStepsAreReadTest(unittest.TestCase):
 
     def test_yaml_anchors_and_aliases_are_read(self):

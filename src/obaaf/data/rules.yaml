@@ -911,9 +911,10 @@ rules:
       letter case, which is wider than some of the actions read it; the input's name is read in any case of
       A to Z, as GitHub does; an action at a path under one of these is read as it. A value the checker
       cannot read is case `computed`, "cannot tell", at most medium: an expression, a list, a mapping, a
-      value with a control, format or separator character left inside it (a NUL ends an environment
-      variable), and inputs written as one expression (`with: ${{ fromJSON(...) }}`), which is "cannot tell"
-      for every setting of the action. Read in the job's steps and in the steps of the local composite
+      value with a control, format, separator, private-use or unassigned character left inside it other
+      than a space, a tab or a line break (a NUL ends an environment variable), and a `with:` that is not a
+      mapping (inputs written as one expression, `with: ${{ fromJSON(...) }}`), which is "cannot tell" for
+      every setting of the action. Read in the job's steps and in the steps of the local composite
       actions it uses. A value only another scanner calls dangerous is not reported. Not read: the same
       settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as
       `--dangerously-skip-permissions`), an action's configuration files (`settings`, `codex-home`), and the
@@ -925,8 +926,8 @@ rules:
     fix: >-
       Remove the input, so the action uses its default, or set the value the documentation recommends: for
       `openai/codex-action`, `safety-strategy: drop-sudo` (the default) or `unprivileged-user`, and no
-      `allow-users` or only named users there (the documentation asks for caution even then); for `anthropics/claude-code-action`, named bots in `allowed_bots`, no
-      `allowed_non_write_users` except in a workflow whose `permissions` are as narrow as the documentation
+      `allow-users` or only named users there (the documentation asks for caution even then); for
+      `anthropics/claude-code-action`, named bots in `allowed_bots`, no `allowed_non_write_users` except in a workflow whose `permissions` are as narrow as the documentation
       asks, and `show_full_output` only while debugging, in a repository whose logs nobody else can read.
 
   # The checker's own configuration. A declaration that tells the checker which rules a job gets

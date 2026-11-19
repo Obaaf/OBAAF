@@ -1866,16 +1866,21 @@ class WorkflowRules:
         core = text.strip(self._TRIMMED) if text is not None else None
         # A control, format or separator character left inside the value (a NUL, which ends an environment
         # variable, U+200B, a no-break space) can make the action read another value than the one written.
-        odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t" for ch in core)
+        odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
         if text is None or "${{" in text or odd:
-            shown = one_line(text if text is not None else shown_value(raw), 120)
+            # The whole value is the fact, so an acceptance stops matching when any of it changes (found by
+            # 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo` become `unsafe`).
+            if text is None:
+                text = raw if isinstance(raw, str) else json.dumps(raw, sort_keys=True, default=as_text,
+                                                                     ensure_ascii=False)
+            shown = one_line(text, 120)
             worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
             severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
             self.add("OBAAF-GHA-026", step.line,
                      "Step '{step}' of job '{job}' gives {action} `{input}` a value the checker cannot read "
                      "({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
                      "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
-                     input=input_shown, value=Fact(text if text is not None else shown_value(raw), shown),
+                     input=input_shown, value=Fact(text, shown),
                      tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
             return
         value = core
