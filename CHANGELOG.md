@@ -17,6 +17,14 @@ The changes below are on the development branch for the prospective 0.4.0 releas
 
 Try the new pin in a dedicated pull request, migrate the old baseline, and run the existing gate before accepting any newly reported findings. The upgrade guide gives the commands, the changes rule by rule, and a measured example from the first adopter. [Upgrade guide](docs/upgrading.md)
 
+### A parity test against zizmor, and two actions whose inputs are code
+
+Slice 2d.3b (issue #79); decision D-099. **A step that gives `mikefarah/yq` an outsider's text in `cmd`, or `Amadevus/pwsh-script` in `script`, now gets OBAAF-GHA-010 (high). It can turn a passing gate red.**
+
+- **Two more actions are read as running their input as code** (`script_inputs` in `detection.yaml`): `mikefarah/yq` runs `cmd` through `eval` in `sh`, and `Amadevus/pwsh-script` runs `script` as PowerShell. The parity test found both: zizmor reports them in its own test workflows and OBAAF did not.
+- **CI runs a pinned zizmor beside OBAAF.** The advisory job `zizmor-parity` installs zizmor 1.32.0 by the SHA-256 of every file PyPI publishes for it, runs it on OBAAF's risky workflows and on zizmor's own test workflows for five audits (at zizmor's release commit), and compares. Where zizmor reports `template-injection`, `unpinned-uses`, `excessive-permissions`, `artipacked` or `cache-poisoning`, OBAAF must report OBAAF-GHA-010, 008, 009, 011 or 006 (or 007) on the same file and job, or `tests/parity/zizmor.yaml` must say why it does not. The test also fails when zizmor's output changes from what `tests/parity/zizmor-cases.json` records, and when a recorded reason no longer names a silent case. The ordinary test suite runs the same comparison on the recorded cases for the risky workflows, without zizmor.
+- **What it shows today:** of 73 cases, OBAAF answers 46; the other 27 are recorded as places where OBAAF's rule is narrower than zizmor's audit on purpose (OBAAF-GHA-011 covers agent jobs and untrusted triggers only; a job is a release job when it publishes; OBAAF-GHA-009 is about undeclared permissions, not broad ones; OBAAF-GHA-010 is about text an outsider writes). OBAAF-GHA-002, 013 and 019 are held to what poutine and CodeQL reported on the same files in landscape.md.
+
 ### Self-assessment results
 
 Slice 4.9 (issue #152). The form and checklist explain which answers count toward a tier. Score reports describe the tier as a summary of the answers supplied and identify the cases mapped to each suggested fix.

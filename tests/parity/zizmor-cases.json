@@ -1,0 +1,771 @@
+{
+ "format": "obaaf-zizmor-cases/v1",
+ "zizmor": "1.32.0",
+ "sets": {
+  "risky": [
+   {
+    "file": "claude-action-toctou.yml",
+    "job": "review",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     14
+    ]
+   },
+   {
+    "file": "clinejection-release.yml",
+    "job": "publish",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     13
+    ]
+   },
+   {
+    "file": "clinejection-release.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     14
+    ]
+   },
+   {
+    "file": "clinejection-release.yml",
+    "job": "publish",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     13,
+     14
+    ]
+   },
+   {
+    "file": "clinejection-triage.yml",
+    "job": "triage",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     9
+    ]
+   },
+   {
+    "file": "clinejection-triage.yml",
+    "job": "triage",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     12,
+     15
+    ]
+   },
+   {
+    "file": "expression-spellings.yml",
+    "job": "triage",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     19,
+     20
+    ]
+   },
+   {
+    "file": "nx-title-injection.yml",
+    "job": "validate",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     13,
+     14
+    ]
+   },
+   {
+    "file": "promptpwnd-issue-agent.yml",
+    "job": "triage",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     17
+    ]
+   },
+   {
+    "file": "promptpwnd-issue-agent.yml",
+    "job": "triage",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     17,
+     18
+    ]
+   },
+   {
+    "file": "pwn-request.yml",
+    "job": "preview",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     11
+    ]
+   },
+   {
+    "file": "pwn-request.yml",
+    "job": "preview",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     8
+    ]
+   },
+   {
+    "file": "pwn-request.yml",
+    "job": "preview",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     11
+    ]
+   },
+   {
+    "file": "pytorch-self-hosted.yml",
+    "job": "build",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     9
+    ]
+   },
+   {
+    "file": "pytorch-self-hosted.yml",
+    "job": "build",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     6
+    ]
+   },
+   {
+    "file": "pytorch-self-hosted.yml",
+    "job": "build",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     9
+    ]
+   },
+   {
+    "file": "tj-actions-unpinned.yml",
+    "job": "ship",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     18
+    ]
+   }
+  ],
+  "zizmor-tests": [
+   {
+    "file": "artipacked.yml",
+    "job": "artipacked",
+    "audit": "artipacked",
+    "severity": "medium",
+    "confidence": "low",
+    "lines": [
+     22
+    ]
+   },
+   {
+    "file": "cache-poisoning.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     13
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-enabled-by-default.yml",
+    "job": "publish-crate",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     21
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-not-configurable.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     23
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-opt-in-boolean-toggle.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-opt-in-boolish-toggle.yml",
+    "job": "publish-crate",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     17
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-opt-in-expression.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "cache-poisoning/caching-opt-in-multi-value-toggle.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     18
+    ]
+   },
+   {
+    "file": "cache-poisoning/dangerous-trigger-write-cache-job.yml",
+    "job": "foo",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     16
+    ]
+   },
+   {
+    "file": "cache-poisoning/dangerous-trigger-write-cache.yml",
+    "job": null,
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     7
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-1081-repro.yml",
+    "job": "issue-1081-true-positive",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     15,
+     18,
+     23
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-1152-repro.yml",
+    "job": "issue-1152-true-positive",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     16,
+     20
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-1152-repro.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     42
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-2320-repro.yml",
+    "job": "issue-2320-true-positive",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     19,
+     24,
+     29
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-343-repro.yml",
+    "job": "goreleaser",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     28,
+     34,
+     41
+    ]
+   },
+   {
+    "file": "cache-poisoning/issue-642-repro.yml",
+    "job": "issue-642-true-positive",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     15
+    ]
+   },
+   {
+    "file": "cache-poisoning/publisher-step.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     23
+    ]
+   },
+   {
+    "file": "cache-poisoning/ramsey-composer-install.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     13,
+     15
+    ]
+   },
+   {
+    "file": "cache-poisoning/trigger-heuristics/tag-and-branch.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     17,
+     23
+    ]
+   },
+   {
+    "file": "cache-poisoning/trigger-heuristics/tag-only.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     16,
+     22
+    ]
+   },
+   {
+    "file": "cache-poisoning/workflow-release-branch-trigger.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     22
+    ]
+   },
+   {
+    "file": "cache-poisoning/workflow-release-trigger-object.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     23
+    ]
+   },
+   {
+    "file": "cache-poisoning/workflow-tag-trigger.yml",
+    "job": "publish",
+    "audit": "cache-poisoning",
+    "severity": "high",
+    "confidence": "low",
+    "lines": [
+     23
+    ]
+   },
+   {
+    "file": "excessive-permissions.yml",
+    "job": "excessive-permissions",
+    "audit": "excessive-permissions",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     12
+    ]
+   },
+   {
+    "file": "excessive-permissions/issue-472-repro.yml",
+    "job": "job2",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     20
+    ]
+   },
+   {
+    "file": "excessive-permissions/jobs-broaden-permissions.yml",
+    "job": "job1",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "high",
+    "lines": [
+     11
+    ]
+   },
+   {
+    "file": "excessive-permissions/jobs-broaden-permissions.yml",
+    "job": "job2",
+    "audit": "excessive-permissions",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     20
+    ]
+   },
+   {
+    "file": "excessive-permissions/reusable-workflow-call.yml",
+    "job": "job1",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     7
+    ]
+   },
+   {
+    "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
+    "job": null,
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     1
+    ]
+   },
+   {
+    "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
+    "job": "job1",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     11
+    ]
+   },
+   {
+    "file": "excessive-permissions/reusable-workflow-other-triggers.yml",
+    "job": "job2",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "excessive-permissions/workflow-default-perms.yml",
+    "job": "single",
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     14
+    ]
+   },
+   {
+    "file": "excessive-permissions/workflow-read-all.yml",
+    "job": null,
+    "audit": "excessive-permissions",
+    "severity": "medium",
+    "confidence": "high",
+    "lines": [
+     5
+    ]
+   },
+   {
+    "file": "excessive-permissions/workflow-write-all.yml",
+    "job": null,
+    "audit": "excessive-permissions",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     5
+    ]
+   },
+   {
+    "file": "excessive-permissions/workflow-write-explicit.yml",
+    "job": null,
+    "audit": "excessive-permissions",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     7,
+     8,
+     9
+    ]
+   },
+   {
+    "file": "template-injection.yml",
+    "job": "inject-me",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "template-injection/addnab-docker-run-action.yml",
+    "job": "some-job",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     20,
+     26
+    ]
+   },
+   {
+    "file": "template-injection/codeql-sinks.yml",
+    "job": "some-job",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     17
+    ]
+   },
+   {
+    "file": "template-injection/dataflow.yml",
+    "job": "test",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     21,
+     22,
+     23,
+     28,
+     29
+    ]
+   },
+   {
+    "file": "template-injection/input-caps.yml",
+    "job": "inject-me",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     18
+    ]
+   },
+   {
+    "file": "template-injection/issue-1903-repro.yml",
+    "job": "repro",
+    "audit": "template-injection",
+    "severity": "informational",
+    "confidence": "low",
+    "lines": [
+     21
+    ]
+   },
+   {
+    "file": "template-injection/issue-2490-repro.yml",
+    "job": "repro",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "template-injection/issue-2502-repro.yml",
+    "job": "repro",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     19
+    ]
+   },
+   {
+    "file": "template-injection/issue-339-repro.yml",
+    "job": "find-run",
+    "audit": "template-injection",
+    "severity": "informational",
+    "confidence": "low",
+    "lines": [
+     30
+    ]
+   },
+   {
+    "file": "template-injection/multiline-expression.yml",
+    "job": "inject-me",
+    "audit": "template-injection",
+    "severity": "informational",
+    "confidence": "low",
+    "lines": [
+     19,
+     20
+    ]
+   },
+   {
+    "file": "template-injection/patterns.yml",
+    "job": "inject-me",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     30,
+     31,
+     32
+    ]
+   },
+   {
+    "file": "template-injection/pr-317-repro.yml",
+    "job": "PR-317-REPRO",
+    "audit": "template-injection",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     28
+    ]
+   },
+   {
+    "file": "template-injection/pwsh-script.yml",
+    "job": "some-job",
+    "audit": "template-injection",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     16
+    ]
+   },
+   {
+    "file": "template-injection/static-env.yml",
+    "job": "static-env-1",
+    "audit": "template-injection",
+    "severity": "low",
+    "confidence": "high",
+    "lines": [
+     43,
+     50,
+     55
+    ]
+   },
+   {
+    "file": "template-injection/template-injection-dynamic-matrix.yml",
+    "job": "not-ok",
+    "audit": "template-injection",
+    "severity": "medium",
+    "confidence": "medium",
+    "lines": [
+     26
+    ]
+   },
+   {
+    "file": "unpinned-uses.yml",
+    "job": "unpinned-0",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     16
+    ]
+   },
+   {
+    "file": "unpinned-uses/issue-1543-repro.yml",
+    "job": "repro",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     18
+    ]
+   },
+   {
+    "file": "unpinned-uses/issue-659-repro.yml",
+    "job": "test-itg",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     24
+    ]
+   },
+   {
+    "file": "unpinned-uses/menagerie-of-uses.yml",
+    "job": "menagerie",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     12,
+     14,
+     22,
+     24,
+     26
+    ]
+   },
+   {
+    "file": "unpinned-uses/reusable-workflow-unpinned.yml",
+    "job": "remote-branch-pinned",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     17
+    ]
+   },
+   {
+    "file": "unpinned-uses/reusable-workflow-unpinned.yml",
+    "job": "remote-tag-pinned",
+    "audit": "unpinned-uses",
+    "severity": "high",
+    "confidence": "high",
+    "lines": [
+     21
+    ]
+   }
+  ]
+ }
+}

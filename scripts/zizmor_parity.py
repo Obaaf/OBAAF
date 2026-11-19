@@ -11,6 +11,8 @@ reason.
         SHA-256 of every file PyPI publishes for it (needs PyPI)
     python scripts/zizmor_parity.py files SET [--root DIR]
         print the files of SET, relative to its root, one per line, for zizmor to read
+    python scripts/zizmor_parity.py run --zizmor PROGRAM --out DIR [--root SET=DIR ...]
+        run the pinned zizmor on every set, with the arguments zizmor.yaml gives, writing DIR/SET.json
     python scripts/zizmor_parity.py ci --zizmor SET=FILE ... [--root SET=DIR ...]
         CI: check that zizmor's output for the mapped audits is what zizmor-cases.json records,
         then compare OBAAF with it; prints CASES and the full comparison, exits 1 on any failure
@@ -76,7 +78,7 @@ class FileSet:
             if any(_glob(rel, pattern) for pattern in self.include) and not any(
                     _glob(rel, pattern) for pattern in self.exclude):
                 out.append(rel)
-        return out
+        return sorted(out)
 
 
 def _glob(rel: str, pattern: str) -> bool:
@@ -86,6 +88,9 @@ def _glob(rel: str, pattern: str) -> bool:
     return "**/" in pattern and fnmatch.fnmatchcase(rel, pattern.replace("**/", "", 1))
 
 
+KINDS = ("narrower", "gap")
+
+
 @dataclass
 class Silent:
     set: str
@@ -93,6 +98,8 @@ class Silent:
     job: str | None
     audit: str
     reason: str
+    kind: str = "narrower"   # narrower: OBAAF's rule is narrower on purpose; gap: OBAAF should report
+    issue: str = ""          # for a gap, the issue that tracks it (#N)
 
 
 @dataclass
@@ -172,10 +179,15 @@ def load_mapping(path: Path = MAPPING) -> Mapping:
     seen = set()
     for i, entry in enumerate(data.get("silent") or []):
         where = f"silent[{i}]"
-        entry = _keys(entry, {"set", "file", "job", "audit", "reason"}, where)
+        entry = _keys(entry, {"set", "file", "job", "audit", "kind", "issue", "reason"}, where)
         item = Silent(_text(entry.get("set"), f"{where}.set"), _text(entry.get("file"), f"{where}.file"),
                       entry.get("job"), _text(entry.get("audit"), f"{where}.audit"),
-                      _text(entry.get("reason"), f"{where}.reason"))
+                      _text(entry.get("reason"), f"{where}.reason"), _text(entry.get("kind"), f"{where}.kind"),
+                      str(entry.get("issue") or ""))
+        if item.kind not in KINDS:
+            raise ParityError(f"{where}.kind: one of {', '.join(KINDS)}")
+        if (item.kind == "gap") != bool(re.fullmatch(r"#\d+", item.issue)):
+            raise ParityError(f"{where}: a gap names its issue as #N, and only a gap names one")
         if item.set not in sets:
             raise ParityError(f"{where}: no set {item.set!r}")
         if item.audit not in audits:
@@ -395,7 +407,8 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
             outcomes.append(Outcome(case, "answered", answer))
         elif entry is not None:
             used.add(case.key())
-            outcomes.append(Outcome(case, "silent", reason=entry.reason))
+            label = f"{entry.kind}: " if entry.kind == "narrower" else f"gap ({entry.issue}): "
+            outcomes.append(Outcome(case, "silent", reason=label + entry.reason))
         else:
             outcomes.append(Outcome(case, "unexplained"))
     answered = {o.case.key() for o in outcomes if o.status == "answered"}
