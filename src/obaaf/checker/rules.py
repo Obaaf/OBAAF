@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import collections
 import copy
 import fnmatch
 import hashlib
@@ -599,6 +600,7 @@ class WorkflowRules:
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
                                firewall=self.firewall)
         second._through = True
+        second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
         order = {"high": 0, "medium": 1, "low": 2}
         standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
@@ -641,55 +643,112 @@ class WorkflowRules:
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
+    # Values OBAAF-GHA-023 reaches in one file, each place counted on its own: a large workflow reaches
+    # some thousands.
+    _PLACEHOLDER_WALK = 500_000
+
+    class _WalkExceeded(Exception):
+        pass
+
     def placeholders(self) -> None:
         """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
         The values are read as YAML gives them, so an escape (`OBAAF\\x5FOWNER`, a line joined inside
         double quotes) is the placeholder it spells, and a comment, which GitHub never reads, is not.
         `OBAAF_OWNER` is found in any letter case (GitHub owner names are compared without regard to
-        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros."""
-        seen: set = set()
+        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros.
+
+        A value written once under a YAML anchor and reached through aliases is one object to the
+        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each list and
+        mapping in it once, so a step shared by two jobs, or used twice in one job, is reported at each
+        (slice 2d.3: it was reported at the first place only). Each text is searched once, however
+        often it is reached, and a text with a placeholder reached again in the same place is that
+        place's once. A file whose places together reach more values than the checker reads is an
+        error for the file, never a pass; the rule's findings so far, and the other rules', stand."""
         found: list = []
+        budget = [self._PLACEHOLDER_WALK]
+        searched: dict = {}
+
+        def held(text: str, where: str) -> list:
+            key = (text, where.rsplit(".", 1)[-1] == "uses")
+            if key not in searched:
+                searched[key] = _placeholders_in(text, where)
+            return searched[key]
 
         def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
-            if isinstance(value, (dict, list)):
-                if id(value) in seen:
-                    return
-                seen.add(id(value))
-            if isinstance(value, str):
-                for placeholder in _placeholders_in(value, where):
-                    found.append((line, job, step, where, placeholder))
-            elif isinstance(value, dict):
-                for key, sub in value.items():
-                    name = as_text(key)
-                    for placeholder in _placeholders_in(name, where):
-                        found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
-                    sub_line = line
-                    if hasattr(value, "line_of"):
-                        try:
-                            sub_line = max(int(value.line_of(key) or 0), line)
-                        except (TypeError, ValueError):
-                            pass
-                    visit(sub, f"{where}.{name}" if where else name, sub_line, job, step)
-            elif isinstance(value, list):
-                for n, sub in enumerate(value):
-                    visit(sub, f"{where}[{n}]", line, job, step)
+            seen: set = set()
 
+            def walk(value, where: str, line: int) -> None:
+                budget[0] -= 1
+                if budget[0] < 0:
+                    raise self._WalkExceeded()
+                if isinstance(value, (dict, list)):
+                    if id(value) in seen:
+                        return
+                    seen.add(id(value))
+                if isinstance(value, str):
+                    placeholders = held(value, where)
+                    if placeholders:
+                        # A text reached again through an alias in the same place is that place's once,
+                        # as a list or mapping is; a text written out twice is two objects, and two places.
+                        if id(value) in seen:
+                            return
+                        seen.add(id(value))
+                    for placeholder in placeholders:
+                        found.append((line, job, step, where, placeholder))
+                elif isinstance(value, dict):
+                    for key, sub in value.items():
+                        name = as_text(key)
+                        for placeholder in held(name, where):
+                            found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
+                        sub_line = line
+                        if hasattr(value, "line_of"):
+                            try:
+                                sub_line = max(int(value.line_of(key) or 0), line)
+                            except (TypeError, ValueError):
+                                pass
+                        walk(sub, f"{where}.{name}" if where else name, sub_line)
+                elif isinstance(value, list):
+                    for n, sub in enumerate(value):
+                        walk(sub, f"{where}[{n}]", line)
+
+            walk(value, where, line)
+
+        try:
+            self._placeholder_places(visit)
+        except self._WalkExceeded:
+            message = ("values reached through YAML aliases are too many to read for template placeholders; the "
+                       "checker cannot tell whether one is left")
+            problems = getattr(self, "_problems", None)
+            problems = self.wf.problems if problems is None else problems
+            if message not in problems:
+                problems.append(message)
+        self._placeholder_findings(found)
+
+    def _placeholder_places(self, visit) -> None:
         jobs_raw = self.wf.raw.get("jobs")
         for key, sub in self.wf.raw.items():
             if key != "jobs":
                 visit({key: sub}, "", 1, None, None)
-        by_raw = {id(job.raw): job for job in self.wf.jobs.values()}
+        # Each job and step is matched to its raw value in order, so that two places holding the same
+        # value through an alias are two jobs or two steps, not one.
+        by_raw: dict = collections.defaultdict(collections.deque)
+        for job in self.wf.jobs.values():
+            by_raw[id(job.raw)].append(job)
         if isinstance(jobs_raw, dict):
             for key, job_raw in jobs_raw.items():
-                job = by_raw.get(id(job_raw))
+                queue = by_raw.get(id(job_raw))
+                job = queue.popleft() if queue else None
                 if job is None:
                     visit({key: job_raw}, "jobs", 1, None, None)
                     continue
-                steps = {id(step.raw): step for step in job.steps}
+                steps: dict = collections.defaultdict(collections.deque)
+                for step in job.steps:
+                    steps[id(step.raw)].append(step)
                 for name, sub in job_raw.items():
                     if name == "steps" and isinstance(sub, list):
                         for n, step_raw in enumerate(sub):
-                            step = steps.get(id(step_raw))
+                            queue = steps.get(id(step_raw))
+                            step = queue.popleft() if queue else None
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
@@ -699,8 +758,10 @@ class WorkflowRules:
             for job in self.wf.jobs.values():
                 for step in job.steps:
                     if step.via is not None and isinstance(step.written, dict):
-                        seen.clear()      # each use of an action is read, as each step written in a job is
+                        # each use of an action is read, as each step written in a job is
                         visit(step.written, "step", step.line, job, step)
+
+    def _placeholder_findings(self, found: list) -> None:
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)
