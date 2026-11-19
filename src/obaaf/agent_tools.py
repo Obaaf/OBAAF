@@ -17,7 +17,8 @@ import re
 
 # Every key an entry may have, and the ones it must have.
 FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "prompt_flags", "packages",
-          "installs", "install_urls", "settings", "flags", "carried")
+          "installs", "install_urls", "settings", "flags", "no_warnings", "shared_program", "other_program",
+          "carried")
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
 # `args_inputs`: the inputs an action hands to the tool's program as command-line options (flagship slice
@@ -25,13 +26,19 @@ REGISTRIES = ("npm", "pypi")
 ACTION_FIELDS = ("prompt_inputs", "args_inputs")
 # A setting the tool's own documentation warns about (flagship slice 2d.5c1, OBAAF-GHA-026): an input of
 # one of the entry's actions, the values warned about (`equals`) or any value (`set: true`), and the words.
-SETTING_FIELDS = ("id", "action", "input", "equals", "set", "severity", "read", "says", "source")
+# `json: true` (flagship slice 2d.5c2b): the action reads the input through `fromJSON`, so a value written as
+# a JSON string (`'"true"'`) is compared as the string it decodes to.
+SETTING_FIELDS = ("id", "action", "input", "equals", "set", "json", "severity", "read", "says", "source")
 SETTING_REQUIRED = ("id", "action", "input", "severity", "read", "says", "source")
 SEVERITIES = ("high", "medium", "low")
 # A command-line option the tool's own files warn about (flagship slice 2d.5c2a, OBAAF-GHA-026): the option's
 # spellings (`options`), the values warned about when it takes one (`equals`), and the words. It is read
 # where the tool's program is run in a script and in the entry's actions' `args_inputs`.
-FLAG_FIELDS = ("id", "options", "equals", "severity", "read", "says", "source")
+# `prefixes: true` (flagship slice 2d.5c2b): the tool's parser also takes any beginning of a long option
+# (Python's argparse does, unless told not to), so each beginning of each long spelling is read as it.
+# `unless` (flagship slice 2d.5c2b): the option counts whatever follows it, except one of these values
+# (Cline's `--auto-approve`, which its own code turns into `--auto-approve true` unless `false` follows).
+FLAG_FIELDS = ("id", "options", "equals", "unless", "prefixes", "severity", "read", "says", "source")
 FLAG_REQUIRED = ("id", "options", "severity", "read", "says", "source")
 _OPTION_RE = re.compile(r"-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*")
 # A source is a file at a commit on GitHub, with the line or lines the words are on.
@@ -196,6 +203,32 @@ def problems(detection: dict) -> list[str]:
             if flags and not (entry.get("programs") or reads_args):
                 out.append(f"agent tool {tool}: has flags but neither programs nor an action's args_inputs, "
                            "so nothing reads them")
+        # What was read and found to warn about nothing (flagship slice 2d.5c2b): an entry with no settings
+        # and no flags says so, in words, so that "not read" and "read, nothing to report" differ.
+        quiet = entry.get("no_warnings")
+        if "no_warnings" in entry and (not isinstance(quiet, str) or not quiet.strip()):
+            out.append(f"agent tool {tool}: no_warnings must say what was read and why nothing is reported")
+        elif "no_warnings" in entry and (entry.get("settings") or entry.get("flags")):
+            out.append(f"agent tool {tool}: has settings or flags, so it must not also say no_warnings")
+        elif not entry.get("settings") and not entry.get("flags") and "no_warnings" not in entry:
+            out.append(f"agent tool {tool}: has no settings and no flags, so it must say in no_warnings what "
+                       "was read and why nothing is reported")
+        # Another well-known program has the same name (AWS's Copilot CLI is `copilot`, pressly's migration
+        # tool is `goose`): a command of that name the checker cannot read is "cannot tell" only where the step
+        # also matches one of the entry's `commands`, which say it runs this tool (flagship slice 2d.5c2b).
+        shared = entry.get("shared_program")
+        other = entry.get("other_program")
+        if "shared_program" in entry and (not isinstance(shared, str) or not shared.strip()):
+            out.append(f"agent tool {tool}: shared_program must name the other program")
+        if ("shared_program" in entry) != ("other_program" in entry):
+            out.append(f"agent tool {tool}: shared_program and other_program go together")
+        elif "other_program" in entry:
+            try:
+                re.compile(str(other))
+                if not isinstance(other, str) or not other.strip():
+                    raise re.error("empty")
+            except re.error as exc:
+                out.append(f"agent tool {tool}: other_program must be a pattern: {exc}")
         carried = entry.get("carried", [])
         if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
             out.append(f"agent tool {tool}: carried must be a list of text")
@@ -244,6 +277,8 @@ def _setting_problems(tool: str, settings: list, actions: dict) -> list[str]:
             out.append(f"{name}: equals must be a list of values written as text")
         if has_set and setting["set"] is not True:
             out.append(f"{name}: set must be true")
+        if "json" in setting and setting["json"] is not True:
+            out.append(f"{name}: json must be true (or left out)")
         if setting.get("severity") not in SEVERITIES:
             out.append(f"{name}: severity must be one of {', '.join(SEVERITIES)}")
         if not isinstance(setting.get("read"), datetime.date):
@@ -292,10 +327,17 @@ def _flag_problems(tool: str, flags: list, settings: list) -> list[str]:
                 if key in named and named[key] != fid:
                     out.append(f"{name}: option {option} is also flag {named[key]}'s")
                 named.setdefault(key, fid)
-        for key in ("equals",):
+        if "equals" in flag and "unless" in flag:
+            out.append(f"{name}: give equals or unless, not both")
+        for key in ("equals", "unless"):
             if key in flag and (not isinstance(flag[key], list) or not flag[key] or not all(
                     isinstance(v, str) and v.strip() for v in flag[key])):
                 out.append(f"{name}: {key} must be a list of values written as text")
+        if "prefixes" in flag and flag["prefixes"] is not True:
+            out.append(f"{name}: prefixes must be true (or left out)")
+        elif flag.get("prefixes") and isinstance(options, list) and not any(
+                isinstance(o, str) and o.startswith("--") for o in options):
+            out.append(f"{name}: prefixes needs a long option (--name) to take the beginnings of")
         if flag.get("severity") not in SEVERITIES:
             out.append(f"{name}: severity must be one of {', '.join(SEVERITIES)}")
         if not isinstance(flag.get("read"), datetime.date):
@@ -409,3 +451,25 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
                 found.add(tool)
         found.update(f"agents.commands: {p}" for p, rx in extra_commands if rx.match(form))
     return sorted(found)
+
+
+def other_program_only(detection: dict, tool: str, programs: list, texts: list) -> bool:
+    """Whether every place the texts name the tool's program is followed by the words of the other program
+    that shares its name (`other_program`, matched right after the name): AWS Copilot's `copilot svc deploy`,
+    pressly's `goose postgres "$DB" up`. False where the entry has no `other_program`, or where any place
+    is not (the wider reading: `echo "use copilot -p"` beside AWS Copilot keeps "cannot tell")."""
+    entry = next((e for e in tools(detection) if isinstance(e, dict) and e.get("id") == tool), None)
+    other = entry.get("other_program") if entry else None
+    if not isinstance(other, str) or not other.strip() or not programs:
+        return False
+    after = re.compile(other)
+    names = re.compile(r"(?<![\w@.-])(?:" + "|".join(re.escape(p) for p in programs)
+                       + r")(?:\.(?:exe|cmd|bat|ps1|com))?(?![\w.-])", re.I)
+    seen = False
+    for text in texts:
+        plain = re.sub(r"[\"'\\]", "", text)
+        for m in names.finditer(plain):
+            seen = True
+            if not after.match(plain, m.end()):
+                return False
+    return seen

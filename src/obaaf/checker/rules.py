@@ -2090,6 +2090,12 @@ class WorkflowRules:
                      tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
                      source=Note(str(flag["source"])))
         open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_ and agent_tools.other_program_only(self.detection, tool, programs, [
+                text for text, _bash in parts] + [v for v, _c in others]):
+            # Another well-known program has this name (AWS's `copilot`, pressly's `goose`): no "cannot tell"
+            # where every place the step names the program is followed by that other program's own words
+            # (flagship slice 2d.5c2b).
+            open_ = []
         if open_:
             words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
             shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
@@ -2125,7 +2131,10 @@ class WorkflowRules:
         # A control, format or separator character left inside the value (a NUL, which ends an environment
         # variable, U+200B, a no-break space) can make the action read another value than the one written.
         odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
-        if text is None or "${{" in text or odd or force_computed:
+        # A value that starts with a comment, read by `fromJSON` (`/* x */ true`): what the runner's reader
+        # makes of it was not tested, so it is "cannot tell" (2d.5c2b's second review).
+        commented = core is not None and core.startswith("/") and any(c[2].get("json") is True for c in candidates)
+        if text is None or "${{" in text or odd or force_computed or commented:
             if not candidates:
                 return
             # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
@@ -2147,11 +2156,15 @@ class WorkflowRules:
             return
         value = core
         folded = value.casefold()
+        decoded = self._json_text(value)
         for tool, name, setting in candidates:
+            # An action that reads the input through `fromJSON` (`json: true`) takes `'"true"'` as `true`.
+            compared = decoded.strip(self._TRIMMED).casefold() if setting.get("json") is True and (
+                decoded is not None) else folded
             if "equals" in setting:
-                hit = any(folded == str(v).strip().casefold() for v in setting["equals"])
+                hit = any(compared == str(v).strip().casefold() for v in setting["equals"])
             else:
-                hit = folded != ""
+                hit = compared != ""
             if not hit:
                 continue
             self.add("OBAAF-GHA-026", step.line,
@@ -2162,6 +2175,36 @@ class WorkflowRules:
                      tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
                      source=Note(str(setting["source"])))
             return
+
+    _JSON_WORD_RE = re.compile(r"[^\s,/\]\}:\[\{]+")
+
+    @classmethod
+    def _json_text(cls, value: str):
+        """What GitHub's `fromJSON` makes of a value, as text, the way the runner's reader (Newtonsoft's
+        `JToken.ReadFrom`) does: the first token, a string in double or single quotes (`'"true"'`, `"'true'"`)
+        or a word up to a separator (`true // off`, `true off`); anything after it is not read. None where the
+        first token is neither (the runner refuses it). Found by 2d.5c2b's reviews."""
+        text = value.lstrip(" \t\r\n")
+        if text[:1] in ("'", '"'):
+            quote = text[0]
+            i, out = 1, []
+            while i < len(text):
+                ch = text[i]
+                if ch == "\\" and i + 1 < len(text):
+                    try:
+                        piece = json.loads('"' + text[i:i + (6 if text[i + 1] == "u" else 2)] + '"')
+                    except ValueError:
+                        piece = text[i + 1]
+                    out.append(piece)
+                    i += 6 if text[i + 1] == "u" else 2
+                    continue
+                if ch == quote:
+                    return "".join(out)
+                out.append(ch)
+                i += 1
+            return None
+        m = cls._JSON_WORD_RE.match(text)
+        return m.group(0) if m else None
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"

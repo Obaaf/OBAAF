@@ -291,7 +291,7 @@ class DataTest(unittest.TestCase):
 
     def test_every_shipped_setting_cites_a_file_at_a_commit_and_was_read(self):
         shipped = agent_tools.settings(load().detection)
-        self.assertEqual(len(shipped), 8)
+        self.assertEqual(len(shipped), 11)          # 8 from slice 2d.5c1, 3 from slice 2d.5c2b
         for tool, _name, setting in shipped:
             with self.subTest(setting=f"{tool}/{setting['id']}"):
                 self.assertRegex(setting["source"], r"/blob/[0-9a-f]{40}/.+#L\d+")
