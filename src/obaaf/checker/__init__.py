@@ -2268,8 +2268,9 @@ class Config:
                 raise ConfigError(f"{path}: agents.{key} must be a list of text")
         for entry in agents.get("actions") or []:
             text = entry.strip()
-            if not wf_mod.action_name(text).rstrip("/") or text.startswith(("./", "$/", ".\\", "docker://")) \
-                    or "\\" in text:
+            # `./` and `$/` are local actions and `docker://` an image, which no step's action is compared
+            # with; a backslash is kept, since a step written with one is compared as written (#245).
+            if not wf_mod.action_name(text).rstrip("/") or text.startswith(("./", "$/", "docker://")):
                 raise ConfigError(f"{path}: agents.actions: {wf_mod.one_line(entry, 80)!r} names no action of "
                                   "another repository (owner, owner/repo or owner/repo/path, before any @). A "
                                   "local action is read through; declare its job with OBAAF_LANE: agent if the "

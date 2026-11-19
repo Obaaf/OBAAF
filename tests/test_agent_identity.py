@@ -216,11 +216,17 @@ class CalledWorkflowTest(unittest.TestCase):
     def test_a_configured_action_that_names_nothing_is_refused(self):
         for agents in ({"actions": "my-org/agent"}, {"actions": ["@v1"]}, {"actions": [""]}, {"actions": ["/"]},
                        {"actions": [3]}, {"actions": ["./.github/actions/run-agent"]}, {"actions": ["$/x"]},
-                       {"actions": ["docker://ghcr.io/x/agent"]}, {"actions": ["my-org\\agent"]},
+                       {"actions": ["docker://ghcr.io/x/agent"]},
                        {"commands": "run-agent"}, {"commands": [" "]}, {"commands": ["("]}):
             with self.subTest(agents=agents), self.assertRaises(checker.ConfigError):
                 Config.from_data({"agents": agents}, "obaaf.yml")
         Config.from_data({"agents": {"actions": ["my-org"], "commands": ["run-agent"]}}, "obaaf.yml")
+        # Found by the third review of slice 2d.11: a step written with a backslash is compared as written,
+        # so an entry written the same way names it, and is kept (#245 is how GitHub reads a backslash).
+        for entry, uses in (("my-org\\agent", "my-org\\agent@v1"), (".\\tools\\agent", ".\\tools\\agent")):
+            with self.subTest(entry=entry):
+                config = Config.from_data({"agents": {"actions": [entry]}}, "obaaf.yml")
+                self.assertTrue(is_agent_job(check(job_with(f"      - uses: {json.dumps(uses)}\n"), config=config)))
 
     def test_a_configured_action_is_read_the_same_way(self):
         config = Config(agents={"actions": ["example/agent"]})
