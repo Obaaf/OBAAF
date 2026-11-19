@@ -1,0 +1,400 @@
+# rules covers all findings of a rule except the kinds listed in except_kinds.
+# kinds assigns those specific rule and kind pairs to their own causes.
+causes:
+  - id: untrusted-workflow-secrets
+    sentence: "An outsider-triggered workflow may receive secrets."
+    rules: [OBAAF-GHA-001]
+    except_kinds:
+      OBAAF-GHA-001: [pull-request]
+    fix_kind: by-hand
+    next: "Move the steps that need secrets into a reviewed workflow and pass only untrusted data between the two."
+  - id: privileged-checkout
+    sentence: "A privileged workflow may fetch or check out code from an unreviewed change."
+    rules: [OBAAF-GHA-002]
+    fix_kind: by-hand
+    next: "Build the change in a read-only pull request job and keep privileged steps on reviewed code."
+  - id: agent-write-permissions
+    sentence: "The agent job's token permissions allow writes or leave writes unresolved."
+    rules: [OBAAF-GHA-003]
+    fix_kind: by-hand
+    next: "Declare read-only permissions on the agent job and move repository writes into a separate reviewed job."
+  - id: agent-oidc
+    sentence: "An agent job has the id-token write permission."
+    rules: [OBAAF-GHA-004]
+    except_kinds:
+      OBAAF-GHA-004: [inherited]
+    fix_kind: by-hand
+    next: "Remove id-token write from the agent job and grant it only to a separate trusted job that needs it."
+  - id: agent-secrets
+    sentence: "An agent job receives secrets."
+    rules: [OBAAF-GHA-005]
+    except_kinds:
+      OBAAF-GHA-005: [environment]
+    fix_kind: confinement
+    next: "Review the reported controls. Remove unnecessary secrets and move required credentials outside the agent command."
+  - id: release-cache
+    sentence: "A release job may restore shared cache data directly or through another job."
+    rules: [OBAAF-GHA-006]
+    except_kinds:
+      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
+    fix_kind: by-hand
+    next: "Review the release job and any named producer. Remove shared cache restores, declare cache-mode: none on the affected job, and rebuild release inputs from trusted sources."
+  - id: untrusted-cache-write
+    sentence: "A workflow an outsider can trigger may write to the default branch's cache."
+    rules: [OBAAF-GHA-007]
+    except_kinds:
+      OBAAF-GHA-007: [unreadable]
+    fix_kind: by-hand
+    next: "Set cache-mode explicitly to none or read on the affected job."
+  - id: dependency-revision
+    sentence: "An action, reusable workflow or container image lacks a verifiable immutable pin."
+    rules: [OBAAF-GHA-008]
+    except_kinds:
+      OBAAF-GHA-008: [local-from-checkout, local-after-download]
+    fix_kind: by-hand
+    next: "Pin remote actions and workflows to full reviewed commit SHAs and images to SHA-256 digests."
+  - id: implicit-token-permissions
+    sentence: "The workflow leaves the job token's permissions implicit."
+    rules: [OBAAF-GHA-009]
+    fix_kind: by-hand
+    next: "Declare the workflow's token permissions and grant only the additional scopes each job needs."
+  - id: untrusted-script-text
+    sentence: "Text influenced by an outsider is used to construct a script."
+    rules: [OBAAF-GHA-010]
+    except_kinds:
+      OBAAF-GHA-010: [through-env]
+    fix_kind: by-hand
+    next: "Pass the text as data through an environment variable and use it quoted in the script."
+  - id: checkout-credentials
+    sentence: "Checkout leaves a credential available to later steps."
+    rules: [OBAAF-GHA-011]
+    fix_kind: tightening
+    next: "Set persist-credentials to false on the reported checkout step and review later steps that need credentials."
+  - id: agent-instruction-source
+    sentence: "The workflow does not establish that the agent reads instructions from a trusted revision."
+    rules: [OBAAF-GHA-012]
+    fix_kind: by-hand
+    next: "Load the instructions from the protected base revision and pass the proposed changes to the agent as data."
+  - id: untrusted-runner
+    sentence: "The workflow may put untrusted or agent work on a persistent self-hosted runner."
+    rules: [OBAAF-GHA-013]
+    fix_kind: by-hand
+    next: "Run the reported job on a GitHub-hosted runner. If it must run on your own runner, use an isolated ephemeral one for untrusted work; the checker cannot see that a runner is ephemeral, so then accept the finding with that reason."
+  - id: release-environment
+    sentence: "The checker cannot establish an environment gate for a job that may publish."
+    rules: [OBAAF-GHA-014]
+    fix_kind: by-hand
+    next: "Put the job behind a named release environment and configure its reviewer and branch restrictions."
+  - id: untrusted-release-trigger
+    sentence: "A job with release authority, or one that calls a release workflow, can be started by an event an outsider can influence."
+    rules: [OBAAF-GHA-015]
+    except_kinds:
+      OBAAF-GHA-015: [pull-request, capability]
+    fix_kind: by-hand
+    next: "Restrict release work to trusted triggers and keep release permissions out of jobs that process unreviewed changes."
+  - id: upload-verification
+    sentence: "The upload is missing a release verification step the checker can confirm blocks it on failure."
+    rules: [OBAAF-GHA-016]
+    except_kinds:
+      OBAAF-GHA-016: [cannot-tell, provenance-only]
+    fix_kind: by-hand
+    next: "Make publishing depend on a successful obaaf verify release check for the exact artifacts being uploaded."
+  - id: release-provenance
+    sentence: "The checker cannot establish that the release artifacts have signed provenance."
+    rules: [OBAAF-GHA-017]
+    fix_kind: by-hand
+    next: "Create provenance in a separate trusted job or verify the signed provenance supplied by the producing workflow."
+  - id: build-signing-key
+    sentence: "Build steps may have access to signing key material."
+    rules: [OBAAF-GHA-018]
+    except_kinds:
+      OBAAF-GHA-018: [any-secret]
+    fix_kind: by-hand
+    next: "Move signing into a dedicated job backed by a managed signing service and remove key material from build steps."
+  - id: unsafe-checkout-option
+    sentence: "Checkout enables unsafe pull request checkout or uses a value the checker cannot establish is false."
+    rules: [OBAAF-GHA-019]
+    fix_kind: by-hand
+    next: "Remove the unsafe checkout option and build the change in a read-only pull request workflow."
+  - id: agent-network-access
+    sentence: "The checker cannot verify a network restriction for the agent job."
+    rules: [OBAAF-GHA-020]
+    fix_kind: confinement
+    next: "Review the reported control and limit the agent's outbound connections to the hosts it needs."
+  - id: proposal-verification
+    sentence: "The workflow may apply agent output without checking both the record and the proposal."
+    rules: [OBAAF-GHA-021]
+    fix_kind: by-hand
+    next: "Require successful agent-run verification and proposal validation before the job can apply the changes."
+  - id: proposal-approval
+    sentence: "The workflow may apply agent output without a required approval."
+    rules: [OBAAF-GHA-022]
+    fix_kind: by-hand
+    next: "Gate the apply job on a protected environment with required independent reviewers."
+  - id: template-placeholder
+    sentence: "A workflow still contains an installation placeholder."
+    rules: [OBAAF-GHA-023]
+    fix_kind: by-hand
+    next: "Replace each reported placeholder with the reviewed repository, revision or value the template requires."
+  - id: protected-secret-environment
+    sentence: "A job or caller uses a protected secret without a matching environment the checker can verify."
+    rules: [OBAAF-GHA-024]
+    fix_kind: by-hand
+    next: "Trace the named secret to its consuming job and declare the designated environment there. Keep the secret only in that environment."
+  - id: agent-tool-version
+    sentence: "An agent step downloads code to run or uses a CLI without a fixed version."
+    rules: [OBAAF-GHA-025]
+    except_kinds:
+      OBAAF-GHA-025: [too-long]
+    fix_kind: tightening
+    next: "Pin registry CLIs to an exact version. For a downloaded script, select and verify a fixed release before running it."
+  - id: agent-action-settings
+    sentence: "An agent action receives an input its own documentation warns about."
+    rules: [OBAAF-GHA-026]
+    except_kinds:
+      OBAAF-GHA-026: [computed, command-option, command-computed]
+    fix_kind: by-hand
+    next: "Read the warning quoted in the finding. Remove the override or set the input to a value appropriate for this job."
+  - id: ineffective-lane
+    sentence: "A lane declaration does not identify an effective lane for the intended job or stage."
+    rules: [OBAAF-CFG-001]
+    except_kinds:
+      OBAAF-CFG-001: [entry-not-a-lane, entry-no-job, entry-no-stage, entry-no-file]
+    fix_kind: by-hand
+    next: "Check the declaration's name, location, target and value, then correct or remove it and inspect the lanes with obaaf check . --lanes."
+  - id: jenkins-credential-scope
+    sentence: "A Jenkins credential binding may reach a change request or an agent stage."
+    rules: [OBAAF-JEN-001]
+    fix_kind: by-hand
+    next: "Scope credentials to protected stages and remove them from untrusted builds and agent workloads."
+  - id: jenkins-runner-isolation
+    sentence: "A build may share its Jenkins execution node with the controller or privileged work."
+    rules: [OBAAF-JEN-002]
+    fix_kind: by-hand
+    next: "Keep builds off the controller and assign untrusted work to separate ephemeral agents."
+  - id: jenkins-agent-authority
+    sentence: "An agent stage may push changes, start builds or publish artifacts."
+    rules: [OBAAF-JEN-003]
+    fix_kind: by-hand
+    next: "Limit the agent to producing a proposal and move side effects into a separate verified and approved job."
+  - id: jenkins-pipeline-source
+    sentence: "The source of Jenkins pipeline code is not established as a reviewed revision."
+    rules: [OBAAF-JEN-004]
+    fix_kind: by-hand
+    next: "Trace the loaded code or library to a protected source and pin external pipeline libraries to reviewed commits."
+  - id: jenkins-release-approval
+    sentence: "A Jenkins release lacks a verifiable approval from a named submitter."
+    rules: [OBAAF-JEN-005]
+    fix_kind: by-hand
+    next: "Require an independent named submitter before publishing and bind the approval to the artifacts."
+  - id: jenkins-host-access
+    sentence: "A build container or pod may have access to the Jenkins host."
+    rules: [OBAAF-JEN-006]
+    fix_kind: by-hand
+    next: "Remove privileged settings, host mounts and other host access from the reported build environment."
+  - id: jenkins-agent-network
+    sentence: "The Jenkinsfile does not establish an outbound network restriction for the agent."
+    rules: [OBAAF-JEN-007]
+    fix_kind: by-hand
+    next: "Check the agent's network policy and restrict outbound access outside the agent process."
+  - id: jenkins-dependency-version
+    sentence: "A Jenkins dependency or agent tool lacks a verifiable immutable version."
+    rules: [OBAAF-JEN-008]
+    fix_kind: by-hand
+    next: "Pin the reported image to a digest, library to a reviewed commit, or agent CLI to an exact version."
+  - id: jenkins-untrusted-command
+    sentence: "Untrusted text may be interpolated into a Jenkins command, into Groovy code, or into a parameter of a job the pipeline starts."
+    rules: [OBAAF-JEN-009]
+    fix_kind: by-hand
+    next: "Treat the text as data: pass it through the environment and quote its expansion in the shell, never build code that load or evaluate runs from it, and check that a job started with it never runs it as a command."
+  - id: jenkins-artifact-source
+    sentence: "The pipeline may take artifacts from a build selected by a moving reference."
+    rules: [OBAAF-JEN-010]
+    fix_kind: by-hand
+    next: "Select a recorded build number and verify the artifact digests before publishing."
+  - id: jenkins-publish-after-failure
+    sentence: "Publishing may proceed when a required check fails or is skipped."
+    rules: [OBAAF-JEN-011]
+    fix_kind: by-hand
+    next: "Require all checks to succeed before the publishing stage can run."
+  - id: jenkins-publish-verification
+    sentence: "The pipeline may publish without a successful release verification step."
+    rules: [OBAAF-JEN-012]
+    fix_kind: by-hand
+    next: "Verify the artifacts before publishing and ensure a failed verification stops the pipeline."
+  - id: jenkins-command-secret
+    sentence: "A credential may be expanded into a command by Groovy."
+    rules: [OBAAF-JEN-013]
+    fix_kind: by-hand
+    next: "Keep secrets in the environment and use a single-quoted Groovy script so the shell reads the variables."
+  - id: jenkins-signing-key
+    sentence: "Build steps may have access to signing key material in Jenkins."
+    rules: [OBAAF-JEN-014]
+    fix_kind: by-hand
+    next: "Use a dedicated signing job and keep the private key in a managed signing service."
+  - id: jenkins-webhook-token
+    sentence: "A webhook trigger may use a token written directly in the Jenkinsfile."
+    rules: [OBAAF-JEN-015]
+    fix_kind: by-hand
+    next: "Check how the token is supplied. Reference a Jenkins credential and rotate any token exposed in source."
+  - id: ci-code-ownership
+    sentence: "CI files or files that control the gate lack effective code owners."
+    rules: [OBAAF-REPO-001]
+    except_kinds:
+      OBAAF-REPO-001: [no-codeowners, not-loaded]
+    fix_kind: by-hand
+    next: "Choose responsible reviewers and add CODEOWNERS patterns covering the paths named in the finding."
+  - id: instruction-code-ownership
+    sentence: "Agent instruction files lack effective code owners."
+    rules: [OBAAF-REPO-002]
+    except_kinds:
+      OBAAF-REPO-002: [no-codeowners, not-loaded]
+    fix_kind: by-hand
+    next: "Choose reviewers for the instructions and add CODEOWNERS patterns covering the reported files."
+  - id: instruction-text-review
+    sentence: "An agent instruction file contains hidden characters."
+    rules: [OBAAF-INS-001]
+    except_kinds:
+      OBAAF-INS-001: [too-large, not-utf8]
+    fix_kind: by-hand
+    next: "Review the reported characters and their history, then remove them from the instruction text."
+  - id: agent-environment-secrets
+    sentence: "An agent job can receive secrets from its declared environment."
+    kinds:
+      OBAAF-GHA-005: [environment]
+    fix_kind: by-hand
+    next: "Review the environment's secrets. Remove the environment from the agent job if it is unnecessary, or move work that needs its credentials to a separate trusted job."
+  - id: agent-inherited-oidc
+    sentence: "A reusable agent job can inherit permission to request OIDC tokens."
+    kinds:
+      OBAAF-GHA-004: [inherited]
+    fix_kind: by-hand
+    next: "Declare read-only permissions on the called agent job and review the grants made by its callers."
+  - id: local-action-checkout
+    sentence: "A local action comes from another repository checked out at a moving revision."
+    kinds:
+      OBAAF-GHA-008: [local-from-checkout]
+    fix_kind: by-hand
+    next: "Pin the earlier checkout of that repository to a reviewed full commit SHA."
+  - id: local-action-download
+    sentence: "A prior download or restore can supply the code of a local action."
+    kinds:
+      OBAAF-GHA-008: [local-after-download]
+    fix_kind: by-hand
+    next: "Keep downloads and restored files outside the local action directory and run the action from a reviewed checkout."
+  - id: agent-tool-script-too-long
+    sentence: "An agent step is too long for the checker to establish how its tools are installed."
+    kinds:
+      OBAAF-GHA-025: [too-long]
+    fix_kind: by-hand
+    next: "Review the reported step and split the script into shorter, reviewable steps so the checker can inspect the installs."
+  - id: agent-action-input-unresolved
+    sentence: "The checker cannot resolve an agent action input to compare it with the documented settings."
+    kinds:
+      OBAAF-GHA-026: [computed]
+    fix_kind: by-hand
+    next: "Inspect how the input is constructed. Use an explicit reviewed literal or leave the input at its documented default."
+  - id: agent-cli-option
+    sentence: "An agent CLI is run with an option its own documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-option]
+    fix_kind: by-hand
+    next: "Read the warning quoted in the finding and remove the option from the command that runs the agent."
+  - id: agent-cli-option-unresolved
+    sentence: "The checker cannot read the words an agent CLI is run with to compare them with the options its documentation warns about."
+    kinds:
+      OBAAF-GHA-026: [command-computed]
+    fix_kind: by-hand
+    next: "Inspect how the command line is built. Write the agent's options as literal words in the step, or check that none of the named options can be among them."
+  - id: pull-request-branch-secrets
+    sentence: "A job that runs on pull requests receives secrets. Forks get none, but a branch pushed by anyone with write access does."
+    kinds:
+      OBAAF-GHA-001: [pull-request]
+    fix_kind: by-hand
+    next: "Check whether the job needs these secrets on pull requests. Remove them, or move the steps that use them to a job that runs only on reviewed code, such as a push to a protected branch."
+  - id: release-cache-mode-unset
+    sentence: "A release job does not declare cache-mode: none, so a cache step added later would read caches other workflows wrote."
+    kinds:
+      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
+    fix_kind: by-hand
+    next: "Declare cache-mode: none on the release job."
+  - id: unreadable-cache-mode
+    sentence: "A job an outsider can start declares a cache-mode the checker cannot read."
+    kinds:
+      OBAAF-GHA-007: [unreadable]
+    fix_kind: by-hand
+    next: "Write the key as cache-mode, in lower case, with none or read as its plain value, and remove any other spelling of the key."
+  - id: untrusted-script-text-env
+    sentence: "A script expands, as an expression, an environment value that holds text an outsider can influence."
+    kinds:
+      OBAAF-GHA-010: [through-env]
+    fix_kind: by-hand
+    next: "Read the value from the environment instead of the ${{ env.NAME }} expression: \"$NAME\" in a POSIX shell, $env:NAME in PowerShell, %NAME% in cmd, process.env.NAME in actions/github-script. For a script an action runs elsewhere, such as over SSH, pass the variable through the action's own environment input."
+  - id: release-from-pull-request
+    sentence: "A release job runs on pull requests, where a branch pushed by anyone with write access gets whatever secrets and token permissions the job has."
+    kinds:
+      OBAAF-GHA-015: [pull-request]
+    fix_kind: by-hand
+    next: "Start the release job only from trusted events, such as a push to a protected branch, a tag or a release, and keep pull request work in a separate job."
+  - id: release-capability-unresolved
+    sentence: "A job an outsider-influenced event can start holds what publishing needs, and the checker cannot tell whether it releases."
+    kinds:
+      OBAAF-GHA-015: [capability]
+    fix_kind: by-hand
+    next: "If the job does not release, remove the publishing permissions or secrets it does not need and, if its environment is an expression, name it in plain text, or accept the finding with that reason. If it does release, start it only from trusted events."
+  - id: job-reads-every-secret
+    sentence: "A job can read every secret, so the checker cannot tell that no signing key is among them."
+    kinds:
+      OBAAF-GHA-018: [any-secret]
+    fix_kind: by-hand
+    next: "Pass only the secrets the job needs, each by its literal name, instead of secrets: inherit, toJSON(secrets) or a computed secret name."
+  - id: instruction-file-size
+    sentence: "An instruction file exceeds the amount of text the checker scans."
+    kinds:
+      OBAAF-INS-001: [too-large]
+    fix_kind: by-hand
+    next: "Review the full file and split it into smaller instruction files that the checker recognizes."
+  - id: instruction-file-encoding
+    sentence: "An agent instruction file cannot be decoded as UTF-8."
+    kinds:
+      OBAAF-INS-001: [not-utf8]
+    fix_kind: by-hand
+    next: "Review the file in its original encoding and save the reviewed text as UTF-8."
+  - id: missing-codeowners
+    sentence: "The repository has no CODEOWNERS file for the reported paths."
+    kinds:
+      OBAAF-REPO-001: [no-codeowners]
+      OBAAF-REPO-002: [no-codeowners]
+    fix_kind: by-hand
+    next: "Create a CODEOWNERS file in a location GitHub reads and assign reviewers for the paths in the findings."
+  - id: unloaded-codeowners
+    sentence: "GitHub cannot load the repository's CODEOWNERS file."
+    kinds:
+      OBAAF-REPO-001: [not-loaded]
+      OBAAF-REPO-002: [not-loaded]
+    fix_kind: by-hand
+    next: "Correct the loading problem named in the finding, then check ownership coverage again."
+  - id: invalid-config-lane
+    sentence: "A lane name in the checker configuration is not recognized."
+    kinds:
+      OBAAF-CFG-001: [entry-not-a-lane]
+    fix_kind: paperwork
+    next: "Choose the intended lane (untrusted, agent, effect, release or trusted), or remove the declaration if it serves no purpose."
+  - id: absent-lane-target
+    sentence: "A lane declaration names a file, job or stage that the checker did not find."
+    kinds:
+      OBAAF-CFG-001: [entry-no-job, entry-no-stage, entry-no-file]
+    fix_kind: by-hand
+    next: "Compare the configured path and target with the jobs and stages listed by obaaf check . --lanes, then correct or remove the entry."
+  - id: upload-verification-unresolved
+    sentence: "The upload follows a check whose failure the checker cannot confirm would stop it."
+    kinds:
+      OBAAF-GHA-016: [cannot-tell]
+    fix_kind: by-hand
+    next: "Put the verification command on its own line in a trusted step and require success before upload."
+  - id: upload-provenance-only
+    sentence: "The upload checks provenance but omits approvals and agent records."
+    kinds:
+      OBAAF-GHA-016: [provenance-only]
+    fix_kind: by-hand
+    next: "Make the upload depend on successful obaaf verify release verification of the artifacts, approvals and agent records."

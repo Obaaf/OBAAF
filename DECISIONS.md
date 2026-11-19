@@ -822,3 +822,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A gate can fail where it passed: a step that runs one of these CLIs in a way the checker cannot read is "cannot tell" until the options are written out. An option written in a prompt's text, or in prose in another input that starts with the program (`claude -p "never pass --dangerously-skip-permissions"`), is reported, the wider reading. A quoted word that starts with a variable or substitution (`claude -p "$PROMPT"`) is read as one word that is not an option, although a CLI's own parser may take a value that begins with `-` as one; that case is #254. Codex's `--sandbox danger-full-access` and `-c` overrides, settings given to `--settings`, options in configuration files or environment variables the tools read, a program name a step builds at run time (braces, globs, `printf`, another step's `GITHUB_ENV` or outputs, `vars`), `python -m` and repository scripts, a local Docker or JavaScript action, and the other 20 tools' settings and options are not read (slice 2d.5c2b). A `with:` written as one expression now names these options among the settings it cannot tell, so an acceptance of that finding stops matching. `codex-args` that codex-action itself refuses for the run's other inputs is still reported, the wider reading.
 
 **Status.** Proposed.
+
+### D-091 How a finding gets a next action in the cause catalogue
+
+**Decision.** Give each checker rule one cause for its remaining kinds. When a kind needs different advice, explicitly exclude it from that group and assign it to one named cause. The catalogue check fails on missing or overlapping assignments. A cause has a stable ID, a sentence, a fix kind and a next action. Jenkins causes direct the reader to a manual change.
+
+**Reason.** Two findings under the same rule can require different work. For example, a tool installed at a changeable version and an install line too long to inspect call for different advice. Naming both sides of an exception lets the catalogue catch a deleted assignment before a report gives the wrong advice.
+
+**Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule's remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
+
+**Status.** Proposed, 2026-11-19 (A1a, #252).
