@@ -337,6 +337,44 @@ class FoundByThePropertiesTest(unittest.TestCase):
         self.assertEqual(found, [("", "env.A"), ("", "run-name"), ("one", "container"), ("one", "env.B"),
                                  ("one", "runs-on")])
 
+    def test_listing_or_deleting_artifacts_is_not_a_download(self):
+        head = ("on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\npermissions:\n"
+                "  actions: write\njobs:\n  clean:\n    runs-on: ubuntu-latest\n    steps:\n")
+        for step in ("      - uses: actions/github-script@1111111111111111111111111111111111111111\n        with:\n"
+                     "          script: |\n            const all = await github.rest.actions.listArtifactsForRepo(context.repo)\n"
+                     "            for (const a of all.data.artifacts) await github.rest.actions.deleteArtifact({...context.repo, "
+                     "artifact_id: a.id})\n",
+                     "      - run: gh api -X DELETE /repos/$GITHUB_REPOSITORY/actions/artifacts/$ID\n"):
+            with self.subTest(step=step.strip()[:60]), TempDir() as tmp:
+                rules = {f.rule for f in run(tmp, "clean.yml", head + step, None).findings}
+                self.assertFalse(rules & {"OBAAF-GHA-021", "OBAAF-GHA-022"}, rules)
+
+    def test_a_long_text_reached_through_many_aliases_is_searched_once(self):
+        """From the second review: each place searched every alias of a long text again, so a 32 KB
+        file took 18 seconds."""
+        lines = ["on: push", "permissions:", "  contents: read", "jobs:", "  one:", "    runs-on: ubuntu-latest",
+                 "    steps:", "      - run: echo", "        env:", '          S: &s "' + "a" * 20000 + '"',
+                 "          L: &l [" + ", ".join(["*s"] * 2000) + "]"]
+        for n in range(100):
+            lines += [f"      - run: echo {n}", "        env: {L: *l}"]
+        started = time.monotonic()
+        with TempDir() as tmp:
+            result = run(tmp, "wf.yml", "\n".join(lines) + "\n", None)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(result.errors, [])
+
+    def test_too_many_values_is_an_error_and_the_other_findings_stand(self):
+        """From the second review: running out of the walk ended the file's other rules too."""
+        lines = ["on: pull_request_target", "jobs:", "  one:", "    runs-on: ubuntu-latest", "    steps:",
+                 "      - uses: actions/checkout@v4", "        with:", "          ref: ${{ github.event.pull_request.head.sha }}",
+                 "      - run: make", "        env: &m", "          L: [" + ", ".join(["{a: b}"] * 3000) + "]"]
+        for n in range(200):
+            lines += [f"      - run: echo {n}", "        env: *m"]
+        with TempDir() as tmp:
+            result = run(tmp, "wf.yml", "\n".join(lines) + "\n", None)
+        self.assertTrue(any("too many to read for template placeholders" in e for e in result.errors), result.errors)
+        self.assertTrue({"OBAAF-GHA-002", "OBAAF-GHA-008"} <= {f.rule for f in result.findings})
+
     def test_an_alias_bomb_costs_little_and_is_reported_once_per_place(self):
         """From the review of the first fix: giving what a shared value holds again at every path that
         reaches it made ten nested lists of ten aliases a million findings and minutes of work."""
@@ -361,10 +399,13 @@ class FoundByThePropertiesTest(unittest.TestCase):
                      "      - run: gh -R $GITHUB_REPOSITORY run download 1 -n patch\n",
                      "      - run: gh --repo=$GITHUB_REPOSITORY run download 1 -n patch\n",
                      "      - run: curl -sL \"$(gh api repos/$R/actions/artifacts --jq '.artifacts[0].archive_download_url')\"\n",
-                     "      - run: curl -s ${{ github.event.workflow_run.artifacts_url }}\n",
+                     "      - run: curl -sL \"$(curl -s ${{ github.event.workflow_run.artifacts_url }} | jq -r "
+                     "'.artifacts[0].archive_download_url')\"\n",
+                     "      - run: gh run --repo $GITHUB_REPOSITORY download 1\n",
+                     "      - run: gh -R$GITHUB_REPOSITORY run download 1\n",
                      "      - uses: Legit-Labs/action-download-artifact@1111111111111111111111111111111111111111\n",
                      "      - uses: actions/github-script@1111111111111111111111111111111111111111\n"
-                     "        with:\n          script: |\n            github.rest.actions.listArtifactsForRepo({owner: 'o', repo: 'r'})\n"):
+                     "        with:\n          script: |\n            const zip = await github.request(artifact.archive_download_url)\n"):
             with self.subTest(step=step.strip()[:60]), TempDir() as tmp:
                 rules = sorted({f.rule for f in run(tmp, "apply.yml", head + step + tail, None).findings}
                                & set(both))

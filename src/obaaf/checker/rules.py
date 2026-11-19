@@ -642,9 +642,12 @@ class WorkflowRules:
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
-    # Lists and mappings OBAAF-GHA-023 walks in one file, each place counted on its own: a large workflow
-    # has a few thousand.
-    _PLACEHOLDER_WALK = 200_000
+    # Values OBAAF-GHA-023 reaches in one file, each place counted on its own: a large workflow reaches
+    # some thousands.
+    _PLACEHOLDER_WALK = 500_000
+
+    class _WalkExceeded(Exception):
+        pass
 
     def placeholders(self) -> None:
         """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
@@ -654,34 +657,39 @@ class WorkflowRules:
         case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros.
 
         A value written once under a YAML anchor and reached through aliases is one object to the
-        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each value in
-        it once, so a step shared by two jobs, or used twice in one job, is reported at each (slice
-        2d.3: it was reported at the first place only), and an alias of an alias costs no more than the
-        values themselves. A file whose places together hold more values than the checker walks is an
-        error, never a pass."""
+        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each list and
+        mapping in it once, so a step shared by two jobs, or used twice in one job, is reported at each
+        (slice 2d.3: it was reported at the first place only). Each text is searched once, however
+        often it is reached. A file whose places together reach more values than the checker reads
+        is an error for the file, never a pass; the rule's findings so far stand."""
         found: list = []
         budget = [self._PLACEHOLDER_WALK]
+        searched: dict = {}
+
+        def held(text: str, where: str) -> list:
+            key = (text, where.rsplit(".", 1)[-1] == "uses")
+            if key not in searched:
+                searched[key] = _placeholders_in(text, where)
+            return searched[key]
 
         def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
             seen: set = set()
 
             def walk(value, where: str, line: int) -> None:
+                budget[0] -= 1
+                if budget[0] < 0:
+                    raise self._WalkExceeded()
                 if isinstance(value, (dict, list)):
                     if id(value) in seen:
                         return
                     seen.add(id(value))
-                    budget[0] -= 1
-                    if budget[0] < 0:
-                        raise expr_mod.TooComplex(
-                            "values reached through YAML aliases are too many to read for template placeholders; "
-                            "the checker cannot tell whether one is left")
                 if isinstance(value, str):
-                    for placeholder in _placeholders_in(value, where):
+                    for placeholder in held(value, where):
                         found.append((line, job, step, where, placeholder))
                 elif isinstance(value, dict):
                     for key, sub in value.items():
                         name = as_text(key)
-                        for placeholder in _placeholders_in(name, where):
+                        for placeholder in held(name, where):
                             found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
                         sub_line = line
                         if hasattr(value, "line_of"):
@@ -696,6 +704,18 @@ class WorkflowRules:
 
             walk(value, where, line)
 
+        try:
+            self._placeholder_places(visit)
+        except self._WalkExceeded:
+            message = ("values reached through YAML aliases are too many to read for template placeholders; the "
+                       "checker cannot tell whether one is left")
+            if getattr(self, "_through", False):
+                raise expr_mod.TooComplex(message) from None
+            if message not in self.wf.problems:
+                self.wf.problems.append(message)
+        self._placeholder_findings(found)
+
+    def _placeholder_places(self, visit) -> None:
         jobs_raw = self.wf.raw.get("jobs")
         for key, sub in self.wf.raw.items():
             if key != "jobs":
@@ -731,6 +751,8 @@ class WorkflowRules:
                     if step.via is not None and isinstance(step.written, dict):
                         # each use of an action is read, as each step written in a job is
                         visit(step.written, "step", step.line, job, step)
+
+    def _placeholder_findings(self, found: list) -> None:
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)

@@ -3653,27 +3653,39 @@ def _inferred_lanes(job: Job, detection: dict, extra_agents: dict) -> dict:
 
 
 ARTIFACT_API_RE = re.compile(
-    r"gh\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)?run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|"
-    r"listArtifactsForRepo|archive_download_url|artifacts_url|/actions/runs/\S*/artifacts|/actions/artifacts\b|"
-    r"/actions/artifacts/\S*/(zip|\{archive_format\})", re.I)
+    r"gh\s+run\s+download\b|downloadArtifact|listWorkflowRunArtifacts|archive_download_url|"
+    r"/actions/runs/\S*/artifacts|/actions/artifacts/\S*/(zip|\{archive_format\})", re.I)
+
+
+def _gh_run_download(text: str) -> bool:
+    """Whether a command in the text is `gh ... run ... download`, with any options between the words
+    (`gh -R repo run download`, `gh run --repo=repo download`). Word by word, so linear in the text."""
+    for segment in command_segments(text):
+        words = [word.rsplit("/", 1)[-1] for word in segment.split()]
+        if words and words[0] == "gh" and "run" in words:
+            if "download" in words[words.index("run") + 1:]:
+                return True
+    return False
 
 
 def _downloads_from_trigger_run(job: Job) -> bool:
     """Whether a step can bring another run's files into the job. Counted: an action other than
-    `actions/download-artifact` whose name says it downloads artifacts (dawidd6's and its forks, as
-    OBAAF-GHA-008 reads them); `actions/download-artifact` given a `run-id` other than
+    `actions/download-artifact` whose name ends in `download-artifact` or holds `/download-artifact`
+    or `artifact-download` (dawidd6's and its forks); `actions/download-artifact` given a `run-id` other than
     `${{ github.run_id }}` (this run), or a `repository`, whatever the value, or inputs that are not a
     mapping the checker can read, or naming `workflow_run` in any letter case; and the artifacts API
-    or `gh run download` in anything the step runs as a command line, read as the shell reads it
-    (lines continued with a backslash joined, quotes taken out), the command OBAAF's egress action
-    runs included.
+    or `gh run download` (with options anywhere between the words) in the run script, a github-script
+    script, the command OBAAF's egress action runs or a `docker://` step's arguments, with lines
+    continued with a backslash joined and quotes taken out. The inputs of other actions (a retry
+    wrapper's `command`) and what a variable or `gh alias` stands for are not read.
 
     Before slice 2d.3 only an input that held the text `workflow_run` as written counted, so
     `run-id: ${{ GITHUB.EVENT.WORKFLOW_RUN.ID }}`, a run id passed through `env` or an input, or a
     `repository` took the job out of the effect lane, and with it OBAAF-GHA-021 and 022; so did
     `gh run \\` continued on the next line, `gh 'run' download`, `gh -R repo run download` and the
     API's `archive_download_url`. Counting `run-id` or `repository` without `github-token` is the
-    wide reading: download-artifact may ignore them then."""
+    wide reading: download-artifact may ignore them then. Listing or deleting artifacts is not a
+    download and is not counted."""
     for step in job.steps:
         action = (step.action or "").lower()
         if action != "actions/download-artifact" and (
@@ -3692,7 +3704,8 @@ def _downloads_from_trigger_run(job: Job) -> bool:
                 if name == "run-id" and "".join(as_text(value).split()).lower() == "${{github.run_id}}":
                     continue
                 return True
-        if ARTIFACT_API_RE.search(step.text()) or any(ARTIFACT_API_RE.search(r) for r in _readings(step.scripts())):
+        if ARTIFACT_API_RE.search(step.text()) or any(ARTIFACT_API_RE.search(r) or _gh_run_download(r)
+                                                      for r in _readings(step.scripts())):
             return True
     return False
 
