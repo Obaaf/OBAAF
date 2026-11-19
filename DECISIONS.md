@@ -95,6 +95,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-085 | What a called local workflow's jobs do counts for the job that calls it: a release there makes it a release job, a declared release job is held to the caches restored there, and a called job whose every caller in the repository forbids restoring is "cannot tell"; a call by `owner/repo/...@ref` is not matched, and a called job's `if: github.event_name == '<event>'` adds that event | Accepted, 2026-11-18 |
 | D-086 | OBAAF reports, as OBAAF-GHA-025 (high), an agent job that runs as code a script downloaded while the job runs, whatever it installs, or installs or runs an agent CLI the catalogue names at a version that can change; only agent jobs are read | Accepted, 2026-11-18 |
 | D-087 | Agent tools are data: one entry per tool in `detection.yaml`, with the sources its facts were read from and the date, from which the checker's agent lists are built; every tool ci-agent-audit recognised at `4a88ee6` has one; the agent rules' findings name the agents a job runs in a fact, `agents` | Accepted, 2026-11-18 |
+| D-089 | Init previews both files, applies explicitly, stops on conflicts and starts CI in report mode | Accepted, 2026-11-18 |
 
 ---
 
@@ -783,3 +784,15 @@ Each finding of OBAAF-GHA-003, 004, 005, 012, 020 and 025 has a fact `agents`: t
 **Consequence.** A job that uses one of the new actions or runs one of the new commands is an agent job and gets the agent rules, so a gate can fail where it passed. Installing one of the five packages before OBAAF's egress action, in 2c.8's exact forms, is accepted as 2c.8 accepts the three: its install scripts run outside the sandbox with the step's environment, which D-053 names. A job-level `defaults.run.shell` is now the only default shell read for an agent where it is text, as GitHub uses the most specific default; before, the workflow's was read as well. An acceptance in a v0.2 baseline of an agent rule's finding on a job that runs a named agent no longer matches; a v0.1 baseline, identified by the message, is not affected. On the first adopter's files at `6794fd2c` (read-only, without `fresh-*` paths) the text report is byte-identical and six findings' JSON facts gain `agents: [claude-code]` (OBAAF-GHA-005, 020 and 025 on two jobs); on this repository the reports are byte-identical. Not covered, and stated in the guide: docker images that run an agent, forms of a command the tool's documentation did not give where it was read, CodeRabbit's other actions (their repositories could not be read), packages of OpenHands, SWE-agent and Amp, and an agent no entry names. Also not done: an action that sits under an agent action's prefix but runs no agent (`anthropics/claude-code-action/agent-approval-check`) still makes an agent job.
 
 **Status.** Accepted, 2026-11-18.
+
+### D-089 How a team reviews and applies the first configuration
+
+**Decision.** Running `obaaf init` shows the proposed configuration and workflow. The user runs `obaaf init --apply` to write them. If either target already exists with different contents, show the conflicting path and diff and stop before writing either file. A first CI workflow reports findings. The team chooses its gate threshold later.
+
+When the tool detects a secret name but cannot establish its GitHub environment, list the name for review. Write a protection rule only when the environment is known. The team resolves ambiguous names.
+
+**Reason.** Someone adopting OBAAF can inspect both files and the detected jobs and secrets before changing their repository. A configuration assembled from a new workflow and an existing, conflicting file can give misleading results. A first report lets the team see the effect of choosing a threshold.
+
+**Consequence.** Setup takes a preview and an explicit apply. A conflict requires reconciliation before the pair can be written. The first workflow does not block on finding severity. Secret values are unnecessary for proposing rules from workflow references.
+
+**Status.** Accepted, 2026-11-18. Sean chose each of these four outcomes in his session (Central Time). This records the requirements for slice 3.3 (#84).
