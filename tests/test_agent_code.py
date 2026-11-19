@@ -260,8 +260,8 @@ class FirstReviewCasesTest(unittest.TestCase):
     """Every probe of the first review, with what is reported now (`agent_code_review_cases.py`)."""
 
     def test_each_case(self):
-        from agent_code_review_cases import CASES
-        for cid, how, code, want, why in CASES:
+        from agent_code_review_cases import CASES, CASES_2
+        for cid, how, code, want, why in CASES + CASES_2:
             with self.subTest(case=cid, why=why):
                 got = kinds(check(maker(how)(code)))
                 got = "hit" if "command-option" in got else ("cannot" if got == ["command-computed"] else (
@@ -296,7 +296,59 @@ class FirstReviewCasesTest(unittest.TestCase):
         ])
 
 
+class SecondReviewTest(unittest.TestCase):
+    """Conditions the second review's mutations showed no test covered, and its crash."""
+
+    def test_conditions(self):
+        Case.expect(self, [
+            (heredoc("python3", "import os\np = 'claude'\np += ' ' + F\nos.system(p)"), "cannot"),
+            ("echo 'import subprocess; subprocess.run([\"claude\",\"--version\"])' | python3", "none"),
+            (heredoc("python3", "import subprocess\nsubprocess.run(['gemini', x + 'y', '-p', 'q'])"), "cannot"),
+            (heredoc("python3", "import subprocess\nsubprocess.run(['claude', x + 'ion'])"), "none"),
+            (heredoc("python3", "import subprocess\nsubprocess.run(['claude', '--yolo-is-not' + x])"), "none"),
+            (heredoc("python3", "import os\nos.system('claude '\n          '" + DSP + "')"), "hit"),
+            (heredoc("python3", "import os\nos.system('claude ' +\n          os.environ['F'])"), "cannot"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', prompt]\nif model:\n    cmd += ['--model', model]\n"
+                                "subprocess.run(cmd)"), "none"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor a in extra:\n    cmd.append(a)\n"
+                                "subprocess.run(cmd)"), "cannot"),
+        ])
+        Case.expect(self, [
+            ("core.group('claude', async () => { await exec.exec('npm', ['test']) })", "none"),
+            ("const args = ['-p', prompt];\nif (model) args.push('--model', model);\nawait exec.exec('claude', args);", "none"),
+            ("const args = ['-p', prompt];\nargs.push(process.env.F, process.env.G);\nawait exec.exec('claude', args);",
+             "none"),
+            ("require('child_process').spawnSync('claude', ['-p', prompt], {shell: true})", "cannot"),
+            ("await exec.exec('claude -p x', flags)", "cannot"),
+            ("await exec.exec('bash', ['-c', `claude ${flags}`])", "cannot"),
+        ], make=script_step)
+
+    def test_a_long_chain_of_unary_operators_does_not_end_the_check(self):
+        text = script_step("const x = " + "!" * 3000 + "y\nawait exec.exec('claude', flags)")
+        self.assertEqual(kinds(check(text)), ["command-computed"])
+
+    def test_the_site_limit(self):
+        text = script_step("await exec.exec('claude', ['-p', p])\n" * 205)
+        self.assertEqual(kinds(check(text)), ["command-computed"])
+        text = script_step("core.info('claude step')\n" * 205 + "await exec.exec('claude', ['-p', p])")
+        self.assertEqual(kinds(check(text)), [])
+
+
 class CostTest(unittest.TestCase):
+    def test_the_second_reviews_slow_inputs(self):
+        # Each took 7 to 26 s before the second review's fixes.
+        cases = [
+            run_step(heredoc("python3", "x = ['claude', " + "a, " * 4000 + "]\na = ['y']")),
+            script_step("await exec.exec('claude',['-p',p])\nconst r = 1" + "/[" * 16000),
+            run_step(heredoc("python3", "p = 'claude " + "x " * 4000 + "'\nimport os\nos.system(f'" + "{p}" * 800 + "{f}')")),
+            run_step(heredoc("python3", "c = 'claude ' + f\n" + "y = c\n" * 6000 + "import os\nos.system(y)")),
+            run_step(heredoc("python3", "import subprocess\n" + "p = 'claude'\n" * 4000 + "f(p)\n" * 4000)),
+        ]
+        for text in cases:
+            start = time.monotonic()
+            check(text)
+            self.assertLess(time.monotonic() - start, 10, text[:80])
+
     def test_large_code_is_read_in_linear_time(self):
         for code in ("import subprocess\n" + "subprocess.run(['claude', '-p', x])\n" * 3000,
                      "x = " + "a." * 20000 + "b\nsubprocess.run(['claude'])\n",

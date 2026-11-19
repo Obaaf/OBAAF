@@ -1232,6 +1232,8 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
         if t == "-m" and group in ("python", "python2", "python3", "pypy"):
             return False                # a module is run (`python -m pkg`): not read, as a repository script is not
         if t == "-f" and group in ("awk", "gaw", "maw"):
+            if n + 1 < len(rest) and rest[n + 1].text in ("/dev/stdin", "-"):
+                break                   # the program from the heredoc (`awk -f /dev/stdin <<'EOF'`)
             return False                # an awk program from a file: not read, as a repository script is not
         if t in options:
             code = rest[n + 1] if n + 1 < len(rest) else None
@@ -1261,16 +1263,28 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
     texts = [code.text] if code is not None else [body if literal else _paste_expansions(body)
                                                   for _k, body, literal in command.stdin]
     if code is None and not texts and command.piped:
-        # Code read from a pipe (`echo '...' | python3`): what `echo` or `printf` writes, else "cannot tell"
-        # where the pipeline names the tool.
+        # Code read from a pipe (`echo '...' | python3`, `cat <<'EOF' | python3`): what `echo`, `printf` or
+        # `cat` of a heredoc writes, else "cannot tell" where the pipeline names the tool.
         literal = _literal_output(command.before)
-        if literal is not None:
+        before = command.before
+        if literal is None and before is not None and before.words and _base(before.words[0].text) == "cat" and (
+                len(_arguments(before.words)) == 1) and before.stdin:
+            texts = [body if lit else _paste_expansions(body) for _k, body, lit in before.stdin]
+        elif literal is not None:
             texts = [literal]
         elif mentions(_pipeline(command), ctx.programs, ctx.packages):
             ctx.cannot_tell(f"{family} reading its code from a pipe: " + _pipeline(command))
             return True
     if not texts:
         return False
+    if code is not None:
+        # The program named among the code's own arguments (`node -e '...spawnSync(argv[1], ...)' claude "$@"`):
+        # the code may run it with the words after it (found by slice 2d.5c2c's second review).
+        after = rest[rest.index(code) + 1:] if code in rest else []
+        at = next((n for n, w in enumerate(after) if not w.computed and (
+            _base(w.text) in ctx.programs or _is_package(w.text, ctx.packages))), None)
+        if at is not None:
+            _read_program_args(_arguments(after[at + 1:]), ctx)
     for text in texts:
         probe = Reading()
         _read_widest(text, ctx.programs, ctx.packages, ctx.flags, probe, anywhere=True)

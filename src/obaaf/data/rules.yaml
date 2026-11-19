@@ -976,8 +976,8 @@ rules:
       data heredocs out, quotes and backslashes removed, brackets and commas made spaces, cut where a shell
       starts a command), so an option in a prompt's text or in a JavaScript or Python argument list is read
       as given. A step in another shell (pwsh is the default on a Windows runner), a github-script script
-      and code given to an interpreter (`python3 -c`, `perl -e`, a heredoc fed to `node`) are read only the
-      widest way, the program found anywhere in them. An option is matched in any letter case, as `--name=value` and `--name
+      and code given to an interpreter (`python3 -c`, `perl -e`, a heredoc fed to `node`) are read the
+      widest way, the program found anywhere in them, and by their tokens or words (below). An option is matched in any letter case, as `--name=value` and `--name
       value`, and a one-letter option inside a group (`-yp`); nothing after a word `--` is an option, and
       `--name=false` is not a match; a `--` right after an option may be its value and does not end them. "Cannot tell", at most medium, is case `command-computed`, in a step
       that names the tool: a word of the program's command with a variable or substitution outside quotes,
@@ -987,13 +987,16 @@ rules:
       checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`) or a new name made for a program
       (`alias`, `hash`, `ln`, `cp`); `IFS` set; `eval` or a shell given text the checker cannot read; a
       script file written in the step and run; text it cannot split; nesting deeper than four levels; in
-      PowerShell or cmd, a variable, group or splat outside quotes among the program's words (`claude @a`,
-      `claude $flags`, `claude %F%`), or a command it cannot name (`& $exe`, `%C%`); and in code in another
+      PowerShell, a variable (not `$env:NAME`, always one string), group or splat outside quotes among the
+      program's words (`claude @a`, `claude $flags`), in cmd a `%VAR%` or `!VAR!` anywhere among them (cmd
+      puts its text in before it reads quotes), or a command it cannot name (`& $exe`, `%C%`), commands inside
+      `{ }` blocks included; and in code in another
       language (code given to `python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, awk or a heredoc, a
       github-script script, a step whose `shell` is python, node, ruby, perl or php), read by its tokens
       (flagship slice 2d.5c2c): an argument list with a splat or spread, joined with another, held in a name
-      the code changes, or given as a value to a call that takes the list (`exec.exec('claude', flags)`,
-      `os.execvp`); a command line in a string given to a call that runs one (`os.system`, `execSync`,
+      the code changes in a way it cannot read (a change that adds literals or one value, `cmd.append(x)`, is
+      read), or given as a value to a call that takes the list (`exec.exec('claude', flags)`, `os.execvp`),
+      or with Node's `{shell: true}`; a command line in a string given to a call that runs one (`os.system`, `execSync`,
       backticks, `%x`, `qx`, `shell_exec`, awk's `system` and pipes) and joined with or holding a value
       (`"claude " + f`, `f"claude {f}"`, `"claude #{f}"`, `"claude $f"`, `"claude %s" % f`), which can end the
       string's own quotes; a list joined into such a string; a value pasted into the code before it runs (a

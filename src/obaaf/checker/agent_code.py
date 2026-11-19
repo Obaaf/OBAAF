@@ -2,8 +2,9 @@
 
 `agent_flags` reads a bash or sh script as bash reads it. Code given to another interpreter (`python3 -c`,
 `node -e`, a heredoc fed to `ruby`, `perl -e`, `php -r`, an awk program), a github-script script and a
-step whose shell is pwsh, cmd, python or another language are read there only the widest way. This module
-reads such code a second time, by its tokens, for what the widest reading cannot see:
+step whose shell is pwsh, cmd, python or another language are read there the widest way. This module
+reads such code a second time, by its tokens (PowerShell and cmd by their words), for what the widest
+reading cannot see:
 
 - **An argument list that holds what the checker cannot read.** A splat or spread (`*flags`, `...flags`,
   Perl's `@flags`, PHP's `...$flags`), a list joined with another (`["claude"] + flags`), a list held in a
@@ -66,9 +67,12 @@ _RUNNER_CALLS = frozenset({
     "check_call", "check_output", "getoutput", "getstatusoutput", "shell_exec", "passthru", "proc_open",
     "capture2", "capture2e", "capture3", "pipeline", "invoke-expression", "iex", "start-process", "execa",
     "execasync", "execcommand", "getexecoutput", "create_subprocess_shell", "readpipe", "qx", "execute",
-    "spawnasync", "execfile", "execfilesync", "fork", "create_subprocess_exec", "subprocess"})
+    "spawnasync", "execfile", "execfilesync", "fork", "create_subprocess_exec", "subprocess", "posix_spawn",
+    "posix_spawnp", "pcntl_exec", "open2", "open3", "capture", "capturex", "systemx", "run3", "command",
+    "execasync", "execanode", "execasync", "spawnp", "execv", "execvp", "execvpe", "execl", "execlp", "spawnv",
+    "spawnvp", "spawnl", "spawnlp"})
 _SHELL_NAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "cmd", "cmd.exe", "pwsh", "powershell",
-                          "pwsh.exe", "powershell.exe"})
+                          "pwsh.exe", "powershell.exe", "ssh"})
 # Calls whose argument after the program is the argument list itself (Python's `os.execv*`, `os.spawnv*`,
 # `os.posix_spawn*`): a value there is a list.
 _PY_LIST_CALL_RE = re.compile(r"(exec|spawn)v|posix_spawn")
@@ -93,6 +97,7 @@ _HOLE_NAME = "__OBAAF_HOLE_"
 PASTED = 2
 _PASTED_RE = re.compile(r"\$\{\{.*?\}\}|\x02\d*\x02", re.S)
 _SUBSCRIPT_LIMIT = 1000     # characters a Perl or PHP subscript in a string is looked for in
+_PASTE_LIMIT = 100_000      # characters of names' values put into strings in one piece of code
 
 
 @dataclass
@@ -129,6 +134,8 @@ class _Tokenizer:
         self.toks: list = []
         self.problem = ""
         self.pending_heredocs: list = []        # (tok, delimiter, interpolates, squiggly) waiting for a line end
+        self.depth: list = []                   # the brackets open at this point; a line end inside ( or [
+                                                # does not end a statement
 
     # -- helpers
     def _value_position(self) -> bool:
@@ -137,22 +144,29 @@ class _Tokenizer:
             return True
         if prev.kind == "op":
             return prev.text not in (")", "]", "}")
-        return prev.kind == "name" and prev.text.lower() in _VALUE_KEYWORDS
+        return prev.kind == "name" and prev.text.lower() in _VALUE_KEYWORDS and (
+            self.family == "perl" or prev.text.lower() not in ("x", "lt", "gt", "le", "ge", "eq", "ne", "cmp"))
 
     def _argument_position(self, i: int) -> bool:
         """A value may start at `i`: where `_value_position` says so, or after a name with a space before
         `i` and none after it (`system %(...)`, `system <<~CMD`, `puts ?x`), as Ruby and Perl read it."""
+        text = self.text
+        if text.startswith("%=", i) and self.toks and self.toks[-1].kind == "name":
+            return False                # `x %= 3`
         if self._value_position():
             return True
         prev = self.toks[-1] if self.toks else None
-        text = self.text
+        if text[i + 1:i + 2] == "=" or (text.startswith("<<", i) and not (
+                prev is not None and prev.text.lower() in _RUNNER_CALLS | _OUTPUT_CALLS | {"p", "puts", "print"})):
+            return False                # `x %= 3`; `args <<FLAGS` appends, `system <<~CMD` is a heredoc
         return (prev is not None and prev.kind == "name" and i > 0 and text[i - 1] in " \t"
                 and i + 1 < len(text) and not text[i + 1].isspace())
 
     def _regex_end(self, i: int) -> int:
         """The index after a regular expression literal that starts with `/` at `i` (classes `[...]` and
         backslashes read), and its flags; -1 if it does not end on its line."""
-        text, n = self.text, len(self.text)
+        text = self.text
+        n = min(len(text), i + 1000)    # a regular expression literal longer than this is not one
         j = i + 1
         in_class = False
         while j < n:
@@ -275,6 +289,9 @@ class _Tokenizer:
                     parts.append((PASTED, m.group(0)))
                     i = m.end()
                     continue
+            if text[i] == "\n" and close in ("'", '"') and style in ("py", "js", "raw") and self.family in (
+                    "python", "js"):
+                return [], -1           # a one-line string in Python or JavaScript ends at its line's end
             if text.startswith(close, i) and depth == 0:
                 if close in ("'", '"') and style in ("ps",) and text.startswith(close * 2, i):
                     buf.append(close)   # PowerShell doubles a quote to write one
@@ -336,7 +353,7 @@ class _Tokenizer:
             if two == "#{":
                 end = self._skip_balanced(i + 2, "{", "}")
                 return (text[i + 2:end - 1], end) if end > 0 else (text[i + 2:], len(text))
-            m = re.compile(r"#(@@?|\$)[A-Za-z_]\w*").match(text, i)
+            m = re.compile(r"#(?:@@?[A-Za-z_]\w*|\$(?:[A-Za-z_]\w*|\d+|[~!@&`'+*$?:\"<>,./\\;]))").match(text, i)
             return (m.group(0)[1:], m.end()) if m else None
         if interp in ("pl", "php", "ps"):
             if interp == "php" and two == "{$":
@@ -629,7 +646,8 @@ class _Tokenizer:
         while i < n:
             c = text[i]
             if c == "\n":
-                self.toks.append(Tok("nl", "\n", i, i + 1))
+                if not self.depth or self.depth[-1] == "{":
+                    self.toks.append(Tok("nl", "\n", i, i + 1))
                 i += 1
                 if self.pending_heredocs:
                     i = self._read_heredocs(i)
@@ -657,6 +675,14 @@ class _Tokenizer:
             if fam == "pwsh" and text.startswith("<#", i):
                 j = text.find("#>", i + 2)
                 i = j + 2 if j >= 0 else n
+                continue
+            if fam == "js" and (text.startswith("<!--", i) or (at_line_start and text.startswith("-->", i))):
+                j = text.find("\n", i)
+                i = j if j >= 0 else n          # HTML-like comments, which JavaScript reads as line comments
+                continue
+            if fam == "php" and text.startswith("?>", i):
+                m = re.compile(r"<\?(?:php|=)?").search(text, i + 2)
+                i = m.end() if m else n         # inline HTML up to the next `<?php`
                 continue
             if fam in ("js", "php", "other") and text.startswith("/*", i):
                 j = text.find("*/", i + 2)
@@ -750,6 +776,10 @@ class _Tokenizer:
                 continue
             op = next((o for o in _MULTI_OPS if text.startswith(o, i)), c)
             self.toks.append(Tok("op", op, i, i + len(op)))
+            if op in ("(", "[", "{"):
+                self.depth.append(op)
+            elif op in (")", "]", "}") and self.depth:
+                self.depth.pop()
             i += len(op)
         if self.pending_heredocs:
             self._read_heredocs(n)
@@ -847,12 +877,19 @@ class _Code:
         if k >= len(toks):
             return -1
         t = toks[k]
+        if t.kind == "op" and t.text == "$" and self.family == "awk" and k + 1 < len(toks) and toks[k + 1].kind in (
+                "num", "name"):
+            return k + 1                    # an awk field (`$1`, `$NF`)
         if t.kind == "op" and t.text in ("(", "[", "{") and self.close[k] > 0:
             end = self.close[k]
         elif t.kind in ("name", "num", "str"):
             end = k
-        elif t.kind == "op" and t.text in ("-", "!", "~") and k + 1 < len(toks):
-            return self._operand_end(k + 1)
+        elif t.kind == "op" and t.text in ("-", "!", "~", "+") and k + 1 < len(toks):
+            j = k
+            while j < len(toks) and toks[j].kind == "op" and toks[j].text in ("-", "!", "~", "+"):
+                j += 1
+            return self._operand_end(j) if j < len(toks) and not (toks[j].kind == "op" and toks[j].text in (
+                "-", "!", "~", "+")) else -1
         else:
             return -1
         if t.kind == "str":
@@ -931,7 +968,8 @@ class _Code:
                     j = e2
                     continue
                 if (fam == "awk" or (fam in ("python", "ruby") and toks[j].kind == "str" and nxt.kind == "str")) \
-                        and nxt.kind in ("str", "name", "num") or (fam == "awk" and nxt.kind == "op" and nxt.text == "("):
+                        and nxt.kind in ("str", "name", "num") or (fam == "awk" and nxt.kind == "op" and nxt.text in (
+                            "(", "$")):
                     e2 = self._operand_end(j + 1)
                     if e2 < 0 or (fam == "awk" and toks[j + 1].kind == "name" and toks[j + 1].text in (
                             "in", "getline", "if", "else", "while", "for", "do", "print", "printf")):
@@ -1010,16 +1048,6 @@ class _Code:
             return ""
         return self.toks[k].text.lower()
 
-    def callee_full(self, open_index: int) -> str:
-        k = open_index - 1
-        names: list = []
-        while k >= 0 and self.toks[k].kind == "name":
-            names.append(self.toks[k].text.lower())
-            if k >= 1 and self.toks[k - 1].kind == "op" and self.toks[k - 1].text in (".", "->", "::", "?."):
-                k -= 2
-                continue
-            break
-        return ".".join(reversed(names))
 
 
 def _merge(parts: list) -> list:
@@ -1069,12 +1097,34 @@ def read_code(text: str, family: str, ctx: af._Context) -> None:
     code.build()
     code.values = _values(code)
     aliases = _aliases(code)
-    if aliases:
-        # A value that is a name given a literal that names the program (`f"{p} --yolo"`, `p + " --yolo"`)
-        # is that literal.
+    # A value that is a name given a string that names the program (`f"{p} --yolo"`, `p + " --yolo"`,
+    # `f"{c}"` where `c = "claude " + f`) is that string's parts; at most `_PASTE_LIMIT` characters are put in
+    # for a piece of code, beyond which the rest is "cannot tell".
+    budget = [_PASTE_LIMIT]
+
+    def put_in(expr: Expr) -> list:
+        out: list = []
+        for h, t in expr.parts:
+            name = _bare(t) if h is True else ""
+            value = _value_at(code, name, expr.first) if name else None
+            sub = code.expr_at.get(value[0]) if value else None
+            if sub is not None and sub.last == value[1] and sub is not expr and af.mentions(
+                    "".join("" if hh else tt for hh, tt in sub.parts), ctx.programs, ctx.packages):
+                size = sum(len(tt) for _hh, tt in sub.parts)
+                budget[0] -= size
+                if budget[0] < 0:
+                    if budget[0] + size >= 0:
+                        code.cannot_tell("names put into strings beyond what the checker reads")
+                    out.append((h, t))
+                    continue
+                out.extend(sub.parts)
+            else:
+                out.append((h, t))
+        return _merge(out)
+    if code.values:
         for expr in code.exprs:
-            expr.parts = _merge([(False, aliases[_bare(t)][0]) if h is True and _bare(t) in aliases else (h, t)
-                                 for h, t in expr.parts])
+            if any(h is True and _bare(t) for h, t in expr.parts):
+                expr.parts = put_in(expr)
     for expr in code.exprs:
         literal = _literal(expr.parts)
         joined = "".join("" if h else t for h, t in expr.parts)
@@ -1199,7 +1249,7 @@ def _call_start(code: _Code, open_index: int) -> int:
     """The first token of the callee chain before the bracket at `open_index` (`shlex.split(` -> `shlex`)."""
     k = open_index - 1
     while k >= 2 and code.toks[k - 1].kind == "op" and code.toks[k - 1].text in (".", "->", "::", "?.") and \
-            code.toks[k - 2].kind == "name":
+            code.toks[k - 2].kind in ("name", "str"):
         k -= 2
     return k
 
@@ -1221,7 +1271,16 @@ def _first_or_after_shell(code: _Code, k: int, p: int) -> bool:
 def _reaches_runner(code: _Code, k: int, hops: int = 0, end: int | None = None) -> bool:
     """Whether the value that starts at token `k` is given to a call that runs a command line: directly, or
     through calls that only change its form (`shlex.split`, `join`, `str`), a list after a shell's name,
-    or a name that is."""
+    or a name that is (worked out once for each place)."""
+    memo = code.__dict__.setdefault("_runner_memo", {})
+    key = (k, hops, end)
+    if key not in memo:
+        memo[key] = False
+        memo[key] = _reaches_runner_uncached(code, k, hops, end)
+    return memo[key]
+
+
+def _reaches_runner_uncached(code: _Code, k: int, hops: int, end: int | None) -> bool:
     toks = code.toks
     runners = _RUNNER_CALLS | ({"open"} if code.family in ("perl", "ruby") else frozenset())
     before = toks[k - 1] if k >= 1 else None
@@ -1233,6 +1292,9 @@ def _reaches_runner(code: _Code, k: int, hops: int = 0, end: int | None = None) 
         # awk runs a command line it prints into or reads from: `print ... | cmd`, `cmd | getline`.
         end = code._operand_end(k) if end is None else end
         after = toks[end + 1] if 0 <= end < len(toks) - 1 else None
+        group = code.parent[k]
+        if group >= 1 and toks[group].text == "(" and not code.callee(group) and toks[group - 1].text == "|":
+            return True                                 # `print ... | ("claude " x)`
         if (before is not None and before.kind == "op" and before.text == "|") or (
                 after is not None and after.text == "|" and end + 2 < len(toks) and toks[end + 2].text == "getline"):
             return True
@@ -1242,13 +1304,16 @@ def _reaches_runner(code: _Code, k: int, hops: int = 0, end: int | None = None) 
     while p >= 0 and levels < 6:
         if toks[p].text == "(":
             callee = code.callee(p)
-            if callee in runners:
+            if callee in runners or _is_runner(code, p):
                 # Perl's and Ruby's `open` take the command line among later arguments (`open($fh, '-|', ...)`).
                 return callee == "open" or _first_or_after_shell(code, inner, p)
-            if callee in _OUTPUT_CALLS or callee not in _TRANSPARENT_CALLS:
+            if callee not in _TRANSPARENT_CALLS:
                 return False
         elif toks[p].text == "[":
-            if not _first_or_after_shell(code, inner, p):
+            holder = code.parent[p]
+            if not _first_or_after_shell(code, inner, p) and not (
+                    holder >= 0 and toks[holder].text == "(" and _is_runner(code, holder) and _first_or_after_shell(
+                        code, p, holder) and _split_args(code, holder + 1, code.close[holder] - 1)[0][0] != p):
                 return False                            # one argument of an argument list
         elif toks[p].text == "{":
             break                                       # a block or an object: the name it is given decides
@@ -1257,13 +1322,21 @@ def _reaches_runner(code: _Code, k: int, hops: int = 0, end: int | None = None) 
         levels += 1
     if hops < 2:
         top = k
-        while code.parent[top] >= 0 and toks[code.parent[top]].text == "(" and code.callee(
-                code.parent[top]) in _TRANSPARENT_CALLS - {""}:
-            top = _call_start(code, code.parent[top])
+        while code.parent[top] >= 0 and toks[code.parent[top]].text == "(":
+            p = code.parent[top]
+            if code.callee(p) in _TRANSPARENT_CALLS - {""}:
+                top = _call_start(code, p)
+            elif not code.callee(p) and code.close[p] > 0 and (end is None or code.close[p] == (end or 0) + 1):
+                top = p                         # brackets round the value: `c = ('claude ' + f)`
+            else:
+                break
         name = _assigned_name(code, top)
         if name is not None:
             stop = _next_assignment(code, name, top - 2)
-            return any(top < u < stop and _reaches_runner(code, u, hops + 1) for u in _uses(code, name, top - 2))
+            uses = [u for u in _uses(code, name, top - 2) if top < u < stop]
+            if len(uses) > _SITE_LIMIT:
+                return True                     # too many places to follow: read it as a command line
+            return any(_reaches_runner(code, u, hops + 1) for u in uses)
     return False
 
 
@@ -1294,6 +1367,20 @@ def _command_line(code: _Code, expr: Expr) -> None:
         return
     if not code.site():
         return
+    p = code.parent[expr.first]
+    if p >= 0 and code.toks[p].text == "(" and expr.last + 1 < len(code.toks) and code.toks[expr.last + 1].text == ",":
+        # A command line and then its arguments (`exec.exec('claude -p x', flags)`, `spawn('claude --print',
+        # args)`): the arguments come after the line's own words.
+        literal = _literal(expr.parts)
+        line_words = literal.split() if literal is not None else []
+        at = next((n for n, w in enumerate(line_words) if af._base(w) in ctx.programs or af._is_package(
+            w, ctx.packages)), None)
+        if at is not None:
+            words: list = [af.Word(text=w, shown=w) for w in line_words[at + 1:]]
+            joined = any(_shell_option(code, a, b) for a, b in _split_args(code, expr.last + 2, code.close[p] - 1))
+            for a, b in _split_args(code, expr.last + 2, code.close[p] - 1):
+                words.extend(_word(code, a, b, False, code.callee(p), joined=joined))
+            _read_words(code, words)
     holes: list = []
     shell: list = []
     quote = ""
@@ -1305,7 +1392,8 @@ def _command_line(code: _Code, expr: Expr) -> None:
         if is_hole:
             value = _value_at(code, _bare(text), expr.first) if is_hole is True and _bare(text) else None
             sub = code.expr_at.get(value[0]) if value else None
-            if sub is not None and sub.last == value[1] and _literal(sub.parts) is not None:
+            if sub is not None and sub.last == value[1] and _literal(sub.parts) is not None and (
+                    len(_literal(sub.parts)) + sum(len(x) for x in shell) < _PASTE_LIMIT):
                 text = _literal(sub.parts)          # a name given a literal string: its text
             else:
                 name = f"{prefix}{len(holes)}"
@@ -1396,15 +1484,16 @@ def _ends(code: _Code, suffix: str) -> list:
     """The warned options a value could be, given the literal text it is known to end with (four
     characters or more: `x + '-skip-permissions'`)."""
     low = suffix.casefold()
-    if len(low) < 4:
+    if not low:
         return []
-    return [option for flag in code.ctx.flags for option in flag["options"] if option.casefold().endswith(low)]
+    return [option for flag in code.ctx.flags for option in flag["options"] if option.casefold().endswith(low) and (
+        len(low) >= 4 or option.casefold().lstrip("-") == low)]
 
 
 def _expr_words(code: _Code, expr: Expr, shown: str, joined: bool) -> list:
     literal = _literal(expr.parts)
     if literal is not None:
-        return literal.split() if joined else [af.Word(text=literal, shown=shown)]
+        return [af.Word(text=w, shown=w) for w in literal.split()] if joined else [af.Word(text=literal, shown=shown)]
     if any(h == PASTED for h, _t in expr.parts) or joined:
         return [_unknown(shown, True)]
     known = "".join("\x03h\x03" if h else txt for h, txt in expr.parts)
@@ -1419,7 +1508,8 @@ def _expr_words(code: _Code, expr: Expr, shown: str, joined: bool) -> list:
                     + _inside(code, expr.first, expr.last))]
 
 
-def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 0, joined: bool = False) -> list:
+def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 0, joined: bool = False,
+          listy: bool = False) -> list:
     """The words one argument stands for: a list of `agent_flags.Word`; one whose text is not known is
     marked `quoted` (one word) or `splits` (any number of words). `joined`: the list is joined into one
     string that a shell or a splitter reads, so a value there can be several words."""
@@ -1453,6 +1543,11 @@ def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 
     # A value pasted into the code's text, a splat or a spread.
     if any(toks[x].sigil == "pasted" for x in range(a, b + 1)):
         return [_unknown(shown, True)]
+    if t.kind == "op" and t.text in ("*", "...") and a + 1 == b and toks[b].kind == "name":
+        value = _value_at(code, toks[b].text, b)
+        if value is not None and toks[value[0]].text == "[" and code.close[value[0]] == value[1] and not _changed(
+                code, toks[b].text, value[0] - 2, b):
+            return _word(code, value[0], value[1], False, callee, depth + 1, joined)    # `[...common]`
     if t.kind == "op" and t.text in ("*", "**", "...", "&"):
         return [_unknown(shown, True)]
     if t.kind == "name" and t.sigil in ("@", "%") and fam in ("perl", "pwsh"):
@@ -1465,6 +1560,9 @@ def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 
     if toks[opener].kind == "op" and toks[opener].text in ("[", "(") and code.close[opener] > 0 and (
             toks[opener].text == "[" or fam in ("perl", "pwsh") or opener != a):
         close = code.close[opener]
+        if any(toks[x].kind == "name" and toks[x].text == "for" and code.parent[x] == opener
+               for x in range(opener + 1, close)):
+            return [_unknown(shown, True)]          # a comprehension: its words are not known
         for x, y in _split_args(code, opener + 1, close - 1):
             words.extend(_word(code, x, y, True, callee, depth + 1, joined))
         if close < b and not (toks[close + 1].text == "." and close + 2 <= b and toks[close + 2].text.lower() in (
@@ -1488,10 +1586,20 @@ def _word(code: _Code, a: int, b: int, in_list: bool, callee: str, depth: int = 
                 return _expr_words(code, sub, shown, joined)
             vo = va + 1 if (fam == "pwsh" and toks[va].text == "@") else va
             if toks[vo].kind == "op" and toks[vo].text in ("[", "(") and code.close[vo] == vb and (
-                    toks[vo].text == "[" or fam in ("perl", "pwsh")) and not _changed(code, t.text, va - 2, a):
-                return _word(code, va, vb, False, callee, depth + 1, joined)
-    # Another value: one word or a list, as the language gives it here.
-    many = joined
+                    toks[vo].text == "[" or fam in ("perl", "pwsh")):
+                words = _word(code, va, vb, False, callee, depth + 1, joined)
+                if not _changed(code, t.text, va - 2, a):
+                    return words
+                # Changed: read where each change adds words it can read (`args.push('--verbose')`).
+                for u in _uses(code, t.text, va - 2):
+                    if va - 2 < u < a and _changes(code, u):
+                        added = _change_words(code, u)
+                        if added is None:
+                            return [_unknown(shown, True)]
+                        words = words + added
+                return words
+    # Another value: one word or a list, as the language gives it here (`listy`: a place that takes a list).
+    many = joined or listy
     if not in_list:
         if fam in ("js", "php", "other", "lua"):
             many = True
@@ -1528,6 +1636,15 @@ def _argv(code: _Code, first: int, last: int) -> None:
         if callee in _OUTPUT_CALLS and not is_list:
             return
         args = _split_args(code, last + 1, close - 1)
+        if is_list:
+            holder0 = code.parent[parent]
+            earlier = _split_args(code, parent + 1, first - 1) + (
+                _split_args(code, holder0 + 1, parent - 1) if holder0 >= 0 and toks[holder0].text == "(" else [])
+            for a, b in earlier:
+                lit = code.expr_at.get(a)
+                if lit is not None and lit.last == b and af._base((_literal(lit.parts) or "").strip()) in (
+                        "echo", "printf", "which", "type", "grep", "test", "command"):
+                    return              # `['echo', 'claude', *flags]`: the program's name is data there
         # The program's own argument must end where a comma or the bracket does.
         if args and args[0][0] == last + 1:
             if not (toks[last + 1].kind == "op" and toks[last + 1].text == ","):
@@ -1545,19 +1662,35 @@ def _argv(code: _Code, first: int, last: int) -> None:
                 _call_start(code, parent) if callee in _JOINS else parent)
             if not _reaches_runner(code, start):
                 return
+        # Node's `{shell: true}` joins the program and its arguments into one shell command line.
+        if not is_list and any(_shell_option(code, a, b) for a, b in args):
+            joined = True
         words: list = []
         for a, b in args:
             words.extend(_word(code, a, b, is_list, callee, joined=joined))
+        if not is_list and not _is_runner(code, parent) and code.family in ("js", "php", "lua", "other"):
+            # The program as an argument of a call that does not run one (`core.group('claude', fn)`,
+            # `path.resolve(dir, 'claude', name)`): only literal options are read there.
+            words = [w for w in words if not w.computed]
         if is_list:
             after = toks[close + 1] if close + 1 < len(toks) else None
             before = toks[parent - 1] if parent >= 1 else None
-            if after is not None and after.kind == "op" and after.text in _EXTENDS_AFTER and not (
+            if after is not None and after.kind == "op" and after.text == "+" and close + 2 < len(toks) and toks[
+                    close + 2].text == "[" and code.close[close + 2] > 0:
+                # `[...] + ['--output-format', 'json']`: the other list's words.
+                other = code.close[close + 2]
+                words.extend(_word(code, close + 2, other, False, callee, joined=joined))
+                if other + 1 < len(toks) and toks[other + 1].kind == "op" and toks[other + 1].text in _EXTENDS_AFTER:
+                    words.append(af.Word(text="\x00", shown=code.src(parent, other + 2), splits=True))
+            elif after is not None and after.kind == "op" and after.text in _EXTENDS_AFTER and not (
                     after.text == "[" or (after.text == "." and close + 2 < len(toks) and toks[close + 2].text.lower() in (
                         "join", "filter", "slice", "copy", "freeze"))):
                 words.append(af.Word(text="\x00", shown=code.src(parent, close + 2), splits=True))
             if before is not None and ((before.kind == "op" and before.text == "+") or (
                     before.kind == "name" and before.text.lower() in _EXTENDS_BEFORE)):
                 words.append(af.Word(text="\x00", shown=code.src(parent - 1, close), splits=True))
+            if holder >= 0 and toks[holder].text == "(" and code.callee(holder) in _MUTATORS | _EXTENDS_BEFORE:
+                words.append(af.Word(text="\x00", shown=code.src(holder - 1, code.close[holder]), splits=True))
             if code.family in ("perl", "ruby") and holder >= 0 and toks[holder].text == "(" and not (
                     code.callee(holder) in _JOINS):
                 # Perl and Ruby flatten a list given among a call's arguments (`system(qw(claude -p), @ARGV)`).
@@ -1589,6 +1722,33 @@ def _argv(code: _Code, first: int, last: int) -> None:
     for a, b in _split_args(code, last + 2, end):
         words.extend(_word(code, a, b, False, callee, joined=callee in _JOINS))
     _read_words(code, words)
+
+
+def _is_runner(code: _Code, open_index: int) -> bool:
+    """Whether the call at `open_index` runs a command: by its name, or by a name given one
+    (`const run = cp.spawnSync; run(...)`)."""
+    callee = code.callee(open_index)
+    if callee in _RUNNER_CALLS:
+        return True
+    value = _value_at(code, code.toks[open_index - 1].text, open_index) if callee else None
+    if value is not None:
+        last = code.toks[value[1]]
+        return last.kind == "name" and last.text.lower() in _RUNNER_CALLS
+    return False
+
+
+def _shell_option(code: _Code, a: int, b: int) -> bool:
+    """Whether an argument is an options object with `shell` set to anything but `false`."""
+    toks = code.toks
+    a, b = _strip_nl(code, a, b)
+    if not (a <= b and toks[a].text == "{" and code.close[a] == b):
+        return False
+    for x, y in _split_args(code, a + 1, b - 1):
+        x, y = _strip_nl(code, x, y)
+        if x <= y and toks[x].text.strip("'\"") == "shell" and (x == y or not (
+                x + 2 <= y and toks[x + 2].text in ("false", "undefined", "null"))):
+            return True
+    return False
 
 
 def _read_words(code: _Code, words: list) -> None:
@@ -1634,6 +1794,9 @@ def _uses(code: _Code, name: str, skip: int) -> list:
         for k, t in enumerate(code.toks):
             if t.kind == "name":
                 code.names.setdefault(t.text, []).append(k)
+    cache = code.__dict__.setdefault("_uses_cache", {})
+    if (name, skip) in cache:
+        return cache[(name, skip)]
     out: list = []
     toks = code.toks
     attribute = skip >= 1 and toks[skip - 1].kind == "op" and toks[skip - 1].text in (".", "->", "::", "?.")
@@ -1647,6 +1810,7 @@ def _uses(code: _Code, name: str, skip: int) -> list:
                 "js", "ruby", "php") and not (k >= 1 and toks[k - 1].text == "?"):
             continue        # a key in an object literal or a keyword argument
         out.append(k)
+    cache[(name, skip)] = out
     return out
 
 
@@ -1672,6 +1836,9 @@ def _changes(code: _Code, k: int) -> bool:
     toks = code.toks
     before = toks[k - 1] if k >= 1 else None
     after = toks[k + 1] if k + 1 < len(toks) else None
+    p = code.parent[k]
+    if p >= 0 and toks[p].text == "(" and code.callee(p) in _OUTPUT_CALLS:
+        return False                        # logged: `console.log(...args)`, `print(*cmd)`
     if after is not None and after.kind == "op":
         if after.text in (".", "->", "?."):
             method = toks[k + 2] if k + 2 < len(toks) else None
@@ -1689,6 +1856,8 @@ def _changes(code: _Code, k: int) -> bool:
         if before.kind == "name" and before.text.lower() in _EXTENDS_BEFORE:
             return True
     p = code.parent[k]
+    if p >= 0 and toks[p].text == "(" and code.callee(p) in _OUTPUT_CALLS:
+        return False                        # logged: `console.log(...args)`, `print(*cmd)`
     if p >= 0 and toks[p].text == "(" and code.callee(p) in _MUTATORS | _EXTENDS_BEFORE and (
             k == p + 1 or (k == p + 2 and toks[p + 1].text == "\\")):
         return True                         # `push(@c, ...)`, `array_push($a, ...)`, `splice(@c, ...)`
@@ -1696,7 +1865,69 @@ def _changes(code: _Code, k: int) -> bool:
 
 
 def _changed(code: _Code, name: str, at: int, until: int) -> bool:
-    return any(at < u < until and _changes(code, u) for u in _uses(code, name, at))
+    """Whether the list a name was given at `at` is changed before `until` (the changes worked out once)."""
+    cache = code.__dict__.setdefault("_changes_cache", {})
+    if (name, at) not in cache:
+        cache[(name, at)] = [u for u in _uses(code, name, at) if u > at and _changes(code, u)]
+    changes = cache[(name, at)]
+    n = bisect.bisect_right(changes, at)
+    return n < len(changes) and changes[n] < until
+
+
+def _change_words(code: _Code, k: int) -> list | None:
+    """The words a change at token `k` adds to a held list, where it adds literal ones or values in a list's
+    places (`cmd.append('--verbose')`, `args.push('--model', m)`, `cmd += ['--model', m]`); None where they
+    are not known."""
+    toks = code.toks
+    after = toks[k + 1] if k + 1 < len(toks) else None
+    if after is None or after.kind != "op":
+        return None
+    if after.text in (".", "->") and k + 3 < len(toks) and toks[k + 2].text.lower() in (
+            "append", "push", "extend", "concat", "insert", "unshift") and toks[k + 3].text == "(":
+        close = code.close[k + 3]
+        args = _split_args(code, k + 4, close - 1) if close > 0 else None
+        if args is None:
+            return None
+        if toks[k + 2].text.lower() == "insert" and args:
+            args = args[1:]                     # `cmd.insert(1, x)`: the index is not a word
+        words: list = []
+        whole = toks[k + 2].text.lower() in ("extend", "concat")
+        loops = _loop_names(code)
+        for a, b in args:
+            a, b = _strip_nl(code, a, b)
+            if a == b and toks[a].kind == "name" and toks[a].text in loops:
+                return None                     # added once for each value of a loop: any number of words
+            words.extend(_word(code, a, b, not whole, "", listy=whole))
+        return words
+    if after.text == "+" and k + 2 < len(toks) and toks[k + 2].text == "[" and code.close[k + 2] > 0 and not (
+            code.close[k + 2] + 1 < len(toks) and toks[code.close[k + 2] + 1].kind == "op" and toks[
+                code.close[k + 2] + 1].text in _EXTENDS_AFTER):
+        return _word(code, k + 2, code.close[k + 2], False, "")       # `cmd + ['--output-format', 'json']`
+    if after.text in ("+=", "<<") and k + 2 < len(toks):
+        end = code._operand_end(k + 2)
+        if end < 0 or not _statement_end(code, end + 1):
+            return None
+        return _word(code, k + 2, end, after.text == "<<", "", listy=after.text == "+=")
+    return None
+
+
+def _loop_names(code: _Code) -> set:
+    """The names a loop gives its values to (`for a in ...`, `for (const a of ...)`, `|a|`, `foreach $a`)."""
+    if "_loops" not in code.__dict__:
+        names: set = set()
+        toks = code.toks
+        for k, t in enumerate(toks):
+            if t.kind == "name" and t.text in ("for", "foreach", "each", "map") and k + 1 < len(toks):
+                for j in range(k + 1, min(k + 6, len(toks))):
+                    if toks[j].kind == "name" and toks[j].text not in ("const", "let", "var", "my", "our", "local",
+                                                                          "each", "do"):
+                        names.add(toks[j].text)
+                        break
+            if t.kind == "op" and t.text == "|" and k + 2 < len(toks) and toks[k + 1].kind == "name" and toks[
+                    k + 2].text in ("|", ","):
+                names.add(toks[k + 1].text)     # a Ruby block's `|a|`
+        code.__dict__["_loops"] = names
+    return code.__dict__["_loops"]
 
 
 def _held_lists(code: _Code) -> None:
@@ -1712,7 +1943,42 @@ def _held_lists(code: _Code) -> None:
         for k in _uses(code, name, at):
             if not (at < k < stop):
                 continue
+            p = code.parent[k]
+            if p >= 0 and toks[p].text == "(" and code.callee(p) in _OUTPUT_CALLS:
+                continue                        # logged (`print('+', *cmd)`, `console.log(...cmd)`)
+            if code.family in ("perl", "ruby") and k >= 1 and toks[k - 1].kind == "name" and toks[
+                    k - 1].text.lower() in _RUNNER_CALLS and k + 1 < len(toks) and toks[k + 1].text == ",":
+                words = []
+                stop_at = k + 1
+                while stop_at + 1 < len(toks) and not _statement_end(code, stop_at + 1):
+                    stop_at += 1
+                for a, b in _split_args(code, k + 2, stop_at):
+                    words.extend(_word(code, a, b, False, toks[k - 1].text.lower()))
+                _read_words(code, words)            # `exec @c, @ARGV;`
+                continue
+            if p >= 0 and toks[p].text == "(" and _is_runner(code, p) and k + 1 < len(toks) and toks[
+                    k + 1].text == "," and code.family in ("perl", "ruby"):
+                # Perl and Ruby flatten a list given among a runner's arguments (`system(@c, @ARGV)`).
+                words: list = []
+                for a, b in _split_args(code, k + 2, code.close[p] - 1):
+                    words.extend(_word(code, a, b, False, code.callee(p)))
+                _read_words(code, words)
+                continue
+            if (p >= 0 and toks[p].text == "(" and code.callee(p) in _JOINS) or (
+                    k + 2 < len(toks) and toks[k + 1].text == "." and toks[k + 2].text.lower() in _JOINS):
+                # Joined into a command line (`os.system(" ".join(cmd))`): its values are words.
+                start = _call_start(code, p) if (p >= 0 and code.callee(p) in _JOINS) else k
+                value = _value_at(code, name, k)
+                if value is not None and _reaches_runner(code, start):
+                    if any(w.computed for w in _word(code, value[0], value[1], False, "", joined=True)):
+                        code.cannot_tell(code.src(max(k - 1, 0), min(k + 3, len(toks) - 1)))
+                        return
+                continue
             if _changes(code, k):
+                added = _change_words(code, k)
+                if added is not None:
+                    _read_words(code, added)
+                    continue
                 code.cannot_tell(code.src(max(k - 1, 0), min(k + 3, len(toks) - 1)))
                 return
             # A copy (`full = cmd`, `full = cmd[:]`, `full = cmd.copy()`, `full = list(cmd)`) is held too.
@@ -1725,11 +1991,6 @@ def _held_lists(code: _Code) -> None:
 
 
 # ------------------------------------------------------------------------------------- pwsh and cmd
-_PS_REDIRECT_RE = re.compile(r"(?:[0-9*]?>>?|<)(?:&[0-9])?$|[0-9*]?>>?&?[0-9]?")
-_PS_OUTPUT = frozenset({"write-host", "write-output", "write-verbose", "write-debug", "write-information",
-                        "write-warning", "write-error", "echo", "add-content", "set-content", "out-file",
-                        "get-command", "test-path", "tee-object", "select-string", "where-object", "if", "elseif",
-                        "while", "foreach", "for", "switch", "return", "throw", "trap"})
 _CMD_VARIABLE_RE = re.compile(r"%[^%\s]+%|%[*~0-9]|%%\w|![^!\s]+!")
 
 
@@ -1746,14 +2007,14 @@ def _ps_words(line: str, family: str) -> list:
         if c.isspace():
             i += 1
             continue
-        if c in ";|" or line.startswith(("&&", "||"), i) or (not ps and c in "&()"):
+        if c in ";|" or line.startswith(("&&", "||"), i) or (not ps and c in "&()") or (ps and c in "{}"):
             op = line[i:i + 2] if line.startswith(("&&", "||"), i) else c
             out.append((op, "op"))
             i += len(op)
             continue
         if ps and c == "#" and (i == 0 or line[i - 1].isspace()):
             break
-        if ps and (c in "({" or line.startswith(("@(", "$(", "@{"), i)):
+        if ps and (c == "(" or line.startswith(("@(", "$(", "@{"), i)):
             j = i + (2 if c in "@$" else 1)
             opener = line[j - 1]
             depth = 1
@@ -1775,7 +2036,8 @@ def _ps_words(line: str, family: str) -> list:
         # ("plain"), inside double quotes ("double"), or nowhere it is read ("single").
         text, kind = [], "plain"
         unquoted, in_double = [], []
-        while i < n and not line[i].isspace() and not (line[i] in ";|" or (not ps and line[i] in "&<>()")):
+        while i < n and not line[i].isspace() and not (line[i] in ";|" or (not ps and line[i] in "&<>()") or (
+                ps and line[i] in "{}")):
             ch = line[i]
             quote = _PS_QUOTES.get(ch) if ps else ('"' if ch == '"' else None)
             if quote:
@@ -1797,6 +2059,13 @@ def _ps_words(line: str, family: str) -> list:
             if ps and ch == "`" and i + 1 < n:
                 text.append(line[i + 1])
                 i += 2
+                continue
+            if ps and line.startswith("${", i):
+                end = line.find("}}", i + 3) + 2 if line.startswith("${{", i) else line.find("}", i + 2) + 1
+                end = end if end > 0 else n
+                text.append(line[i:end])
+                unquoted.append(line[i:end])        # `${env:F}`, a `${{ }}` expression
+                i = end
                 continue
             text.append(ch)
             unquoted.append(ch)
@@ -1834,6 +2103,10 @@ def _shell_words(raw: str, kind: str, family: str) -> af.Word:
         return [af.Word(text="\x00", shown=raw, splits=True)]
     if kind == "single" or not variable:
         return [af.Word(text=raw, shown=raw)]
+    if family == "cmd":
+        return [af.Word(text="\x00", shown=raw, splits=True)]      # expanded as text before quotes are read
+    if kind == "plain" and re.fullmatch(r"\$env:\w+|\$\{env:\w+\}", raw, re.I):
+        return [af.Word(text="\x03v\x03", shown=raw, quoted=True, candidates=[""])]   # always one string
     if kind == "double":
         return [af.Word(text="\x03v\x03", shown=raw, quoted=True, candidates=[raw[:variable.start()]])]
     return [af.Word(text="\x00", shown=raw, splits=True)]
@@ -1889,6 +2162,34 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
             i += 3
     if not ps and i < len(words) and words[i][0].startswith("@") and words[i][1] == "plain":
         words = words[:i] + [(words[i][0][1:], "plain")] + words[i + 1:]
+    if i < len(words) and words[i][1] == "plain":
+        low = words[i][0].lower()
+        if not ps and low == "start":
+            # `start [/wait] ["title"] program ...`
+            i += 1
+            while i < len(words) and (words[i][0].startswith("/") or words[i][1] in ("double", "single") and (
+                    i + 1 < len(words))):
+                if words[i][1] in ("double", "single") and af._base(words[i][0]) in ctx.programs:
+                    break
+                i += 1
+        elif low in ("cmd", "cmd.exe") and i + 1 < len(words) and words[i + 1][0].lower() in ("/c", "/k", "/s/c"):
+            rest = words[i + 2:]
+            if len(rest) == 1 and rest[0][1] in ("double", "single"):
+                read_shell_lines(rest[0][0], ctx, "cmd")
+            else:
+                _shell_command(rest, ctx, "cmd", aliases, mentioned)
+            return
+        elif low in ("bash", "sh") and i + 2 < len(words) and words[i + 1][0] == "-c":
+            probe = af._Context(list(ctx.programs), ctx.packages, ctx.flags, {}, True, set(), ctx.reading,
+                                depth=ctx.depth + 1, loose=True)
+            af._read_text(words[i + 2][0], probe)
+            return
+        elif low in ("npx", "bunx", "pnpx", "pnpm", "yarn"):
+            j = i + 1
+            while j < len(words) and words[j][0].startswith("-"):
+                j += 2 if words[j][0] in ("-p", "--package") else 1
+            if j < len(words) and (af._is_package(words[j][0], ctx.packages) or af._base(words[j][0]) in ctx.programs):
+                i = j
     if i >= len(words):
         return
     raw, kind = words[i]
@@ -1911,12 +2212,20 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
         return
     args: list = []
     skip = False
+    stop_parsing = False
     for raw2, kind2 in rest:
         if skip:
             skip = False
             continue
         if kind2 == "redirect":
             skip = True
+            continue
+        if ps and raw2 == "--%" and kind2 == "plain":
+            stop_parsing = True             # the rest as written, with `%VAR%` put in as cmd does
+            continue
+        if stop_parsing:
+            args.append(af.Word(text="\x00", shown=raw2, splits=True) if _CMD_VARIABLE_RE.search(raw2) else
+                        af.Word(text=raw2, shown=raw2))
             continue
         args.extend(_shell_words(raw2, kind2, family))
     _read_shell_args(args, ctx, family, words)
@@ -1925,15 +2234,29 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
 def _start_process(rest: list, ctx: af._Context, mentioned: bool) -> None:
     """`Start-Process claude -ArgumentList ...`, `Start-Process -FilePath claude -ArgumentList $a`."""
     file_path, arguments, positional = None, None, []
+    switches = ("-wait", "-nonewwindow", "-passthru", "-usenewenvironment", "-loaduserprofile", "-whatif",
+                "-confirm")
     j = 0
     while j < len(rest):
         raw, kind = rest[j]
         low = raw.lower()
+        if kind == "plain" and low.startswith("-") and any(sw.startswith(low) and len(low) > 2 for sw in switches):
+            j += 1
+            continue
         if kind == "plain" and low.startswith("-") and j + 1 < len(rest):
             if "-filepath".startswith(low) and len(low) > 1:
                 file_path = rest[j + 1]
-            elif low in ("-argumentlist", "-args", "-arguments") or "-argumentlist".startswith(low) and len(low) > 2:
-                arguments = rest[j + 1]
+                j += 2
+                continue
+            if low in ("-argumentlist", "-args", "-arguments") or "-argumentlist".startswith(low) and len(low) > 2:
+                # A list written with commas (`-ArgumentList '-p', $p`) runs over several words.
+                items = [rest[j + 1]]
+                j += 2
+                while items[-1][0].endswith(",") and j < len(rest):
+                    items.append(rest[j])
+                    j += 1
+                arguments = items
+                continue
             j += 2
             continue
         if kind == "plain" and raw.startswith("@") and mentioned:
@@ -1945,17 +2268,20 @@ def _start_process(rest: list, ctx: af._Context, mentioned: bool) -> None:
     if file_path is None and positional:
         file_path, positional = positional[0], positional[1:]
     if arguments is None and positional:
-        arguments = positional[0]
+        arguments = [positional[0]]
     if file_path is None or not (af._base(file_path[0]) in ctx.programs or af._is_package(file_path[0], ctx.packages)):
         return
     if arguments is None:
         return
-    raw, kind = arguments
-    if kind in ("single", "double") and not re.search(r"\$[\w{(]", raw):
-        words = [af.Word(text=w, shown=w) for w in raw.split(",") for w in w.split()]
-    else:
-        words = _shell_words(raw, kind, "pwsh")
-    _read_shell_args(words, ctx, "pwsh", [file_path, arguments])
+    # Start-Process joins its arguments into one command line: a variable anywhere in them is any words.
+    words: list = []
+    for raw, kind in arguments:
+        raw = raw.rstrip(",")
+        if kind != "single" and re.search(r"\$[\w{(]|@\w", raw) or kind == "group":
+            words.append(af.Word(text="\x00", shown=raw, splits=True))
+        else:
+            words.extend(af.Word(text=w, shown=w) for part in raw.split(",") for w in part.split())
+    _read_shell_args(words, ctx, "pwsh", [file_path] + list(arguments))
 
 
 def _read_shell_args(args: list, ctx: af._Context, family: str, words: list) -> None:
