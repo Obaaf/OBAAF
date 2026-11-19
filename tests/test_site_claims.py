@@ -146,14 +146,14 @@ class TheTwoExampleFiles(unittest.TestCase):
 
 
 class TheEgressAction(unittest.TestCase):
-    def test_no_released_commit_is_listed(self):
-        """Four pages say no released commit of the egress action is listed. When one is, they change."""
+    def test_pages_name_the_reviewed_pin_and_conditional_credit(self):
+        reviewed = "80db1e68769165c9ecf24e553254fa35d6e168d5"
         data = yaml.safe_load((ROOT / "src" / "obaaf" / "data" / "detection.yaml").read_text(encoding="utf-8"))
-        self.assertEqual(data["egress_action_releases"], [],
-                         "a commit of the egress action is listed: change the sentences that say none is "
-                         "(index.html, rules.html, comparison.html, case-study.html)")
+        self.assertEqual(data["egress_action_releases"], [reviewed])
         for name in ("index.html", "rules.html", "comparison.html", "case-study.html"):
-            self.assertIn("none is listed", text(name), name)
+            words = text(name)
+            self.assertIn(f"pins Obaaf/OBAAF/actions/egress@{reviewed}", words, name)
+            self.assertIn("can clear OBAAF-GHA-020 when the job meets the egress conditions", words, name)
 
 
 AGENT_JOB = """\

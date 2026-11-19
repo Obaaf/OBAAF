@@ -960,8 +960,8 @@ class ReleaseDataTest(unittest.TestCase):
                 self.assertRegex(sha, r"^[0-9a-f]{40}$")
                 self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
-    def test_no_commit_of_the_egress_action_is_listed_yet(self):
-        self.assertEqual(checker.load().detection["egress_action_releases"], [])
+    def test_only_the_reviewed_commit_of_the_egress_action_is_listed(self):
+        self.assertEqual(checker.load().detection["egress_action_releases"], ["80db1e68769165c9ecf24e553254fa35d6e168d5"])
 
     def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
         """Only a commit at or after the floor may be listed: the checker reads the action's
