@@ -932,23 +932,25 @@ rules:
       @anthropic-ai/claude-code`, `claude.cmd`, a path to one, the package's `cli.js` under `node`), where a
       command starts (after `sudo`, `env`, `timeout`, `xargs`, `find -exec`, `npx`, `yarn` and the like) or
       as an argument of any command whose arguments are not data (`docker run`, `cross-env`, `ssh`; data:
-      `echo`, `grep`, `git`, `cp`, a package installer), a quoted argument of such a command that names the
-      tool read again as a command line, in its `run`, its `shell`, a
+      `echo`, `grep`, `git`, `find`, a package installer, `docker build`), a quoted argument of such a
+      command that names the tool read again as a command line, in its `run`, its `shell`, a
       github-script script, the command OBAAF's egress action runs, another input, `env` value or
       `docker://` command line that starts with the program, and an input named like a command (`command`,
       `args`) that names the tool. A bash or sh script is read twice, the two added together: as bash splits
       it (quotes, backslashes, `$'...'` and `$"..."` as bash reads them; heredocs as data unless a shell
       reads them; a variable put in where its value is known: an `env` value that is plain text, from the
       step, else the job, else the workflow, unless the script sets the name or an earlier step writes
-      `GITHUB_ENV` or `exportVariable`, or a name the script sets once to plain text, and none at all where
-      the script uses `eval`, `source`, `declare`, `export`, `printf`, `read` or the like, which can set any
-      name; command substitutions, `bash -c`, `eval`,
+      `GITHUB_ENV` or calls `exportVariable` (then only the step's own `env` is read), or a name the script
+      sets once to plain text, and none at all where the script runs `eval`, `source`, a nameref, or
+      `declare`, `export`, `printf -v` or `read` with a quoted or computed name, which can set any name;
+      command substitutions, `bash -c`, `eval`, a `git` alias that runs a shell command (`!cmd`),
       `env -S`, `su -c`, `script -c`, `flock -c`, `watch`, `npx -c`, aliases, interpreters given code and
       text a shell reads from a pipe, heredoc or here-string read again), and the widest way (comments and
       data heredocs out, quotes and backslashes removed, brackets and commas made spaces, cut where a shell
       starts a command), so an option in a prompt's text or in a JavaScript or Python argument list is read
-      as given. A step in another shell (pwsh is the default on a Windows runner) and a github-script script
-      are read only the widest way. An option is matched in any letter case, as `--name=value` and `--name
+      as given. A step in another shell (pwsh is the default on a Windows runner), a github-script script
+      and code given to an interpreter (`python3 -c`, `perl -e`, a heredoc fed to `node`) are read only the
+      widest way, the program found anywhere in them. An option is matched in any letter case, as `--name=value` and `--name
       value`, and a one-letter option inside a group (`-yp`); nothing after a word `--` is an option, and
       `--name=false` is not a match; a `--` right after an option may be its value and does not end them. "Cannot tell", at most medium, is case `command-computed`, in a step
       that names the tool: a word of the program's command with a variable or substitution outside quotes,
@@ -957,12 +959,14 @@ rules:
       value given one the checker cannot read; the program run by `xargs` or `parallel`; a command the
       checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`) or a new name made for a program
       (`alias`, `hash`, `ln`, `cp`); `IFS` set; `eval` or a shell given text the checker cannot read; a
-      script file written in the step and run; text it cannot split; nesting deeper than four levels; and
-      a step in another shell, or a github-script script that runs a command, where nothing is found. Read
+      script file written in the step and run; text it cannot split; nesting deeper than four levels; in
+      another shell, a variable or splat among the program's words (`claude @a`); and in code in another
+      language that names the tool, a warned option written in pieces (`"--dangerously-" + "skip-..."`). Read
       in the job's steps and in the steps of the local composite actions it uses. A value only another
       scanner calls dangerous is not reported. Not read: a quoted word that starts with a variable or a
-      substitution (`claude -p "$PROMPT"`) is taken for one word that is not one of these options, though
-      the tool's own parser may read a value that starts with `-` as an option (#254); Codex's `--sandbox
+      substitution (`claude -p "$PROMPT"`) is taken for one word that is not one of these options, and so
+      are options held whole in a variable in code in another language, though the tool's own parser may
+      read a value that starts with `-` as an option (#254); Codex's `--sandbox
       danger-full-access` and the action's `sandbox` input (neither the CLI's files nor the action's give a
       sentence of warning for them) and Codex's `-c` overrides; settings given to `--settings` (a file or
       JSON), claude-code-action's `settings` and codex-action's `codex-home`; an environment variable the

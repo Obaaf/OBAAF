@@ -814,6 +814,16 @@ def _read_nested(text: str, ctx: _Context, prose: bool | None = None) -> None:
         ctx.prose = before
 
 
+def _pipeline(command: Command) -> str:
+    """The pipeline that feeds a command, as written, for a fact (`curl ... | base64 -d | bash`)."""
+    parts: list = []
+    current = command
+    while current is not None and len(parts) < 8:
+        parts.append(" ".join(w.shown for w in current.words))
+        current = current.before if current.piped else None
+    return _fact_text(" | ".join(reversed(parts)))
+
+
 def _literal_output(command: Command | None) -> str | None:
     """What `echo` or `printf` with known words writes, for a shell that reads it from a pipe."""
     if command is None or not command.words:
@@ -837,7 +847,7 @@ _DATA_COMMANDS = frozenset({
     ":", "basename", "dirname", "realpath", "readlink", "which", "type", "whereis", "file", "stat", "du", "npm",
     "pnpm", "yarn", "pip", "pip3", "apt", "apt-get", "brew", "yum", "dnf", "apk", "conda", "mamba", "gem",
     "cargo", "go", "tar", "zip", "unzip", "gzip", "gunzip", "base64", "md5sum", "sha256sum", "shasum", "diff",
-    "cmp", "date", "sleep", "kill", "pkill", "pgrep", "ps", "printenv", "for", "select", "in", "do", "done",
+    "cmp", "date", "sleep", "kill", "pkill", "pgrep", "ps", "printenv", "find", "for", "select", "in", "do", "done",
     "then", "else", "elif", "fi", "while", "until", "if", "function", "}", "{", "!",
     "make", "cmake", "dotnet", "mvn", "gradle", "corepack", "volta-install", "poetry", "uv", "pipenv",
     "hatch", "pdm"})
@@ -894,13 +904,36 @@ def _read_command(command: Command, ctx: _Context) -> None:
                for j in range(first + 1, len(words))):
             ctx.cannot_tell(" ".join(w.shown for w in words[first:])[:120])
         return
-    if name0 in _DATA_COMMANDS and not (first + 1 < len(words) and texts[first + 1] in ("run", "exec", "x", "dlx")):
+    if name0 == "git":
+        # `git -c alias.r='!cmd' r` and `git config alias.r '!cmd'` give git a shell command to run.
+        for j in range(first + 1, len(words)):
+            m = re.match(r"alias\.[^=\s]+(?:=|$)", texts[j])
+            if m:
+                value = texts[j][m.end():] if "=" in texts[j] else (texts[j + 1] if j + 1 < len(texts) else "")
+                if value.startswith("!"):
+                    _read_nested(value[1:], ctx)
+        return
+    sub = texts[first + 1] if first + 1 < len(words) else ""
+    if name0 in ("docker", "podman", "nerdctl") and sub not in ("run", "exec", "compose", "container"):
+        return                      # `docker build -t claude`: the program's name as data
+    if name0 == "kubectl" and sub not in ("exec", "run", "debug"):
+        return
+    if name0 in _DATA_COMMANDS and sub not in ("run", "exec", "x", "dlx"):
         return                      # `conda run`, `poetry run`, `uv run`, `npm exec` run what follows
     # Any other command (`cross-env`, `tmux`, `docker run`, `ssh`, `trap`): a word among its arguments may
     # start the program, a shell or another runner, or be a command line of its own.
     for j in range(first + 1, len(words)):
         w = words[j]
         if w.computed:
+            # A quoted command line with an expansion, given to another command (`tmux new -d "claude $F"`):
+            # read as written inside its quotes, where the expansion is what it is.
+            if w.shown[:1] in "\"'" and w.shown[-1:] == w.shown[:1] and len(w.shown) > 1 and (
+                    " " in w.shown) and mentions(w.shown, ctx.programs, ctx.packages):
+                inner = w.shown[1:-1]
+                if w.shown[0] == "'":
+                    _read_nested(inner, ctx)
+                else:
+                    _read_nested(inner.replace('\\"', '"'), ctx)
             continue
         name = bases[j]
         if (name in ctx.programs or _is_package(w.text, ctx.packages) or name in _SHELLS or name in (
@@ -969,9 +1002,7 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
         rest = _arguments(words[i + 1:])
     if name in ctx.programs or _is_package(w.text, ctx.packages):
         if runs_input is not None and runs_input < i:
-            ctx.cannot_tell(f"{bases[runs_input]}: " + " ".join(x.shown for x in words)[:120]
-                            + (" <- " + " ".join(x.shown for x in command.before.words)[:80]
-                               if command.piped and command.before else ""))
+            ctx.cannot_tell(f"{bases[runs_input]}: " + _pipeline(command))
         _read_program_args(rest, ctx)
         return True
     if family in ("node", "nodejs", "bun", "deno"):
@@ -1033,7 +1064,7 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
         return _interpreter(family, rest, ctx, command)
     if name in _SHELLS:
         if runs_input is not None and runs_input < i:
-            ctx.cannot_tell(f"{bases[runs_input]}: " + " ".join(x.shown for x in words)[:120])
+            ctx.cannot_tell(f"{bases[runs_input]}: " + _pipeline(command))
         _shell(rest, ctx, command)
         return True
     if name == "eval":
@@ -1145,22 +1176,16 @@ def _interpreter(family: str, rest: list, ctx: _Context, command: Command) -> bo
         return False
     for text in texts:
         probe = Reading()
-        _read_widest(text, ctx.programs, ctx.packages, ctx.flags, probe)
+        _read_widest(text, ctx.programs, ctx.packages, ctx.flags, probe, anywhere=True)
         ctx.reading.merge(probe)
-        # "Cannot tell" where the code names the tool and can start a process (prose that names it in a
-        # `print` is not a command).
-        if not probe.hits and ((code is not None and code.computed) or (
-                mentions(text, ctx.programs, ctx.packages) and _RUNS_PROCESS_RE.search(text))):
+        # "Cannot tell" where the code names the tool and holds the start of a warned option it does not
+        # complete; code given as a variable is not read at all.
+        if code is not None and code.computed and mentions(code.shown, ctx.programs, ctx.packages):
             for flag in ctx.flags:
-                ctx.reading.cannot_tell(flag, f"{family}: " + _fact_text(text))
+                ctx.reading.cannot_tell(flag, f"{family}: {code.shown}")
+        elif mentions(text, ctx.programs, ctx.packages):
+            _fragments(text, ctx.flags, ctx.reading, family)
     return True
-
-
-# What, in code given to an interpreter, can start a process.
-_RUNS_PROCESS_RE = re.compile(
-    r"subprocess|os\.(system|popen|exec|spawn|posix_spawn)|\bpty\.|child_process|\b(exec|execSync|execFile|"
-    r"execFileSync|spawn|spawnSync|system|popen|fork|Popen|check_output|check_call|getoutput)\s*\(|\bqx\b|"
-    r"Start-Process|Invoke-Expression|\biex\b|\bopen\s*\(\s*['\"]\|", re.I)
 
 
 def _string_script(word: Word, ctx: _Context) -> None:
@@ -1180,8 +1205,7 @@ def _stdin(command: Command, ctx: _Context) -> None:
     if command.piped:
         literal = _literal_output(command.before)
         if literal is None:
-            before = " ".join(w.shown for w in command.before.words) if command.before else ""
-            ctx.cannot_tell("a shell reading its script from: " + before[:120])
+            ctx.cannot_tell("a shell reading its script from a pipe: " + _pipeline(command))
         else:
             _read_nested(literal, ctx)
 
@@ -1228,9 +1252,14 @@ _ASSIGNED_RE = re.compile(
     r"(?:\[[^\]]*\])?\+?=|\b(?:read|mapfile|readarray)\s+(?:-\w+\s+(?:[^\s-]\S*\s+)?)*([A-Za-z_][A-Za-z0-9_]*)"
     r"|\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b|\bgetopts\s+\S+\s+([A-Za-z_][A-Za-z0-9_]*)"
     r"|\bprintf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*):?=")
+# Commands that can set a variable whose name the checker cannot read: `eval` and `source` (or `.`) of any
+# text, a nameref, and `declare`, `export`, `printf -v`, `read` and the like given a quoted or computed name.
+# Matched where a command starts, so a prompt's "read the diff" is not one (found by 2d.5c2a's review).
+_START = r"(?:^|[;&|({`]|\b(?:then|do|else|elif|if|while|until)\b|\$\()\s*"
 _DYNAMIC_ASSIGN_RE = re.compile(
-    r"(?<![\w-])(eval|source|declare|typeset|readonly|local|export|printf|read|mapfile|readarray|let|getopts|"
-    r"select|unset|compgen)(?![\w-])|(?<![\w-])\.\s|\$\{!|\$\{[A-Za-z_][A-Za-z0-9_]*:?=")
+    _START + r"(?:(?:eval|source|let|unset|compgen)(?![\w-])|\.\s+\S"
+    r"|(?:declare|typeset|local|readonly|export)\s+(?:-\w+\s+)*(?:-\w*n\w*\s|[\"'$`])"
+    r"|printf\s+-v\s*[\"'$`]|(?:read|mapfile|readarray)(?:\s+-[a-zA-Z]+(?:\s+[^\s-]\S*)?)*\s+[\"'$`])", re.M)
 _NAME_EQUALS_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\+?=")
 _LITERAL_ASSIGN_RE = re.compile(
     r"(?:^|[\s;&|(])(?:(?:export|local|readonly|typeset|declare)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)="
@@ -1346,7 +1375,8 @@ def _strip_comment_line(line: str) -> str:
     return line
 
 
-def _read_widest(text: str, programs: list, packages: list, flags: list, reading: Reading) -> None:
+def _read_widest(text: str, programs: list, packages: list, flags: list, reading: Reading,
+                  anywhere: bool = False) -> None:
     """The second reading: quotes, backslashes, brackets and commas taken out, cut where a shell starts a
     command; a command that starts with the program has its words matched as known text."""
     plain = re.sub(r"[\[\],]", " ", re.sub(r"[\"'\\]", "", _strip_data(text).replace("$'", "'")))
@@ -1355,6 +1385,12 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
         if not words:
             continue
         first = words[0]
+        if anywhere:
+            # Code in another language: the program anywhere in it (`system "claude ..."`, `%x(claude ...)`).
+            at = next((n for n, w in enumerate(words) if _base(w) in programs or _is_package(w, packages)), None)
+            if at is not None:
+                _match_known(words[at + 1:], flags, reading)
+                continue
         if _base(first) in programs or _is_package(first, packages):
             _match_known(words[1:], flags, reading)
         elif _base(first) in ("node", "nodejs", "bun", "deno") and len(words) > 1 and _names_package_path(
@@ -1401,11 +1437,48 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
                     out[word] = None
                 shown[fid] = out
             reading.unknown = shown
-    _read_widest(text, programs, packages, flags, reading)
-    if not bash and not reading.hits and mentioned:
-        for flag in flags:
-            reading.cannot_tell(flag, "a script the checker does not read as bash")
+    _read_widest(text, programs, packages, flags, reading, anywhere=not bash)
+    if not bash and mentioned:
+        _fragments(text, flags, reading, "a script the checker does not read as bash")
     return reading
+
+
+_FRAGMENT_RE = re.compile(r"(?<![\w-])(--?[A-Za-z][A-Za-z0-9-]*)")
+
+
+def _fragments(text: str, flags: list, reading: Reading, where: str) -> None:
+    """In code the checker reads only the widest way: each warned option of which the code holds a start
+    it does not complete (`"--dangerously-" . "skip-permissions"`, `--dangerously-#{x}-permissions`) is
+    "cannot tell". An option held whole in a variable is not read, as in bash (#254)."""
+    plain = re.sub(r"[\"'\\]", "", text)
+    for m in _FRAGMENT_RE.finditer(plain):
+        word = m.group(1)
+        end = plain[m.end():m.end() + 1]
+        low = word.casefold()
+        for flag in flags:
+            if flag["id"] in reading.hits:
+                continue
+            for option in flag["options"]:
+                o = option.casefold()
+                if len(low) >= 4 and o.startswith(low) and o != low and (end == "" or not end.isalnum()):
+                    reading.cannot_tell(flag, f"{where}: {_fact_text(word + plain[m.end():m.end() + 40])}")
+                    break
+
+
+def put_in_cheaply(text: str, scopes: list) -> str:
+    """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
+    `${NAME}`, by a regular expression: only to decide whether the step names the tool."""
+    values: dict = {}
+    for scope in reversed(scopes):
+        if isinstance(scope, dict):
+            values.update({k: v for k, v in scope.items() if isinstance(k, str) and isinstance(v, str)
+                           and _PLAIN_VALUE_RE.fullmatch(v)})
+    for m in _LITERAL_ASSIGN_RE.finditer(text):
+        value = m.group(2)
+        values[m.group(1)] = value[1:-1] if value[:1] in "\"'" else value
+    if not values:
+        return text
+    return re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: values.get(m.group(1), m.group(0)), text)
 
 
 def appears(text: str, programs: list, packages: list) -> bool:

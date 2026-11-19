@@ -1623,7 +1623,11 @@ class WorkflowRules:
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                     out[name] = None
                     continue
-                text = str(value)
+                try:
+                    text = str(value)
+                except ValueError:          # an integer too long for Python to print (found by 2d.5c2a's review)
+                    out[name] = None
+                    continue
                 out[name] = None if "$" in text or len(text) > 10_000 else text
         return out
 
@@ -1932,6 +1936,15 @@ class WorkflowRules:
 
     _FOREIGN_SPECIAL_RE = re.compile(r"[$@`%^(]")
 
+    def _later_writes(self, job: Job) -> list:
+        """The indexes of the job's steps that can set a variable for the steps after them, worked out once."""
+        cache = self.__dict__.setdefault("_later_writes_cache", {})
+        if job.id not in cache:
+            cache[job.id] = [n for n, s in enumerate(job.steps) if self._SETS_FOR_LATER_RE.search(
+                (s.run or "") + " " + " ".join(str(v) for v in s.with_.values() if isinstance(v, str)) + " "
+                + " ".join(str(v) for v in s.env.values() if isinstance(v, str)))]
+        return cache[job.id]
+
     _EXEC_CALL_RE = re.compile(r"\b(exec|execSync|execFile|execFileSync|spawn|spawnSync|getExecOutput|run|call|"
                                r"check_call|check_output|Popen|system)\s*\(|\$`|child_process|\.apply\s*\(")
 
@@ -1989,20 +2002,21 @@ class WorkflowRules:
         # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
         scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
-        # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`).
-        earlier = []
-        for other_step in job.steps:
-            if other_step is step:
-                break
-            earlier.append(other_step)
-        trust_env = scoped and not any(self._SETS_FOR_LATER_RE.search(
-            (s.run or "") + " " + " ".join(str(v) for v in s.with_.values() if isinstance(v, str)) + " "
-            + " ".join(str(v) for v in s.env.values() if isinstance(v, str))) for s in earlier)
+        if not any(agent_flags.appears(t, programs, packages) for t in named):
+            # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
+            # where the script has a `$` and an assignment, with a regular expression (kept cheap).
+            if not any("$" in text and "=" in text and agent_flags.appears(agent_flags.put_in_cheaply(
+                    text, scopes), programs, packages) for text, _b in parts):
+                return              # the tool's name is nowhere in the step (the common case, kept cheap)
+        # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
+        # the job's and workflow's `env` values are then not known; the step's own `env` is.
+        writes = self._later_writes(job)
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        trust_env = scoped and not any(n < index for n in writes)
+        if not trust_env and scoped:
+            scopes = [scopes[0], {k: None for k in scopes[1]}, {k: None for k in scopes[2]}]
+            trust_env = True
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
-        if not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
-                agent_flags.appears(agent_flags._substitute(text, known[id(text)][0]), programs, packages)
-                for text, _b in parts):
-            return                  # the tool's name is nowhere in the step (the common case, kept cheap)
         mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
         reading = agent_flags.Reading()
         for text, bash in parts:
@@ -2013,20 +2027,20 @@ class WorkflowRules:
             else:
                 # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
                 # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
-                if script is text:
-                    # A script that can run commands (`child_process`, `exec`, `spawn`) and names the tool.
-                    mentioned_here = any(self._EXEC_CALL_RE.search(line) and agent_flags.mentions(
-                        line, programs, packages) for line in text.split("\n")) or (
-                        "child_process" in text and agent_flags.mentions(text, programs, packages))
-                else:
-                    # A line of another shell that names the tool and is not a plain command of it, or uses
-                    # a character that shell's quoting or variables use.
-                    mentioned_here = any(agent_flags.mentions(line, programs, packages) and (
-                        self._FOREIGN_SPECIAL_RE.search(line) or _base_word(line) not in programs)
-                        for line in text.split("\n"))
+                # JavaScript or another shell is read the widest way; "cannot tell" where it names the tool and
+                # holds the start of a warned option it cannot complete (`"--dangerously-" + "skip-..."`).
                 if agent_flags.appears(text, programs, packages):
                     reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
-                                                          mentioned=mentioned_here, bash=False, loose=True))
+                                                          mentioned=agent_flags.mentions(text, programs, packages),
+                                                          bash=False, loose=True))
+                    if script is not text:
+                        # In another shell, a variable or splat among the program's words (`claude @a`,
+                        # `claude $flags`, `claude %F%`) is "cannot tell", as an unquoted one is in bash.
+                        for line in text.split("\n"):
+                            if _base_word(line) in programs and re.search(r"(?<!\S)[@$%]\w|%\w+%", line):
+                                for flag in flags:
+                                    if flag["id"] not in reading.hits:
+                                        reading.cannot_tell(flag, one_line(line.strip(), 120))
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that names the tool in an input whose name says it is a command.
@@ -2034,7 +2048,7 @@ class WorkflowRules:
                     command_like and agent_flags.appears(other, programs, packages)):
                 variables, unread = agent_flags.known_variables(scopes, other, trust_env)
                 reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
-                                                      unread=unread, prose=True))
+                                                      unread=unread, prose=not command_like))
         for flag, option, value in reading.hits.values():
             written_as = option if value is None else f"{option} {value}"
             self.add("OBAAF-GHA-026", step.line,
