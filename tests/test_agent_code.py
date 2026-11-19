@@ -323,6 +323,29 @@ class SecondReviewTest(unittest.TestCase):
             ("await exec.exec('bash', ['-c', `claude ${flags}`])", "cannot"),
         ], make=script_step)
 
+    def test_the_third_pass(self):
+        # An unclosed `${{` in a PowerShell step looped for ever; a held list's changes were read one by one.
+        start = time.monotonic()
+        self.assertEqual(kinds(check(shell_step("pwsh", "claude -p ${{ github.event.issue.title", "windows-latest"))),
+                         ["command-computed"])
+        self.assertLess(time.monotonic() - start, 10)
+        Case.expect(self, [
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', p]\ncmd.append('--permission-mode')\n"
+                                "cmd.append('bypassPermissions')\nsubprocess.run(cmd)"), "hit"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '--permission-mode']\ncmd.append(mode)\n"
+                                "subprocess.run(cmd)"), "cannot"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', p]\nfor i in range(len(extra)):\n"
+                                "    cmd.append(extra[i])\nsubprocess.run(cmd)"), "cannot"),
+        ])
+        Case.expect(self, [("cmd /c " * 2000 + "claude %F%", "cannot")],
+                    make=lambda text: shell_step("cmd", text, "windows-latest"))
+        Case.expect(self, [
+            ("const args = ['-p', p];\nextra.forEach(f => args.push(f));\nawait exec.exec('claude', args)", "cannot"),
+            ("const args = ['-p', p];\nfor (let i = 0; i < extra.length; i++) { args.push(extra[i]) }\n"
+             "await exec.exec('claude', args)", "cannot"),
+            ("const r = /" + "a" * 1001 + "'/;\nawait exec.exec('claude', flags) // '", "cannot"),
+        ], make=script_step)
+
     def test_a_long_chain_of_unary_operators_does_not_end_the_check(self):
         text = script_step("const x = " + "!" * 3000 + "y\nawait exec.exec('claude', flags)")
         self.assertEqual(kinds(check(text)), ["command-computed"])

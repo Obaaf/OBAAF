@@ -166,7 +166,7 @@ class _Tokenizer:
         """The index after a regular expression literal that starts with `/` at `i` (classes `[...]` and
         backslashes read), and its flags; -1 if it does not end on its line."""
         text = self.text
-        n = min(len(text), i + 1000)    # a regular expression literal longer than this is not one
+        n = min(len(text), i + 1000)    # a regular expression literal longer than this: -2
         j = i + 1
         in_class = False
         while j < n:
@@ -185,7 +185,7 @@ class _Tokenizer:
                 m = re.compile(r"[A-Za-z]*").match(text, j + 1)
                 return m.end()
             j += 1
-        return -1
+        return -2 if n < len(text) and "\n" not in text[i:n] else -1
 
     def _skip_balanced(self, i: int, open_: str, close: str, limit: int | None = None) -> int:
         """The index after the `close` that ends a group opened just before `i`, skipping strings; -1 if
@@ -748,6 +748,9 @@ class _Tokenizer:
                 if end > 0:
                     i = end
                     continue
+                if end == -2:
+                    self.problem = self.problem or "a regular expression longer than the checker reads"
+                    break
             # Names, with a sigil where the language has one.
             if c in "$@%&" and fam in ("perl", "php", "pwsh", "ruby"):
                 m = (_PS_NAME_RE if fam == "pwsh" else _NAME_RE).match(text, i + 1)
@@ -843,6 +846,7 @@ class _Code:
         self.names: dict | None = None      # name -> the tokens that name it, worked out once
         self.budget = 400_000               # tokens the argument readers may visit, beyond which: cannot tell
         self.values: dict = {}              # name -> the values it is given (`_values`)
+        self.paste = [_PASTE_LIMIT]         # characters of names' values that may still be put into strings
         self.sites = 0
 
     def site(self) -> bool:
@@ -1100,7 +1104,7 @@ def read_code(text: str, family: str, ctx: af._Context) -> None:
     # A value that is a name given a string that names the program (`f"{p} --yolo"`, `p + " --yolo"`,
     # `f"{c}"` where `c = "claude " + f`) is that string's parts; at most `_PASTE_LIMIT` characters are put in
     # for a piece of code, beyond which the rest is "cannot tell".
-    budget = [_PASTE_LIMIT]
+    budget = code.paste
 
     def put_in(expr: Expr) -> list:
         out: list = []
@@ -1392,9 +1396,10 @@ def _command_line(code: _Code, expr: Expr) -> None:
         if is_hole:
             value = _value_at(code, _bare(text), expr.first) if is_hole is True and _bare(text) else None
             sub = code.expr_at.get(value[0]) if value else None
-            if sub is not None and sub.last == value[1] and _literal(sub.parts) is not None and (
-                    len(_literal(sub.parts)) + sum(len(x) for x in shell) < _PASTE_LIMIT):
-                text = _literal(sub.parts)          # a name given a literal string: its text
+            literal = _literal(sub.parts) if sub is not None and sub.last == value[1] else None
+            if literal is not None and len(literal) <= code.paste[0]:
+                code.paste[0] -= len(literal)
+                text = literal                      # a name given a literal string: its text
             else:
                 name = f"{prefix}{len(holes)}"
                 holes.append(text)
@@ -1893,10 +1898,12 @@ def _change_words(code: _Code, k: int) -> list | None:
         words: list = []
         whole = toks[k + 2].text.lower() in ("extend", "concat")
         loops = _loop_names(code)
+        if _in_loop(code, k):
+            return None                         # added once for each turn of a loop: any number of words
         for a, b in args:
             a, b = _strip_nl(code, a, b)
-            if a == b and toks[a].kind == "name" and toks[a].text in loops:
-                return None                     # added once for each value of a loop: any number of words
+            if any(toks[x].kind == "name" and toks[x].text in loops for x in range(a, b + 1)):
+                return None                     # a loop's value (`a`, `extra[i]`): any number of words
             words.extend(_word(code, a, b, not whole, "", listy=whole))
         return words
     if after.text == "+" and k + 2 < len(toks) and toks[k + 2].text == "[" and code.close[k + 2] > 0 and not (
@@ -1909,6 +1916,44 @@ def _change_words(code: _Code, k: int) -> list | None:
             return None
         return _word(code, k + 2, end, after.text == "<<", "", listy=after.text == "+=")
     return None
+
+
+_LOOP_CALLS = frozenset({"foreach", "each", "map", "flatmap", "flat_map", "times", "each_with_index", "upto",
+                         "downto", "for_each", "reduce", "filter", "every", "some", "array_map", "array_walk"})
+
+
+def _in_loop(code: _Code, k: int) -> bool:
+    """Whether token `k` is inside a loop: a callback given to `forEach`, `each`, `map` and the like, a block
+    after `for (...)` or `while (...)`, or (Python) a line indented under a `for` or `while` line."""
+    toks = code.toks
+    p = code.parent[k]
+    while p >= 0:
+        if toks[p].text == "(" and code.callee(p) in _LOOP_CALLS:
+            return True
+        if toks[p].text == "{" and p >= 1 and toks[p - 1].text == ")":
+            opener = next((o for o in range(p - 2, -1, -1) if code.close[o] == p - 1), -1)
+            if opener >= 1 and toks[opener - 1].kind == "name" and toks[opener - 1].text in ("for", "while", "foreach"):
+                return True
+        if toks[p].text == "{" and p >= 1 and toks[p - 1].kind == "name" and code.callee(p) in _LOOP_CALLS:
+            return True                         # Ruby's `extra.each { |f| ... }`
+        p = code.parent[p]
+    if code.family in ("python", "ruby"):
+        text = code.text
+        start = text.rfind("\n", 0, toks[k].start) + 1
+        indent = len(text[start:toks[k].start]) - len(text[start:toks[k].start].lstrip())
+        pos = start - 1
+        while pos > 0:
+            prev = text.rfind("\n", 0, pos) + 1
+            line = text[prev:pos]
+            stripped = line.lstrip()
+            if stripped and len(line) - len(stripped) < indent:
+                if re.match(r"(for|while|until)\b", stripped) or re.search(r"\b(each|times|map)\b.*\bdo\b", stripped):
+                    return True
+                indent = len(line) - len(stripped)
+                if indent == 0:
+                    break
+            pos = prev - 1
+    return False
 
 
 def _loop_names(code: _Code) -> set:
@@ -1940,6 +1985,16 @@ def _held_lists(code: _Code) -> None:
             continue
         seen.add((name, at))
         stop = _next_assignment(code, name, at)
+        # The list's own words after the program, to read each literal change with (an option added in one
+        # change and its value in the next: `cmd.append('--permission-mode'); cmd.append(mode)`).
+        own: list = []
+        value = next(((a, b) for kk, a, b in code.values.get(name, ()) if kk == at), None)
+        if value is not None and toks[value[0]].text == "[":
+            listed = _word(code, value[0], value[1], False, "")
+            start = next((n for n, w in enumerate(listed) if not w.computed and (
+                af._base(w.text) in code.ctx.programs or af._is_package(w.text, code.ctx.packages))), None)
+            own = listed[start + 1:] if start is not None else []
+        added_all: list = []
         for k in _uses(code, name, at):
             if not (at < k < stop):
                 continue
@@ -1977,7 +2032,7 @@ def _held_lists(code: _Code) -> None:
             if _changes(code, k):
                 added = _change_words(code, k)
                 if added is not None:
-                    _read_words(code, added)
+                    added_all.extend(added)
                     continue
                 code.cannot_tell(code.src(max(k - 1, 0), min(k + 3, len(toks) - 1)))
                 return
@@ -1988,6 +2043,8 @@ def _held_lists(code: _Code) -> None:
             other = _assigned_name(code, start)
             if other is not None and other != name:
                 queue.append((other, start - 2))
+        if added_all:
+            _read_words(code, own + added_all)
 
 
 # ------------------------------------------------------------------------------------- pwsh and cmd
@@ -2061,8 +2118,8 @@ def _ps_words(line: str, family: str) -> list:
                 i += 2
                 continue
             if ps and line.startswith("${", i):
-                end = line.find("}}", i + 3) + 2 if line.startswith("${{", i) else line.find("}", i + 2) + 1
-                end = end if end > 0 else n
+                found = line.find("}}", i + 3) if line.startswith("${{", i) else line.find("}", i + 2)
+                end = n if found < 0 else found + (2 if line.startswith("${{", i) else 1)
                 text.append(line[i:end])
                 unquoted.append(line[i:end])        # `${env:F}`, a `${{ }}` expression
                 i = end
@@ -2174,10 +2231,17 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
                 i += 1
         elif low in ("cmd", "cmd.exe") and i + 1 < len(words) and words[i + 1][0].lower() in ("/c", "/k", "/s/c"):
             rest = words[i + 2:]
-            if len(rest) == 1 and rest[0][1] in ("double", "single"):
-                read_shell_lines(rest[0][0], ctx, "cmd")
-            else:
-                _shell_command(rest, ctx, "cmd", aliases, mentioned)
+            if ctx.depth > af._MAX_DEPTH:
+                ctx.cannot_tell("nesting deeper than the checker reads: " + af._fact_text(" ".join(w[0] for w in rest)))
+                return
+            ctx.depth += 1
+            try:
+                if len(rest) == 1 and rest[0][1] in ("double", "single"):
+                    read_shell_lines(rest[0][0], ctx, "cmd")
+                else:
+                    _shell_command(rest, ctx, "cmd", aliases, mentioned)
+            finally:
+                ctx.depth -= 1
             return
         elif low in ("bash", "sh") and i + 2 < len(words) and words[i + 1][0] == "-c":
             probe = af._Context(list(ctx.programs), ctx.packages, ctx.flags, {}, True, set(), ctx.reading,
