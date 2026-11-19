@@ -21,6 +21,13 @@ FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "p
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
 ACTION_FIELDS = ("prompt_inputs",)
+# A setting the tool's own documentation warns about (flagship slice 2d.5c1, OBAAF-GHA-026): an input of
+# one of the entry's actions, the values warned about (`equals`) or any value (`set: true`), and the words.
+SETTING_FIELDS = ("id", "action", "input", "equals", "set", "severity", "read", "says", "source")
+SETTING_REQUIRED = ("id", "action", "input", "severity", "read", "says", "source")
+SEVERITIES = ("high", "medium", "low")
+# A source is a file at a commit on GitHub, with the line or lines the words are on.
+_SOURCE_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/[0-9a-f]{40}/[^#\s]+#L\d+(-L\d+)?")
 # The lists built from the entries. A detection file that still has one of them by hand is refused, so
 # that a list and the entries cannot drift apart.
 DERIVED = ("agent_actions", "agent_commands", "agent_packages", "agent_installs", "agent_install_urls")
@@ -168,11 +175,78 @@ def problems(detection: dict) -> list[str]:
         settings = entry.get("settings")
         if not isinstance(settings, list):
             out.append(f"agent tool {tool}: settings must be a list")
+        else:
+            out.extend(_setting_problems(tool, settings, actions))
         carried = entry.get("carried", [])
         if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
             out.append(f"agent tool {tool}: carried must be a list of text")
         if not actions and not entry.get("commands"):
             out.append(f"agent tool {tool}: has neither an action nor a command, so nothing finds it")
+    return out
+
+
+def _setting_problems(tool: str, settings: list, actions: dict) -> list[str]:
+    """The faults of one entry's `settings`: an unknown or missing key, an id that is not a short lower-case
+    name or is given twice, an action the entry does not list, an input name that is not text, neither or
+    both of `equals` and `set`, an `equals` that is not a list of text, an unknown severity, a date that
+    is not one, words that are not text, and a source that is not a file at a commit with its lines."""
+    out: list[str] = []
+    seen: set = set()
+    listed = {str(a).lower() for a in actions}
+    for number, setting in enumerate(settings, start=1):
+        name = f"agent tool {tool}: setting {number}"
+        if not isinstance(setting, dict):
+            out.append(f"{name}: not a mapping")
+            continue
+        sid = setting.get("id")
+        if isinstance(sid, str):
+            name = f"agent tool {tool}: setting {sid}"
+        for key in SETTING_REQUIRED:
+            if key not in setting:
+                out.append(f"{name}: missing {key}")
+        for key in setting:
+            if key not in SETTING_FIELDS:
+                out.append(f"{name}: unknown key {key!r}")
+        if not isinstance(sid, str) or not _ID_RE.fullmatch(sid):
+            out.append(f"{name}: id must be lower-case letters, digits and '-', at most 40")
+        elif sid in seen:
+            out.append(f"{name}: id is given twice")
+        seen.add(sid)
+        if str(setting.get("action", "")).lower() not in listed:
+            out.append(f"{name}: action {setting.get('action')!r} is not one of the entry's actions")
+        given = setting.get("input")
+        if not isinstance(given, str) or not given.strip() or given != given.strip():
+            out.append(f"{name}: input must be an input's name")
+        has_equals, has_set = "equals" in setting, "set" in setting
+        if has_equals == has_set:
+            out.append(f"{name}: give either equals (the values warned about) or set: true")
+        if has_equals and (not isinstance(setting["equals"], list) or not setting["equals"] or not all(
+                isinstance(v, str) and v.strip() for v in setting["equals"])):
+            out.append(f"{name}: equals must be a list of values written as text")
+        if has_set and setting["set"] is not True:
+            out.append(f"{name}: set must be true")
+        if setting.get("severity") not in SEVERITIES:
+            out.append(f"{name}: severity must be one of {', '.join(SEVERITIES)}")
+        if not isinstance(setting.get("read"), datetime.date):
+            out.append(f"{name}: read must be a date (YYYY-MM-DD)")
+        if not isinstance(setting.get("says"), str) or not setting["says"].strip():
+            out.append(f"{name}: says must be the documentation's words")
+        if not isinstance(setting.get("source"), str) or not _SOURCE_RE.fullmatch(setting["source"]):
+            out.append(f"{name}: source must be a file at a commit on GitHub, with its lines (#Ln or #Ln-Lm)")
+    return out
+
+
+def settings(detection: dict) -> list:
+    """Every entry's settings, in order, as (tool id, tool name, setting) for the entries and settings that
+    are well formed (a fault is `problems`' to name; `obaaf catalog` fails on it)."""
+    out = []
+    for entry in tools(detection):
+        if not isinstance(entry, dict) or not isinstance(entry.get("settings"), list):
+            continue
+        for setting in entry["settings"]:
+            if isinstance(setting, dict) and isinstance(setting.get("action"), str) and isinstance(
+                    setting.get("input"), str) and isinstance(setting.get("id"), str):
+                out.append((str(entry.get("id")), str(entry.get("name") or entry.get("id")), setting))
     return out
 
 

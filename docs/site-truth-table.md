@@ -31,6 +31,8 @@ Reviewed the local site from `80db1e6` with the copy changes recorded here. The 
 
 The three predicate pages now attribute signing to configured GitHub reference jobs (C118). The agent-run page identifies the separate trusted job as part of that workflow (C115). The approval page describes the independent-reviewer check on the supplied approvals (C116). The build-record page names the fields with reporter labels (C132). The versioned schemas retain their published contents. The assessment labels effort as a catalogue estimate (C125). The reference incident table and the provenance guide identify case mappings under the papers' assumptions (C123–C124).
 
+On 2026-11-19, the development rules page and upgrade guidance were also checked against the GHA-026 implementation and catalogue added in #244. A matching literal cites the source. A computed input yields a medium finding without a quotation and fails the default gate unless accepted. An empty `allowed_non_write_users` has no match. The source warning about `allowed_bots: "*"` concerns public repositories, while the checker reads the workflow without checking its visibility.
+
 The local site build validated internal links. The site-claims, assessment and predicate-namespace tests passed. This check did not publish the site, rerun the historical 0.3.0 measurement or perform hosted signing.
 
 ## 1. Current claims

@@ -40,11 +40,25 @@ Every tool that ci-agent-audit recognised at its commit `4a88ee6` (2026-11-07) h
 
 **Each agent rule names the agent.** The findings of OBAAF-GHA-003, 004, 005, 012, 020 and 025 have a fact `agents`: the `id` of each entry the job runs, and `agents.actions: <prefix>` or `agents.commands: <pattern>` for each entry of your own configuration that matches, sorted. They are read in the job's steps, in the steps of the local actions it uses, in a workflow it calls by an agent action's name, and in its default shell. So an acceptance of one of those findings stops covering the job when another named agent is added to it, or takes the place of the one it ran. A job that runs no agent the checker can name (one you declared an agent job, or one whose agent runs in a repository script) has no such fact. The fact is not shown in the text report or in SARIF; the JSON report has it with the finding's other facts.
 
+**Settings the tool's own documentation warns about** (OBAAF-GHA-026, slice 2d.5c1, decision D-088). An entry's `settings` lists values of its actions' inputs that the tool's own documentation warns about, each with the words, quoted, and the file, commit and lines they were read from. A finding for a matching literal prints both. A value is compared trimmed and in any letter case; where two settings name one input, the first that matches is reported; a value the checker cannot read (an expression, a list, a mapping) gets a medium `computed` finding with no source quotation. An unaccepted finding fails the default medium gate. Read on 2026-11-19:
+
+| Action and input | Value | Severity | Entry |
+| --- | --- | --- | --- |
+| `openai/codex-action`, `safety-strategy` | `unsafe` | high | `codex` |
+| `openai/codex-action`, `safety-strategy` | `read-only` | medium | `codex` |
+| `openai/codex-action`, `allow-users` | `*`, the whole value (in a list the action reads it as a user's name) | high | `codex` |
+| `anthropics/claude-code-action`, `allowed_non_write_users` | `*` | high | `claude-code` |
+| `anthropics/claude-code-action`, `allowed_non_write_users` | any other value that is not empty | medium | `claude-code` |
+| `anthropics/claude-code-action`, `allowed_bots` | `*` | medium | `claude-code` |
+| `anthropics/claude-code-action` and `anthropics/claude-code-base-action`, `show_full_output` | `true` | medium | `claude-code` |
+
+A value only another scanner's data calls dangerous is not reported. The actions' defaults, `safety-strategy: drop-sudo` or `unprivileged-user`, and named users or bots in `allow-users` and `allowed_bots` give no finding; an empty `allowed_non_write_users` also gives no finding. The documented warning for `allowed_bots: "*"` concerns public repositories. The checker reports the literal without checking repository visibility. A value is compared with white space taken off its ends as either Python or JavaScript trims it (U+FEFF included); a value with a control, format, separator, private-use or unassigned character left inside it other than a space, a tab, a carriage return or a line feed, and a `with:` that is neither a mapping nor empty (inputs written as one expression, `with: ${{ fromJSON(...) }}`), are "cannot tell". Not read: claude-code-action's `display_report`, a key written in clear, `ACTIONS_STEP_DEBUG`, these actions inside another repository's composite action or reusable workflow, and a `uses:` with an empty path segment, a leading `/` or a backslash (#245).
+
 **What the entries do not cover**, as read on 2026-11-18:
 - Docker images that run an agent (`docker://...pr-agent`, Amp's review image): an image is not matched to an entry.
 - A form of a tool's command its documentation did not give where it was read: Auggie's `-p`, Kiro's `kiro` and `q` programs, OpenHands' and SWE-agent's packages, Amp's package, and any command of Cline but its program name.
 - CodeRabbit's other actions: their repositories asked for a sign-in, so nothing could be read.
-- The settings each tool's documentation warns about (`settings` in each entry), which slice 2d.5c is to fill and report.
+- The settings of the other tools, and settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as `--dangerously-skip-permissions`): slice 2d.5c2. The two actions' settings below are read since slice 2d.5c1.
 - An agent that no entry names, such as a project's own model entry points: name it in `agents.actions` or `agents.commands`, or declare the job an agent job.
 - A command written as text is read as run. The patterns are matched anywhere in a step's command lines, as they were before the slice, so `echo "goose run the migrator"` or a comment `# use kilo run` makes an agent job, and such text names an agent in the `agents` fact; editing it can change the finding.
 - The Jenkins rules: their reading of piped installs still knows only the agent names it knew before (`claude`, `gemini`, `codex`, `opencode`, `aider`, `copilot`, `qodo`).
