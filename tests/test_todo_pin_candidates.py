@@ -106,12 +106,16 @@ class SharedValueLoaderTest(unittest.TestCase):
     def test_a_recursive_alias_is_refused_at_once(self):
         # Marking stops at a node already marked; without that, this document would never finish
         # composing. Run in a child process so a hang fails the test instead of the suite.
+        import os
+        from pathlib import Path
         import subprocess
         import sys
+        src = Path(__file__).resolve().parent.parent / "src"
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(src), os.environ.get("PYTHONPATH")]))}
         code = ("from obaaf import yamlutil\n"
                 "try:\n    yamlutil.load('a: &a [*a]\\nb: *a\\n')\n"
                 "except Exception as exc:\n    print(type(exc).__name__)\n")
-        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env)
         self.assertEqual(done.stdout.strip(), "ConstructorError", done.stderr)
 
     def test_shared_keys_name_only_values_reached_from_more_than_one_place(self):
