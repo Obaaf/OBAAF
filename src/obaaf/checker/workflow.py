@@ -106,6 +106,49 @@ def names_action(action: str, prefix: str) -> bool:
     return low == pre or low.startswith(pre + "/")
 
 
+def leaves_repository(uses) -> bool:
+    """Whether a step's or job's `uses:` names a path that leaves its repository (flagship slice 2d.11,
+    from its review): a local `./`, `$/` or `.\\` path whose `..` climbs above the workspace, or another
+    repository's action whose `..` climbs to or above `owner/repo` (`action_name` stops `..` there, so the
+    name it gives is not what the runner would look for). The runner puts every action a job uses in one
+    folder beside the workspace, the whole repository of each, so such a path can reach an action the job
+    never names (`./../../_actions/anthropics/claude-code-action/<ref>`). A backslash is read as a `/` too,
+    and a local path is also read without what follows an `@`, as `_local_action_folders` reads them, since
+    how GitHub reads either is not established."""
+    if not isinstance(uses, str):
+        return False
+    text = uses.strip()
+    if not text or text.startswith("docker://"):
+        return False
+    if text.startswith(("./", "$/", ".\\")):
+        rest = text[2:]
+        candidates = [rest, rest.split("@", 1)[0]]
+        floor = 0
+    else:
+        candidates = [text.split("@", 1)[0]]
+        floor = 2
+    for candidate in candidates + [c.replace("\\", "/") for c in candidates if "\\" in c]:
+        parts = candidate.split("/")
+        if floor and any(part in (".", "..") for part in parts[:floor]):
+            return True
+        depth = 0
+        for part in parts[floor:]:
+            if part == "..":
+                if depth == 0:
+                    return True
+                depth -= 1
+            elif part not in (".", ""):
+                depth += 1
+    return False
+
+
+def _configured_prefix(entry) -> str:
+    """A repository's own `agents.actions` entry as a prefix to compare: without space round it, without
+    an `@ref` (any ref of it is the agent) and without a `/` at its end, in lower case (flagship slice 2d.11,
+    from its review: before, a called workflow was compared with the entry as written, `x.yml@v1` too)."""
+    return action_name(str(entry).strip()).rstrip("/").lower()
+
+
 def _repo_and_path(action: str) -> tuple[str, str]:
     """`owner/repo` in lower case, and the path under it as written: GitHub's owner and repository names
     are read in any case, a path in the repository is not (a git tree is case-sensitive)."""
@@ -117,7 +160,9 @@ class AgentActions:
     """The actions the checker takes to run an agent (flagship slice 2d.11): each catalogue entry's
     actions and the paths under them (`agent_actions` in the detection data), except the paths the
     catalogue lists as running no agent (`agent_not_actions`, from each entry's `not_agents`), and a
-    repository's own `agents.actions` with every path under them, which nothing narrows.
+    repository's own `agents.actions` with every path under them, which nothing narrows. (Where it is read,
+    a step whose `uses:` leaves its repository, `leaves_repository`, is taken for an agent's too: it can run
+    any action the runner downloaded for the job, the folders this list takes out included.)
 
     A path the catalogue lists is taken out only as it is written there: its `owner/repo` in any case,
     the folder under it exactly (`agent-approval-check`, not `Agent-Approval-Check`, which a Linux runner
@@ -130,7 +175,7 @@ class AgentActions:
     def __init__(self, detection: dict, configured=()):
         self.catalogue = tuple(str(a).lower() for a in detection.get("agent_actions", ()) or ())
         self.excluded = frozenset(_repo_and_path(str(a)) for a in detection.get("agent_not_actions", ()) or ())
-        self.configured = tuple(str(a).lower() for a in configured or ())
+        self.configured = tuple(p for p in (_configured_prefix(a) for a in configured or ()) if p)
 
     def names(self, action: str | None) -> str | None:
         """The prefix that makes `action` (`owner/repo[/path]`, as `Step.action` gives it) an agent action,
@@ -145,10 +190,6 @@ class AgentActions:
             if low == prefix or low.startswith(prefix + "/"):
                 return None if self.excluded and _repo_and_path(action) in self.excluded else prefix
         return None
-
-    def step(self, step: "Step") -> bool:
-        """Whether a step uses an agent action."""
-        return self.names(step.action) is not None
 
     def excludes(self, action: str | None) -> bool:
         """Whether the catalogue lists `action` as one that runs no agent, though it is under an agent
@@ -2577,8 +2618,10 @@ class Job:
         actions = AgentActions(detection, extra_actions)
         commands = [re.compile(p, re.M) for p in list(detection.get("agent_commands", [])) + list(extra_commands)]
         for step in self.steps:
-            if actions.step(step):
+            if actions.names(step.action):
                 return f"uses {step.action}"
+            if leaves_repository(step.uses):
+                return f"uses {one_line(step.uses, 80)}, a path out of its repository that can reach any action the job downloads"
             text = step.agent_text(commands)
             if text and matches_any(commands, text):
                 return f"runs an agent CLI in '{step.name}'"

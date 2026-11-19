@@ -168,13 +168,27 @@ class CalledWorkflowTest(unittest.TestCase):
                 self.assertFalse(is_agent_job(check(job_with(f"      - uses: {action}-docs@v1\n"))))
 
     def test_a_workflow_in_an_agent_actions_repository_still_is(self):
-        for tool, action in self.actions():
+        # Where the action is a whole repository: a workflow can only be at `owner/repo/.github/workflows/`.
+        whole = [(tool, action) for tool, action in self.actions() if action.count("/") == 1]
+        self.assertGreater(len(whole), 20)
+        for tool, action in whole:
             for uses in (f"{action}/.github/workflows/review.yml@v1", f"{action.upper()}/.github/workflows/x.yml@v1",
                          f"{action}/.github/workflows/x.yml@{'a' * 40}"):
                 with self.subTest(tool=tool, uses=uses):
                     found = [f for f in check(calling(uses, "    secrets: inherit\n")).findings if f.rule in AGENT_RULES]
                     self.assertTrue(found)
                     self.assertTrue(all(f.facts["agents"] == [tool] for f in found), found)
+
+    def test_a_workflow_beside_an_action_in_a_folder_is_not_that_action(self):
+        # Continue's, Kilo Code's and OpenHands' actions are folders of a larger repository; that
+        # repository's own workflows are not under the action (found by the review of slice 2d.11, which
+        # showed the guide said otherwise).
+        folders = [(tool, action) for tool, action in self.actions() if action.count("/") > 1]
+        self.assertEqual(len(folders), 7)
+        for tool, action in folders:
+            owner, repo = action.split("/")[:2]
+            with self.subTest(tool=tool, action=action):
+                self.assertEqual(agent_findings(check(calling(f"{owner}/{repo}/.github/workflows/x.yml@v1"))), [])
 
     def test_spaces_around_the_call_are_read_through(self):
         text = calling('" anthropics/claude-code-action/.github/workflows/x.yml@v1 "', "    secrets: inherit\n")
@@ -183,6 +197,27 @@ class CalledWorkflowTest(unittest.TestCase):
     def test_dot_dot_does_not_climb_out_of_the_repository(self):
         text = calling("anthropics/claude-code-action-docs/../claude-code-action/.github/workflows/x.yml@v1")
         self.assertEqual(agent_findings(check(text)), [])
+
+    def test_a_configured_action_is_read_without_its_ref_and_a_slash_at_its_end(self):
+        # Found by the review of slice 2d.11: a call was compared with the entry as written before, so an
+        # entry with an `@ref` or a `/` at its end named the call; it still does, as a prefix.
+        call = calling("my-org/agent/.github/workflows/x.yml@v1", "    secrets: inherit\n")
+        for entry in ("my-org/agent/.github/workflows/x.yml@v1", "my-org/agent/.github/workflows/x.yml@",
+                      "my-org/agent/", "my-org/", " my-org/agent ", "My-Org/Agent@main"):
+            with self.subTest(entry=entry):
+                found = [f for f in check(call, config=Config(agents={"actions": [entry]})).findings
+                         if f.rule in AGENT_RULES]
+                self.assertTrue(found)
+                self.assertTrue(all(f.facts["agents"] == [f"agents.actions: {entry}"] for f in found))
+        step = job_with("      - uses: my-org/agent/run@v2\n")
+        self.assertTrue(is_agent_job(check(step, config=Config(agents={"actions": ["my-org/agent/@v1"]}))))
+
+    def test_a_configured_action_that_names_nothing_is_refused(self):
+        for agents in ({"actions": "my-org/agent"}, {"actions": ["@v1"]}, {"actions": [""]}, {"actions": ["/"]},
+                       {"actions": [3]}, {"commands": "run-agent"}, {"commands": [" "]}):
+            with self.subTest(agents=agents), self.assertRaises(checker.ConfigError):
+                Config.from_data({"agents": agents}, "obaaf.yml")
+        Config.from_data({"agents": {"actions": ["my-org"], "commands": ["run-agent"]}}, "obaaf.yml")
 
     def test_a_configured_action_is_read_the_same_way(self):
         config = Config(agents={"actions": ["example/agent"]})
@@ -198,6 +233,62 @@ class CalledWorkflowTest(unittest.TestCase):
         self.assertFalse(actions.calls("./.github/workflows/x.yml"))
         self.assertFalse(actions.calls(None))
         self.assertFalse(actions.calls("   "))
+
+
+class OutOfTheRepositoryTest(unittest.TestCase):
+    """Found by the review of slice 2d.11: the runner puts the whole repository of each action a job uses in
+    one folder beside the workspace, so after the approval check a step can reach Claude Code's own action
+    by a path that leaves its repository. Such a path is taken for an agent action, in any job."""
+
+    ESCAPES = [
+        f"./../../_actions/anthropics/claude-code-action/{APPROVAL_SHA}",
+        f"./.github/../../../_actions/anthropics/claude-code-action/{APPROVAL_SHA}",
+        f".\\..\\..\\_actions\\anthropics\\claude-code-action\\{APPROVAL_SHA}",
+        f"$/../x",
+        f"actions/checkout/../../../anthropics/claude-code-action/{APPROVAL_SHA}@v4",
+        "actions/checkout/..@v4",
+        "actions/../x/y@v1",
+        "actions/checkout/x\\..\\..\\y@v4",
+    ]
+    STAYS = ["./.github/actions/a/../b", "actions/cache/save/../restore@v4", "actions/checkout@v4",
+             "./.github/actions/x", "docker://alpine:3", "actions/cache/./save@v4"]
+
+    def test_a_path_out_of_its_repository_is_an_agent(self):
+        for uses in self.ESCAPES:
+            with self.subTest(uses=uses):
+                self.assertTrue(wf_mod.leaves_repository(uses))
+                result = check(job_with(APPROVAL_STEP + f"      - uses: {uses!r}\n"))
+                self.assertTrue(is_agent_job(result))
+                self.assertTrue(is_agent_job(check(job_with(f"      - uses: {uses!r}\n"))))
+
+    def test_a_path_that_stays_is_not(self):
+        for uses in self.STAYS:
+            with self.subTest(uses=uses):
+                self.assertFalse(wf_mod.leaves_repository(uses))
+        self.assertFalse(wf_mod.leaves_repository(None))
+        self.assertFalse(is_agent_job(check(job_with(APPROVAL_STEP + "      - uses: actions/checkout@v4\n"))))
+
+    def test_it_says_why_and_names_no_tool(self):
+        with TempDir() as tmp:
+            root = tmp / "repo"
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "wf.yml").write_text(
+                job_with(APPROVAL_STEP + f"      - uses: {self.ESCAPES[0]}\n"), encoding="utf-8")
+            ((_f, _job, lane, reason),) = checker.lanes(root, config=Config())
+        self.assertEqual(lane, "agent")
+        self.assertIn("a path out of its repository", reason)
+        result = check(job_with(f"      - uses: {self.ESCAPES[4]}\n"))
+        self.assertEqual(agents_of(result), [None])
+
+    def test_inside_a_local_composite_action_and_before_the_egress_action(self):
+        files = {".github/actions/gate/action.yml":
+                 f"runs:\n  using: composite\n  steps:\n    - uses: {self.ESCAPES[4]}\n"}
+        steps = (f"      - uses: actions/checkout@{'0' * 40}\n        with: {{persist-credentials: false}}\n"
+                 "      - uses: ./.github/actions/gate\n")
+        self.assertTrue(is_agent_job(check(job_with(steps), files=files)))
+        from test_egress_recognised import CHECKOUT, NOT_MET, action, egress, run_check, verdict, workflow
+        before = CHECKOUT + "\n" + APPROVAL_STEP + f"      - uses: {self.ESCAPES[0]}\n" + action()
+        self.assertEqual(verdict(egress(run_check(workflow(before)))), NOT_MET)
 
 
 class NotAgentsDataTest(unittest.TestCase):
@@ -233,6 +324,10 @@ class NotAgentsDataTest(unittest.TestCase):
             "missing checked": (self.entry(not_agents=[{k: v for k, v in self.item().items() if k != "checked"}]),),
             "unknown key": (self.entry(not_agents=[self.item(colour="blue")]),),
             "must be owner/repo/path": (self.entry(not_agents=[self.item(action="example/tool-action")]),),
+            "without a . or .. part": (self.entry(not_agents=[self.item(action="example/tool-action/./check")]),),
+            "without a . or .. part ": (self.entry(not_agents=[self.item(action="example/tool-action/x/../check")]),),
+            "in the action's folder": (self.entry(not_agents=[self.item(
+                source="https://github.com/example/tool-action/blob/" + "a" * 40 + "/action.yml#L1")]),),
             "not in a folder under one of the entry's actions": (
                 self.entry(not_agents=[self.item(action="example/other/check")]),),
             "folder under one of the entry's actions ": (

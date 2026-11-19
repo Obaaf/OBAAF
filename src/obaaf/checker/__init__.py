@@ -1560,8 +1560,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             _charge(cache, max(0, added) // _BYTES_PER_UNIT)
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
-            if out.agent is None and actions.step(step):
+            if out.agent is None and actions.names(step.action):
                 out.agent = f"uses {step.action} in the local action {shown}"
+            if out.agent is None and wf_mod.leaves_repository(step.uses):
+                out.agent = (f"uses {wf_mod.one_line(step.uses, 80)} in the local action {shown}, a path out of its "
+                             "repository that can reach any action the job downloads")
             if out.agent is None:
                 text = step.agent_text(commands)
                 if text and wf_mod.matches_any(commands, text):
@@ -2242,6 +2245,16 @@ class Config:
         agents = data.get("agents") or {}
         if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
             raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
+        # A string would be read one character at a time, and an entry that is empty once its `@ref` and a
+        # `/` at its end are taken off names nothing (flagship slice 2d.11, from its review).
+        for key in ("actions", "commands"):
+            given = agents.get(key) or []
+            if not isinstance(given, list) or not all(isinstance(v, str) and v.strip() for v in given):
+                raise ConfigError(f"{path}: agents.{key} must be a list of text")
+        for entry in agents.get("actions") or []:
+            if not wf_mod.action_name(entry.strip()).rstrip("/"):
+                raise ConfigError(f"{path}: agents.actions: {wf_mod.one_line(entry, 80)!r} names no action "
+                                  "(an owner, owner/repo or owner/repo/path, before any @)")
         lanes = data.get("lanes") or {}     # left empty, it declares nothing
         if not isinstance(lanes, dict):
             raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")

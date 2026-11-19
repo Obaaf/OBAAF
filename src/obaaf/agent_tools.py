@@ -287,8 +287,11 @@ def _not_agent_problems(entries: list) -> list[str]:
                 if key not in NOT_AGENT_FIELDS:
                     out.append(f"{name}: unknown key {key!r}")
             action = item.get("action")
-            if not isinstance(action, str) or not _ACTION_RE.fullmatch(action) or action.count("/") < 2:
-                out.append(f"{name}: action must be owner/repo/path")
+            if not isinstance(action, str) or not _ACTION_RE.fullmatch(action) or action.count("/") < 2 or any(
+                    part in (".", "..") for part in action.split("/")):
+                # A step's action is read with `.` and `..` worked out, so a path written with them would
+                # never be the one taken out (found by the review of slice 2d.11).
+                out.append(f"{name}: action must be owner/repo/path, without a . or .. part")
             else:
                 name = f"agent tool {tool}: not_agents {action}"
                 low = action.lower()
@@ -303,10 +306,14 @@ def _not_agent_problems(entries: list) -> list[str]:
                     out.append(f"{name}: is listed twice")
                 seen.add(low)
                 repo = "/".join(action.split("/")[:2]).lower()
+                folder = action.split("/", 2)[2]
                 source = item.get("source")
                 if isinstance(source, str) and _SOURCE_RE.fullmatch(source) and not source.lower().startswith(
                         f"https://github.com/{repo}/blob/"):
                     out.append(f"{name}: source must be a file in {repo}, the action's own repository")
+                elif isinstance(source, str) and _SOURCE_RE.fullmatch(source) and not re.match(
+                        r"https://github\.com/[^/]+/[^/]+/blob/[0-9a-f]{40}/" + re.escape(folder) + "/", source):
+                    out.append(f"{name}: source must be a file in the action's folder, {folder}")
             if not isinstance(item.get("read"), datetime.date):
                 out.append(f"{name}: read must be a date (YYYY-MM-DD)")
             for key, what in (("says", "the action's own words"), ("checked", "what was read to know it runs no agent")):
@@ -520,9 +527,9 @@ def named_agents(job, detection: dict, configured: dict | None = None) -> list[s
         if text and not matches_any(every, text):
             text = ""       # no pattern matches anywhere: each tool's need not be tried (slice 2d.5b's cost)
         for tool, actions, rxs in entries:
-            if actions.step(step) or (text and any(rx.search(text) for rx in rxs)):
+            if actions.names(step.action) or (text and any(rx.search(text) for rx in rxs)):
                 found.add(tool)
-        found.update(f"agents.actions: {a}" for a, actions in extra_actions if actions.step(step))
+        found.update(f"agents.actions: {a}" for a, actions in extra_actions if actions.names(step.action))
         found.update(f"agents.commands: {p}" for p, rx in extra_commands if text and rx.search(text))
     # A called workflow is read as a step's action is: `owner/repo/.github/workflows/x.yml@ref` is under
     # `owner/repo`, and `owner/repo-docs/...` is not (flagship slice 2d.11).
