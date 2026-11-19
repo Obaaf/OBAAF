@@ -2090,6 +2090,11 @@ class WorkflowRules:
                      tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
                      source=Note(str(flag["source"])))
         open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_ and agent_tools.shares_program(self.detection, tool) and not any(
+                agent_tools.runs_tool(self.detection, tool, text) for text in named):
+            # Another well-known program has this name (AWS's `copilot`, pressly's `goose`): "cannot tell" only
+            # where the step also runs the command the entry gives for the tool (flagship slice 2d.5c2b).
+            open_ = []
         if open_:
             words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
             shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
@@ -2147,11 +2152,15 @@ class WorkflowRules:
             return
         value = core
         folded = value.casefold()
+        decoded = self._json_text(value)
         for tool, name, setting in candidates:
+            # An action that reads the input through `fromJSON` (`json: true`) takes `'"true"'` as `true`.
+            compared = decoded.strip(self._TRIMMED).casefold() if setting.get("json") is True and (
+                decoded is not None) else folded
             if "equals" in setting:
-                hit = any(folded == str(v).strip().casefold() for v in setting["equals"])
+                hit = any(compared == str(v).strip().casefold() for v in setting["equals"])
             else:
-                hit = folded != ""
+                hit = compared != ""
             if not hit:
                 continue
             self.add("OBAAF-GHA-026", step.line,
@@ -2162,6 +2171,17 @@ class WorkflowRules:
                      tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
                      source=Note(str(setting["source"])))
             return
+
+    @staticmethod
+    def _json_text(value: str):
+        """The string a value written as a JSON string decodes to (`"tr\\u0075e"` is `true`), else None."""
+        if not value.startswith('"'):
+            return None
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return None
+        return decoded if isinstance(decoded, str) else None
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"

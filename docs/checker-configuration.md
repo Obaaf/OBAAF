@@ -51,8 +51,8 @@ Every tool that ci-agent-audit recognised at its commit `4a88ee6` (2026-11-07) h
 | `anthropics/claude-code-action`, `allowed_non_write_users` | any other value that is not empty | medium | `claude-code` |
 | `anthropics/claude-code-action`, `allowed_bots` | `*` | medium | `claude-code` |
 | `anthropics/claude-code-action` and `anthropics/claude-code-base-action`, `show_full_output` | `true` | medium | `claude-code` |
-| `google-github-actions/run-gemini-cli`, `gemini_debug` | `true` | medium | `gemini-cli` (slice 2d.5c2b) |
-| `QwenLM/qwen-code-action`, `qwen_debug` | `true` | medium | `qwen-code` (slice 2d.5c2b) |
+| `google-github-actions/run-gemini-cli`, `gemini_debug` | `true`, also as the JSON string `"true"` (the action reads it through `fromJSON`) | medium | `gemini-cli` (slice 2d.5c2b) |
+| `QwenLM/qwen-code-action`, `qwen_debug` | `true`, also as the JSON string `"true"` | medium | `qwen-code` (slice 2d.5c2b) |
 | `OpenHands/extensions/plugins/pr-review`, `enable-uv-cache` | `true`, or `auto`, which turns setup-uv's cache on on GitHub-hosted runners | medium | `openhands` (slice 2d.5c2b) |
 
 A value only another scanner's data calls dangerous is not reported. The actions' defaults, `safety-strategy: drop-sudo` or `unprivileged-user`, and named users or bots in `allow-users` and `allowed_bots` give no finding; an empty `allowed_non_write_users` also gives no finding. The documented warning for `allowed_bots: "*"` concerns public repositories. The checker reports the literal without checking repository visibility. A value is compared with white space taken off its ends as either Python or JavaScript trims it (U+FEFF included); a value with a control, format, separator, private-use or unassigned character left inside it other than a space, a tab, a carriage return or a line feed, and a `with:` that is neither a mapping nor empty (inputs written as one expression, `with: ${{ fromJSON(...) }}`), are "cannot tell". Not read: claude-code-action's `display_report`, a key written in clear, `ACTIONS_STEP_DEBUG`, these actions inside another repository's composite action or reusable workflow, and a `uses:` with an empty path segment, a leading `/` or a backslash (#245).
@@ -67,10 +67,14 @@ A value only another scanner's data calls dangerous is not reported. The actions
 | Codex's `--dangerously-bypass-hook-trust` | `codex` | medium | the same |
 | `--yolo`, `-y`, `--y`, `--approval-mode yolo`, `--approvalMode yolo` | `gemini-cli` | medium (its documentation turns the sandbox on with them) | `gemini` |
 | `--yolo`, `-y`, `--y`, `--approval-mode yolo`, `--approvalMode yolo` | `qwen-code` (slice 2d.5c2b) | high (its documentation says `--yolo` turns on no sandbox) | `qwen` |
+| Qwen Code's `--insecure` | `qwen-code` | medium | `qwen` |
 | `--auto`, and the hidden `--yolo`, `--dangerously-skip-permissions` and `--dangerouslySkipPermissions`, which skip the checks `--auto` answers | `kilo` (slice 2d.5c2b) | high | `kilo` |
-| `--yolo`, `-y` | `cline` (slice 2d.5c2b) | high | `cline` |
-| `--allow-all-tools`, `--allow-all`, `--yolo` | `copilot-cli` (slice 2d.5c2b; the sentence is in GitHub's documentation, `github/docs`) | high | `copilot` |
-| `--always-approve`, `--yolo`, and any beginning of either (`--always`, `--yol`), as Python's argparse takes it | `openhands` (slice 2d.5c2b) | high | `openhands` |
+| `--yolo`, `-y`, and `--zen`, `-z` and `--auto-approve true`, which do what `--yolo` does | `cline` (slice 2d.5c2b) | high | `cline` |
+| `--allow-all-tools`, `--allow-all`, `--yolo` | `copilot-cli` (slice 2d.5c2b; the sentences are in GitHub's documentation, `github/docs`) | high | `copilot` |
+| Copilot CLI's `--show-secrets`, `--trust-folder`, `--share-gist` | `copilot-cli` | medium | `copilot` |
+| `--always-approve`, `--yolo`, `--headless`, and any beginning of them (`--always`, `--yol`, `--head`), as Python's argparse takes it | `openhands` (slice 2d.5c2b) | high | `openhands` |
+| Continue's `cn --auto` | `continue` (slice 2d.5c2b) | medium | `cn` |
+| OpenCode's `--hostname 0.0.0.0` | `opencode` (slice 2d.5c2b) | medium | `opencode` |
 | goose's `--dangerously-unauthenticated` | `goose` (slice 2d.5c2b) | medium | `goose` |
 
 **How a script is read.** A bash or sh script is read twice, and the two readings are added together:
@@ -94,13 +98,19 @@ To clear one, write the options out in the step. A quoted word that starts with 
 
 **Not read:** Codex's `--sandbox danger-full-access` and its `-c` overrides; settings given to `--settings` (a file or JSON); options in a configuration file or an environment variable the tool reads; a program name a step builds at run time (braces, globs, `printf`, another step's `GITHUB_ENV`, `GITHUB_PATH` or outputs, `vars`, a file), which the agent lane does not see either; `python -m` and a repository script a step runs; `BASH_ENV`; a local Docker or JavaScript action.
 
-**What the other entries say** (slice 2d.5c2b, decision D-094). The rest of the entries' action files, READMEs, documentation and CLI help text were read on 2026-11-19 at the commits their `sources` name. Where nothing there warns about a value, the entry says what was read in `no_warnings`, and `obaaf catalog` refuses an entry that has no `settings`, no `flags` and no `no_warnings`; fourteen entries have it. Not reported, and why:
+**What the other entries say** (slice 2d.5c2b, decision D-094). The rest of the entries' action files, READMEs, documentation and CLI help text were read on 2026-11-19 at the commits their `sources` name. Where nothing there warns about a value, the entry says what was read in `no_warnings`; `obaaf catalog` refuses an entry that has no `settings`, no `flags` and no `no_warnings`, and one that has `no_warnings` beside settings or flags. Twelve entries have it.
 
-- A mode a tool runs in by default, which no option names: a one-shot `cline "prompt"` is in yolo mode unless given `--auto-approve false`, `--act` or `--plan`; OpenHands' headless mode always approves every action; `google-github-actions/run-gemini-cli`, `google-gemini/gemini-cli-action` and `QwenLM/qwen-code-action` run their CLI with `--yolo` themselves, whatever their inputs say.
-- Options a tool's own files describe with no sentence of warning (decision F-267): OpenCode's `--auto` and its hidden `--yolo` and `--dangerously-skip-permissions`; Continue's `cn --auto`; Aider's `--yes-always`; Qwen Code's `--approval-mode auto` (the CLI's default) and `auto-edit`; Copilot CLI's `--allow-all-paths` and `--allow-all-urls` alone.
+Two program names are shared with other well-known tools: AWS's Copilot CLI is also `copilot`, and pressly's database migration tool is also `goose`. An entry says so in `shared_program`, and then a command the checker cannot read is "cannot tell" only where the step also runs the command the entry gives for the tool (`copilot -p`, `goose run`); a warned option written out is reported either way. A program after a package runner may carry its version: `uvx openhands@latest`, `uv tool run openhands==1.2.0` and `pipx run` are read.
+
+Not reported, and why:
+
+- A mode a tool runs in by default, which no option names: a one-shot `cline "prompt"` is in yolo mode unless given `--auto-approve false`, `--act` or `--plan`; `google-github-actions/run-gemini-cli`, `google-gemini/gemini-cli-action` and `QwenLM/qwen-code-action` run their CLI with `--yolo` themselves, whatever their inputs say.
+- Options a tool's own files describe with no sentence of warning (decision F-267): OpenCode's `--auto` and its hidden `--yolo` and `--dangerously-skip-permissions`; Aider's `--yes-always`; Qwen Code's `--approval-mode auto` (the CLI's default) and `auto-edit`; Copilot CLI's `--allow-all-paths` and `--allow-all-urls` alone, and `--share`, which writes the transcript to a file the job keeps.
+- Copilot CLI's other spellings (`--allowAllTools`, a beginning of an option): its parser is not in its public files.
+- PR-Agent warns never to take `--config-branch` from a pull request (`--config-branch=$GITHUB_HEAD_REF`), which is about where the value comes from, not the value. GitHub Models' `actions/ai-inference` runs Copilot CLI itself with `--model` and `--allow-tool=` built from its inputs, which are not read as Copilot's options.
 - Tools whose options are documented only on a web page, not in a file at a commit: Kiro CLI (kiro.dev) and Amp (ampcode.com). CodeRabbit's `coderabbitai/ai-pr-reviewer` could not be read: GitHub refused an anonymous read of the repository.
-- Environment variables that turn the same modes on: Copilot's `COPILOT_ALLOW_ALL`, goose's `GOOSE_MODE`, Aider's `AIDER_YES_ALWAYS`.
-- The other entries' files warn about events or credentials, not values: PR-Agent's and Jules' warnings are about which events run them, Claude Code Security Reviewer's that it is not hardened against prompt injection, Augment's that its tokens are credentials. `qodo-ai/command` was retired on 2026-11-01. GitHub Models, SWE-agent and Warp's files warn about nothing.
+- Environment variables that do what a warned option does, or turn on an agent's approval mode: Copilot's `COPILOT_ALLOW_ALL`, Aider's `AIDER_YES_ALWAYS`, goose's `GOOSE_MODE`.
+- The other entries' files warn about events or credentials, not values: Jules' warning is about which events run it, Claude Code Security Reviewer's that it is not hardened against prompt injection, Augment's that its tokens are credentials. `qodo-ai/command` was retired on 2026-11-01. SWE-agent's and Warp's files warn about nothing.
 
 **What the entries do not cover**, as read on 2026-11-18:
 - Docker images that run an agent (`docker://...pr-agent`, Amp's review image): an image is not matched to an entry.

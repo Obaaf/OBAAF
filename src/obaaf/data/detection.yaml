@@ -180,13 +180,14 @@ agent_tools:
     install_urls: []
     # Both actions run `gemini --yolo` themselves, whatever their inputs say (run-gemini-cli's action.yml,
     # lines 309 and 316; gemini-cli-action's, line 85), so no input turns it on or off and none is reported
-    # for it (flagship slice 2d.5c2b). The action passes `gemini_debug` through `fromJSON`, so only the JSON
-    # `true` turns debugging on.
+    # for it (flagship slice 2d.5c2b). The action passes `gemini_debug` through `fromJSON` (line 417) and
+    # compares the result with `true` (line 306), so the JSON string `"true"` turns debugging on too.
     settings:
       - id: debug
         action: google-github-actions/run-gemini-cli
         input: gemini_debug
         equals: ["true"]
+        json: true
         severity: medium
         read: 2026-11-19
         says: >-
@@ -302,8 +303,10 @@ agent_tools:
     install_urls: []
     settings: []
     no_warnings: >-
-      Read on 2026-11-19: actions/ai-inference's action.yml, README.md and SECURITY.md at 41caef4. None of
-      them warns about an input's value, and the action runs no agent program with options.
+      Read on 2026-11-19: actions/ai-inference's action.yml, README.md, SECURITY.md and src/copilot.ts at
+      41caef4. None of them warns about an input's value. The action runs GitHub Copilot CLI itself with
+      `-p`, `-s`, `--no-ask-user`, `--model` and `--allow-tool=` built from its inputs (src/copilot.ts,
+      lines 93 to 102); those inputs are not read as Copilot's options.
 
   - id: pr-agent
     name: PR-Agent
@@ -326,9 +329,12 @@ agent_tools:
     install_urls: []
     settings: []
     no_warnings: >-
-      Read on 2026-11-19: action.yaml, README.md and docs/docs/installation/github.md at c601521. The one
-      warning is about running the action on `pull_request_target` (github.md, line 106), an event, not
-      an input or an option; the event rules read events.
+      Read on 2026-11-19: action.yaml, README.md and docs/docs at c601521. Two warnings, neither about a value
+      the checker can compare: running the action on `pull_request_target`
+      (docs/docs/installation/github.md, line 106), an event the event rules read; and never setting
+      `--config-branch` from untrusted or pull-request input
+      (docs/docs/usage-guide/configuration_options.md, lines 67 to 71), which is about where the value
+      comes from, not the value. Neither is reported by this rule.
     carried: ["the action Codium-ai/pr-agent"]
 
   - id: coderabbit
@@ -363,6 +369,7 @@ agent_tools:
       - https://docs.openhands.dev/openhands/usage/cli/headless
       - https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx
       - https://github.com/OpenHands/OpenHands-CLI/blob/283c6ac3610f4299f405f7389f65766dcb83e12a/openhands_cli/argparsers/util.py
+      - https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/headless.mdx
     # All-Hands-AI/OpenHands was in OBAAF's list before slice 2d.5b; its default branch had no action
     # file when read, so it is kept for workflows pinned to an older commit.
     actions:
@@ -398,8 +405,8 @@ agent_tools:
     # Command-line options (flagship slice 2d.5c2b), read where `openhands` is run. `--yolo` is the same
     # option as `--always-approve` (OpenHands-CLI's openhands_cli/argparsers/util.py, lines 12 to 17), and
     # Python's argparse takes any beginning of either (`--always`, `--yol`). High: nothing in the sentence's
-    # page puts the actions in a sandbox. Headless mode always approves every action (headless.mdx, line
-    # 28), which no option says and the checker does not report.
+    # page puts the actions in a sandbox. `--headless`, the documented way to run it in CI, always approves
+    # every action (headless.mdx, lines 27 to 29), so it is reported too.
     flags:
       - id: always-approve
         options: [--always-approve, --yolo]
@@ -408,6 +415,15 @@ agent_tools:
         read: 2026-11-19
         says: "Auto-approve all actions (use with caution)"
         source: https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx#L62
+      - id: headless
+        options: [--headless]
+        prefixes: true
+        severity: high
+        read: 2026-11-19
+        says: >-
+          **Headless mode always runs in `always-approve` mode.** The agent will execute all actions without
+          any confirmation.
+        source: https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/headless.mdx#L28
     carried: ["the action All-Hands-AI/OpenHands"]
 
   - id: opencode
@@ -415,6 +431,7 @@ agent_tools:
     read: 2026-11-18
     sources:
       - https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/README.md
+      - https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/services/site/src/docs/v1/content/windows-wsl.mdx
     # sst/opencode and anomalyco/opencode served the same repository (the same commit) when read. Its
     # default branch had no action file then; sst/opencode was in OBAAF's list before slice 2d.5b.
     actions:
@@ -430,12 +447,20 @@ agent_tools:
     install_urls:
       - 'opencode\.ai/(v2/)?install\b'
     settings: []
-    no_warnings: >-
-      Read on 2026-11-19 at 007afb1: the CLI's options (packages/cli/src/commands/commands.ts) and its
-      documentation (services/site/src/docs). `--auto` is described as "Auto-approve permissions that
-      are not explicitly denied", and the hidden `--yolo` and `--dangerously-skip-permissions` do the
-      same (packages/cli/src/commands/handlers/run.ts, line 34), with no sentence of warning, so none is
-      reported (decision F-267). Kilo Code, which shares this command, does warn; see its entry.
+    # Command-line options (flagship slice 2d.5c2b), read where `opencode` is run. `--auto` is described as
+    # "Auto-approve permissions that are not explicitly denied", and the hidden `--yolo` and
+    # `--dangerously-skip-permissions` do the same (packages/cli/src/commands/handlers/run.ts, line 34), with
+    # no sentence of warning in OpenCode's files, so none of them is reported (decision F-267); Kilo Code,
+    # which shares this command, does warn (see its entry). The server's password is a variable the checker
+    # does not read, so `--hostname 0.0.0.0` is reported whether or not it is set.
+    flags:
+      - id: hostname-any
+        options: [--hostname]
+        equals: ["0.0.0.0"]
+        severity: medium
+        read: 2026-11-19
+        says: When using `--hostname 0.0.0.0`, set `OPENCODE_SERVER_PASSWORD` to secure the server.
+        source: https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/services/site/src/docs/v1/content/windows-wsl.mdx#L62
     carried: ["opencode run", "the package opencode-ai", "the install script opencode.ai/install"]
 
   - id: cline
@@ -445,6 +470,7 @@ agent_tools:
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/README.md
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/README.md
       - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts
     # The CLI's README gives `cline "<prompt>"` for a headless run, which the pattern below finds; the
     # action was in OBAAF's list before slice 2d.5b, and the repository had no action file when read.
     actions:
@@ -458,20 +484,31 @@ agent_tools:
     installs: {}
     install_urls: []
     settings: []
-    # Command-line options (flagship slice 2d.5c2b), read where `cline` is run. The CLI's README calls
-    # `-y, --yolo` yolo mode (apps/cli/README.md, lines 91 and 271); the warning is the documentation's for
-    # YOLO mode. Not reported, because no option says it: a one-shot run (`cline "prompt"`, or a prompt on
-    # standard input) is in yolo mode by default unless it is given `--auto-approve false`, `--act` or
-    # `--plan` (README, lines 89 and 338).
+    # Command-line options (flagship slice 2d.5c2b), read where `cline` is run, from the CLI's own help text
+    # (commander). `-z, --zen` runs "with full tool auto-approval (same semantics as `--yolo`)" (README,
+    # line 331) and `--auto-approve true` sets the same override as `--yolo` (program.ts, lines 145 to 160),
+    # so both are read with the sentence about `--yolo`, the wider reading (decision F-280). Not reported,
+    # because no option says it: a one-shot run (`cline "prompt"`, or a prompt on standard input) is in yolo
+    # mode by default unless it is given `--auto-approve false`, `--act` or `--plan` (README, lines 89 and
+    # 338).
     flags:
       - id: yolo
-        options: [--yolo, -y]
+        options: [--yolo, -y, --zen, -z]
         severity: high
         read: 2026-11-19
         says: >-
-          **Warning: This is dangerous.** YOLO mode disables all safety checks. Cline executes whatever it
-          decides without asking permission.
-        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx#L78
+          Auto-approve a limited tool set for unsupervised runs (benchmarks, CI). DANGEROUS: use only in
+          sandboxed environments.
+        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts#L28-L31
+      - id: auto-approve-true
+        options: [--auto-approve]
+        equals: ["true"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Auto-approve a limited tool set for unsupervised runs (benchmarks, CI). DANGEROUS: use only in
+          sandboxed environments.
+        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts#L28-L31
     carried: ["the action cline/cline"]
 
   - id: aider
@@ -502,6 +539,8 @@ agent_tools:
     sources:
       - https://github.com/github/copilot-cli/blob/020bbc0a39e97deaf58327cb880167f845461690/README.md
       - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-command-reference.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md
     actions: {}
     commands:
       - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
@@ -514,10 +553,14 @@ agent_tools:
     install_urls:
       - 'gh\.io/copilot-install\b'
     settings: []
+    shared_program: >-
+      AWS's Copilot CLI for containers on Amazon ECS is also `copilot` (`copilot svc deploy`), so a `copilot`
+      command the checker cannot read is "cannot tell" only where the step also runs `copilot -p`.
     # Command-line options (flagship slice 2d.5c2b), read where `copilot` is run. The CLI's documentation is
     # GitHub's, in github/docs. "These options" are `--allow-all-tools`, `--allow-all` and `--yolo` (lines 98
     # and 100). Not read: `--allow-all-paths` and `--allow-all-urls` alone (no sentence of warning names
-    # them) and the variable `COPILOT_ALLOW_ALL`.
+    # them), `--share` (a file the job keeps), the variable `COPILOT_ALLOW_ALL`, and spellings such as
+    # `--allowAllTools` or a beginning of an option: the CLI's parser is not in its public files.
     flags:
       - id: allow-all
         options: [--allow-all-tools, --allow-all, --yolo]
@@ -525,6 +568,29 @@ agent_tools:
         read: 2026-11-19
         says: It is strongly recommended that you only use these options in an isolated environment.
         source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md#L104-L105
+      - id: show-secrets
+        options: [--show-secrets]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          `--show-secrets` can print sensitive environment variable and header values to your terminal or
+          logs. Only use this option in trusted environments, and avoid copying, pasting, or otherwise
+          capturing the output in shared logs or history.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-command-reference.md#L1083-L1084
+      - id: trust-folder
+        options: [--trust-folder]
+        severity: medium
+        read: 2026-11-19
+        says: Only use this for configuration you have reviewed.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L53
+      - id: share-gist
+        options: [--share-gist]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Publish the session transcript as a secret GitHub gist after completion. Convenient for sharing
+          results from CI. Note that session transcripts may contain sensitive information.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L55
     carried: ["copilot -p and --prompt"]
 
   - id: qodo
@@ -603,6 +669,7 @@ agent_tools:
     sources:
       - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/actions/general-review/action.yml
       - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/extensions/cli/README.md
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/docs/guides/notion-continue-guide.mdx
     actions:
       continuedev/continue/actions/general-review: {prompt_inputs: []}
     commands:
@@ -616,10 +683,16 @@ agent_tools:
     install_urls:
       - 'raw\.githubusercontent\.com/continuedev/continue/[^/\s]+/extensions/cli/scripts/install\.(sh|ps1)\b'
     settings: []
-    no_warnings: >-
-      Read on 2026-11-19 at 5522c6f: the general-review action and the CLI's documentation (docs/cli). `cn
-      --auto` is described as "Allow all tools without prompting" (docs/cli/tool-permissions.mdx, line
-      82) with no sentence of warning, so it is not reported.
+    # Command-line options (flagship slice 2d.5c2b), read where `cn` is run. The CLI's reference describes
+    # `--auto` as "Allow all tools without prompting" (docs/cli/tool-permissions.mdx, line 82); the warning is
+    # in a guide.
+    flags:
+      - id: auto
+        options: [--auto]
+        severity: medium
+        read: 2026-11-19
+        says: Always test prompts in TUI mode first before running them with `--auto` in production.
+        source: https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/docs/guides/notion-continue-guide.mdx#L177-L178
 
   - id: jules
     name: Jules
@@ -659,6 +732,9 @@ agent_tools:
     install_urls:
       - 'github\.com/(block|aaif-goose)/goose/releases/download/\S*/download_cli\.sh\b'
     settings: []
+    shared_program: >-
+      pressly's database migration tool is also `goose` (`goose postgres "$DB" up`), so a `goose` command the
+      checker cannot read is "cannot tell" only where the step also runs `goose run`.
     # Command-line options (flagship slice 2d.5c2b), read where `goose` is run. goose's approval mode is the
     # variable `GOOSE_MODE`, not an option, and is not read.
     flags:
@@ -743,12 +819,14 @@ agent_tools:
     install_urls:
       - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.(sh|ps1)\b'
     # The action runs `qwen --yolo` itself, whatever its inputs say (action.yml, line 232), so no input turns
-    # it on or off and none is reported for it (flagship slice 2d.5c2b).
+    # it on or off and none is reported for it (flagship slice 2d.5c2b). It passes `qwen_debug` through
+    # `fromJSON` (line 315), so the JSON string `"true"` turns debugging on too.
     settings:
       - id: debug
         action: QwenLM/qwen-code-action
         input: qwen_debug
         equals: ["true"]
+        json: true
         severity: medium
         read: 2026-11-19
         says: >-
@@ -771,6 +849,12 @@ agent_tools:
           including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at
           the host process's privilege level.
         source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md#L338
+      - id: insecure
+        options: [--insecure]
+        severity: medium
+        read: 2026-11-19
+        says: "WARNING: removes protection against man-in-the-middle attacks."
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/packages/cli/src/config/top-level-options.ts#L145-L150
       - id: approval-mode-yolo
         options: [--approval-mode, --approvalMode]
         equals: [yolo]

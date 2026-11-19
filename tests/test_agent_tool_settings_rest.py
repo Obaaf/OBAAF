@@ -26,8 +26,8 @@ PR_REVIEW = "OpenHands/extensions/plugins/pr-review@1902359eb285eb09bfb488e39283
 # Every entry, and what this slice found in its own files (S: a setting, F: an option, N: nothing).
 FOUND = {
     "claude-code": "SF", "gemini-cli": "SF", "codex": "SF", "github-models": "N", "pr-agent": "N",
-    "coderabbit": "N", "openhands": "SF", "opencode": "N", "cline": "F", "aider": "N", "copilot-cli": "F",
-    "qodo": "N", "claude-code-security-review": "N", "auggie": "N", "continue": "N", "jules": "N",
+    "coderabbit": "N", "openhands": "SF", "opencode": "F", "cline": "F", "aider": "N", "copilot-cli": "F",
+    "qodo": "N", "claude-code-security-review": "N", "auggie": "N", "continue": "F", "jules": "N",
     "goose": "F", "kilo": "F", "kiro": "N", "qwen-code": "SF", "swe-agent": "N", "warp": "N", "amp": "N",
 }
 
@@ -92,7 +92,11 @@ class TheDataTest(unittest.TestCase):
         self.assertEqual(problems(no_warnings="Read README.md at abc1234; nothing warns."), [])
         self.assertEqual(problems(flags=[flag]), [])
         self.assertEqual(problems(flags=[dict(flag, prefixes=True)]), [])
+        self.assertEqual(problems(flags=[flag], shared_program="Another tool is also `t`."), [])
         for entry, why in [
+            ({"flags": [flag], "no_warnings": "nothing"}, "must not also say no_warnings"),
+            ({"flags": [flag], "shared_program": ""}, "shared_program must name"),
+            ({"flags": [flag], "shared_program": "x", "commands": []}, "shared_program needs commands"),
             ({}, "must say in no_warnings"),
             ({"no_warnings": ""}, "no_warnings must say"),
             ({"no_warnings": "   "}, "no_warnings must say"),
@@ -127,6 +131,9 @@ class SettingsTest(unittest.TestCase):
         (PR_REVIEW, "          enable-uv-cache: true\n", "openhands/uv-cache", "medium"),
         (PR_REVIEW, "          enable-uv-cache: auto\n", "openhands/uv-cache", "medium"),
         (PR_REVIEW, "          ENABLE-UV-CACHE: ' Auto '\n", "openhands/uv-cache", "medium"),
+        # Both actions read the input through `fromJSON`: a JSON string is what it decodes to (the review).
+        (GEMINI, "          gemini_debug: '\"true\"'\n", "gemini-cli/debug", "medium"),
+        (QWEN, "          qwen_debug: '\"tr\\u0075e\"'\n", "qwen-code/debug", "medium"),
     ]
 
     def test_each_documented_setting_is_reported_with_its_words(self):
@@ -141,6 +148,8 @@ class SettingsTest(unittest.TestCase):
 
     def test_the_default_and_the_safe_values_are_not_reported(self):
         for uses, inputs in [
+            (GEMINI, "          gemini_debug: '\"false\"'\n"),
+            (PR_REVIEW, "          enable-uv-cache: '\"true\"'\n"),      # setup-uv compares the raw text
             (GEMINI, "          gemini_debug: false\n"),
             (GEMINI, "          gemini_model: gemini-2.5-pro\n"),
             (QWEN, "          qwen_debug: false\n"),
@@ -185,12 +194,28 @@ class CommandLineTest(unittest.TestCase):
         ('copilot -p "fix the tests" --allow-all', "copilot-cli/allow-all", "high"),
         ('copilot --yolo -p "fix the tests"', "copilot-cli/allow-all", "high"),
         ("goose serve --dangerously-unauthenticated", "goose/unauthenticated", "medium"),
-        ('openhands --headless --always-approve -t "fix"', "openhands/always-approve", "high"),
-        ('openhands --headless --yolo -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --always-approve -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --yolo -t "fix"', "openhands/always-approve", "high"),
         # Python's argparse takes any beginning of a long option that is not ambiguous.
-        ('openhands --headless --always -t "fix"', "openhands/always-approve", "high"),
-        ('openhands --headless --yol -t "fix"', "openhands/always-approve", "high"),
-        ('openhands --headless --ALWAYS-APP -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --always -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --yol -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --ALWAYS-APP -t "fix"', "openhands/always-approve", "high"),
+        ('openhands --headless -t "fix"', "openhands/headless", "high"),
+        ('openhands --head -t "fix"', "openhands/headless", "high"),
+        ('uvx openhands@latest --headless -t "fix"', "openhands/headless", "high"),
+        ('uv tool run --python 3.12 openhands==1.2.0 --head -t "fix"', "openhands/headless", "high"),
+        ('qwen -dy=true -p hi', "qwen-code/yolo", "high"),       # yargs: `y` takes the value
+        ('qwen --insecure -p "fix"', "qwen-code/insecure", "medium"),
+        ('cline --zen "fix"', "cline/yolo", "high"),
+        ('cline -z "fix"', "cline/yolo", "high"),
+        ('cline --auto-approve true "fix"', "cline/auto-approve-true", "high"),
+        ('cline --auto-approve=TRUE "fix"', "cline/auto-approve-true", "high"),
+        ('copilot mcp add foo --show-secrets -- npx foo', "copilot-cli/show-secrets", "medium"),
+        ('copilot -p "fix" --trust-folder', "copilot-cli/trust-folder", "medium"),
+        ('copilot -p "fix" --share-gist', "copilot-cli/share-gist", "medium"),
+        ('cn -p "fix" --auto', "continue/auto", "medium"),
+        ("opencode serve --hostname 0.0.0.0", "opencode/hostname-any", "medium"),
+        ("opencode web --hostname=0.0.0.0", "opencode/hostname-any", "medium"),
     ]
 
     def test_each_documented_option_is_reported_once_with_its_words(self):
@@ -208,16 +233,17 @@ class CommandLineTest(unittest.TestCase):
             'qwen -p "fix it" --approval-mode auto',       # the CLI's default (config.ts, line 2009)
             'qwen -p "fix it" --approval-mode auto-edit',
             'qwen -p "fix it" --yolo=false',
+            'qwen -dy=false -p hi',
+            'cline --auto-approve false "fix"',
+            'opencode serve --hostname 127.0.0.1',
             'opencode run --auto "fix"',                    # described, not warned about (F-267)
             'opencode run --dangerously-skip-permissions "fix"',
-            'cn -p "fix" --auto',
             'aider --yes-always --message "fix"',
             'cline --auto-approve false "fix"',
             'copilot -p "fix" --allow-all-paths',
             'copilot -p "fix" --allow-all-urls',
-            'openhands --headless --llm-approve -t "fix"',
-            'openhands --headless -t "fix"',              # always approves; no option says so
-            'openhands --headless --exit-without-confirmation -t "fix"',
+            'openhands --llm-approve -t "fix"',
+            'openhands --exit-without-confirmation -t "fix"',
             'kilo run --au "fix"',                          # yargs takes no beginnings of options
             'goose run --no-session -t "fix"',
             'sweagent run --agent.model.name=x',
@@ -228,10 +254,21 @@ class CommandLineTest(unittest.TestCase):
             with self.subTest(script=script):
                 self.assertEqual(found(check(run_step(script))), [])
 
+    def test_a_name_another_well_known_program_shares_is_cannot_tell_only_beside_the_tools_command(self):
+        # AWS's Copilot CLI and pressly's goose (found by the review): no finding where the step does not run
+        # the agent's own command; "cannot tell" where it does.
+        for script in ['copilot svc deploy --name api --env ${{ inputs.env }}', 'copilot deploy --app "$APP" --env $ENV',
+                       'goose -dir ./migrations postgres ${{ secrets.DATABASE_URL }} up', 'goose postgres $DB up']:
+            with self.subTest(script=script):
+                self.assertEqual(found(check(run_step(script))), [])
+        for script in ['copilot -p "fix" $FLAGS', 'goose run -t "fix" $FLAGS']:
+            with self.subTest(script=script):
+                self.assertEqual({(h.kind, h.severity) for h in found(check(run_step(script)))},
+                                 {("command-computed", "medium")})
+
     def test_what_the_checker_cannot_read_is_cannot_tell_for_the_new_tools(self):
         for script in ['qwen -p "fix" $FLAGS', 'kilo run $FLAGS "fix"', 'cline $FLAGS "fix"',
-                       'copilot -p "fix" $FLAGS', 'openhands --headless "--al$X" -t "fix"',
-                       'goose serve $FLAGS']:
+                       'openhands "--al$X" -t "fix"', 'cn -p "fix" $FLAGS', 'opencode serve --hostname $H']:
             with self.subTest(script=script):
                 hits = found(check(run_step(script)))
                 self.assertTrue(hits, script)
