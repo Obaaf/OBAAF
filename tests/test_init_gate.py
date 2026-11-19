@@ -1,4 +1,6 @@
 import contextlib
+from importlib.resources import files
+from itertools import combinations
 from io import StringIO
 import json
 import os
@@ -135,6 +137,52 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn("Applied the displayed gate change", text)
         self.assertTrue(self.workflow.read_bytes().endswith(tail))
+
+    def test_gate_changes_after_a_setup_pin_rotation(self):
+        from obaaf.fix_gate import ORIGINAL_SETUP
+        from obaaf.init_scanners import SCANNERS
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"c" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        legacy = (Path(__file__).parent / "fixtures/init/report-only-3.3.yaml").read_bytes()
+        path = self.root / "policy files" / "accepted.json"
+        path.parent.mkdir()
+        path.write_text('{"format":"obaaf-baseline/v0.2","findings":[]}')
+        old_gate = historical.replace(b"/.github/obaaf-baseline.json\n", b"/policy files/accepted.json\n").replace(
+            b'obaaf check source "${config[@]}" --fail-on never', b"gate_check 'policy files/accepted.json' --fail-on high")
+        expected = old_gate.replace(b"--fail-on high", b"--fail-on medium")
+        with patch("obaaf.fix_gate.files", return_value=future):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    tail = steps(names)
+                    for label, report in (("current report", historical), ("legacy report", legacy),
+                                          ("previous gate", old_gate)):
+                        with self.subTest(scanners=names, workflow=label):
+                            self.workflow.write_bytes(report + tail)
+                            commit(self.root)
+                            code, text = self.gate("--baseline", path, "--apply")
+                            self.assertEqual(code, 0, text)
+                            self.assertIn("Applied the displayed gate change", text)
+                            self.assertEqual(self.workflow.read_bytes(), expected + tail)
+                            self.assertIn("already gates", self.gate("--baseline", path)[1])
+            self.workflow.write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+            commit(self.root)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertEqual(self.workflow.read_bytes(), expected.replace(ORIGINAL_SETUP, next_setup))
+
+            custom = historical.replace(ORIGINAL_SETUP, b"uses: team/custom-checker@v1")
+            self.workflow.write_bytes(custom)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertIn("by hand", text)
+            self.assertEqual(self.workflow.read_bytes(), custom)
 
     @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
     def test_actual_ci_script_reads_only_the_target_policy_on_pr(self):

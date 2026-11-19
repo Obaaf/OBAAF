@@ -80,6 +80,10 @@ Choose `low`, `medium`, or `high`. The proof checks the current repository with 
 
 On a pull request, the checker uses baseline and configuration data from the exact target commit. If the baseline exists only on the PR branch, that run has zero baseline acceptances. On pushes, the checker uses the pushed repository’s own policy. A policy read failure stops the job. The preview can upgrade an earlier, unedited init workflow and preserves the generated companion steps. For a custom workflow it prints the threshold and target-branch policy instructions for a manual edit. Apply requires a clean tracked workflow.
 
+Enabling a gate or changing its threshold keeps the workflow’s checker commit. For a gate-capable generated workflow, take the exact commit from the new init preview and update the `Obaaf/OBAAF/actions/setup-obaaf@` line in a separate reviewed change. Keep the existing baseline path, threshold, target-branch policy steps and companion checks.
+
+For the original report-only workflow that predates gate support, run init with the same companion options and review the complete proposed workflow. Adopt that whole workflow to continue reporting and keep automatic gate activation available. A team ready to block can first enable the gate with its existing checker, then update the pin. Verify the resulting report or gate on a push and a pull request before merging.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |
