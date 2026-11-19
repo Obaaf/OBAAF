@@ -101,8 +101,9 @@ class TemplatesAreCleanTest(unittest.TestCase):
         self.assertEqual(rules, {"OBAAF-GHA-023"})
 
     def test_this_repositorys_own_workflows_pass(self):
-        result = checker.check(ROOT)
-        self.assertEqual([(f.rule, f.path) for f in result.active() if f.severity in ("high", "medium")], [])
+        code, out, err = run_cli("check", ROOT, "--baseline", ROOT / ".github/obaaf-baseline.json",
+                                 "--fail-on", "medium")
+        self.assertEqual(code, 0, err or out)
 
 
 SHA = "1" * 40
