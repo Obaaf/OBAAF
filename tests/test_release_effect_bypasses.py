@@ -14,6 +14,7 @@ import unittest
 from helpers import TempDir
 
 from obaaf import checker
+from obaaf.checker import baseline
 
 SHA = "1111111111111111111111111111111111111111"
 
@@ -674,11 +675,15 @@ class TemplatesStayCleanTest(unittest.TestCase):
         rules = {"OBAAF-GHA-006", "OBAAF-GHA-007", "OBAAF-GHA-014", "OBAAF-GHA-016", "OBAAF-GHA-017",
                  "OBAAF-GHA-021", "OBAAF-GHA-022"}
         for target in (root, root / "templates" / "github-actions" / "workflows"):
-            found = [(f.rule, f.path, f.state) for f in checker.check(target).findings
+            result = checker.check(target)
+            if target == root:
+                baseline.apply(result, baseline.load(root / ".github/obaaf-baseline.json"))
+                self.assertEqual(result.baseline_stale, [])
+            found = [(f.rule, f.path, f.state) for f in result.findings
                      if f.rule in rules and f.severity in ("high", "medium")]
             # Since slice 2d.4b2 the release job's check follows setup-obaaf's steps, one of which puts its
             # virtual environment on the PATH, so OBAAF-GHA-016 cannot vouch for it: accepted in
-            # .github/obaaf.yml for Sean to confirm (plan item 64). Nothing else is.
+            # the exact baseline entry approved by Sean (plan item 64). Nothing else is.
             accepted = [("OBAAF-GHA-016", ".github/workflows/release-pypi.yml", "accepted")] if target == root else []
             self.assertEqual(found, accepted)
 
