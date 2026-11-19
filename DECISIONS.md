@@ -103,6 +103,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
+| D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
 
 ---
 
@@ -907,3 +908,15 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A2b will call this proof for its paperwork preview. The preview lists each refused candidate under “Could not be made automatically”, together with the proof's single-line reason. It offers only candidates that pass. A proof needs working directory-descriptor and no-follow support and a writable temporary directory outside Git working trees and the source. The first implementation declines external check inputs, external or absolute links, nested repositories and filesystems, submodules, hard-linked files, special files and a Git index whose instruction list differs from the private copy. It edits existing regular files. A malformed document, unexpected file change, failed check read, missing CI input, changed source bytes, or difference between the original and unedited-copy results also withholds the candidate. For Git working trees, an advisory about folder pruning may appear only on the private copy. The proof checks that the actual CI and Jenkins files, Jenkins coverage and all other notes agree. It declines edits that change Jenkins file selection.
 
 **Status.** Proposed, 2026-11-19 (slice A2a, #261).
+
+### D-104 What a saved settings snapshot establishes
+
+**Decision.** The approved adoption design sets a 30-day lifetime. Measure elapsed UTC time from the audit producer’s `taken_at`. Exactly 30 days is eligible. A future timestamp or an older observation supplies no proof. Read a snapshot only from an explicit `--settings FILE`, with the audit command’s existing strict format reader. Match the observed GitHub API host and repository to the checked clone’s github.com origin. An unestablished or different identity leaves the result uncertain.
+
+An assessment concerns a literal secret and its required literal environment. Require a complete environment list and complete secret-name inventories for all environments, the repository, and the organisation. A recorded observation that the owner is a user can establish that organisation secrets do not apply. An unread or partial setting carries its recorded reason forward. A matching name must appear only in the required environment. For selected branches, all allowed names must be literal branches read as protected. For the protected-branches-only setting, require an observed classic branch protection rule, because the absence of rules permits all branches. See [GitHub deployment branches and tags](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags).
+
+**Consequence.** The explicit evidence path in the repository requires a code owner. A single-file scan, a lane listing, or an external snapshot cannot verify the evidence because the repository ownership check does not cover the snapshot in those cases. The optional CI template setting reads a pull request’s snapshot from its target commit. This slice reports the assessment separately and leaves finding verdicts to A4b.
+
+**Evidence.** `tests/test_settings_evidence.py` exercises the audit producer with recorded responses and tests timestamp boundaries, identity, exclusivity, branch policies, partial reads and the public CLI. `TheTemplateStepTest.test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin` exercises the selected snapshot and checker support in the template.
+
+**Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.

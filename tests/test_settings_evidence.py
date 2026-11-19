@@ -1,0 +1,150 @@
+"""Offline settings evidence, using the existing audit producer and its benign replay fixture."""
+import copy
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from helpers import run_cli
+from obaaf.audit import snapshot
+from obaaf.settings_evidence import SettingsEvidence
+from test_settings_audit import recording, take
+
+
+class EvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.recorded, _ = take(recording("admin-token"), token="dummy")
+        cls.when = datetime(2026, 11, 12, 1, tzinfo=timezone.utc)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.path = self.root / "policy/settings.json"
+        self.data = copy.deepcopy(self.recorded)
+        self.settings = self.data["settings"]
+        self.env = self.settings["environments"]["value"][1]
+        self.env["branch_policies"] = [{"type": "branch", "name": "main"}]
+
+    def read(self, *, now=None, repository="example-studio/game"):
+        snapshot.write(self.data, self.path)
+        return SettingsEvidence.load(self.path, repository, now or self.when)
+
+    def result(self):
+        return self.read().assess("PACKAGE_INDEX_TOKEN", "release")
+
+    def test_complete_observations_and_protected_only_mode(self):
+        self.assertEqual(self.result().verdict, "verified")
+        self.env["deployment_branches"] = "protected"
+        self.env.pop("branch_policies")
+        self.assertEqual(self.result().verdict, "cannot tell")
+        fixture = Path(__file__).parent / "fixtures/settings/classic-before-2b6/snapshot.json"
+        self.settings["branch_protection"] = json.loads(fixture.read_text())["settings"]["branch_protection"]
+        self.assertEqual(self.result().verdict, "verified")
+
+    def test_timestamp_boundary_future_identity_and_invalid_date(self):
+        for age, verdict in [(timedelta(days=30), "verified"), (timedelta(days=30, seconds=1), "cannot tell"),
+                             (timedelta(seconds=-1), "cannot tell")]:
+            with self.subTest(age=age):
+                e = self.read(now=self.when + age)
+                self.assertEqual(e.taken_at, "2026-11-12T01:00:00Z")
+                self.assertEqual(e.assess("PACKAGE_INDEX_TOKEN", "release").verdict, verdict)
+        for identity in (None, "other/repo"):
+            self.assertTrue(self.read(repository=identity).limitations)
+        self.data["taken_at"] = "2026-02-31T01:00:00Z"
+        with self.assertRaisesRegex(snapshot.SnapshotError, "valid UTC"):
+            self.read()
+
+    def test_unread_partial_and_absent_inventory_remain_unknown(self):
+        for key in ("environments", "environment_secrets", "repository_secrets", "organization_secrets", "branches"):
+            with self.subTest(key=key):
+                old = self.settings[key]
+                self.settings[key] = {"status": "unread", "reason_code": "forbidden", "reason": "read refused",
+                                      "needs": "read"}
+                result = self.result()
+                self.assertEqual(result.verdict, "cannot tell")
+                self.assertIn("read refused", result.reason)
+                self.settings[key] = old
+        self.settings["environment_secrets"].update(status="partial", needs="read", problems=[
+            {"key": "main-only", "what": "environment", "reason_code": "forbidden", "reason": "scope unavailable"}])
+        self.assertIn("scope unavailable", self.result().reason)
+        self.settings["environment_secrets"] = {"status": "read", "value": {"release": ["PACKAGE_INDEX_TOKEN"]}}
+        self.assertIn("inventories disagree", self.result().reason)
+
+    def test_evidence_of_another_copy_or_an_unprotected_branch(self):
+        for key in ("repository_secrets", "organization_secrets"):
+            self.settings[key]["value"].append("package_index_token")
+            self.assertEqual(self.result().verdict, "not met")
+            self.settings[key]["value"].pop()
+        self.settings["environment_secrets"]["value"]["main-only"].append("PACKAGE_INDEX_TOKEN")
+        self.assertEqual(self.result().verdict, "not met")
+        self.settings["environment_secrets"]["value"]["main-only"].pop()
+        self.settings["branches"]["value"]["main"]["protected"] = False
+        self.assertEqual(self.result().verdict, "not met")
+        self.env["branch_policies"][0]["name"] = "release-*"
+        self.assertEqual(self.result().verdict, "cannot tell")
+        self.env["branch_policies"][0]["type"] = "tag"
+        self.assertEqual(self.result().verdict, "not met")
+
+    def test_personal_repository_requires_observed_owner_type(self):
+        self.settings["organization_secrets"] = {"status": "not_applicable", "reason": "personal repository"}
+        self.assertEqual(self.result().verdict, "cannot tell")
+        self.settings["repository"]["value"]["owner_type"] = "User"
+        self.assertEqual(self.result().verdict, "verified")
+
+    def test_normal_cli_reads_only_selected_file_and_checks_ownership(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
+                        "https://github.com/example-studio/game.git"], check=True)
+        folder = self.root / ".github"
+        (folder / "workflows").mkdir(parents=True)
+        (folder / "workflows/ci.yml").write_text("""on: workflow_dispatch
+permissions: {contents: read}
+jobs:
+  assistant:
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      API_KEY: ${{ secrets.PACKAGE_INDEX_TOKEN }}
+    steps:
+      - uses: openai/codex-action@1111111111111111111111111111111111111111
+""")
+        (folder / "CODEOWNERS").write_text("/.github/ @example/build\n")
+        (folder / "obaaf.yml").write_text("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
+        self.data["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        snapshot.write(self.data, self.path)
+        args = ("check", str(self.root), "--format", "json", "--fail-on", "never")
+        status, out, err = run_cli(*args)
+        self.assertEqual(status, 0, err)
+        self.assertNotIn("Settings snapshot", err)
+        before = json.loads(out)["findings"]
+        self.assertTrue(any(f["rule"] == "OBAAF-GHA-005" for f in before))
+        status, out, err = run_cli(*args, "--settings", str(self.path))
+        self.assertEqual(status, 0, err)
+        self.assertIn(self.data["taken_at"], err)
+        self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+        found = json.loads(out)["findings"]
+        self.assertTrue(any(f["rule"] == "OBAAF-REPO-001" and "policy/settings.json" in str(f) for f in found))
+        self.assertEqual([f for f in found if f["rule"] != "OBAAF-REPO-001"], before)
+        workflow = folder / "workflows/ci.yml"
+        partials = [(str(workflow), "--config", str(folder / "obaaf.yml")), (str(self.root), "--lanes")]
+        for partial in partials:
+            with self.subTest(partial=partial):
+                status, _, err = run_cli("check", *partial, "--settings", str(self.path), "--fail-on", "never")
+                self.assertEqual(status, 0, err)
+                self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
+                self.assertIn("does not check snapshot code ownership", err)
+                self.assertNotIn("PACKAGE_INDEX_TOKEN: verified", err)
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "settings.json"
+            snapshot.write(self.data, outside)
+            status, _, err = run_cli(*args, "--settings", str(outside))
+            self.assertEqual(status, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
+            self.assertIn("outside the checked repository", err)
+        self.path.write_text("{}")
+        self.assertEqual(run_cli(*args)[0], 0)
+        self.assertEqual(run_cli(*args, "--settings", str(self.path))[0], 2)
