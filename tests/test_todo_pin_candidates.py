@@ -91,3 +91,32 @@ class PinCandidateTest(unittest.TestCase):
             with self.subTest(runs_on=runs_on, shell=shell):
                 finding, = findings(check(workflow))
                 self.assertEqual(finding.pin_candidate, expected)
+
+    def test_an_aliased_list_of_steps_is_manual(self):
+        workflow = ("on: push\njobs:\n"
+                    "  a:\n    runs-on: ubuntu-latest\n    env: {OBAAF_LANE: agent}\n"
+                    "    steps: &l\n      - run: npm install -g @anthropic-ai/claude-code\n"
+                    "  b:\n    runs-on: ubuntu-latest\n    env: {OBAAF_LANE: agent}\n    steps: *l\n")
+        found = findings(check(workflow))
+        self.assertEqual(sorted(f.job for f in found), ["a", "b"])
+        self.assertTrue(all(f.pin_candidate is None for f in found))
+
+
+class SharedValueLoaderTest(unittest.TestCase):
+    def test_a_recursive_alias_is_refused_at_once(self):
+        # Marking stops at a node already marked; without that, this document would never finish
+        # composing. Run in a child process so a hang fails the test instead of the suite.
+        import subprocess
+        import sys
+        code = ("from obaaf import yamlutil\n"
+                "try:\n    yamlutil.load('a: &a [*a]\\nb: *a\\n')\n"
+                "except Exception as exc:\n    print(type(exc).__name__)\n")
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.stdout.strip(), "ConstructorError", done.stderr)
+
+    def test_shared_keys_name_only_values_reached_from_more_than_one_place(self):
+        from obaaf import yamlutil
+        data = yamlutil.load("a: {run: &r x, other: y}\nb: {run: *r}\nc: {run: x}\n")
+        self.assertEqual((data["a"].shared_keys, data["b"].shared_keys, data["c"].shared_keys),
+                         ({"run"}, {"run"}, set()))
+        self.assertEqual(data["a"]["run"], "x")
