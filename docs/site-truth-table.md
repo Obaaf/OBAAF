@@ -25,6 +25,14 @@ The inventory covers homepage metadata, prose, diagram labels, all four JavaScri
 
 Found in review, not changed in the rows: some rows cite a heading or a signature rather than the supporting sentence (C042's "never runs the model" is at line 6 of the apply template; C093 is better cited at `docs/openssf-submission.md:3`); R06 and M02 have no command or output recorded; a few code blocks show raw session paths although the commands section says paths are shown as `$WORK`/`$CASE`; C083 and C106 are the project describing its own offering and need not be cut.
 
+## Public copy checked on 2026-11-19
+
+Reviewed the local site from `80db1e6` with the copy changes recorded here. The quickstart keeps its recorded 0.3.0 output. The development checker (0.4.0.dev0) was run on the two workflow files printed on both pages. With `--fail-on low`, the tag example exited 1 with one low OBAAF-GHA-008 finding, and the commit-pinned example exited 0 with no findings. The comparison identifies one *documented* adopter (C008). The rules page distinguishes a network restriction the checker can verify from a finding about missing evidence and describes development-only OBAAF-GHA-025 for unpinned CLI installs, runs and updates.
+
+The three predicate pages now attribute signing to configured GitHub reference jobs (C118). The agent-run page identifies the separate trusted job as part of that workflow (C115). The approval page describes the independent-reviewer check on the supplied approvals (C116). The build-record page names the fields with reporter labels (C132). The versioned schemas retain their published contents. The assessment labels effort as a catalogue estimate (C125). The reference incident table and the provenance guide identify case mappings under the papers' assumptions (C123–C124).
+
+The local site build validated internal links. The site-claims, assessment and predicate-namespace tests passed. This check did not publish the site, rerun the historical 0.3.0 measurement or perform hosted signing.
+
 ## 1. Current claims
 
 | ID | Current assertion | Placement | Verdict | Evidence | Publication decision |

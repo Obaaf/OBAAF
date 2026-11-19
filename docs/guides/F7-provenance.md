@@ -23,7 +23,7 @@ Both are signed through GitHub's Sigstore with the workflow's identity, using a 
 <a id="item-3-2"></a>
 ## Item 3.2: Automatic provenance check before upload
 
-**Why.** Provenance that nobody checks protects nobody. A check in a separate step before upload flags files the release lane did not build. In the APT41 and PipeMon cases, such a check would have flagged files that did not come from the release lane (Paper 2, Table 7).
+**Why.** Provenance that nobody checks protects nobody. A check in a separate step before upload flags files the release lane did not build. Paper 2, Table 7 maps APT41 and PipeMon to provenance verification under its stated assumptions.
 
 **Do this.**
 

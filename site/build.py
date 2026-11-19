@@ -54,11 +54,18 @@ def validate(output):
 # schema's $id resolves to the schema file itself.
 FORMATS = {
     "agent-run": ("Agent-run record", "The files of the proposal bundle",
-                  "obaaf attest agent-run", "The agent lane's attest job"),
+                  "obaaf attest agent-run", "the agent lane's attest job",
+                  "In the reference workflow a separate trusted job constructs the record and treats "
+                  "the agent's trace as untrusted."),
     "agent-approval": ("Approval record", "The files of the proposal bundle",
-                       "obaaf attest approval", "The effect lane's approve job"),
+                       "obaaf attest approval", "the effect lane's approve job",
+                       "Records who approved applying the proposal. In the reference workflow "
+                       "`obaaf attest approval` checks the supplied approvals for a reviewer outside "
+                       "the requester list before writing the record."),
     "build-record": ("Build record", "The release artifacts",
-                     "obaaf attest build-record", "The release lane's attest job"),
+                     "obaaf attest build-record", "the release lane's attest job",
+                     "Records how a release artifact was built. The source, assets, manifest, SDK "
+                     "entries and isolation fields identify their reporters."),
 }
 DOCS = "https://github.com/Obaaf/OBAAF/blob/main/docs/attestations.md"
 
@@ -92,7 +99,7 @@ def _page(title, canonical, depth, body):
 
 def write_formats(output):
     """Publish a page per predicate type and build type, and the schemas at their $id."""
-    for name, (label, subjects, command, signer) in FORMATS.items():
+    for name, (label, subjects, command, signer, description) in FORMATS.items():
         uri = predicates.OBAAF_TYPES[name]
         schema_rel = predicates.SCHEMA_FOR_TYPE[uri]
         schema_text = data_text(schema_rel)
@@ -109,10 +116,10 @@ def write_formats(output):
         schema_link = "../" * depth + schema_path.relative_to(output).as_posix()
         body = f"""<div class="section-label">IN-TOTO PREDICATE TYPE</div>
 <h2>{label}, version 0.1</h2>
-<p class="large">{_inline(schema['description'])}</p>
+<p class="large">{_inline(description)}</p>
 <p><strong>Type URI.</strong> <code>{uri}</code></p>
 <p><strong>Subjects.</strong> {subjects}, each identified by its SHA-256 digest.</p>
-<p><strong>Written by.</strong> <code>{command}</code>. <strong>Signed by.</strong> {signer}, through GitHub's Sigstore with the signing workflow's identity.</p>
+<p><strong>Written by.</strong> <code>{command}</code>. The command writes an unsigned predicate. In the configured GitHub reference workflow, {signer} signs through GitHub's Sigstore using the workflow identity.</p>
 <p><strong>JSON Schema.</strong> <a href="{schema_link}">{schema_id}</a></p>
 <p><strong>Documentation.</strong> <a href="{DOCS}">Records and attestation formats</a></p>
 <p class="caption">Version 0.1 may change before OBAAF 1.0. A changed format gets a new version and a new URI; this page and its schema stay as published.</p>"""
