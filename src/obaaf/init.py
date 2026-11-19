@@ -14,7 +14,7 @@ from tempfile import NamedTemporaryFile
 
 import yaml
 
-from obaaf import agent_tools, checker
+from obaaf import agent_tools, checker, init_scanners
 from obaaf.catalog import load
 from obaaf.checker import CONFIG_LOCATIONS
 from obaaf.checker.egress import MODEL_KEYS
@@ -39,7 +39,7 @@ def _read(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
-def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
+def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[str]]:
     folder = root / ".github/workflows"
     catalog = load()
     config = checker.Config()
@@ -106,7 +106,7 @@ def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
         notes.append("To create an agent workflow, start with GitHub Agentic Workflows: https://github.github.com/gh-aw/")
     config = yaml.safe_dump({"lanes": lanes, "protected_secrets": protected}, sort_keys=False)
     workflow_bytes = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
-    return {CONFIG_LOCATIONS[0]: config.encode("utf-8"), WORKFLOW: workflow_bytes}, notes
+    return {CONFIG_LOCATIONS[0]: config.encode("utf-8"), WORKFLOW: workflow_bytes + init_scanners.steps(scanners)}, notes
 
 
 def _install(root: Path, missing: dict[str, bytes]) -> None:
@@ -150,7 +150,10 @@ def run(args) -> int:
         for folder in (root / ".github", root / ".github/workflows"):
             if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
                 raise ValueError(f"{folder} must be a directory inside the repository")
-        proposal, notes = _proposal(root)
+        proposal, notes = _proposal(root, args.with_scanner)
+        if not args.with_scanner:
+            print("Optional companion checks: add --with-scanner zizmor, --with-scanner actionlint, "
+                  "or --with-scanner poutine to the same init command.")
         for note in notes:
             print(one_line(note))
         missing = {}

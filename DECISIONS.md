@@ -103,6 +103,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-100 | How init chooses candidate agent jobs and secret environments, and handles existing configuration | Proposed |
+| D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 
 ---
 
@@ -909,3 +910,13 @@ If another supported configuration name already exists, init shows any differenc
 **Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
 
 **Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
+### D-101 Companion checks in the first workflow
+
+**Decision.** With `obaaf init --with-scanner NAME` the user can select zizmor, actionlint or poutine, repeating the option for multiple tools. Selection order does not affect the preview. There are no companion steps by default. The existing conflict check applies if the repository already has a different workflow.
+
+**Reason.** Teams can start with one report and add the tools whose checks they want. Pinning the Linux image manifests makes the selected tools identifiable. Reading the checkout with a read-only mount and container networking disabled keeps the scans local after the runner fetches the images.
+
+**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
+
+**Status.** Proposed, 2026-11-19 (3.3b, #84).
