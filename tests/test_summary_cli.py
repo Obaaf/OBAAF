@@ -16,8 +16,12 @@ class SummaryCliTest(unittest.TestCase):
                 code, full, err = run_cli(*args)
                 short_code, short, short_err = run_cli(*args, "--summary")
                 self.assertEqual((code, short_code, short_err), (expected, expected, err))
-                self.assertTrue(short.startswith("What to do next:"))
-                self.assertTrue(full.endswith(short + f"Checked by obaaf {__version__}.\n"))
+                # The summary opens as the full report does, with the accepted risk (D-043), and its list
+                # is the full report's list, word for word.
+                self.assertTrue(short.startswith("Accepted risk: none."), short)
+                self.assertTrue(full.startswith(short.splitlines()[0]))
+                todo = short[short.index("What to do next:"):]
+                self.assertTrue(full.endswith(todo + f"Checked by obaaf {__version__}.\n"))
                 command, = [line for line in short.splitlines() if "--write-baseline=" in line]
                 words = shlex.split(command)
                 self.assertEqual(words[:4], ["obaaf", "check", str(target), "--platform=github"])
@@ -59,3 +63,77 @@ class SummaryCliTest(unittest.TestCase):
             self.assertEqual(code, full_code, err)
             self.assertIn("15 unknown", full)
             self.assertIn("15 unknown rule results across 1 Jenkinsfile", summary)
+
+    def test_summary_shows_accepted_risk_expiry_and_an_old_baseline(self):
+        import json
+        from datetime import date, timedelta
+
+        target = RISKY / "pwn-request.yml"
+        with TempDir() as root:
+            baseline = root / "b.json"
+            soon = (date.today() + timedelta(days=2)).isoformat()
+            code, _, err = run_cli("check", target, "--platform", "github", "--write-baseline", baseline,
+                                   "--owner", "@someone", "--reason", "accepted for this test", "--expires", soon,
+                                   "--fail-on", "never")
+            self.assertEqual(0, code, err)
+            args = ("check", target, "--platform", "github", "--baseline", baseline, "--fail-on", "high")
+            full_code, full, _ = run_cli(*args)
+            code, short, _ = run_cli(*args, "--summary")
+            self.assertEqual(full_code, code)
+            self.assertIn("Accepted risk: 5 finding(s) are accepted", short)
+            self.assertIn("Expiring soon: 5 acceptance(s)", short)
+            code, quiet, _ = run_cli(*args, "--summary", "--expiry-warning", "0")
+            self.assertNotIn("Expiring soon", quiet)
+        # An old-format baseline accepts nothing, and the summary says so (the fixture of the lifecycle tests).
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            args = ("check", repo, "--baseline", old, "--fail-on", "low", "--no-fixes")
+            full_code, full, _ = run_cli(*args)
+            code, short, _ = run_cli(*args, "--summary")
+            self.assertEqual((1, 1), (full_code, code))
+            self.assertIn("The baseline is in the old format (obaaf-baseline/v0.1)", short)
+
+    def test_the_lanes_command_stands_on_its_own_line_and_runs(self):
+        with TempDir() as root:
+            path = root / ".github" / "workflows" / "w.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text("on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n"
+                            "      OBAAF_LANE: agnet\n    steps:\n      - run: echo hi\n", encoding="utf-8")
+            code, short, err = run_cli("check", root, "--summary", "--fail-on", "low")
+            self.assertIn("the command below", short, short + err)
+            command, = [line.strip() for line in short.splitlines() if line.strip().startswith("obaaf check")
+                        and line.strip().endswith("--lanes")]
+            words = shlex.split(command)
+            self.assertEqual(["obaaf", "check", str(root)], words[:3])
+            lanes_code, lanes, lanes_err = run_cli(*words[1:])
+            self.assertEqual(0, lanes_code, lanes_err)
+            self.assertIn("w.yml#a", lanes)
+
+    def test_guards_in_the_list(self):
+        from datetime import date, timedelta
+
+        with TempDir() as root:
+            path = root / ".github/workflows/bad.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text("jobs: [", encoding="utf-8")
+            good = root / ".github/workflows/ok.yml"
+            good.write_text("on: pull_request_target\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                            "      - uses: actions/checkout@v4\n", encoding="utf-8")
+            full_code, full, _ = run_cli("check", root, "--fail-on", "never")
+            code, short, _ = run_cli("check", root, "--summary", "--fail-on", "never")
+            self.assertEqual(full_code, code)
+            self.assertNotEqual(0, code)
+            self.assertIn("The scan is incomplete", short)
+            self.assertNotIn("Optional bulk acceptance", short)
+            # A baseline with an entry that matches nothing: review it before writing a new one.
+            baseline = root / "b.json"
+            path.unlink()
+            run_cli("check", root, "--write-baseline", baseline, "--owner", "@someone", "--reason",
+                    "accepted for this test", "--expires", (date.today() + timedelta(days=30)).isoformat(),
+                    "--fail-on", "never")
+            good.write_text(good.read_text(encoding="utf-8").replace("@v4", "@" + "1" * 40), encoding="utf-8")
+            code, short, _ = run_cli("check", root, "--summary", "--baseline", baseline, "--fail-on", "never")
+            self.assertIn("Stale baseline entries:", short)
+            self.assertIn("Review stale entries before deciding whether to replace the baseline.", short)
