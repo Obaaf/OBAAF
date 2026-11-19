@@ -1003,7 +1003,9 @@ rules:
       `GITHUB_ENV`, `GITHUB_PATH` or outputs, `vars`, or a file), as the agent lane does not see it either;
       `python -m` and a repository script a step runs; `BASH_ENV`; a local Docker or JavaScript action; a
       warned mode a tool runs in by default, which no option names (Cline's one-shot runs, and
-      run-gemini-cli, gemini-cli-action and qwen-code-action, which run their CLI with `--yolo` themselves);
+      run-gemini-cli, gemini-cli-action and qwen-code-action, which run their CLI with `--yolo` themselves;
+      #265); a program's name given as an argument of a command that is not on the data list is read as
+      the program, so `ollama run qwen $PROMPT` or `--agent openhands $ARGS` is "cannot tell" (#264);
       options described in a tool's files with no sentence of warning (OpenCode's `--auto` and its hidden
       `--yolo` and `--dangerously-skip-permissions`, Aider's `--yes-always`, Qwen Code's `--approval-mode
       auto`, the CLI's default, and `auto-edit`, Copilot CLI's `--allow-all-paths` and `--allow-all-urls`

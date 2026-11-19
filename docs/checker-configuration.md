@@ -105,7 +105,8 @@ Two program names are shared with other well-known tools: AWS's Copilot CLI is a
 
 Not reported, and why:
 
-- A mode a tool runs in by default, which no option names: a one-shot `cline "prompt"` is in yolo mode unless given `--auto-approve false`, `--act` or `--plan`; `google-github-actions/run-gemini-cli`, `google-gemini/gemini-cli-action` and `QwenLM/qwen-code-action` run their CLI with `--yolo` themselves, whatever their inputs say.
+- A mode a tool runs in by default, which no option names: a one-shot `cline "prompt"` is in yolo mode unless given `--auto-approve false`, `--act` or `--plan`; `google-github-actions/run-gemini-cli`, `google-gemini/gemini-cli-action` and `QwenLM/qwen-code-action` run their CLI with `--yolo` themselves, whatever their inputs say (#265).
+- Not a gap but a cost: a program's name given as an argument of a command that is not on the data list is read as the program, so `ollama run qwen $PROMPT` or `python eval.py --agent openhands $ARGS` is "cannot tell" (#264).
 - Options a tool's own files describe with no sentence of warning (decision F-267): OpenCode's `--auto` and its hidden `--yolo` and `--dangerously-skip-permissions`; Aider's `--yes-always`; Qwen Code's `--approval-mode auto` (the CLI's default) and `auto-edit`; Copilot CLI's `--allow-all-paths` and `--allow-all-urls` alone.
 - Copilot CLI's other spellings (`--allowAllTools`, a beginning of an option): its parser is not in its public files.
 - GitHub Models' `actions/ai-inference` runs Copilot CLI itself with `--model` and `--allow-tool=` built from its inputs, which are not read as Copilot's options. `PR_AGENT_CONFIG_BRANCH`, PR-Agent's variable for its config branch, is not read.
