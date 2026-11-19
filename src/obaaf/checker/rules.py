@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -1824,6 +1825,14 @@ class WorkflowRules:
         for step in job.steps:
             if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
                 continue
+            written = step.raw.get("with")
+            if written is not None and not isinstance(written, dict):
+                # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review).
+                mine = [c for c in known if step.uses_action(c[2]["action"])]
+                if mine:
+                    self._agent_setting(job, step, written, mine, whole=True)
+                continue
             given = step.with_
             if not given:
                 continue
@@ -1836,30 +1845,40 @@ class WorkflowRules:
             for key, candidates in by_input.items():
                 self._agent_setting(job, step, given[key], candidates)
 
-    def _agent_setting(self, job: Job, step: Step, raw, candidates: list) -> None:
+    # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
+    # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
+    _TRIMMED = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
+
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False) -> None:
         action = (step.action or "").lower()
         tool_name = candidates[0][1]
-        input_shown = candidates[0][2]["input"]
+        input_shown = "with" if whole else candidates[0][2]["input"]
         if raw is None:
             return          # `input:` with nothing after it is an empty value, which no setting names
-        if isinstance(raw, bool):
+        if whole:
+            text = None
+        elif isinstance(raw, bool):
             text = "true" if raw else "false"
         elif isinstance(raw, (str, int, float)):
             text = as_text(raw)
         else:
             text = None
-        if text is None or "${{" in text:
+        core = text.strip(self._TRIMMED) if text is not None else None
+        # A control, format or separator character left inside the value (a NUL, which ends an environment
+        # variable, U+200B, a no-break space) can make the action read another value than the one written.
+        odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t" for ch in core)
+        if text is None or "${{" in text or odd:
             shown = one_line(text if text is not None else shown_value(raw), 120)
             worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
             severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
             self.add("OBAAF-GHA-026", step.line,
-                     "Step '{step}' of job '{job}' gives {action} the input `{input}` a value the checker cannot "
-                     "read ({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
+                     "Step '{step}' of job '{job}' gives {action} `{input}` a value the checker cannot read "
+                     "({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
                      "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
                      input=input_shown, value=Fact(text if text is not None else shown_value(raw), shown),
                      tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
             return
-        value = text.strip()
+        value = core
         folded = value.casefold()
         for tool, name, setting in candidates:
             if "equals" in setting:

@@ -155,6 +155,39 @@ class CannotTellTest(unittest.TestCase):
                 self.assertEqual([h.kind for h in hits], ["computed"])
 
 
+    def test_inputs_written_as_one_expression_are_cannot_tell(self):
+        # Found by 2d.5c1's review: GitHub evaluates `with:` into the inputs, which the checker cannot read.
+        for uses, settings in ((CODEX, ["codex/anyone", "codex/safety-read-only", "codex/safety-unsafe"]),
+                               (CLAUDE, ["claude-code/any-bot", "claude-code/full-output",
+                                         "claude-code/non-write-users", "claude-code/non-write-users-anyone"])):
+            for written in ("${{ fromJSON(vars.CFG) }}", "${{ matrix.w }}"):
+                with self.subTest(uses=uses, written=written):
+                    text = ("on: issue_comment\npermissions: {contents: read}\njobs:\n  a:\n"
+                            "    runs-on: ubuntu-latest\n    steps:\n      - uses: " + uses + "\n"
+                            "        with: " + written + "\n")
+                    hits = found(check(text))
+                    self.assertEqual([(h.kind, h.severity, h.facts["input"]) for h in hits],
+                                     [("computed", "medium", "with")])
+                    self.assertEqual(hits[0].facts["settings"], settings)
+
+    def test_a_character_an_action_may_read_otherwise_is_cannot_tell(self):
+        # JavaScript's trim takes off U+FEFF, which Python's strip does not; a NUL ends an environment
+        # variable; a no-break space or a zero-width space inside a value may be read otherwise.
+        for line, setting in (('allow-users: "\\ufeff*"', "codex/anyone"),
+                              ('allow-users: "*\\ufeff"', "codex/anyone")):
+            with self.subTest(line=line):
+                hits = found(check(one_step(CODEX, f"          {line}\n")))
+                self.assertEqual([(h.kind, h.facts.get("setting")) for h in hits], [("setting", setting)])
+        hits = found(check(one_step(CLAUDE, '          allowed_non_write_users: "\\ufeff*"\n')))
+        self.assertEqual([(h.facts["setting"], h.severity) for h in hits],
+                         [("claude-code/non-write-users-anyone", "high")])
+        for line in ('safety-strategy: "unsafe\\0"', 'safety-strategy: "un\\u200bsafe"',
+                     'safety-strategy: "un\\u00a0safe"', 'allow-users: "*\\0x"'):
+            with self.subTest(line=line):
+                hits = found(check(one_step(CODEX, f"          {line}\n")))
+                self.assertEqual([(h.kind, h.severity) for h in hits], [("computed", "medium")])
+
+
 class WhereStepsAreReadTest(unittest.TestCase):
 
     def test_yaml_anchors_and_aliases_are_read(self):
