@@ -140,7 +140,7 @@ button.primary:hover { background: #973b20; }
   <div class="masthead"><div class="brand"><svg aria-hidden="true" viewBox="0 0 32 36"><path d="M16 2 29 7v12c0 7-8 12-13 15C11 31 3 26 3 19V7Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="m9 18 5 5 9-11" fill="none" stroke="currentColor" stroke-width="2"/></svg>OBAAF</div><span class="edition">FIELD GUIDE / SELF-ASSESSMENT</span></div>
   <p class="eyebrow">34 QUESTIONS / FOUR TIERS / YOUR NEXT STEP</p>
   <h1>OBAAF Self-Assessment</h1>
-  <p class="lead">Thirty-four yes-or-no questions in four tiers for a software team without security staff. Answer each from the evidence named beside it. You reach a tier when every item at that tier and below is answered yes. A tier describes controls in place, not a guarantee of security.</p>
+  <p class="lead">Answer 34 questions using the evidence listed beside each one. Choose Yes, No or Not sure; each item starts at Not sure, which counts as No. Choose N/A only if the item offers it and its “N/A only if” statement is true for your team. You reach a tier when every item up to that tier is Yes or an allowed N/A. The tier reflects the answers you supplied; OBAAF does not verify that they are true.</p>
   <span class="privacy">Your answers stay in your browser</span>
   <p class="draft-note">{{DRAFT_NOTE}}</p>
 </header>
@@ -270,8 +270,8 @@ function update() {
     const li = el("li");
     li.append(el("strong", { text: `${item.id} ${item.short} ` }), el("span", { class: "effort", text: DATA.effort[item.effort].label }));
     const why = [];
-    if (item.prevents.length) why.push(`Would have prevented ${item.prevents.join(", ")}.`);
-    if (item.limits.length) why.push(`Detects or limits ${item.limits.join(", ")}.`);
+    if (item.prevents.length) why.push(`Cases mapped to prevention: ${item.prevents.join(", ")}.`);
+    if (item.limits.length) why.push(`Cases mapped to detection or containment: ${item.limits.join(", ")}.`);
     if (why.length) li.append(el("div", { class: "why", text: why.join(" ") }));
     const links = el("div", { class: "why" });
     item.fix.forEach((f, i) => {

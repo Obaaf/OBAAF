@@ -74,7 +74,7 @@ From Paper 1, section 8.4, and Paper 2, section 10:
 - **Endorsement failure.** A reviewer can approve a malicious proposal. Records make agent-authored changes identifiable so they can get extra scrutiny.
 - **Labeling errors.** Labels must match repository settings, such as who may comment.
 - **Compromise of the CI platform, the model provider or developer machines**, and publishers that ship malware on purpose.
-- **What a tier does not mean.** A tier describes controls in place, not a guarantee.
+- **What a tier does not mean.** A tier summarises the answers a team gave against the rubric. Nothing verifies that those answers are true, and a tier is not a guarantee.
 
 ## Repository layout
 
