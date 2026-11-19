@@ -829,3 +829,14 @@ When the tool detects a secret name but cannot establish its GitHub environment,
 **Consequence.** JSON gains a `todo` array. A changeable tool version is one cause with counts for pin candidates and manual fixes. An eligible literal install can be considered for a user-supplied pin. The later fix command must still prove the patch. Existing JSON fields, SARIF, gate results and acceptance identities are preserved.
 
 **Status.** Proposed, 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.
+
+
+### D-093 The text to-do list and the summary view
+
+**Decision.** Put the same action list just before the full text report’s version line and in `obaaf check --summary`. In the shorter view, retain scan errors and stale-entry warnings. The check uses the same exit status in either view. Reject a summary combined with a machine format, lane listing or baseline write before writing any file.
+
+**Reason.** A team can read its next actions without losing the reason a gate failed. Explicitly asking to write or accept findings is a separate operation.
+
+**Consequence.** The text report grows by one section. The summary uses the original inputs for suggested commands, with a count by severity before any suggestion to accept remaining risk. Existing machine formats keep the behavior of the preceding adoption slice.
+
+**Status.** Proposed, 2026-11-19 (A1c, #259).

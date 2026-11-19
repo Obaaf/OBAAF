@@ -2269,6 +2269,8 @@ class CheckResult:
     options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
     today: date | None = None                                # the day acceptances were judged against
 
+    fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
+
     @property
     def workflow_files(self) -> list[str]:
         return [f for f in self.files if f not in set(self.jenkins_files)]
