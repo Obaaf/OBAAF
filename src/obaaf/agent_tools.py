@@ -17,15 +17,23 @@ import re
 
 # Every key an entry may have, and the ones it must have.
 FIELDS = ("id", "name", "read", "sources", "actions", "commands", "programs", "prompt_flags", "packages",
-          "installs", "install_urls", "settings", "carried")
+          "installs", "install_urls", "settings", "flags", "carried")
 REQUIRED = ("id", "name", "read", "sources", "actions", "commands", "packages", "install_urls", "settings")
 REGISTRIES = ("npm", "pypi")
-ACTION_FIELDS = ("prompt_inputs",)
+# `args_inputs`: the inputs an action hands to the tool's program as command-line options (flagship slice
+# 2d.5c2a): `claude_args`, `codex-args`.
+ACTION_FIELDS = ("prompt_inputs", "args_inputs")
 # A setting the tool's own documentation warns about (flagship slice 2d.5c1, OBAAF-GHA-026): an input of
 # one of the entry's actions, the values warned about (`equals`) or any value (`set: true`), and the words.
 SETTING_FIELDS = ("id", "action", "input", "equals", "set", "severity", "read", "says", "source")
 SETTING_REQUIRED = ("id", "action", "input", "severity", "read", "says", "source")
 SEVERITIES = ("high", "medium", "low")
+# A command-line option the tool's own files warn about (flagship slice 2d.5c2a, OBAAF-GHA-026): the option's
+# spellings (`options`), the values warned about when it takes one (`equals`), and the words. It is read
+# where the tool's program is run in a script and in the entry's actions' `args_inputs`.
+FLAG_FIELDS = ("id", "options", "equals", "severity", "read", "says", "source")
+FLAG_REQUIRED = ("id", "options", "severity", "read", "says", "source")
+_OPTION_RE = re.compile(r"-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*")
 # A source is a file at a commit on GitHub, with the line or lines the words are on.
 _SOURCE_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/[0-9a-f]{40}/[^#\s]+#L\d+(-L\d+)?")
 # The lists built from the entries. A detection file that still has one of them by hand is refused, so
@@ -128,10 +136,12 @@ def problems(detection: dict) -> list[str]:
                 out.append(f"agent tool {tool}: action {action!r} is not owner/repo or owner/repo/path")
                 continue
             claim("action", action, tool)
-            if not isinstance(spec, dict) or set(spec) - set(ACTION_FIELDS) or not isinstance(
-                    spec.get("prompt_inputs", []), list) or not all(
-                    isinstance(i, str) and i for i in spec.get("prompt_inputs", [])):
-                out.append(f"agent tool {tool}: action {action}: expected {{prompt_inputs: [names]}}")
+            if not isinstance(spec, dict) or set(spec) - set(ACTION_FIELDS) or not all(
+                    isinstance(spec.get(key, []), list) and all(isinstance(i, str) and i and i == i.strip()
+                                                                for i in spec.get(key, []))
+                    for key in ACTION_FIELDS):
+                out.append(f"agent tool {tool}: action {action}: expected {{prompt_inputs: [names], "
+                           "args_inputs: [names]}}")
         for key in ("commands", "install_urls"):
             values = entry.get(key)
             if not isinstance(values, list):
@@ -177,6 +187,15 @@ def problems(detection: dict) -> list[str]:
             out.append(f"agent tool {tool}: settings must be a list")
         else:
             out.extend(_setting_problems(tool, settings, actions))
+        flags = entry.get("flags", [])
+        if not isinstance(flags, list):
+            out.append(f"agent tool {tool}: flags must be a list")
+        else:
+            out.extend(_flag_problems(tool, flags, settings if isinstance(settings, list) else []))
+            reads_args = any(isinstance(spec, dict) and spec.get("args_inputs") for spec in actions.values())
+            if flags and not (entry.get("programs") or reads_args):
+                out.append(f"agent tool {tool}: has flags but neither programs nor an action's args_inputs, "
+                           "so nothing reads them")
         carried = entry.get("carried", [])
         if not isinstance(carried, list) or not all(isinstance(c, str) and c.strip() for c in carried):
             out.append(f"agent tool {tool}: carried must be a list of text")
@@ -233,6 +252,80 @@ def _setting_problems(tool: str, settings: list, actions: dict) -> list[str]:
             out.append(f"{name}: says must be the documentation's words")
         if not isinstance(setting.get("source"), str) or not _SOURCE_RE.fullmatch(setting["source"]):
             out.append(f"{name}: source must be a file at a commit on GitHub, with its lines (#Ln or #Ln-Lm)")
+    return out
+
+
+def _flag_problems(tool: str, flags: list, settings: list) -> list[str]:
+    """The faults of one entry's `flags`: an unknown or missing key, an id that is not a short lower-case
+    name or is given twice (or is also a setting's), options that are not a list of option words or that
+    another of the entry's flags also names, an `equals` that is not a list of text, an unknown severity, a
+    date that is not one, words that are not text, and a source that is not a file at a commit with its lines."""
+    out: list[str] = []
+    seen = {s.get("id") for s in settings if isinstance(s, dict) and isinstance(s.get("id"), str)}
+    named: dict = {}
+    for number, flag in enumerate(flags, start=1):
+        name = f"agent tool {tool}: flag {number}"
+        if not isinstance(flag, dict):
+            out.append(f"{name}: not a mapping")
+            continue
+        fid = flag.get("id")
+        if isinstance(fid, str):
+            name = f"agent tool {tool}: flag {fid}"
+        for key in FLAG_REQUIRED:
+            if key not in flag:
+                out.append(f"{name}: missing {key}")
+        for key in flag:
+            if key not in FLAG_FIELDS:
+                out.append(f"{name}: unknown key {key!r}")
+        if not isinstance(fid, str) or not _ID_RE.fullmatch(fid):
+            out.append(f"{name}: id must be lower-case letters, digits and '-', at most 40")
+        elif fid in seen:
+            out.append(f"{name}: id is given twice (a setting's and a flag's ids are one list)")
+        seen.add(fid)
+        options = flag.get("options")
+        if not isinstance(options, list) or not options or not all(
+                isinstance(o, str) and _OPTION_RE.fullmatch(o) for o in options):
+            out.append(f"{name}: options must be a list of option words (-x or --name)")
+        else:
+            for option in options:
+                key = option.lower()
+                if key in named and named[key] != fid:
+                    out.append(f"{name}: option {option} is also flag {named[key]}'s")
+                named.setdefault(key, fid)
+        for key in ("equals",):
+            if key in flag and (not isinstance(flag[key], list) or not flag[key] or not all(
+                    isinstance(v, str) and v.strip() for v in flag[key])):
+                out.append(f"{name}: {key} must be a list of values written as text")
+        if flag.get("severity") not in SEVERITIES:
+            out.append(f"{name}: severity must be one of {', '.join(SEVERITIES)}")
+        if not isinstance(flag.get("read"), datetime.date):
+            out.append(f"{name}: read must be a date (YYYY-MM-DD)")
+        if not isinstance(flag.get("says"), str) or not flag["says"].strip():
+            out.append(f"{name}: says must be the documentation's words")
+        if not isinstance(flag.get("source"), str) or not _SOURCE_RE.fullmatch(flag["source"]):
+            out.append(f"{name}: source must be a file at a commit on GitHub, with its lines (#Ln or #Ln-Lm)")
+    return out
+
+
+def flag_readers(detection: dict) -> list:
+    """For each well-formed entry with flags: (tool id, tool name, flags, programs, packages, args), where
+    `args` maps each of the entry's actions that has `args_inputs` to those inputs. A fault is `problems`'
+    to name; `obaaf catalog` fails on it."""
+    out = []
+    for entry in tools(detection):
+        if not isinstance(entry, dict) or not isinstance(entry.get("flags"), list):
+            continue
+        flags = [f for f in entry["flags"] if isinstance(f, dict) and isinstance(f.get("id"), str) and isinstance(
+            f.get("options"), list) and all(isinstance(o, str) for o in f["options"])]
+        if not flags:
+            continue
+        programs = [str(p) for p in (entry.get("programs") or []) if isinstance(p, str)]
+        given = entry.get("packages") if isinstance(entry.get("packages"), dict) else {}
+        packages = [str(n) for names in given.values() if isinstance(names, list) for n in names]
+        args = {str(a): [str(i) for i in spec.get("args_inputs", [])]
+                for a, spec in (entry.get("actions") or {}).items()
+                if isinstance(spec, dict) and isinstance(spec.get("args_inputs"), list) and spec["args_inputs"]}
+        out.append((str(entry.get("id")), str(entry.get("name") or entry.get("id")), flags, programs, packages, args))
     return out
 
 
