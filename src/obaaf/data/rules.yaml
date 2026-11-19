@@ -943,7 +943,8 @@ rules:
       `GITHUB_ENV` or calls `exportVariable` (then only the step's own `env` is read), or a name the script
       sets once to plain text, and none at all where the script runs `eval`, `source`, a nameref, or
       `declare`, `export`, `printf -v` or `read` with a quoted or computed name, which can set any name;
-      command substitutions, `bash -c`, `eval`, a `git` alias that runs a shell command (`!cmd`),
+      command substitutions, `bash -c`, `eval`, a `git` setting whose value names the tool (`alias.r=!cmd`,
+      `diff.external`, given with `-c`, `git config` or `GIT_CONFIG_VALUE_n`),
       `env -S`, `su -c`, `script -c`, `flock -c`, `watch`, `npx -c`, aliases, interpreters given code and
       text a shell reads from a pipe, heredoc or here-string read again), and the widest way (comments and
       data heredocs out, quotes and backslashes removed, brackets and commas made spaces, cut where a shell
@@ -964,9 +965,11 @@ rules:
       language that names the tool, a warned option written in pieces (`"--dangerously-" + "skip-..."`). Read
       in the job's steps and in the steps of the local composite actions it uses. A value only another
       scanner calls dangerous is not reported. Not read: a quoted word that starts with a variable or a
-      substitution (`claude -p "$PROMPT"`) is taken for one word that is not one of these options, and so
-      are options held whole in a variable in code in another language, though the tool's own parser may
-      read a value that starts with `-` as an option (#254); Codex's `--sandbox
+      substitution (`claude -p "$PROMPT"`) is taken for one word that is not one of these options, though
+      the tool's own parser may read a value that starts with `-` as an option (#254); in code in another
+      language, options built from variables (an argument array held in a variable, a shell string joined
+      with a variable, `"--" + "yolo"`) are not read beyond a warned option's start written in pieces
+      (flagship slice 2d.5c2c); Codex's `--sandbox
       danger-full-access` and the action's `sandbox` input (neither the CLI's files nor the action's give a
       sentence of warning for them) and Codex's `-c` overrides; settings given to `--settings` (a file or
       JSON), claude-code-action's `settings` and codex-action's `codex-home`; an environment variable the

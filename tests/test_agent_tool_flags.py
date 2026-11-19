@@ -768,3 +768,30 @@ class ThirdReviewCasesTest(unittest.TestCase):
         start = time.perf_counter()
         check(text)
         self.assertLess(time.perf_counter() - start, 20)
+
+
+class FourthReviewCasesTest(unittest.TestCase):
+    """What the fourth review of slice 2d.5c2a found in bash and other shells."""
+
+    DSP = "--dangerously-skip-permissions"
+
+    def test_global_options_before_a_subcommand(self):
+        d = self.DSP
+        for script in (f"kubectl -n agents exec pod -- claude {d}", f"kubectl --namespace agents exec pod -- claude {d}",
+                       f"docker --context remote run img claude {d}", f"docker -H unix:///var/run/docker.sock run img claude {d}",
+                       f"podman --remote run img claude {d}"):
+            with self.subTest(script=script):
+                self.assertIn("command-option", kinds(check(run_step(script))))
+
+    def test_git_settings_that_run_a_command(self):
+        d = self.DSP
+        for script in (f"git -c diff.external='claude {d} -p' diff",
+                       f"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.r GIT_CONFIG_VALUE_0='!claude {d} -p x' git r",
+                       f"git config core.sshCommand 'claude {d}'"):
+            with self.subTest(script=script):
+                self.assertIn("command-option", kinds(check(run_step(script))))
+
+    def test_cmd_takes_out_carets(self):
+        text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: windows-latest\n    steps:\n"
+                "      - shell: cmd\n        run: claude ^--dangerously-skip-permissions -p x\n")
+        self.assertEqual(kinds(check(text)), ["command-option"])

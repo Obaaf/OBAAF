@@ -1969,7 +1969,10 @@ class WorkflowRules:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
         parts: list = []
         if step.run:
-            parts.append((step.run, self._step_shell(job, step) in ("bash", "sh")))
+            shell_name = self._step_shell(job, step)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            parts.append((step.run.replace("^", "") if shell_name in ("cmd", "cmd.exe") else step.run,
+                          shell_name in ("bash", "sh")))
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
@@ -2012,10 +2015,8 @@ class WorkflowRules:
         # the job's and workflow's `env` values are then not known; the step's own `env` is.
         writes = self._later_writes(job)
         index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
-        trust_env = scoped and not any(n < index for n in writes)
-        if not trust_env and scoped:
-            scopes = [scopes[0], {k: None for k in scopes[1]}, {k: None for k in scopes[2]}]
-            trust_env = True
+        later = any(n < index for n in writes)
+        trust_env = [scoped, scoped and not later, scoped and not later]
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
         mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
         reading = agent_flags.Reading()

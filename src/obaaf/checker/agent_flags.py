@@ -863,6 +863,12 @@ def _read_command(command: Command, ctx: _Context) -> None:
         return
     texts = [w.text for w in words]
     bases = [_base(t) if not w.computed else "" for t, w in zip(texts, words)]
+    # `GIT_CONFIG_VALUE_0='!cmd'` gives git a setting, which may be a command it runs.
+    for t in texts:
+        m = re.match(r"GIT_CONFIG_VALUE_\d+=(.*)", t, re.S)
+        if m and mentions(m.group(1), ctx.programs, ctx.packages):
+            value = m.group(1)
+            _read_nested(value[1:] if value.startswith("!") else value, ctx)
     # `IFS=...` on its own changes how every later expansion is split (`IFS=, read` sets it for `read` only).
     if ctx.loose and all(re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", t) for t in texts) and any(
             t.startswith(("IFS=", "IFS+=")) for t in texts):
@@ -905,15 +911,21 @@ def _read_command(command: Command, ctx: _Context) -> None:
             ctx.cannot_tell(" ".join(w.shown for w in words[first:])[:120])
         return
     if name0 == "git":
-        # `git -c alias.r='!cmd' r` and `git config alias.r '!cmd'` give git a shell command to run.
+        # A git setting whose value names the tool can be a command git runs (`alias.r=!cmd`, `diff.external`,
+        # `core.sshCommand`, `credential.helper`): given with `-c` or `git config`, it is read as a command line.
         for j in range(first + 1, len(words)):
-            m = re.match(r"alias\.[^=\s]+(?:=|$)", texts[j])
-            if m:
+            m = re.match(r"[A-Za-z][\w-]*(?:\.[^=\s]+)+(?:=|$)", texts[j])
+            if m and (j > first + 1 and texts[j - 1] in ("-c", "config", "--global", "--local", "--system",
+                                                          "--add", "--replace-all") or "=" in texts[j]):
                 value = texts[j][m.end():] if "=" in texts[j] else (texts[j + 1] if j + 1 < len(texts) else "")
-                if value.startswith("!"):
-                    _read_nested(value[1:], ctx)
+                if mentions(value, ctx.programs, ctx.packages):
+                    _read_nested(value[1:] if value.startswith("!") else value, ctx)
         return
-    sub = texts[first + 1] if first + 1 < len(words) else ""
+    # The subcommand, after the command's own options and their values (`kubectl -n agents exec`).
+    k = first + 1
+    while k < len(words) and texts[k].startswith("-"):
+        k += 1 if "=" in texts[k] or k + 1 >= len(words) or texts[k] in ("--remote", "--debug", "-D") else 2
+    sub = texts[k] if k < len(words) else ""
     if name0 in ("docker", "podman", "nerdctl") and sub not in ("run", "exec", "compose", "container"):
         return                      # `docker build -t claude`: the program's name as data
     if name0 == "kubectl" and sub not in ("exec", "run", "debug"):
@@ -1276,7 +1288,7 @@ def known_variables(scopes: list, script: str, trust_env: bool = True) -> tuple[
     if _DYNAMIC_ASSIGN_RE.search(script):
         # `eval`, `source`, `declare -n`, `printf -v`, `read`, a quoted `export NAME=...` and the like can set
         # any variable: none is known, from the script or from `env`.
-        trust_env, dynamic = False, True
+        trust_env, dynamic = [False] * len(scopes), True
     else:
         dynamic = False
     counts: dict = {}
@@ -1286,9 +1298,11 @@ def known_variables(scopes: list, script: str, trust_env: bool = True) -> tuple[
     known: dict = {}
     unread: dict = {}
     seen: set = set()
-    for scope in scopes:
+    trusted = list(trust_env) if isinstance(trust_env, (list, tuple)) else [trust_env] * len(scopes)
+    for number, scope in enumerate(scopes):
         if not isinstance(scope, dict):
             continue
+        trust_env = trusted[number] if number < len(trusted) else False
         for name, value in scope.items():
             if not isinstance(name, str) or name in seen:
                 continue
