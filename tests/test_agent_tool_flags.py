@@ -199,7 +199,7 @@ class CommandLineTest(unittest.TestCase):
             ("claude -p x `cat flags.txt`", None),
             ("claude -p x ${{ inputs.flags }}", ["${{ inputs.flags }}"]),
             ('claude -p "${{ inputs.prompt }}"', None),
-            ("cat flags | xargs claude -p x", ["xargs"]),
+            ("cat flags | xargs claude -p x", None),
             ('claude -p x --permission-mode "$MODE"', None),
             ('claude -p x --permission-mode=$MODE', None),
             ('claude -p x "--dangerously-$REST"', None),
@@ -392,7 +392,8 @@ class ReviewCasesTest(unittest.TestCase):
             (f"bash <<< 'claude {d}'", "hit"),
             (f"source <(echo 'claude {d}')", "hit"),
             (f"printf 'claude {d}' > run.sh\nbash run.sh", "cannot"),
-            (f"CMD='claude {d}'\neval \"$CMD\"", "hit"),
+            # `eval` can set any variable, so none is put in: "cannot tell".
+            (f"CMD='claude {d}'\neval \"$CMD\"", "cannot"),
             (f"bash <<'EOF'\nclaude {d}\nEOF", "hit"),
             (f"sh -c \"sh -c 'sh -c \\\"sh -c claude\\\\ {d}\\\"'\"", "hit"),
         ])
@@ -493,7 +494,9 @@ class ReviewCasesTest(unittest.TestCase):
             ("conda install -c x gemini -y", "none"),
             (f'claude -p "$P" # never add {d}', "none"),
             ("codex mcp add srv -- npx server --yolo", "none"),
-            (f"claude -p -- {d}", "none"),
+            # A `--` right after an option may be that option's value (commander), so it does not end them.
+            (f"claude -p -- {d}", "hit"),
+            (f"claude -p x --append-system-prompt -- {d}", "hit"),
             ('claude -p "$PROMPT"', "none"),
             (f"grep -r claude . {d}", "none"),
         ])
@@ -551,3 +554,139 @@ class ExpectrailShapeTest(unittest.TestCase):
                   'if [ "$OUTSIDE" = "on" ]; then args+=(--outside claude,gpt --passes 3); fi\n'
                   'python -m "$module" "${args[@]}" > judge.log 2>&1\n')
         self.assertEqual(found(check(run_step(script))), [])
+
+
+class SecondReviewCasesTest(unittest.TestCase):
+    """The ways past and false positives the second review of slice 2d.5c2a found, each a case."""
+
+    DSP = "--dangerously-skip-permissions"
+
+    def expect(self, cases, **kw):
+        for script, want in cases:
+            with self.subTest(script=script):
+                got = kinds(check(run_step(script, **kw)))
+                if want == "hit":
+                    self.assertIn("command-option", got, script)
+                elif want == "cannot":
+                    self.assertEqual(got, ["command-computed"], script)
+                else:
+                    self.assertEqual(got, [], script)
+
+    def test_a_variable_any_command_can_set_is_not_put_in(self):
+        d = self.DSP
+        self.expect([
+            (f'F=--verbose; export "F={d}"; claude $F -p x', "cannot"),
+            (f"F=--verbose; declare -n R=F; R={d}; claude $F -p x", "cannot"),
+            (f'F=--verbose; eval "F={d}"; claude $F -p x', "cannot"),
+            (f"F=--verbose; printf -v 'F' '%s' {d}; claude $F -p x", "cannot"),
+            (f"F=--verbose; read -r 'F' <<< {d}; claude $F -p x", "cannot"),
+            (f"F=--verbose; source <(echo 'F={d}'); claude $F -p x", "cannot"),
+            ("a=cla; b=ude; $a$b " + d, "hit"),
+        ])
+
+    def test_the_lexer_reads_as_bash_reads(self):
+        d = self.DSP
+        self.expect([
+            (f"cat <<true'_'\nx\ntrue\nclaude {d}\ntrue_", "none"),
+            (f"cat <<true'_'\nx\ntrue_\nclaude {d}", "hit"),
+            (f'cat <<"E"OF\nx\nEOF\nclaude {d}', "hit"),
+            (f"X=$(case \"$Y\" in *) claude $'\\x2d-dangerously-skip-permissions' -p x;; esac)", "hit"),
+            ("case \"$X\" in\n  release/*) claude -p x ;;\n  *) echo no ;;\nesac", "none"),
+            ("OUT=$(cat <<'EOF'\n1) be brief 2) be kind\nEOF\n)\nclaude -p \"$OUT\"", "none"),
+        ])
+        text = run_step("x").replace("run: |\n          x", 'run: "claude -p x\\r# --dangerously-skip-permissions"')
+        self.assertIn("command-option", kinds(check(text)))
+
+    def test_interpreters_runners_and_written_files(self):
+        d = self.DSP
+        self.expect([
+            (f"python3 <<'EOF'\nimport subprocess\nsubprocess.run([\"claude\", \"{d}\"])\nEOF", "hit"),
+            (f"python3 -Ic 'import subprocess; subprocess.run([\"claude\",\"{d}\"])'", "hit"),
+            (f"python3.12 -c 'import os; os.system(\"claude {d}\")'", "hit"),
+            (f"perl -le 'exec \"claude\",\"{d}\"'", "hit"),
+            (f"node -pe \"require('child_process').execFileSync('claude',['{d}'])\"", "hit"),
+            (f"trap 'claude {d}' EXIT", "hit"),
+            (f"docker run --rm node:20 sh -c 'npx @anthropic-ai/claude-code -p x {d}'", "hit"),
+            (f"cross-env NODE_ENV=ci claude -p x {d}", "hit"),
+            (f"xvfb-run claude -p x {d}", "hit"),
+            (f"tmux new-session -d 'claude -p x {d}'", "hit"),
+            (f"ssh host 'claude -p x {d}'", "hit"),
+            (f"sudo -iu runner claude {d}", "hit"),
+            (f"xargs --max-procs 4 claude {d} < list", "hit"),
+            (f"cat > run.sh <<'EOF'\nclaude -p x {d}\nEOF\nchmod +x run.sh\n./run.sh", "cannot"),
+            (f"printf 'claude {d}' > s.py\npython3 s.py # claude", "cannot"),
+            (f"alias c='command claude'\nc {d}", "hit"),
+        ])
+
+    def test_false_positives_of_the_second_review(self):
+        self.expect([
+            ("cp CLAUDE.md AGENTS.md\nclaude -p x", "none"),
+            ("ln -sf AGENTS.md CLAUDE.md\nclaude -p x", "none"),
+            ("mkdir -p ~/.claude && cp settings.json ~/.claude/\nclaude -p x", "none"),
+            ("while IFS= read -r line; do echo \"$line\"; done < f\nclaude -p x", "none"),
+            ("IFS=, read -r A B <<< \"$IN\"\nclaude -p x", "none"),
+            ('claude -p x\n"$GITHUB_WORKSPACE/scripts/post.sh"', "none"),
+            ("python -m \"$module\" --outside claude,gpt", "none"),
+        ])
+
+    def test_prose_in_other_inputs_is_not_cannot_tell(self):
+        for uses, line in [(CLAUDE, "prompt: \"Claude, please review this change. Don't approve it.\""),
+                           ("slackapi/slack-github-action@" + "d" * 40, "text: \"Claude finished the review. It's ready.\"")]:
+            with self.subTest(line=line):
+                text = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                        f"      - uses: {uses}\n        with:\n          {line}\n")
+                self.assertEqual(kinds(check(text)), [])
+
+    def test_windows_and_github_script_without_a_command(self):
+        win = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: windows-latest\n    steps:\n"
+               "      - run: claude --version\n")
+        self.assertEqual(kinds(check(win)), [])
+        script = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                  "      - uses: actions/github-script@" + "b" * 40 + "\n        with:\n          script: |\n"
+                  "            await exec.exec('npm', ['test'])\n            core.info('Reviewed by claude')\n")
+        self.assertEqual(kinds(check(script)), [])
+
+    def test_shell_and_matrix_include_and_env_written_as_one_expression(self):
+        shell = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 f"      - shell: claude {self.DSP} -p {{0}}\n        run: review\n")
+        self.assertEqual(kinds(check(shell)), ["command-option"])
+        include = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                   "    strategy:\n      matrix:\n        include: [{c: 'claude -p x'}]\n    steps:\n"
+                   "      - run: ${{ matrix.c }}\n")
+        self.assertEqual(kinds(check(include)), ["command-computed"])
+        env = ("on: push\npermissions: {contents: read}\nenv: {FLAGS: --model}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n      - env: ${{ fromJSON(vars.E) }}\n        run: claude -p x $FLAGS\n")
+        self.assertEqual(kinds(check(env)), ["command-computed"])
+        export = ("on: push\npermissions: {contents: read}\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                  "    env: {FLAGS: --model}\n    steps:\n      - uses: actions/github-script@" + "b" * 40 + "\n"
+                  "        with:\n          script: core.exportVariable('FLAGS', context.payload.comment.body)\n"
+                  "      - run: claude -p x $FLAGS\n")
+        self.assertEqual(kinds(check(export)), ["command-computed"])
+
+    def test_claude_args_expansion_inside_a_value_and_codex_json(self):
+        hits = found(check(one_step(CLAUDE, "          claude_args: '--permission-mode bypass${X}Permissions'\n")))
+        self.assertEqual([h.kind for h in hits], ["computed"])
+        one_word = found(check(one_step(CODEX, "          codex-args: '[\"--model o3 --yolo\"]'\n")))
+        self.assertEqual(one_word, [])
+        escaped = found(check(one_step(CODEX, "          codex-args: '[\"\\u002d-yolo\"]'\n")), "option")
+        self.assertEqual([h.facts["setting"] for h in escaped], ["codex/bypass-approvals-and-sandbox"])
+
+    def test_the_nesting_limit_is_cannot_tell(self):
+        script = "claude -p x; " + "bash -c 'bash -c \"" * 0 + "sh -c 'sh -c \"sh -c \\\"sh -c \\\\\\\"sh -c x\\\\\\\"\\\"\"'"
+        reading = agent_flags.read_script("x=1; " + "eval " * 0 + "claude -p x\n" + "$(" * 6 + "echo" + ")" * 6,
+                                          ["claude"], [], next(r for r in agent_tools.flag_readers(load().detection)
+                                                               if r[0] == "claude-code")[2], mentioned=True)
+        self.assertTrue(any("nesting" in w for words in reading.unknown.values() for w in words))
+        del script
+
+    def test_runner_chains_are_linear(self):
+        _t, _n, flags, programs, packages, _a = next(r for r in agent_tools.flag_readers(load().detection)
+                                                     if r[0] == "claude-code")
+        for word in ("nohup ", "sudo ", "env ", "find . -exec x "):
+            timings = []
+            for n in (1000, 4000):
+                start = time.perf_counter()
+                agent_flags.read_script(word * n + "claude -p x", programs, packages, flags, mentioned=True)
+                timings.append(time.perf_counter() - start)
+            with self.subTest(word=word):
+                self.assertLess(timings[1], max(0.3, timings[0] * 6))

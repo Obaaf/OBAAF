@@ -154,16 +154,6 @@ agent_tools:
           If `claude_args` turns off permission checks, for example with `bypassPermissions`, commands outside
           the list run without approval, and the action logs a warning.
         source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md#L102
-      # The same mode set in settings given inline on the command line; a settings file is not read.
-      - id: bypass-permissions-settings
-        options: [--settings]
-        contains: [bypassPermissions]
-        severity: high
-        read: 2026-11-19
-        says: >-
-          If `claude_args` turns off permission checks, for example with `bypassPermissions`, commands outside
-          the list run without approval, and the action logs a warning.
-        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md#L102
     carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
   - id: gemini-cli

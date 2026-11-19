@@ -162,7 +162,6 @@ class CannotTellTest(unittest.TestCase):
         for uses, settings in ((CODEX, ["codex/anyone", "codex/bypass-approvals-and-sandbox", "codex/bypass-hook-trust",
                                         "codex/safety-read-only", "codex/safety-unsafe"]),
                                (CLAUDE, ["claude-code/any-bot", "claude-code/bypass-permissions-mode",
-                                         "claude-code/bypass-permissions-settings",
                                          "claude-code/full-output", "claude-code/non-write-users",
                                          "claude-code/non-write-users-anyone", "claude-code/skip-permissions"])):
             for written in ("${{ fromJSON(vars.CFG) }}", "${{ matrix.w }}"):

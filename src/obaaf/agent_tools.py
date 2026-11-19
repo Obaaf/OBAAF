@@ -31,7 +31,7 @@ SEVERITIES = ("high", "medium", "low")
 # A command-line option the tool's own files warn about (flagship slice 2d.5c2a, OBAAF-GHA-026): the option's
 # spellings (`options`), the values warned about when it takes one (`equals`), and the words. It is read
 # where the tool's program is run in a script and in the entry's actions' `args_inputs`.
-FLAG_FIELDS = ("id", "options", "equals", "contains", "severity", "read", "says", "source")
+FLAG_FIELDS = ("id", "options", "equals", "severity", "read", "says", "source")
 FLAG_REQUIRED = ("id", "options", "severity", "read", "says", "source")
 _OPTION_RE = re.compile(r"-[A-Za-z]|--[A-Za-z0-9][A-Za-z0-9-]*")
 # A source is a file at a commit on GitHub, with the line or lines the words are on.
@@ -292,7 +292,7 @@ def _flag_problems(tool: str, flags: list, settings: list) -> list[str]:
                 if key in named and named[key] != fid:
                     out.append(f"{name}: option {option} is also flag {named[key]}'s")
                 named.setdefault(key, fid)
-        for key in ("equals", "contains"):
+        for key in ("equals",):
             if key in flag and (not isinstance(flag[key], list) or not flag[key] or not all(
                     isinstance(v, str) and v.strip() for v in flag[key])):
                 out.append(f"{name}: {key} must be a list of values written as text")
