@@ -244,7 +244,7 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
            "the pilot will test.", "",
            "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An allowed "
            "N/A also counts as yes. Choose N/A only if the item offers it and its “N/A only if” statement is true "
-           "for your team. The tier reflects the answers you supplied; OBAAF does not check them.", "",
+           "for your team. The tier reflects the answers you supplied; OBAAF does not verify that they are true.", "",
            "Fill it in on paper, in the [offline form](../assessment/obaaf-self-assessment.html), or as a file "
            "scored with `obaaf assess score`. Your answers never leave your machine.", ""]
     for tier_id in sorted(c.tiers):

@@ -137,7 +137,7 @@ Stated plainly, because a threat model that omits its boundary is marketing:
 - **Endorsement failure.** A human reviewer can approve a malicious proposal. Records make agent-authored changes identifiable so they get extra scrutiny; they do not make reviewers infallible.
 - **Labelling errors.** Labels must match the platform's real settings — who may comment, who holds which role. A wrong label is a wrong authority.
 - **Platform, provider, or workstation compromise**, and a publisher who ships malware on purpose.
-- **A tier is not a guarantee.** It summarises the answers a team gave against the rubric, which nothing checks; it is not an assurance that software is safe.
+- **A tier is not a guarantee.** It summarises the answers a team gave against the rubric, which nothing verifies; it is not an assurance that software is safe.
 
 ## 11. Standards alignment
 

@@ -28,6 +28,7 @@ VALID = {"yes", "no", "na", "unanswered"}
 ALIASES = {
     "y": "yes", "true": "yes", "n": "no", "false": "no", "n/a": "na", "not applicable": "na",
     "": "unanswered", "?": "unanswered", "unknown": "unanswered", "unsure": "unanswered",
+    "not sure": "unanswered",
 }
 
 
@@ -88,7 +89,7 @@ def _normalize(raw: Any, iid: str) -> Answer:
     value = str(raw).strip().lower()
     value = ALIASES.get(value, value)
     if value not in VALID:
-        raise AnswerError(f"item {iid}: answer {raw!r} is not one of yes, no, na or unanswered")
+        raise AnswerError(f"item {iid}: answer {raw!r} is not one of yes, no, na, unanswered or not sure")
     return Answer(value=value, evidence=evidence, note=note)
 
 
@@ -126,7 +127,7 @@ def parse_answers(data: Any, catalog: Catalog | None = None) -> AnswerSet:
         if answer.value == "na" and not catalog.items[iid].get("na_when"):
             raise AnswerError(
                 f"item {iid} cannot be marked not applicable; only items whose condition can be absent can "
-                "(Paper 2, DR6). Answer yes or no."
+                "(Paper 2, DR6). Answer yes, no or not sure."
             )
         answers[iid] = answer
     for iid in catalog.items:
@@ -209,7 +210,7 @@ def template(catalog: Catalog | None = None) -> str:
     catalog = catalog or load()
     lines = [
         "# OBAAF self-assessment answers. Answer each item yes, no, or na where allowed.",
-        "# Leave an item unanswered if you are not sure; it counts as no.",
+        "# If you are not sure, leave it unanswered (or write not sure); it counts as no.",
         "# Keep this file inside your studio: it is never sent anywhere.",
         "# Score it with:  obaaf assess score this-file.yaml",
         f"format: {ANSWER_FORMAT}",
@@ -242,7 +243,7 @@ def to_text(result: Result, catalog: Catalog | None = None, limit: int = 10) -> 
     who = f" for {result.answers.studio}" if result.answers.studio else ""
     out.append(f"OBAAF self-assessment{who}")
     out.append(f"Tier reached: {result.tier} ({result.tier_name})")
-    out.append("The tier reflects the answers you supplied; OBAAF does not check them.")
+    out.append("The tier reflects the answers you supplied; OBAAF does not verify that they are true.")
     for tier, counts in result.per_tier.items():
         satisfied = counts["yes"] + counts["na"]
         out.append(f"  Tier {tier} {catalog.tiers[tier]['name']:<11} {satisfied:>2}/{counts['items']} satisfied")
@@ -279,7 +280,7 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     meta.append(f"Scored by obaaf {__version__}")
     out += [" · ".join(meta), ""]
     out.append(f"**Tier reached: {result.tier} ({result.tier_name}).** "
-               "The tier reflects the answers you supplied; OBAAF does not check them.")
+               "The tier reflects the answers you supplied; OBAAF does not verify that they are true.")
     out.append("")
     out.append("| Tier | Satisfied | No | Unanswered |")
     out.append("| --- | --- | --- | --- |")
@@ -290,7 +291,8 @@ def to_markdown(result: Result, catalog: Catalog | None = None, link_base: str =
     if result.fixes:
         out.append("## What to fix next")
         out.append("")
-        out.append("Ranked lowest tier first, then lowest effort, then by the documented cases mapped to each item.")
+        out.append("Ranked lowest tier first, then lowest effort, then by the number of documented cases mapped to "
+                   "prevention, then to detection or containment. The last column lists both kinds.")
         out.append("")
         out.append("| # | Item | Tier | Effort | Mapped cases | How to fix |")
         out.append("| --- | --- | --- | --- | --- | --- |")

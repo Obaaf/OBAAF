@@ -6,7 +6,7 @@
 
 Version 0.1.0 (released). Source: Paper 2, Table 6 ([*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802)). For a software team without security staff: 34 questions in four tiers. Answer each Yes, No or Not sure from the evidence named beside it, which a second person can check; Not sure counts as No. Effort is an initial estimate (hours, days or weeks) that the pilot will test.
 
-**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An allowed N/A also counts as yes. Choose N/A only if the item offers it and its “N/A only if” statement is true for your team. The tier reflects the answers you supplied; OBAAF does not check them.
+**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An allowed N/A also counts as yes. Choose N/A only if the item offers it and its “N/A only if” statement is true for your team. The tier reflects the answers you supplied; OBAAF does not verify that they are true.
 
 Fill it in on paper, in the [offline form](../assessment/obaaf-self-assessment.html), or as a file scored with `obaaf assess score`. Your answers never leave your machine.
 

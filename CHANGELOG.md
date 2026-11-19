@@ -10,9 +10,9 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 Slice 4.9 (issue #152). The form and checklist explain which answers count toward a tier. Score reports describe the tier as a summary of the answers supplied and identify the cases mapped to each suggested fix.
 
-- The form, the checklist and `obaaf assess init` name every answer they take: Yes, No, Not sure (counted as No) and, where an item allows it, N/A. The checklist has a Not sure box on every item.
-- Where a tier is stated, it now says that it reflects the answers given and that OBAAF does not check them, in place of "a tier describes controls in place".
-- **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`. The JSON report is unchanged.
+- The form and the checklist offer Yes, No, Not sure (counted as No) and, where an item allows it, N/A; the checklist has a Not sure box on every item. The file `obaaf assess init` writes says to leave an item `unanswered` if not sure, and `obaaf assess score` now also takes `not sure` for it.
+- Where the form, the checklist and the text and Markdown reports state a tier, they now say that it reflects the answers given and that OBAAF does not verify that they are true, in place of "a tier describes controls in place". The JSON report is unchanged.
+- **The text of `obaaf assess score` changes, for a script that reads it.** The text report adds that sentence under `Tier reached:`, and its `Would have prevented:` and `Detects or limits:` lines are now `Cases mapped to prevention:` and `Cases mapped to detection or containment:`; the form says the same. The Markdown report's column `Documented cases it addresses` is now `Mapped cases`, and its ranking sentence names the two counts it ranks by. The JSON report is unchanged.
 
 ### Agent tools are data, and the agent rules name the agent
 
