@@ -850,7 +850,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 ### D-093 The text to-do list and the summary view
 
-**Decision.** Put the same action list just before the full text report’s version line and in `obaaf check --summary`. The shorter view opens as the full report does, with the accepted risk, its owners, the nearest expiry and the acceptances expiring soon (D-043; `--expiry-warning` applies), and retains scan errors, an old-format baseline and stale-entry warnings. A command the list suggests stands on a line of its own; where the check's paths or options cannot be printed on one line, only the command is left out and the list says so. The check uses the same exit status in either view. Reject a summary combined with a machine format, lane listing or baseline write before writing any file.
+**Decision.** Put the same action list just before the full text report’s version line and in `obaaf check --summary`. The shorter view opens as the full report does, with the accepted risk, its owners, the nearest expiry and the acceptances expiring soon (D-043; `--expiry-warning` applies), and retains scan errors, an old-format baseline and stale-entry warnings. The lanes command the list suggests stands on a line of its own; where the check's paths or options cannot be printed on one line, a command is left out and the list says so (the lanes item keeps its advice). The check uses the same exit status in either view. Reject a summary combined with a machine format, lane listing or baseline write before writing any file.
 
 **Reason.** A team can read its next actions without losing the reason a gate failed. Explicitly asking to write or accept findings is a separate operation.
 
