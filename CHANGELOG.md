@@ -38,6 +38,16 @@ Slice 2d.5c2b (issue #81, the rest of part 2 of 2d.5); decision D-094. **OBAAF-G
 - OBAAF-GHA-026's `Why:` line now also names "a way to other jobs or clients".
 - Not reported: a dangerous mode a tool runs in by default (a one-shot `cline "prompt"`, and the three actions that run their CLI with `--yolo` themselves); options described with no sentence of warning (OpenCode's `--auto`, Aider's `--yes-always`); Kiro CLI and Amp, documented only on web pages; environment variables such as `COPILOT_ALLOW_ALL` and `GOOSE_MODE`.
 
+### Which actions and called workflows are an agent's
+
+Slice 2d.11 (issue #236); decision D-096. **Fewer jobs are agent jobs; a baseline entry for one of their findings no longer matches, which fails a check at or above `--fail-on`.**
+
+- **A called workflow is read as a step's action is.** A job's `uses:` is under an agent action when its `owner/repo` (in any case) and folders are, with a `/` after the action's name: `anthropics/claude-code-action/.github/workflows/x.yml@v1` still makes an agent job, and `anthropics/claude-code-action-docs/.github/workflows/docs.yml@v1` no longer does. Before, a call was matched by its first characters alone, for the catalogue's actions and for your own `agents.actions`. Spaces round the value and `..` are read through, and `..` never leaves `owner/repo`.
+- **An action in a folder under an agent action that runs no agent can be listed.** A catalogue entry's new `not_agents` gives such an action, the action's own words for what it does, the file, commit and lines they were read from, what was read to know it runs no agent, and the date. `obaaf catalog` refuses an item that is not under one of its entry's actions, is an action an entry lists, is under another entry's action, is listed twice, or cites a file outside the action's own repository. The checker builds `agent_not_actions` from the entries, and a list written by hand beside them is refused.
+- **One is listed: `anthropics/claude-code-action/agent-approval-check`**, read at `f431ada`. It checks a pull request's approvals and runs no agent. A job that uses only it is no longer an agent job, and loses OBAAF-GHA-003, 004, 005, 012, 020 and 025 and the fact `agents: [claude-code]`; OBAAF-GHA-026 reads none of Claude Code's settings on it; and before OBAAF's egress action it is no longer an agent outside the confined command.
+- **Every other path under an agent action is still the agent**, including the listed path in another letter case, a folder under it, and `..` back to another folder. `anthropics/claude-code-action/base-action` is Claude Code. Your own `agents.actions` are never narrowed: a prefix you list names every path under it, the listed one included.
+- The guide lists what was read on 2026-11-19 under every listed action's folder, and what is left as the agent. This repository's report and Expectrail's are byte-identical before and after.
+
 ### Agent CLIs given options built in code in another language
 
 Slice 2d.5c2c (issue #81, the rest of part 2 of 2d.5); decision D-095. **OBAAF-GHA-026 reads more, and it can turn a passing gate red.**

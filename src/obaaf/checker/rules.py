@@ -20,7 +20,7 @@ from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
-    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
+    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
@@ -1882,9 +1882,9 @@ class WorkflowRules:
                 # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
                 # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review), and so is
                 # every flag of an input it hands the program as options (slice 2d.5c2a).
-                mine = [c for c in known if step.uses_action(c[2]["action"])]
+                mine = [c for c in known if self._tool_action(step, c[2]["action"])]
                 mine += [(tool, name, flag) for tool, name, flags, _programs, _packages, args in readers
-                         if any(step.uses_action(a) for a in args) for flag in flags]
+                         if any(self._tool_action(step, a) for a in args) for flag in flags]
                 if mine:
                     self._agent_setting(job, step, written, mine, whole=True)
                 continue
@@ -1893,12 +1893,18 @@ class WorkflowRules:
                 continue
             by_input: dict = {}
             for tool, name, setting in known:
-                if step.uses_action(setting["action"]):
+                if self._tool_action(step, setting["action"]):
                     key = input_name(setting["input"])
                     if key in given:
                         by_input.setdefault(key, []).append((tool, name, setting))
             for key, candidates in by_input.items():
                 self._agent_setting(job, step, given[key], candidates)
+
+    def _tool_action(self, step: Step, action: str) -> bool:
+        """Whether the step uses `action`, an agent tool's action, or one in a folder under it that the
+        catalogue does not list as running no agent (flagship slice 2d.11): the approval check under
+        `anthropics/claude-code-action` is not given that action's settings."""
+        return step.uses_action(action) and not self._agent_actions().excludes(step.action)
 
     def _agent_flags(self, job: Job, readers: list) -> None:
         """OBAAF-GHA-026 for command-line options (flagship slice 2d.5c2a): an option an agent tool's own
@@ -1915,7 +1921,7 @@ class WorkflowRules:
                 # expression is "cannot tell" for them in `agent_tool_settings`.
                 if given and isinstance(written, dict):
                     for action, inputs in args.items():
-                        if not step.uses_action(action):
+                        if not self._tool_action(step, action):
                             continue
                         for key in dict.fromkeys(input_name(i) for i in inputs):
                             if key in given:
@@ -2461,15 +2467,20 @@ class WorkflowRules:
             self.__dict__["_agent_patterns_cache"] = cached
         return cached
 
+    def _agent_actions(self) -> AgentActions:
+        """The agent actions, the catalog's (less the paths it lists as running no agent) and the
+        configuration's, built once (flagship slice 2d.11)."""
+        cached = self.__dict__.get("_agent_actions_cache")
+        if cached is None:
+            cached = AgentActions(self.detection, self.agents.get("actions", ()) or ())
+            self.__dict__["_agent_actions_cache"] = cached
+        return cached
+
     def _agent_step(self, step: Step, text: str) -> str | None:
         """Why the checker takes the step to run an agent, or None."""
-        actions = list(self.detection.get("agent_actions", [])) + list(self.agents.get("actions", ()) or ())
-        commands = [re.compile(p, re.M) for p in
-                    list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
-        for prefix in actions:
-            if step.uses_action(prefix):
-                return f"uses {one_line(step.action, 80)}"
-        if text and matches_any(commands, text):
+        if self._agent_actions().step(step):
+            return f"uses {one_line(step.action, 80)}"
+        if text and matches_any(self._agent_patterns(), text):
             return "runs an agent CLI"
         return None
 

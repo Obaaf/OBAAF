@@ -1450,7 +1450,7 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
     return None
 
 
-def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list, depth: int = 0,
+def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions", commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
                            given: dict | None = None, given_env: dict | None = None) -> _ActionReading:
     """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
@@ -1560,10 +1560,8 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             _charge(cache, max(0, added) // _BYTES_PER_UNIT)
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
-            if out.agent is None:
-                prefix = next((p for p in actions if step.uses_action(p)), None)
-                if prefix is not None:
-                    out.agent = f"uses {step.action} in the local action {shown}"
+            if out.agent is None and actions.step(step):
+                out.agent = f"uses {step.action} in the local action {shown}"
             if out.agent is None:
                 text = step.agent_text(commands)
                 if text and wf_mod.matches_any(commands, text):
@@ -1636,7 +1634,7 @@ def _inputs_read(raws) -> set:
     return names
 
 
-def _apply_local_action_detection(workflow, root: Path | None, actions: list, commands: list,
+def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.AgentActions", commands: list,
                                   unread: list, errors: list, cache: dict | None = None) -> None:
     """Put a job whose agent runs inside a local action in the agent lane, and record the step for
     the egress control, as `_apply_script_detection` does for a script (flagship slice 2d.4a). With
@@ -2095,8 +2093,10 @@ def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, stat
             job.local_steps[step.index] = inner
 
 
-def _agent_actions(catalog: "Catalog", config: "Config") -> list:
-    return list(catalog.detection.get("agent_actions", [])) + list(config.agents.get("actions", ()) or ())
+def _agent_actions(catalog: "Catalog", config: "Config") -> "wf_mod.AgentActions":
+    """The catalogue's agent actions, less the paths it lists as running no agent, and the configuration's
+    (flagship slice 2d.11)."""
+    return wf_mod.AgentActions(catalog.detection, config.agents.get("actions", ()) or ())
 
 
 def _script_commands(catalog: "Catalog", config: "Config") -> list:
@@ -2538,7 +2538,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
 
 
 def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",
-                       declared: "_LaneDeclarations", script_cmds: list, agent_actions: list, unread_actions: list,
+                       declared: "_LaneDeclarations", script_cmds: list, agent_actions: "wf_mod.AgentActions",
+                       unread_actions: list,
                        action_cache: dict, steps_state: dict) -> list:
     """Classify every workflow read without error, and read the repository's scripts and local actions it
     uses, in the order the files were read. Returns (path, rel, workflow, what was reported) for every
