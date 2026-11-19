@@ -918,3 +918,11 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
 **Status.** Proposed, 2026-11-19 (A2b, #275).
+
+### D-105 Draft confinement for one agent job
+
+**Decision.** Preview one recognisable run step with the egress action at a listed release commit. Check the draft on a private copy and report the target job's control verdicts, including unmet conditions. Leave host selection, job splits and unsupported credential placement to the team.
+
+**Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
+
+**Status.** Proposed, 2026-11-19 (A3a, #281). No release commit is listed pending #248.

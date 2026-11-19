@@ -36,6 +36,12 @@ obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
 
 Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
 
+### Preview confinement for one agent job
+
+Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs` key. The development catalogue currently lists no released egress-action commit. The command explains the hold and stops.
+
+Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |
