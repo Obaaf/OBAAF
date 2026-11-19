@@ -194,32 +194,84 @@ def _own_nodes(function):
             todo.extend(ast.iter_child_nodes(node))
 
 
-# Rules whose kinds are written outside the function that reports them, and only there.
-KINDS_WRITTEN_IN = {"OBAAF-INS-001": "_examine_instruction_file"}
+# Rules whose kind is a value the reporting function gets from elsewhere: (module, function) where it
+# is written. A kind of theirs the reader cannot follow is one of that function's literals, not one of
+# the reporting function's (which, for OBAAF-INS-001, also reports the REPO rules' kinds).
+KINDS_WRITTEN_IN = {"OBAAF-INS-001": ("checker/rules.py", "_examine_instruction_file")}
 
 
-def kind_words(rules):
-    """For each rule, the string literals of the functions that report it: its kinds can only be
-    one of them, or one followed by another that begins with "-" ("no-cache-mode" + "-self-hosted")."""
+def _assigned(function):
+    """What each local name of a function is assigned: a list of expressions, or None for a name it
+    also gets otherwise (a parameter, a loop, unpacking a value that is not a tuple)."""
+    out = {a.arg: None for a in function.args.args + function.args.kwonlyargs}
+    for node in _own_nodes(function):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                pairs = [(target, node.value)]
+                if isinstance(target, ast.Tuple):
+                    pairs = (list(zip(target.elts, node.value.elts)) if isinstance(node.value, ast.Tuple)
+                             and len(node.value.elts) == len(target.elts) else [(t, None) for t in target.elts])
+                for name, value in pairs:
+                    if isinstance(name, ast.Name) and out.get(name.id, []) is not None:
+                        out[name.id] = None if value is None else out.get(name.id, []) + [value]
+        elif isinstance(node, (ast.For, ast.comprehension, ast.AugAssign, ast.AnnAssign, ast.NamedExpr,
+                               ast.With)):
+            for name in ast.walk(node.target if hasattr(node, "target") else node):
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                    out[name.id] = None
+    return out
+
+
+def _possible(node, names, words, depth=0):
+    """The strings an expression can be: a literal, a choice, a sum, or a local name assigned
+    these. Anything else may be any literal of its function (`words`)."""
+    if depth > 5:
+        return set(words)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        return _possible(node.body, names, words, depth + 1) | _possible(node.orelse, names, words, depth + 1)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _possible(node.left, names, words, depth + 1)
+        right = _possible(node.right, names, words, depth + 1)
+        return {a + b for a in left for b in right}
+    if isinstance(node, ast.Name) and names.get(node.id):
+        return set().union(*(_possible(v, names, words, depth + 1) for v in names[node.id]))
+    return set(words)
+
+
+def _literal_strings(function):
+    return {n.value for n in _own_nodes(function) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
+def possible_kinds(rules):
+    """For each rule, every kind its `add` calls can give a finding, read as `_possible` reads them;
+    "" (the default) always."""
     from obaaf.checker import _IDLE_TEMPLATES
 
-    words = {"OBAAF-CFG-001": set(_IDLE_TEMPLATES)}
-    functions = [node for tree in _trees() for node in ast.walk(tree)
-                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    for function in functions:
-        own = list(_own_nodes(function))
-        literals = {n.value for n in own if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        for node in own:
+    functions = []
+    for path in sorted(SRC.rglob("*.py")):
+        where = path.relative_to(SRC).as_posix()
+        functions += [(where, node) for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    elsewhere = {}
+    for rule, place in KINDS_WRITTEN_IN.items():
+        found = [f for where, f in functions if (where, f.name) == place]
+        if len(found) != 1:
+            raise AssertionError(f"KINDS_WRITTEN_IN: {len(found)} functions {place[1]} in {place[0]}")
+        elsewhere[rule] = _literal_strings(found[0])
+    kinds = {rule: {""} for rule in rules}
+    kinds["OBAAF-CFG-001"] |= set(_IDLE_TEMPLATES)
+    for _where, function in functions:
+        names, words = _assigned(function), _literal_strings(function)
+        for node in _own_nodes(function):
             if (isinstance(node, ast.Call) and _is_add(node.func) and node.args
-                    and isinstance(node.args[0], ast.Constant) and node.args[0].value in rules
-                    and node.args[0].value not in KINDS_WRITTEN_IN):
-                words.setdefault(node.args[0].value, set()).update(literals)
-    for rule, name in KINDS_WRITTEN_IN.items():
-        for function in functions:
-            if function.name == name:
-                words.setdefault(rule, set()).update(
-                    n.value for n in _own_nodes(function) if isinstance(n, ast.Constant) and isinstance(n.value, str))
-    return words
+                    and isinstance(node.args[0], ast.Constant) and node.args[0].value in rules):
+                rule = node.args[0].value
+                kind = next((k.value for k in node.keywords if k.arg == "kind"), None)
+                if kind is not None:
+                    kinds[rule] |= _possible(kind, names, elsewhere.get(rule, words))
+    return kinds
 
 
 class LiteralKindsTest(unittest.TestCase):
@@ -248,24 +300,25 @@ class LiteralKindsTest(unittest.TestCase):
 
     def test_every_kind_the_catalogue_names_is_written_where_its_rule_is_reported(self):
         # A misspelt kind on both sides of an exception would pass the consistency check, and the
-        # real kind would get the remainder's advice. A kind is a literal of a function that reports
-        # its rule, or two of them joined, the second beginning with "-" (see kind_words).
+        # real kind would get the remainder's advice (see possible_kinds for how kinds are read).
         causes = load().causes
-        words = kind_words(set(load().rules))
+        kinds = possible_kinds(set(load().rules))
 
         def written(rule, kind):
-            own = words.get(rule, set())
-            return kind in own or any(kind == a + b for a in own for b in own if b.startswith("-"))
+            return kind in kinds.get(rule, set())
 
         self.assertEqual(sorted(pair for pair in causes._exact if not written(*pair)), [])
         for rule, typo in (("OBAAF-CFG-001", "entry-no-jobs"), ("OBAAF-INS-001", "not-utf-8"),
                            ("OBAAF-INS-001", "not-loaded"), ("OBAAF-GHA-006", "no-cache-mode-selfhosted"),
                            ("OBAAF-GHA-006", "no-cache-mode-agent"), ("OBAAF-GHA-026", "comand-option"),
-                           ("OBAAF-GHA-001", "pull-request-agent")):
+                           ("OBAAF-GHA-001", "pull-request-agent"), ("OBAAF-GHA-006", "no-cache-mode-capability"),
+                           ("OBAAF-GHA-015", "cannot-tell"), ("OBAAF-GHA-006", "unreadable-capability")):
             with self.subTest(rule=rule, typo=typo):
                 self.assertFalse(written(rule, typo))
         for rule, real in (("OBAAF-GHA-006", "no-cache-mode-self-hosted"), ("OBAAF-GHA-007", "unreadable"),
-                           ("OBAAF-INS-001", "not-utf8"), ("OBAAF-CFG-001", "entry-no-stage")):
+                           ("OBAAF-INS-001", "not-utf8"), ("OBAAF-CFG-001", "entry-no-stage"),
+                           ("OBAAF-GHA-009", ""), ("OBAAF-GHA-013", "other-labels-agent"),
+                           ("OBAAF-GHA-014", "unreadable-capability"), ("OBAAF-GHA-008", "reusable-workflow")):
             with self.subTest(rule=rule, real=real):
                 self.assertTrue(written(rule, real))
 
