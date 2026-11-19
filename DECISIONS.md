@@ -106,7 +106,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
-| D-108 | An advisory parity test compares OBAAF with a pinned zizmor | Proposed |
+| D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 
 ---
