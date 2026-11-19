@@ -106,6 +106,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
+| D-108 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 
 ---
 
@@ -942,3 +943,13 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 **Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, and edits whose precise effect cannot be proven remain for manual review. The checker reads the workflow offline.
 
 **Status.** Proposed, 2026-11-19 (slice A5a, #285).
+
+### D-108 Explicit exact versions for agent tool installs
+
+**Decision.** Slice A5b (#291) adds `obaaf fix --pin PACKAGE=VERSION` for GHA-025 findings with the checker's existing evidence of a simple direct npm install. One invocation accepts one package and one exact npm version. A single to-do group retains both candidate and manual counts. Its preview command repeats the check scope and asks the adopter to select a version. The edit inserts the version in the original workflow scalar and verifies that its decoded run text changes only by that insertion. A folded YAML command can qualify when the literal package argument occupies the next physical line.
+
+**Reason.** The adopter chooses the dependency and version. An offline check can identify a literal install and prove its effect on findings. It cannot establish that a registry has published the selected version or that a job will run with it.
+
+**Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review.
+
+**Status.** Proposed, 2026-11-19 (slice A5b, #291).

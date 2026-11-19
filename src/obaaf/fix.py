@@ -117,8 +117,10 @@ def _verified_plan(source, copy, options, before, metadata, plan):
     def rejection(item, error):
         if item.kind != "tightening":
             return f"{item.description}: {error}"
-        from obaaf.checker.todo import checkout_command
-        command = checkout_command(before, candidate=item.id)
+        from obaaf.checker.todo import tightening_command
+        pin = metadata.get("pin")
+        request = ["--pin", "=".join(pin)] if pin else ["--tighten", "checkout-credentials"]
+        command = tightening_command(before, request, candidate=item.id)
         return (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
                 f"their owner. Retry this step alone with {command}")
 
@@ -169,17 +171,23 @@ def run(args):
     try:
         if (args.reason is not None or args.expires is not None) and not all((args.owner, args.reason, args.expires, args.baseline)):
             raise ValueError("baseline migration needs --baseline, --owner, --reason and --expires together")
+        pin = None
+        if args.pin is not None:
+            from obaaf.fix_tightening import parse_pin
+            if len(args.pin) != 1:
+                raise ValueError("select one --pin PACKAGE=VERSION per preview")
+            pin = parse_pin(args.pin[0])
         if args.candidate is not None and not args.candidate.strip():
-            raise ValueError("--candidate needs a nonblank name from the checkout preview")
-        if args.candidate is not None and not args.tighten:
-            raise ValueError("--candidate needs --tighten checkout-credentials")
-        if args.tighten and any(v is not None for v in (args.owner, args.reason, args.expires)):
-            raise ValueError("checkout tightening cannot change acceptance metadata; request paperwork separately")
+            raise ValueError("--candidate needs a nonblank name from the tightening preview")
+        if args.candidate is not None and not (args.tighten or pin):
+            raise ValueError("--candidate needs --tighten checkout-credentials or --pin PACKAGE=VERSION")
+        if (args.tighten or pin) and any(v is not None for v in (args.owner, args.reason, args.expires)):
+            raise ValueError("workflow tightening cannot change acceptance metadata; request paperwork separately")
         root, options = _paths(args)
         checker.parse_fail_on(options.fail_on)
-        if args.tighten:
-            from obaaf.fix_checkout import plan
-            metadata = dict(candidate=args.candidate)
+        if args.tighten or pin:
+            from obaaf.fix_tightening import plan
+            metadata = dict(candidate=args.candidate, pin=pin)
         else:
             from obaaf.fix_paperwork import plan
             metadata = dict(owner=args.owner, reason=args.reason, expires=args.expires)
@@ -197,6 +205,12 @@ def run(args):
             if args.tighten:
                 print("Checkout tightening can affect later steps that use Git credentials.")
             _render(proposal, source, after, reasons, paths, options.fail_on, catalog)
+            if pin and not proposal.edits:
+                if proposal.already_satisfied:
+                    print(one_line(proposal.already_satisfied))
+                    return 0
+                print("No proven pin to apply. Review the reported install and its original workflow by hand.")
+                return 1
             if args.candidate is not None and not proposal.edits:
                 print("Named checkout withheld. Review its original workflow and resolve the reported condition "
                       "before running this named request again.")

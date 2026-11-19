@@ -17,13 +17,13 @@ from obaaf.checker.todo_upgrade import previous_acceptances
 _LEVELS = ("high", "medium", "low", "info")
 
 
-def checkout_command(result, candidate=None):
+def tightening_command(result, request, candidate=None):
     """Reproduce this check's scope without enabling apply or modifying acceptances."""
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
     options = list(map(str, result.options or ()))
-    args = ["obaaf", "fix", target, "--tighten", "checkout-credentials", *options]
+    args = ["obaaf", "fix", target, *request, *options]
     if not any(option == "--platform" or option.startswith("--platform=") for option in options):
         args.append("--platform=auto")
     if result.baseline_path:
@@ -40,7 +40,7 @@ class _Group:
     kind: str
     severity: Counter = field(default_factory=Counter)
     previous: int = 0
-    pin_candidates: int = 0
+    pin_packages: Counter = field(default_factory=Counter)
 
     def as_dict(self, result: CheckResult) -> dict:
         item = {
@@ -57,14 +57,24 @@ class _Group:
             if result.errors:
                 item["nextAction"] = "Resolve the scan errors before previewing checkout tightening."
             else:
-                command = checkout_command(result)
+                command = tightening_command(result, ["--tighten", "checkout-credentials"])
                 item["command"] = command
                 item["nextAction"] = f"{self.cause.next_action} Preview the change with {command}"
         if self.previous:
             item["previousMatches"] = self.previous
         if self.cause.id == "agent-tool-version":
-            item["pinCandidates"] = self.pin_candidates
-            item["byHand"] = item["count"] - self.pin_candidates
+            count = self.pin_packages.total()
+            item["pinCandidates"] = count
+            item["byHand"] = item["count"] - count
+            if count and not result.errors:
+                packages = sorted(self.pin_packages)
+                package = packages[0] if len(packages) == 1 else "PACKAGE"
+                command = tightening_command(result, ["--pin", f"{package}=VERSION"])
+                item["command"] = command
+                item["nextAction"] = (f"Review other forms by hand. Choose an exact npm version for {', '.join(packages)} "
+                                      f"and substitute your selection in {command}")
+            elif result.errors:
+                item["nextAction"] = "Resolve the scan errors before previewing a package pin."
         return item
 
 
@@ -88,10 +98,11 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
         group.severity[finding.severity] += 1
         group.previous += previous.get(id(finding), 0)
         if cause.id == "agent-tool-version" and finding.pin_candidate:
-            group.pin_candidates += 1
+            group.pin_packages[finding.pin_candidate] += 1
 
     def priority(group: _Group) -> tuple:
-        actionable = group.cause.id in ("acceptance-old-baseline", "checkout-credentials") and not result.errors
+        actionable = (group.cause.id in ("acceptance-old-baseline", "checkout-credentials")
+                      or bool(group.pin_packages)) and not result.errors
         highest = next((i for i, level in enumerate(_LEVELS) if group.severity[level]), len(_LEVELS))
         return (not actionable, highest, -group.severity.total(), group.cause.id)
 

@@ -23,6 +23,18 @@ Move the pin in a pull request of its own, so that the gate runs once with the n
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
+### Pin a directly installed agent tool
+
+OBAAF-GHA-025 keeps one to-do group for tool installs. The counts show how many findings have a candidate direct npm install and how many need manual review. The preview's final proof determines which candidates can change. Select the exact version your team has reviewed and use the same path, configuration, baseline, platform and threshold as the check. For example, if your team has selected version `1.2.3`:
+
+```sh
+obaaf fix . --pin @openai/codex=1.2.3 --baseline .github/obaaf-baseline.json --fail-on low
+```
+
+The edit appends the supplied version to the package in a literal `npm install -g PACKAGE` workflow step. A separate version query for the installed CLI may follow. OBAAF also recognizes the `sudo` form when followed by that query. It leaves scripts, indirect invocations, shared YAML and other install forms for manual review. Choose one package per invocation. The preview does not look up the version, download the package or execute the workflow.
+
+Use `--candidate NAME` from the preview to request one occurrence. Add `--apply` to write a proven diff to clean tracked targets. OBAAF reports affected acceptances and retains the original files when the named edit cannot be proven. A withheld pin exits 1. A repeat is a successful no-op when the checked files show the requested direct install at the exact selected version. Other packages can still need work. An unresolved manual install of the same package, an absent package or a conflicting directly installed version cannot establish that the request is satisfied. A malformed package or version exits 2.
+
 ### Tighten credentials on a checkout
 
 Run `obaaf fix . --tighten checkout-credentials` with the same gate options, including its baseline. The command previews a literal `persist-credentials: false` on directly identified checkout steps reported by OBAAF-GHA-011. Review later Git operations that use the checkout credential. A checker proof reads the workflow without running those steps.
