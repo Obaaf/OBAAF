@@ -23,6 +23,35 @@ Move the pin in a pull request of its own, so that the gate runs once with the n
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
+### Set up a first GitHub Actions check
+
+From the repository root, run `obaaf init`. Review the proposed agent lanes, the secret names it lists for review, and the diff for both files. Run `obaaf init --apply` to create `.github/obaaf.yml` and `.github/workflows/obaaf-pipeline-check.yml`. If either file differs from the proposal, init prints the differences and stops before creating either file. A repository using another supported configuration path must reconcile that file first.
+
+Init reads GitHub workflow files locally. It proposes agent lanes for catalogued tools it recognizes in workflows and local composite actions, and for jobs with recognized model-provider key names. A job that makes a single provider health check or calls a perception model can hold such a key, so review each proposed lane. It proposes a secret’s required environment when all observed uses identify the same literal environment. Check where the secret is actually stored in GitHub before accepting the proposal. A computed environment, multiple environments or a reusable workflow parameter leaves the name for review. Check repository scripts for agents the workflow and local action references miss.
+
+The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job.
+
+#### Optional companion checks
+
+Add `--with-scanner` once for each companion you want in the preview. Supply the same options when applying it. For example:
+
+```sh
+obaaf init --with-scanner zizmor --with-scanner actionlint
+obaaf init --with-scanner zizmor --with-scanner actionlint --apply
+```
+
+`--with-scanner poutine` enables poutine independently. The default workflow includes OBAAF alone. If you already applied a workflow, a new selection produces a conflict and a diff. Review that diff and edit your existing workflow to adopt the steps you want.
+
+Each selected step pulls an upstream Linux/amd64 image by digest, then scans the checkout mounted read-only with the container’s network disabled. The scanner receives no GitHub token. Findings appear in the Actions log. A scanner startup or analysis error can fail its step. Zizmor uses offline audits with configuration loading disabled. Actionlint checks the workflow syntax, disables its shellcheck and pyflakes integrations, and treats its documented finding status (1) as successful. Poutine analyzes the local repository with its built-in rules and the release check disabled. Actionlint and poutine receive an empty configuration created outside the checkout.
+
+These are the versions measured in the landscape comparison. The digests are the Linux/amd64 image manifests, verified with `docker manifest inspect --verbose IMAGE:VERSION` against the official registries. The init template targets the standard x86-64 Ubuntu runner.
+
+| Scanner release | Official image tag | Pinned Linux/amd64 manifest |
+| --- | --- | --- |
+| [zizmor 1.32.0](https://github.com/zizmorcore/zizmor/releases/tag/v1.32.0) | `ghcr.io/zizmorcore/zizmor:1.32.0` | `sha256:bb5d47cd29a3f534bbdfa49eaee3b1c8bfc3de3152ec6e4d73a678a129354e34` |
+| [actionlint 1.7.12](https://github.com/rhysd/actionlint/releases/tag/v1.7.12) | `docker.io/rhysd/actionlint:1.7.12` | `sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7` |
+| [poutine 1.1.6](https://github.com/boostsecurityio/poutine/releases/tag/v1.1.6) | `ghcr.io/boostsecurityio/poutine:1.1.6` | `sha256:0ae43043afd3d24957294cc5e19f12b9e0e8c7adc8b4c0504982ec3d0936ac03` |
+
 ### Preview the changes to your OBAAF files
 
 In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.

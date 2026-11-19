@@ -103,6 +103,8 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
+| D-100 | How init chooses candidate agent jobs and secret environments, and handles existing configuration | Proposed |
+| D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 
@@ -910,6 +912,27 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Status.** Proposed, 2026-11-19 (slice A2a, #261).
 
+### D-100 How init proposes the first agent lanes and secret environments
+
+**Decision.** Slice 3.3 proposes an agent lane when a workflow or its local composite action names a catalogued tool, or a job references a recognized model-provider key. A recognized environment variable bound to a differently named secret also counts. The preview gives the matching tool or key so a team can judge each candidate. A provider health check or perception job can hold the same key as an agent.
+
+For D-089, init proposes a required environment for a secret when every observed use identifies the same literal environment. A missing, computed or differing environment sends the name for review, as does a use in a reusable workflow whose secret might be a caller's parameter. Unnamed or inherited secret access could include any named secret, so its environment also counts when deciding whether each name has one literal environment. GitHub storage and access settings require separate verification.
+
+If another supported configuration name already exists, init shows any differences and stops before creating a second configuration, even when their contents match. A target that already contains the proposed bytes is left in place. Both new files are prepared before either is installed. If installation of the second fails, init removes the first file it just created.
+
+**Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
+
+**Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
+### D-101 Companion checks in the first workflow
+
+**Decision.** With `obaaf init --with-scanner NAME` the user can select zizmor, actionlint or poutine, repeating the option for multiple tools. Selection order does not affect the preview. There are no companion steps by default. The existing conflict check applies if the repository already has a different workflow.
+
+**Reason.** Teams can start with one report and add the tools whose checks they want. Pinning the Linux image manifests makes the selected tools identifiable. Reading the checkout with a read-only mount and container networking disabled keeps the scans local after the runner fetches the images.
+
+**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
+
+**Status.** Proposed, 2026-11-19 (3.3b, #84).
 ### D-102 Paperwork changes in the fix preview
 
 **Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away. With a partial check the preview withholds changes whose scope it cannot establish.

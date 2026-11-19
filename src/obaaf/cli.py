@@ -46,6 +46,12 @@ def cmd_fix(args) -> int:
     return run(args)
 
 
+# ------------------------------------------------------------------ init
+def cmd_init(args) -> int:
+    from obaaf.init import run
+    return run(args)
+
+
 # ------------------------------------------------------------------ assess
 def cmd_assess_init(args) -> int:
     from obaaf import assess
@@ -780,6 +786,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reason", help="reason for carrying matching legacy acceptances forward")
     parser.add_argument("--expires", help="expiry for migrated acceptances (YYYY-MM-DD)")
     parser.set_defaults(func=cmd_fix)
+
+    x = sub.add_parser("init", help="preview a GitHub Actions configuration and report-only workflow")
+    x.add_argument("path", nargs="?", default=".", help="repository directory (default: current directory)")
+    x.add_argument("--apply", action="store_true", help="create both files after reviewing the preview")
+    from obaaf.init_scanners import SCANNERS
+    x.add_argument("--with-scanner", action="append", choices=tuple(SCANNERS), default=[],
+                   help="add a report-only companion scanner (repeat for more than one)")
+    x.set_defaults(func=cmd_init)
 
     # assess
     a = sub.add_parser("assess", help="the self-assessment").add_subparsers(dest="sub", required=True)

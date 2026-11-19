@@ -11,6 +11,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
 - **The suggested `obaaf baseline migrate` command works for a path that begins with `-`.** It is written `./-name`, which the command reads as a path rather than an option.
 - **Review existing acceptances.** A 0.3.0 baseline accepts nothing until migrated. Each acceptance needs an owner, a reason with at least four letters or digits, and an expiry date within 366 days. The report opens with the risk still accepted and lists entries that no longer match.
