@@ -1924,16 +1924,25 @@ def _loop_guard(code: _Code, k: int, at: int, pieces: list, in_list: bool, listy
     value, added once for each turn, is any number of words."""
     toks = code.toks
     loops = _loop_names(code)
+    # A loop over literal strings: the change adds its words once for each string, in turn (`for m in ['plan',
+    # 'bypassPermissions']: cmd += ['--permission-mode', m]`).
+    literal = next((toks[a].text for a, b in pieces if a == b and toks[a].kind == "name" and loops.get(
+        toks[a].text) is not None), None)
+    if literal is not None:
+        turns: list = []
+        for value in loops[literal][:_SITE_LIMIT]:
+            for a, b in pieces:
+                if a == b and toks[a].kind == "name" and toks[a].text == literal:
+                    turns.append(af.Word(text=value, shown=value))
+                else:
+                    turns.extend(_word(code, a, b, in_list, "", listy=listy))
+        return turns
     loop = _in_loop(code, k)
     repeated = loop is not None and (at < 0 or _in_loop(code, at) != loop)
     words: list = []
     for a, b in pieces:
         names = [toks[x].text for x in range(a, b + 1) if toks[x].kind == "name" and toks[x].text in loops]
         unknown_loop = any(loops[n] is None for n in names)
-        if a == b and names and not unknown_loop:
-            # A loop over literal strings: each is a word the change adds (`for f in ['--yolo']: cmd.append(f)`).
-            words.extend(af.Word(text=v, shown=v) for v in loops[names[0]])
-            continue
         if repeated and a <= b and toks[a].kind == "name" and toks[a].text not in loops and toks[a].text not in (
                 code.values):
             unknown_loop = True                 # a name the code never gives a value, in a repeated change: a

@@ -379,7 +379,13 @@ class SecondReviewTest(unittest.TestCase):
                                 "    cmd.append(f)\nsubprocess.run(cmd)"), "hit"),
             (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor f in ['" + DSP + "']:\n"
                                 "    cmd += [f]\nsubprocess.run(cmd)"), "hit"),
+            (heredoc("python3", "import subprocess\ncmd = ['claude', '-p', 'x']\nfor m in ['plan', 'bypassPermissions']:\n"
+                                "    cmd += ['--permission-mode', m]\nsubprocess.run(cmd)"), "hit"),
         ])
+        Case.expect(self, [
+            ("const args = ['-p', 'x'];\nfor (const m of ['plan', 'bypassPermissions']) args.push('--permission-mode', m);\n"
+             "await exec.exec('claude', args)", "hit"),
+        ], make=script_step)
         Case.expect(self, [
             ("for (const pr of prs) {\n  const args = ['-p', prompt(pr)];\n  if (v) args.push('--verbose');\n"
              "  await exec.exec('claude', args);\n}", "none"),
