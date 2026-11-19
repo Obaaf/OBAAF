@@ -795,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto",
                    help="which CI definitions to check: auto (GitHub Actions workflows and Jenkinsfiles), github "
                         "or jenkins. Jenkins results are advisory (see docs/jenkins.md).")
-    x.add_argument("--summary", action="store_true", help="show only the to-do list from the text report")
+    x.add_argument("--summary", action="store_true", help="show the to-do list with scan, coverage and stale-entry warnings")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
     x.add_argument("--fail-on", default="medium",

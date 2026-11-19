@@ -275,10 +275,12 @@ def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options)]
+    return ["obaaf", "check", target, *map(str, result.options or ())]
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
+    if catalog.causes.problems:
+        return ["Action list unavailable because the cause catalogue is inconsistent. Run obaaf catalog for details."]
     groups = todo(result, catalog)
     count = sum(group["count"] for group in groups)
     lines = [f"What to do next: {count} finding{'s' if count != 1 else ''}, "
