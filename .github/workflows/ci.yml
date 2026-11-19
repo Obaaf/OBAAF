@@ -209,17 +209,21 @@ jobs:
         run: python scripts/zizmor_parity.py lock --print
 
       - name: Install the pinned zizmor
+        # Run when only the pin check failed: pip checks every file against the pin anyway.
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
         run: |
           python -m venv "$RUNNER_TEMP/zizmor"
           "$RUNNER_TEMP/zizmor/bin/python" -m pip install --require-hashes --only-binary=:all: --no-deps \
             --requirement tests/parity/zizmor-requirements.txt
 
       - name: Run zizmor on each set
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
         run: |
           python scripts/zizmor_parity.py run --zizmor "$RUNNER_TEMP/zizmor/bin/zizmor" --out "$RUNNER_TEMP/parity" \
             --root zizmor-tests=third-party/zizmor/crates/zizmor/tests/integration/test-data
 
       - name: Compare OBAAF with zizmor
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
         run: |
           python scripts/zizmor_parity.py ci \
             --zizmor risky="$RUNNER_TEMP/parity/risky.json" \

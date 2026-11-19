@@ -49,6 +49,14 @@ LOCK_HEADER = """\
 """
 
 
+def shown(path: Path) -> str:
+    """A path as the repository names it, where it is in the repository."""
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
 class ParityError(Exception):
     """The mapping, a cases file or zizmor's output is not what this script reads."""
 
@@ -143,9 +151,12 @@ def _keys(entry, allowed: set, where: str) -> dict:
 
 
 def load_mapping(path: Path = MAPPING) -> Mapping:
-    import yaml
+    from obaaf import yamlutil
 
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data = yamlutil.load(path.read_text(encoding="utf-8"))   # refuses duplicate keys
+    except Exception as exc:
+        raise ParityError(f"{path}: not read as YAML: {exc}") from None
     data = _keys(data, {"format", "zizmor", "audits", "sets", "silent", "recorded"}, str(path))
     if data.get("format") != FORMAT:
         raise ParityError(f"{path}: format must be {FORMAT}")
@@ -220,7 +231,9 @@ def load_mapping(path: Path = MAPPING) -> Mapping:
 
 @dataclass(frozen=True)
 class Case:
-    """What zizmor reported for one audit on one job of one file (job None: the file as a whole)."""
+    """What zizmor reported for one audit on one job of one file (job None: the file as a whole): the
+    steps it named, by their index in the job's `steps` as zizmor's route gives it, and whether it also
+    named the job itself or a part of it that is not a step."""
 
     file: str
     job: str | None
@@ -228,19 +241,22 @@ class Case:
     severity: str
     confidence: str
     lines: tuple
+    steps: tuple = ()
+    job_level: bool = True
 
     def key(self) -> tuple:
         return (self.file, self.job, self.audit)
 
     def as_dict(self) -> dict:
         return {"file": self.file, "job": self.job, "audit": self.audit, "severity": self.severity,
-                "confidence": self.confidence, "lines": list(self.lines)}
+                "confidence": self.confidence, "lines": list(self.lines), "steps": list(self.steps),
+                "job_level": self.job_level}
 
 
 def _route(location: dict) -> list:
     """The keys and indices of a zizmor location's route, which yamlpath writes as
     {"route": [{"Key": "jobs"}, {"Index": 0}, ...]}."""
-    route = location.get("symbolic", {}).get("route")
+    route = location["symbolic"]["route"]
     if isinstance(route, dict):
         route = route.get("route")
     if not isinstance(route, list):
@@ -252,7 +268,7 @@ def _route(location: dict) -> list:
             if kind == "Key" and isinstance(value, str):
                 out.append(value)
                 continue
-            if kind == "Index" and isinstance(value, int):
+            if kind == "Index" and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 out.append(value)
                 continue
         raise ParityError(f"zizmor route part not read: {part!r:.200}")
@@ -260,8 +276,8 @@ def _route(location: dict) -> list:
 
 
 def _file(location: dict) -> str:
-    key = location.get("symbolic", {}).get("key")
-    if not isinstance(key, dict) or "Local" not in key:
+    key = location["symbolic"]["key"]
+    if not isinstance(key, dict) or set(key) != {"Local"}:
         raise ParityError(f"zizmor location that is not a local file: {key!r:.200}")
     path = key["Local"].get("verbatim_path") if isinstance(key["Local"], dict) else None
     if not isinstance(path, str) or not path:
@@ -278,60 +294,98 @@ def _primary(locations: list) -> dict:
         raise ParityError("zizmor finding without locations")
     for kind in ("Primary", "Related"):
         for location in locations:
-            if isinstance(location, dict) and location.get("symbolic", {}).get("kind") == kind:
+            if (isinstance(location, dict) and isinstance(location.get("symbolic"), dict)
+                    and location["symbolic"].get("kind") == kind):
                 return location
-    raise ParityError("zizmor finding with only hidden locations")
+    raise ParityError("zizmor finding with no primary or related location")
+
+
+def _line(location: dict) -> int:
+    row = location["concrete"]["location"]["start_point"]["row"]
+    if not isinstance(row, int) or isinstance(row, bool) or row < 0:
+        raise ParityError(f"zizmor location without a row: {location!r:.200}")
+    return row + 1
 
 
 def cases_from_zizmor(findings, audits) -> list[Case]:
     """zizmor's json-v1 output (a list of findings) as cases of the given audits, one per file, job
-    and audit, with the highest severity and confidence and every line reported."""
+    and audit, with the highest severity and confidence, every line and every step reported."""
     if not isinstance(findings, list):
         raise ParityError("zizmor's json-v1 output is a list of findings")
     grouped: dict = {}
     for finding in findings:
         if not isinstance(finding, dict) or not isinstance(finding.get("ident"), str):
             raise ParityError(f"not a zizmor finding: {finding!r:.200}")
-        if finding["ident"] not in audits or finding.get("ignored"):
+        if finding["ident"] not in audits:
             continue
-        det = finding.get("determinations") or {}
+        if finding.get("ignored") not in (False, None):
+            if finding.get("ignored") is True:
+                continue
+            raise ParityError(f"zizmor's `ignored` not read: {finding.get('ignored')!r}")
+        det = finding.get("determinations")
+        if not isinstance(det, dict):
+            raise ParityError(f"zizmor finding without determinations: {finding!r:.200}")
         severity = str(det.get("severity", "")).lower()
         confidence = str(det.get("confidence", "")).lower()
         if severity not in SEVERITIES or confidence not in CONFIDENCES:
             raise ParityError(f"zizmor determinations not read: {det!r}")
-        location = _primary(finding.get("locations"))
-        route = _route(location)
-        job = route[1] if len(route) > 1 and route[0] == "jobs" and isinstance(route[1], str) else None
-        row = location.get("concrete", {}).get("location", {}).get("start_point", {}).get("row")
-        line = row + 1 if isinstance(row, int) else 0
-        key = (_file(location), job, finding["ident"])
-        sev, conf, lines = grouped.get(key, ("informational", "low", set()))
+        try:
+            location = _primary(finding.get("locations"))
+            route = _route(location)
+            line = _line(location)
+            path = _file(location)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ParityError(f"zizmor location not read ({exc!r}): {finding!r:.300}") from None
+        job = step = None
+        if route[:1] == ["jobs"] and len(route) > 1:
+            if not isinstance(route[1], str):
+                raise ParityError(f"zizmor route with a job that is not a name: {route!r}")
+            job = route[1]
+            if len(route) > 3 and route[2] == "steps" and isinstance(route[3], int):
+                step = route[3]
+        key = (path, job, finding["ident"])
+        sev, conf, lines, steps, whole = grouped.get(key, ("informational", "low", set(), set(), False))
         grouped[key] = (max(sev, severity, key=SEVERITIES.index), max(conf, confidence, key=CONFIDENCES.index),
-                        lines | {line})
-    return sorted((Case(f, j, a, s, c, tuple(sorted(ls))) for (f, j, a), (s, c, ls) in grouped.items()),
+                        lines | {line}, steps | ({step} if step is not None else set()), whole or step is None)
+    return sorted((Case(f, j, a, s, c, tuple(sorted(ls)), tuple(sorted(st)), w)
+                   for (f, j, a), (s, c, ls, st, w) in grouped.items()),
                   key=lambda c: (c.file, c.job or "", c.audit))
 
 
+def digests(fileset: FileSet, base: Path) -> dict:
+    """The SHA-256 of each file of a set, by its path in the set."""
+    import hashlib
+
+    return {rel: hashlib.sha256((base / rel).read_bytes()).hexdigest() for rel in fileset.files(base)}
+
+
+CASE_KEYS = {"file", "job", "audit", "severity", "confidence", "lines", "steps", "job_level"}
+
+
 def load_cases(path: Path = CASES) -> dict:
-    """The recorded cases: {"zizmor": version, "sets": {set: [Case, ...]}}."""
+    """The recorded cases: {"zizmor": version, "sets": {set: [Case, ...]}, "digests": {set: {file: sha256}}}."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("format") != CASES_FORMAT:
-        raise ParityError(f"{path}: format must be {CASES_FORMAT}")
+    if not isinstance(data, dict) or data.get("format") != CASES_FORMAT or set(data) != {
+            "format", "zizmor", "sets", "digests"}:
+        raise ParityError(f"{path}: format must be {CASES_FORMAT}, with zizmor, sets and digests")
     sets = {}
     for name, items in (data.get("sets") or {}).items():
         out = []
         for item in items:
-            if not isinstance(item, dict) or set(item) != {"file", "job", "audit", "severity", "confidence", "lines"}:
+            if not isinstance(item, dict) or set(item) != CASE_KEYS:
                 raise ParityError(f"{path}: set {name}: not a case: {item!r:.200}")
             out.append(Case(item["file"], item["job"], item["audit"], item["severity"], item["confidence"],
-                            tuple(item["lines"])))
+                            tuple(item["lines"]), tuple(item["steps"]), bool(item["job_level"])))
         sets[name] = out
-    return {"zizmor": data.get("zizmor"), "sets": sets}
+    if not isinstance(data["digests"], dict) or set(data["digests"]) != set(sets):
+        raise ParityError(f"{path}: digests must name the same sets as the cases")
+    return {"zizmor": data.get("zizmor"), "sets": sets, "digests": data["digests"]}
 
 
-def dump_cases(version: str, sets: dict) -> str:
+def dump_cases(version: str, sets: dict, files: dict) -> str:
     return json.dumps({"format": CASES_FORMAT, "zizmor": version,
-                       "sets": {name: [c.as_dict() for c in cases] for name, cases in sorted(sets.items())}},
+                       "sets": {name: [c.as_dict() for c in cases] for name, cases in sorted(sets.items())},
+                       "digests": {name: dict(sorted(files[name].items())) for name in sorted(sets)}},
                       indent=1, sort_keys=False) + "\n"
 
 
@@ -344,15 +398,31 @@ class Hit:
     rule: str
     job: str | None
     state: str
+    step_line: int | None = None   # the line of the step the finding names, None for a finding on the job
 
 
-def obaaf_findings(path: Path) -> tuple[list[Hit], list[str]]:
-    """What `obaaf check FILE` (no configuration, GitHub Actions) finds on one workflow file."""
+@dataclass
+class FileResult:
+    hits: list
+    errors: list
+    steps: dict    # job id -> the line of each of its steps, in order
+
+
+def obaaf_findings(path: Path) -> FileResult:
+    """What `obaaf check FILE` (no configuration, GitHub Actions) finds on one workflow file, and where
+    OBAAF's reader puts each job's steps."""
     from obaaf import checker
+    from obaaf.checker import workflow as wf_mod
 
     config = checker.Config.load(path.parent, None)
     result = checker.check(path, config=config, platform="github")
-    return [Hit(f.rule, f.job, f.state) for f in result.findings], list(result.errors)
+    errors = list(result.errors)
+    parsed = wf_mod.parse(path.name, path.read_text(encoding="utf-8"))
+    if parsed.error:
+        errors.append(parsed.error)
+    steps = {job_id: [step.line for step in job.steps] for job_id, job in parsed.jobs.items()}
+    hits = [Hit(f.rule, f.job, f.state, f.line if f.step is not None else None) for f in result.findings]
+    return FileResult(hits, errors, steps)
 
 
 @dataclass
@@ -361,6 +431,7 @@ class Outcome:
     status: str        # answered, silent (recorded), unexplained
     hits: list = field(default_factory=list)
     reason: str = ""
+    unmet: list = field(default_factory=list)   # what zizmor named that no OBAAF finding answers
 
 
 @dataclass
@@ -369,12 +440,35 @@ class Comparison:
     outcomes: list
     stale: list        # silent entries that name no case, or a case OBAAF answers: (entry, why)
     recorded: list     # (Recorded, ok: bool, hits)
-    errors: dict       # file -> OBAAF's errors on it
+    errors: dict       # file -> what OBAAF could not read in it
 
     @property
     def failures(self) -> int:
         return (sum(o.status == "unexplained" for o in self.outcomes) + len(self.stale)
-                + sum(not ok for _, ok, _ in self.recorded))
+                + sum(not ok for _, ok, _ in self.recorded) + len(self.errors))
+
+
+def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
+    """OBAAF's findings that answer a case, and what in the case none answers. A finding answers when it
+    is of a mapped rule, not `fixed`, and on the case's job (any job, for a case on the file). Each step
+    zizmor named needs a finding on that step or on the job as a whole; the job, when zizmor named it
+    or a part of it that is not a step, needs any finding on it."""
+    found = [h for h in result.hits if h.rule in rules and h.state != "fixed"
+             and (case.job is None or h.job == case.job)]
+    if case.job is None:
+        return found, ([] if found else ["the file"])
+    unmet = []
+    if case.job_level and not found:
+        unmet.append(f"job {case.job}")
+    lines = result.steps.get(case.job)
+    if case.steps and lines is None:
+        raise ParityError(f"{case.file}: OBAAF's reader has no job {case.job!r}, which zizmor names")
+    for index in case.steps:
+        if index >= len(lines):
+            raise ParityError(f"{case.file}: job {case.job!r} has no step {index + 1}, which zizmor names")
+        if not any(h.step_line is None or h.step_line == lines[index] for h in found):
+            unmet.append(f"step {index + 1} (line {lines[index]})")
+    return found, unmet
 
 
 def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, findings=obaaf_findings) -> Comparison:
@@ -383,34 +477,35 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
     by_file: dict = {}
     errors: dict = {}
 
-    def hits_on(rel: str) -> list[Hit]:
+    def result_of(rel: str) -> FileResult:
         if rel not in by_file:
             if rel not in files:
-                raise ParityError(f"set {set_name}: zizmor reported {rel}, which is not among the set's files")
-            hits, errs = findings(base / rel)
-            by_file[rel] = hits
-            if errs:
-                errors[rel] = errs
+                raise ParityError(f"set {set_name}: {rel} is not among the set's files")
+            result = findings(base / rel)
+            by_file[rel] = result
+            if result.errors:
+                errors[rel] = result.errors
         return by_file[rel]
 
     silent = {(s.file, s.job, s.audit): s for s in mapping.silent if s.set == set_name}
+    for key, entry in silent.items():
+        if entry.file not in files:
+            raise ParityError(f"set {set_name}: a silent entry names {entry.file}, which is not among its files")
     used: set = set()
     outcomes = []
     for case in cases:
         if case.audit not in mapping.audits:
             continue
-        rules = mapping.audits[case.audit]
-        answer = [h for h in hits_on(case.file) if h.rule in rules and h.state != "fixed"
-                  and (case.job is None or h.job is None or h.job == case.job)]
+        found, unmet = answer(case, mapping.audits[case.audit], result_of(case.file))
         entry = silent.get(case.key())
-        if answer:
-            outcomes.append(Outcome(case, "answered", answer))
+        if not unmet:
+            outcomes.append(Outcome(case, "answered", found))
         elif entry is not None:
             used.add(case.key())
             label = f"{entry.kind}: " if entry.kind == "narrower" else f"gap ({entry.issue}): "
-            outcomes.append(Outcome(case, "silent", reason=label + entry.reason))
+            outcomes.append(Outcome(case, "silent", found, label + entry.reason, unmet))
         else:
-            outcomes.append(Outcome(case, "unexplained"))
+            outcomes.append(Outcome(case, "unexplained", found, unmet=unmet))
     answered = {o.case.key() for o in outcomes if o.status == "answered"}
     stale = []
     for key, entry in silent.items():
@@ -422,7 +517,7 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
     for item in mapping.recorded:
         if item.set != set_name:
             continue
-        got = [h for h in hits_on(item.file) if h.rule in item.rules]
+        got = [h for h in result_of(item.file).hits if h.rule in item.rules and h.state != "fixed"]
         recorded.append((item, bool(got), got))
     return Comparison(set_name, outcomes, stale, recorded, errors)
 
@@ -436,9 +531,15 @@ def render(comparison: Comparison) -> str:
         c = o.case
         where = f"{c.file}#{c.job}" if c.job else f"{c.file} (file)"
         lines_of = ",".join(str(n) for n in c.lines)
-        detail = (" ".join(sorted({f"{h.rule}/{h.job or '-'}/{h.state}" for h in o.hits})) if o.status == "answered"
-                  else o.reason if o.status == "silent" else "OBAAF reports none of " + ", ".join(
-                      sorted(set(MAPPING_RULES.get(c.audit, [])))))
+        hits = " ".join(sorted({f"{h.rule}/{h.job or '-'}/{h.state}" + (f"@{h.step_line}" if h.step_line else "")
+                                for h in o.hits}))
+        if o.status == "answered":
+            detail = hits
+        else:
+            detail = ("no finding of " + ", ".join(MAPPING_RULES.get(c.audit, [])) + " on " + "; ".join(o.unmet)
+                      + (f" (OBAAF found: {hits})" if hits else ""))
+            if o.status == "silent":
+                detail = o.reason + " [" + detail + "]"
         lines.append(f"  [{o.status}] {where} {c.audit} ({c.severity}, {c.confidence} confidence; line {lines_of}): "
                      f"{detail}")
     for entry, why in comparison.stale:
@@ -450,7 +551,7 @@ def render(comparison: Comparison) -> str:
                         else "OBAAF reports none of " + ", ".join(item.rules)))
     for rel, errs in sorted(comparison.errors.items()):
         for err in errs:
-            lines.append(f"  [obaaf error] {rel}: {err}")
+            lines.append(f"  [obaaf could not read] {rel}: {err}")
     return "\n".join(lines)
 
 
@@ -508,13 +609,13 @@ def cmd_lock(args, mapping: Mapping) -> int:
     if args.check:
         current = LOCK.read_text(encoding="utf-8") if LOCK.is_file() else ""
         if current != text:
-            print(f"{LOCK.relative_to(ROOT)} does not match zizmor {mapping.version} on PyPI. The expected file "
+            print(f"{shown(LOCK)} does not match zizmor {mapping.version} on PyPI. The expected file "
                   "is printed by `python scripts/zizmor_parity.py lock --print`.", file=sys.stderr)
             return 1
-        print(f"{LOCK.relative_to(ROOT)} matches zizmor {mapping.version} on PyPI ({len(digests)} files).")
+        print(f"{shown(LOCK)} matches zizmor {mapping.version} on PyPI ({len(digests)} files).")
         return 0
     LOCK.write_text(text, encoding="utf-8")
-    print(f"wrote {LOCK.relative_to(ROOT)} ({len(digests)} files)")
+    print(f"wrote {shown(LOCK)} ({len(digests)} files)")
     return 0
 
 
@@ -542,13 +643,24 @@ def cmd_run(args, mapping: Mapping) -> int:
         if not files:
             raise ParityError(f"set {name}: no files under {base}")
         done = subprocess.run([args.zizmor, *mapping.arguments, *files], cwd=base, capture_output=True, text=True)
+        if done.stderr.strip():
+            print(f"set {name}: zizmor wrote to standard error:\n{done.stderr.rstrip()}")
         if done.returncode != 0:
-            print(done.stderr, file=sys.stderr)
             raise ParityError(f"set {name}: zizmor exited {done.returncode}")
-        findings = json.loads(done.stdout)
+        try:
+            findings = json.loads(done.stdout)
+        except ValueError as exc:
+            raise ParityError(f"set {name}: zizmor's output is not JSON: {exc}") from None
         (out / f"{name}.json").write_text(done.stdout, encoding="utf-8")
         print(f"set {name}: zizmor {mapping.version} read {len(files)} files and reported {len(findings)} findings")
     return 0
+
+
+def _zizmor_json(path: str):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ParityError(f"zizmor's output {path} not read: {exc}") from None
 
 
 def cmd_ci(args, mapping: Mapping) -> int:
@@ -556,24 +668,33 @@ def cmd_ci(args, mapping: Mapping) -> int:
     outputs = _roots(args.zizmor)
     if set(outputs) != set(mapping.sets):
         raise ParityError(f"give --zizmor for every set: {', '.join(sorted(mapping.sets))}")
-    live = {}
-    for name, path in outputs.items():
-        live[name] = cases_from_zizmor(json.loads(Path(path).read_text(encoding="utf-8")), mapping.audits)
+    live = {name: cases_from_zizmor(_zizmor_json(path), mapping.audits) for name, path in outputs.items()}
+    bases = {name: base_of(mapping, name, roots) for name in mapping.sets}
+    files = {name: digests(mapping.sets[name], bases[name]) for name in mapping.sets}
     failures = 0
-    recorded = load_cases() if CASES.is_file() else {"zizmor": None, "sets": {}}
-    if recorded["zizmor"] != mapping.version or recorded["sets"] != live:
+    recorded = {"zizmor": None, "sets": {}, "digests": {}}
+    if CASES.is_file():
+        try:
+            recorded = load_cases()
+        except (ParityError, ValueError) as exc:
+            print(f"{shown(CASES)} not read: {exc}")
+    if recorded["zizmor"] != mapping.version or recorded["sets"] != live or recorded["digests"] != files:
         failures += 1
-        print(f"FAIL: {CASES.relative_to(ROOT)} is not what zizmor {mapping.version} reports for the mapped "
-              "audits. What it reported, as the file should read, is on the next line.")
-        print("CASES " + json.dumps(json.loads(dump_cases(mapping.version, live)), separators=(",", ":")))
+        print(f"FAIL: {shown(CASES)} is not what zizmor {mapping.version} reports for the mapped "
+              "audits on these files. What it reported, as the file should read, is on the next line.")
+        print("CASES " + json.dumps(json.loads(dump_cases(mapping.version, live, files)), separators=(",", ":")))
         for name in sorted(mapping.sets):
             then = {c.key(): c for c in recorded["sets"].get(name, [])}
             now = {c.key(): c for c in live[name]}
             for key in sorted(set(then) | set(now), key=str):
                 if then.get(key) != now.get(key):
                     print(f"  {name}: recorded {then.get(key)}; zizmor now {now.get(key)}")
+            old = recorded["digests"].get(name, {})
+            for rel in sorted(set(old) | set(files[name])):
+                if old.get(rel) != files[name].get(rel):
+                    print(f"  {name}: {rel} recorded {old.get(rel)}; now {files[name].get(rel)}")
     for name in sorted(mapping.sets):
-        comparison = compare(mapping, name, live[name], base_of(mapping, name, roots))
+        comparison = compare(mapping, name, live[name], bases[name])
         print(render(comparison))
         failures += comparison.failures
     print("parity: " + ("FAILED" if failures else "passed"))
@@ -584,17 +705,25 @@ def cmd_compare(args, mapping: Mapping) -> int:
     roots = _roots(args.root)
     recorded = load_cases()
     if recorded["zizmor"] != mapping.version:
-        raise ParityError(f"{CASES.relative_to(ROOT)} was recorded with zizmor {recorded['zizmor']}, "
+        raise ParityError(f"{shown(CASES)} was recorded with zizmor {recorded['zizmor']}, "
                           f"not {mapping.version}")
     failures = 0
     for name in args.set or sorted(mapping.sets):
         if name not in mapping.sets:
             raise ParityError(f"no set {name!r}")
-        try:
-            base = base_of(mapping, name, roots)
-        except ParityError as exc:
-            print(f"set {name}: skipped ({exc})")
+        if mapping.sets[name].repository and name not in roots:
+            if args.set:
+                raise ParityError(f"set {name} is from {mapping.sets[name].repository}; give --root {name}=DIR")
+            print(f"set {name}: skipped (its files are in {mapping.sets[name].repository}; give --root {name}=DIR)")
             continue
+        base = base_of(mapping, name, roots)
+        now = digests(mapping.sets[name], base)
+        if recorded["digests"].get(name) != now:
+            changed = sorted(rel for rel in set(now) | set(recorded["digests"].get(name, {}))
+                             if now.get(rel) != recorded["digests"].get(name, {}).get(rel))
+            print(f"set {name}: these files are not the ones zizmor's recorded cases were read from: "
+                  + ", ".join(changed))
+            failures += 1
         comparison = compare(mapping, name, recorded["sets"].get(name, []), base)
         print(render(comparison))
         failures += comparison.failures

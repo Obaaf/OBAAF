@@ -56,26 +56,29 @@ def mapping(silent=(), recorded=(), root: str = "w") -> "zp.Mapping":
 
 
 class ZizmorOutput(unittest.TestCase):
-    def test_a_finding_on_a_step_is_a_case_of_its_job(self):
+    def test_a_finding_on_a_step_is_a_case_of_its_job_and_that_step(self):
         cases = zp.cases_from_zizmor([finding("template-injection", [
             location("a.yml", ["jobs", "build", "steps", 0, "run"], kind="Related", row=9),
             location("a.yml", ["jobs", "build", "steps", 1, "run"], row=12)])], AUDITS)
-        self.assertEqual([("a.yml", "build", "template-injection", "high", "high", (13,))],
-                         [(c.file, c.job, c.audit, c.severity, c.confidence, c.lines) for c in cases])
+        self.assertEqual([("a.yml", "build", "template-injection", "high", "high", (13,), (1,), False)],
+                         [(c.file, c.job, c.audit, c.severity, c.confidence, c.lines, c.steps, c.job_level)
+                          for c in cases])
 
     def test_a_workflow_level_finding_names_no_job(self):
         cases = zp.cases_from_zizmor([finding("excessive-permissions", [location("./b.yml", ["permissions"])])],
                                      AUDITS)
-        self.assertEqual([("b.yml", None)], [(c.file, c.job) for c in cases])
+        self.assertEqual([("b.yml", None, (), True)], [(c.file, c.job, c.steps, c.job_level) for c in cases])
 
     def test_findings_of_one_job_and_audit_are_one_case_with_the_highest_determinations(self):
         cases = zp.cases_from_zizmor([
-            finding("template-injection", [location("a.yml", ["jobs", "j", "steps", 0])], "Low", "Medium", ),
-            finding("template-injection", [location("a.yml", ["jobs", "j", "steps", 3])], "Informational", "High",
-                    ),
+            finding("template-injection", [location("a.yml", ["jobs", "j", "steps", 0])], "Low", "Medium"),
+            finding("template-injection", [location("a.yml", ["jobs", "j", "steps", 3])], "Informational", "High"),
+            finding("template-injection", [location("a.yml", ["jobs", "j", "permissions"], row=2)], "Low", "Low"),
         ], AUDITS)
         self.assertEqual(1, len(cases))
-        self.assertEqual(("low", "high", (5,)), (cases[0].severity, cases[0].confidence, cases[0].lines))
+        c = cases[0]
+        self.assertEqual(("low", "high", (3, 5), (0, 3), True), (c.severity, c.confidence, c.lines, c.steps,
+                                                                 c.job_level))
 
     def test_unmapped_and_ignored_findings_are_not_cases(self):
         cases = zp.cases_from_zizmor([
@@ -85,65 +88,117 @@ class ZizmorOutput(unittest.TestCase):
         self.assertEqual([], cases)
 
     def test_output_it_cannot_read_is_an_error_not_a_looser_case(self):
-        bad = [
-            "not a list",
-            [{"no": "ident"}],
-            [finding("artipacked", [])],
-            [finding("artipacked", [location("a.yml", ["jobs", "j"], kind="Hidden")])],
-            [finding("artipacked", [location("a.yml", ["jobs", "j"])], severity="Severe")],
-            [dict(finding("artipacked", [location("a.yml", ["jobs"])]), locations=[
-                {"symbolic": {"key": {"Remote": {}}, "route": {"route": []}, "kind": "Primary"}}])],
-            [dict(finding("artipacked", [location("a.yml", ["jobs"])]), locations=[
-                {"symbolic": {"key": {"Local": {"verbatim_path": "a.yml"}}, "route": {"route": [{"Key": 1}]},
-                              "kind": "Primary"}}])],
-            [dict(finding("artipacked", [location("a.yml", ["jobs"])]), locations=[
-                {"symbolic": {"key": {"Local": {"verbatim_path": "a.yml"}}, "route": "jobs.j", "kind": "Primary"}}])],
-        ]
-        for output in bad:
-            with self.subTest(output=str(output)[:80]):
+        good = finding("artipacked", [location("a.yml", ["jobs", "j"])])
+
+        def with_location(**changes):
+            loc = location("a.yml", ["jobs", "j"])
+            for key, value in changes.items():
+                if key == "symbolic" or key == "concrete":
+                    loc[key] = value
+                else:
+                    loc["symbolic"][key] = value
+            return [dict(good, locations=[loc])]
+
+        bad = {
+            "not a list": "not a list",
+            "no ident": [{"no": "ident"}],
+            "no locations": [finding("artipacked", [])],
+            "hidden only": [finding("artipacked", [location("a.yml", ["jobs", "j"], kind="Hidden")])],
+            "unknown severity": [finding("artipacked", [location("a.yml", ["jobs", "j"])], severity="Severe")],
+            "no determinations": [dict(good, determinations=None)],
+            "ignored not a boolean": [dict(good, ignored="yes")],
+            "remote key": with_location(key={"Remote": {}}),
+            "two keys": with_location(key={"Local": {"verbatim_path": "a.yml"}, "Stdin": {}}),
+            "no path": with_location(key={"Local": {}}),
+            "job as an index": with_location(route={"route": [{"Key": "jobs"}, {"Index": 1}]}),
+            "route part not read": with_location(route={"route": [{"Key": 1}]}),
+            "negative index": with_location(route={"route": [{"Key": "jobs"}, {"Key": "j"}, {"Index": -1}]}),
+            "route as text": with_location(route="jobs.j"),
+            "symbolic null": with_location(symbolic=None),
+            "concrete null": with_location(concrete=None),
+            "no row": with_location(concrete={"location": {"start_point": {}}}),
+        }
+        for name, output in bad.items():
+            with self.subTest(name=name):
                 with self.assertRaises(zp.ParityError):
                     zp.cases_from_zizmor(output, AUDITS)
 
-    def test_cases_round_trip_through_the_recorded_file(self):
+    def test_cases_and_digests_round_trip_through_the_recorded_file(self):
         cases = zp.cases_from_zizmor([finding("artipacked", [location("a.yml", ["jobs", "j", "steps", 0])])],
                                      AUDITS)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cases.json"
-            path.write_text(zp.dump_cases("1.32.0", {"s": cases}), encoding="utf-8")
-            self.assertEqual({"zizmor": "1.32.0", "sets": {"s": cases}}, zp.load_cases(path))
+            path.write_text(zp.dump_cases("1.32.0", {"s": cases}, {"s": {"a.yml": "0" * 64}}), encoding="utf-8")
+            self.assertEqual({"zizmor": "1.32.0", "sets": {"s": cases}, "digests": {"s": {"a.yml": "0" * 64}}},
+                             zp.load_cases(path))
+
+
+WORKFLOW = """\
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo one
+      - run: echo two
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo three
+"""
 
 
 class Comparison(unittest.TestCase):
+    """The comparison, with OBAAF's findings given by hand. Steps of WORKFLOW's job `build` are at lines 6
+    and 7 (OBAAF's reader puts a step at the line of its first key)."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)
         for name in ("a.yml", "b.yml"):
-            (self.base / name).write_text("on: push\n", encoding="utf-8")
+            (self.base / name).write_text(WORKFLOW, encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_compare(self, cases, hits, silent=(), recorded=()):
+    def run_compare(self, cases, hits, silent=(), recorded=(), errors=None):
         def findings(path):
-            return hits.get(path.name, []), []
+            return zp.FileResult(hits.get(path.name, []), (errors or {}).get(path.name, []),
+                                 {"build": [6, 7], "deploy": [11]})
         return zp.compare(mapping(silent, recorded), "s", cases, self.base, findings=findings)
 
     @staticmethod
-    def case(job="build", audit="template-injection", file="a.yml"):
-        return zp.Case(file, job, audit, "high", "high", (3,))
+    def case(job="build", audit="template-injection", file="a.yml", steps=(), job_level=True):
+        return zp.Case(file, job, audit, "high", "high", (3,), tuple(steps), job_level)
 
     def test_answered_by_the_mapped_rule_on_the_same_job(self):
-        result = self.run_compare([self.case()], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new")]})
+        result = self.run_compare([self.case()], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 6)]})
         self.assertEqual(["answered"], [o.status for o in result.outcomes])
         self.assertEqual(0, result.failures)
 
     def test_another_job_another_rule_or_a_fixed_finding_does_not_answer(self):
         for hit in (zp.Hit("OBAAF-GHA-010", "deploy", "new"), zp.Hit("OBAAF-GHA-001", "build", "new"),
-                    zp.Hit("OBAAF-GHA-010", "build", "fixed")):
+                    zp.Hit("OBAAF-GHA-010", "build", "fixed"), zp.Hit("OBAAF-GHA-010", None, "new")):
             with self.subTest(hit=hit):
                 result = self.run_compare([self.case()], {"a.yml": [hit]})
                 self.assertEqual(["unexplained"], [o.status for o in result.outcomes])
                 self.assertEqual(1, result.failures)
+
+    def test_each_step_zizmor_names_needs_a_finding_on_it_or_on_the_job(self):
+        case = self.case(steps=(1,), job_level=False)
+        on_other_step = {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 6)]}
+        result = self.run_compare([case], on_other_step)
+        self.assertEqual(["unexplained"], [o.status for o in result.outcomes])
+        self.assertEqual(["step 2 (line 7)"], result.outcomes[0].unmet)
+        self.assertEqual(0, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", 7)]}).failures)
+        self.assertEqual(0, self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", None)]}).failures)
+        both = self.case(steps=(0, 1), job_level=False)
+        self.assertEqual(1, self.run_compare([both], on_other_step).failures)
+
+    def test_a_step_or_job_obaaf_s_reader_does_not_have_is_an_error(self):
+        for case in (self.case(steps=(5,), job_level=False), self.case(job="nope", steps=(0,), job_level=False)):
+            with self.subTest(case=case), self.assertRaises(zp.ParityError):
+                self.run_compare([case], {"a.yml": [zp.Hit("OBAAF-GHA-010", case.job, "new", None)]})
 
     def test_accepted_and_cannot_tell_findings_answer(self):
         for state in ("accepted", "cannot-tell"):
@@ -155,14 +210,24 @@ class Comparison(unittest.TestCase):
                                   {"a.yml": [zp.Hit("OBAAF-GHA-009", "anything", "new")]})
         self.assertEqual(0, result.failures)
 
+    def test_a_file_obaaf_could_not_read_fails_even_where_a_reason_is_recorded(self):
+        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.",
+                          "narrower")
+        result = self.run_compare([self.case()], {}, silent=[entry], errors={"a.yml": ["cannot parse YAML"]})
+        self.assertEqual(["silent"], [o.status for o in result.outcomes])
+        self.assertEqual(1, result.failures)
+        self.assertIn("[obaaf could not read] a.yml: cannot parse YAML", zp.render(result))
+
     def test_a_recorded_reason_makes_a_silent_case_pass(self):
-        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.", "narrower")
+        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.",
+                          "narrower")
         result = self.run_compare([self.case()], {}, silent=[entry])
         self.assertEqual(["silent"], [o.status for o in result.outcomes])
         self.assertEqual(0, result.failures)
 
     def test_a_reason_for_a_case_zizmor_does_not_report_or_obaaf_answers_fails(self):
-        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.", "narrower")
+        entry = zp.Silent("s", "a.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.",
+                          "narrower")
         result = self.run_compare([], {}, silent=[entry])
         self.assertEqual(1, result.failures)
         self.assertIn("zizmor reports no such case", result.stale[0][1])
@@ -170,6 +235,12 @@ class Comparison(unittest.TestCase):
                                   silent=[entry])
         self.assertEqual(1, result.failures)
         self.assertIn("OBAAF now answers", result.stale[0][1])
+
+    def test_a_reason_for_a_file_outside_the_set_is_an_error(self):
+        entry = zp.Silent("s", "gone.yml", "build", "template-injection", "OBAAF reads only outsiders' text here.",
+                          "narrower")
+        with self.assertRaises(zp.ParityError):
+            self.run_compare([], {}, silent=[entry])
 
     def test_unmapped_audits_are_not_compared(self):
         result = self.run_compare([self.case(audit="dangerous-triggers")], {})
@@ -182,11 +253,14 @@ class Comparison(unittest.TestCase):
     def test_recorded_results_of_other_tools(self):
         item = zp.Recorded("poutine 1.1.6", "untrusted_checkout_exec", "s", "b.yml", ["OBAAF-GHA-002"])
         self.assertEqual(1, self.run_compare([], {}, recorded=[item]).failures)
+        self.assertEqual(1, self.run_compare([], {"b.yml": [zp.Hit("OBAAF-GHA-002", "j", "fixed")]},
+                                             recorded=[item]).failures)
         self.assertEqual(0, self.run_compare([], {"b.yml": [zp.Hit("OBAAF-GHA-002", "j", "new")]},
                                              recorded=[item]).failures)
 
     def test_the_report_names_each_case_and_its_status(self):
-        entry = zp.Silent("s", "b.yml", None, "artipacked", "OBAAF covers agent jobs and untrusted triggers.", "gap", "#1")
+        entry = zp.Silent("s", "b.yml", None, "artipacked", "OBAAF covers agent jobs and untrusted triggers.",
+                          "gap", "#1")
         result = self.run_compare(
             [self.case(), self.case(job=None, audit="artipacked", file="b.yml"), self.case(job="x")],
             {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new")]}, silent=[entry])
@@ -196,6 +270,82 @@ class Comparison(unittest.TestCase):
         self.assertIn("[unexplained] a.yml#x template-injection", text)
         self.assertIn("[silent] b.yml (file) artipacked", text)
         self.assertIn("gap (#1): OBAAF covers agent jobs", text)
+
+
+class StepLines(unittest.TestCase):
+    def test_obaaf_findings_gives_the_line_of_each_step_and_of_the_step_a_finding_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "w.yml"
+            path.write_text(WORKFLOW.replace("echo two", "echo ${{ github.event.pull_request.title }}"),
+                            encoding="utf-8")
+            result = zp.obaaf_findings(path)
+        self.assertEqual({"build": [6, 7], "deploy": [11]}, result.steps)
+        self.assertIn(zp.Hit("OBAAF-GHA-010", "build", "new", 7), result.hits)
+        self.assertEqual([], result.errors)
+
+
+class Commands(unittest.TestCase):
+    """`ci` and `compare` end to end, with a copy of the mapping and cases in a temporary folder."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = (zp.CASES, zp.MAPPING)
+        self.addCleanup(self.restore)
+        zp.CASES = self.dir / "cases.json"
+        zp.CASES.write_text(self.saved[0].read_text(encoding="utf-8"), encoding="utf-8")
+
+    def restore(self):
+        zp.CASES, zp.MAPPING = self.saved
+
+    def run_main(self, *argv) -> tuple[int, str]:
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = zp.main(list(argv))
+        return code, out.getvalue()
+
+    def test_compare_passes_on_the_recorded_cases_and_skips_a_set_it_has_no_files_for(self):
+        code, text = self.run_main("compare")
+        self.assertEqual(0, code, text)
+        self.assertIn("set zizmor-tests: skipped", text)
+
+    def test_compare_refuses_a_named_set_it_has_no_files_for(self):
+        code, text = self.run_main("compare", "--set", "zizmor-tests")
+        self.assertEqual(2, code, text)
+
+    def test_compare_fails_when_a_file_is_not_the_one_the_cases_were_read_from(self):
+        data = json.loads(zp.CASES.read_text(encoding="utf-8"))
+        name = sorted(data["digests"]["risky"])[0]
+        data["digests"]["risky"][name] = "0" * 64
+        zp.CASES.write_text(json.dumps(data), encoding="utf-8")
+        code, text = self.run_main("compare", "--set", "risky")
+        self.assertEqual(1, code, text)
+        self.assertIn(f"not the ones zizmor's recorded cases were read from: {name}", text)
+
+    def test_ci_fails_and_prints_the_cases_when_zizmor_reports_otherwise(self):
+        recorded = zp.load_cases()
+        zizmor_out = {name: self.dir / f"{name}.json" for name in recorded["sets"]}
+        # zizmor reports nothing on either set: every recorded case is gone, and every silent entry stale.
+        for path in zizmor_out.values():
+            path.write_text("[]", encoding="utf-8")
+        base = self.dir / "zizmor-tests"
+        for rel in recorded["digests"]["zizmor-tests"]:
+            (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (base / rel).write_text("on: push\njobs: {}\n", encoding="utf-8")
+        code, text = self.run_main("ci", *[f"--zizmor={n}={p}" for n, p in zizmor_out.items()],
+                                   f"--root=zizmor-tests={base}")
+        self.assertEqual(1, code, text)
+        self.assertIn("cases.json is not what zizmor", text)
+        line = next(line for line in text.splitlines() if line.startswith("CASES "))
+        printed = json.loads(line[6:])
+        self.assertEqual({"risky": [], "zizmor-tests": []}, printed["sets"])
+        self.assertEqual(recorded["digests"]["risky"], printed["digests"]["risky"])
+        self.assertIn("[stale] silent entry", text)
+        self.assertIn("parity: FAILED", text)
 
 
 class FileSets(unittest.TestCase):
@@ -251,7 +401,16 @@ class MappingFile(unittest.TestCase):
                 self.assertEqual(fileset.commit, checkout[0]["with"]["ref"])
                 self.assertIn(f"{fileset.name}=third-party/zizmor/{fileset.root}", text)
                 self.assertEqual(fileset.root, checkout[0]["with"]["sparse-checkout"])
-        self.assertIn("--require-hashes", text)
+        install = next(s["run"] for s in job["steps"] if "pip install" in s.get("run", "") and "zizmor" in s["run"])
+        for option in ("--require-hashes", "--only-binary=:all:", "--no-deps", "tests/parity/zizmor-requirements.txt"):
+            self.assertIn(option, install)
+        later = [s for s in job["steps"] if "zizmor_parity.py run" in s.get("run", "")
+                 or "zizmor_parity.py ci" in s.get("run", "")]
+        self.assertEqual(2, len(later))
+        for fileset in self.mapping.sets.values():
+            if fileset.repository:
+                for step in later:
+                    self.assertIn(f"{fileset.name}=third-party/zizmor/{fileset.root}", step["run"])
 
     def test_mistakes_in_the_mapping_are_errors(self):
         good = (ROOT / "tests" / "parity" / "zizmor.yaml").read_text(encoding="utf-8")
@@ -325,6 +484,9 @@ class RecordedCases(unittest.TestCase):
         for name, fileset in mapping.sets.items():
             if fileset.repository:
                 continue
+            self.assertEqual(recorded["digests"][name], zp.digests(fileset, ROOT / fileset.root),
+                             f"set {name}: a file changed since zizmor's cases were recorded; record them again "
+                             "from CI's zizmor-parity job")
             result = zp.compare(mapping, name, recorded["sets"].get(name, []), ROOT / fileset.root)
             self.assertEqual(0, result.failures, zp.render(result))
             compared += len(result.outcomes)
