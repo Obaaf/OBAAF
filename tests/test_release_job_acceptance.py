@@ -2,6 +2,7 @@
 
 from datetime import date
 from pathlib import Path
+import re
 import shutil
 import unittest
 
@@ -44,10 +45,13 @@ class ReleaseJobAcceptanceTest(unittest.TestCase):
         entries = baseline.load(ROOT / ".github/obaaf-baseline.json").entries
         self.assertEqual(len(entries), 1)
         entry = entries[0]
-        self.assertEqual({k: entry[k] for k in ("rule", "severity", "path", "job", "kind", "owner", "reason",
-                                                 "expires")}, {
+        self.assertEqual({k: entry[k] for k in ("rule", "severity", "path", "job", "kind", "facts", "owner",
+                                                 "reason", "expires")}, {
             "rule": "OBAAF-GHA-016", "severity": "high", "path": ".github/workflows/release-pypi.yml",
-            "job": "publish", "kind": "cannot-tell", "owner": "@seanudeke",
+            "job": "publish", "kind": "cannot-tell",
+            "facts": {"steps": ["pypa/gh-action-pypi-publish"],
+                      "checks": ["publish: Verify the release before uploading (FR6)"]},
+            "owner": "@seanudeke",
             "reason": "The PATH entry before the verify step is the one this repository's own setup-obaaf "
                       "writes, from hash-locked wheels; see plan item 64",
             "expires": "2027-02-18"})
@@ -67,6 +71,11 @@ class ReleaseJobAcceptanceTest(unittest.TestCase):
             text = (root / action).read_text(encoding="utf-8")
             self.assertEqual(text.count(line), 1)
             self.assertEqual(text.count("GITHUB_PATH"), 1)
+            # What the line puts on the PATH is the virtual environment the action has just made.
+            assignments = [w.strip() for w in text.split("\n") if re.search(r"\b(bin|venv)=", w)]
+            self.assertEqual(assignments, [
+                'venv="$RUNNER_TEMP/obaaf-venv"',
+                'if [ -d "$venv/Scripts" ]; then bin="$venv/Scripts"; else bin="$venv/bin"; fi'])
 
             def publish_016():
                 result = check(root, today=date(2026, 11, 19))
