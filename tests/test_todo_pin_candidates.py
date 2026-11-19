@@ -63,3 +63,31 @@ class PinCandidateTest(unittest.TestCase):
                        {".github/actions/tool/action.yml": action})
         finding, = findings(result)
         self.assertIsNone(finding.pin_candidate)
+
+    def test_an_install_reached_through_a_yaml_alias_is_manual(self):
+        # One edit under the anchor changes every step that reaches it (review of #258).
+        jobs = {
+            "a": "      - run: &install npm install -g @anthropic-ai/claude-code\n",
+            "b": "      - run: *install\n",
+            "c": "      - &step {run: npm install -g @openai/codex}\n",
+            "d": "      - *step\n",
+            "e": "      - <<: *step\n        name: Merged\n",
+            "f": "      - run: npm install -g @openai/codex\n",
+        }
+        workflow = "on: push\njobs:\n" + "".join(
+            f"  {name}:\n    runs-on: ubuntu-latest\n    env: {{OBAAF_LANE: agent}}\n    steps:\n{step}"
+            for name, step in jobs.items())
+        found = sorted(findings(check(workflow)), key=lambda f: f.job)
+        self.assertEqual([f.job for f in found], list(jobs))
+        self.assertEqual([f.pin_candidate for f in found], [None] * 5 + ["@openai/codex"])
+
+    def test_a_windows_runner_without_a_shell_is_manual(self):
+        # GitHub's default shell on Windows is PowerShell, as OBAAF-GHA-025 itself reads it.
+        for runs_on, shell, expected in (("windows-latest", "", None),
+                                         ("windows-latest", "        shell: bash\n", "@openai/codex"),
+                                         ("ubuntu-latest", "", "@openai/codex")):
+            workflow = (f"on: push\njobs:\n  a:\n    runs-on: {runs_on}\n    env: {{OBAAF_LANE: agent}}\n"
+                        f"    steps:\n      - run: npm install -g @openai/codex\n{shell}")
+            with self.subTest(runs_on=runs_on, shell=shell):
+                finding, = findings(check(workflow))
+                self.assertEqual(finding.pin_candidate, expected)

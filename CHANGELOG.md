@@ -8,7 +8,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
-- **Read the action list in JSON.** The new `todo` array groups outstanding findings and shows which old baseline entries share a rule, file and job with current work.
+- **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
+- **The suggested `obaaf baseline migrate` command works for a path that begins with `-`.** It is written `./-name`, which the command reads as a path rather than an option.
 - **Review existing acceptances.** A 0.3.0 baseline accepts nothing until migrated. Each acceptance needs an owner, a reason with at least four letters or digits, and an expiry date within 366 days. The report opens with the risk still accepted and lists entries that no longer match.
 - **Review newly checked jobs.** The checker follows local composite actions and calls to local reusable workflows, recognises 23 named agent tools, reports agent jobs that install tools at a version that can change (OBAAF-GHA-025), and reports agent actions given a setting their own documentation warns about (OBAAF-GHA-026). Ineffective lane declarations, checkout and permission handling, ownership of CI files, and revised egress checks can also change a gate's result.
 - **Check repository settings separately.** The new `obaaf audit` command compares settings with workflow files and distinguishes findings, settings it could not read, and questions the rules could not answer. The workflow checker and the settings audit each have their own gate.

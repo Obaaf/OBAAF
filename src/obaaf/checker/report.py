@@ -490,7 +490,9 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
             # that counts "findings" does not count it.
             for f in result.findings if f.state != FIXED
         ],
-        "notes": list(result.notes),
+        "notes": list(result.notes) + ([
+            "The to-do list is empty because the cause catalogue is inconsistent; obaaf catalog names the problems."
+        ] if catalog.causes.problems else []),
         "todo": todo(result, catalog),
     }
     cleared = result.cleared()

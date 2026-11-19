@@ -44,6 +44,10 @@ class _Group:
 
 
 def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
+    """Empty when the cause catalogue is inconsistent: the report is still written (`to_json` says
+    why in its notes), and `obaaf catalog` names the problems."""
+    if catalog.causes.problems:
+        return []
     groups: dict[str, _Group] = {}
     previous = previous_acceptances(result.baseline_stale, result.findings)
     for finding in result.findings:
@@ -65,7 +69,7 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
         # Legacy migration is the mechanical action already provided by the CLI.
         # Further automatic edits join this tier when the proof engine ships them.
         actionable = group.cause.id == "acceptance-old-baseline"
-        highest = next(i for i, level in enumerate(_LEVELS) if group.severity[level])
+        highest = next((i for i, level in enumerate(_LEVELS) if group.severity[level]), len(_LEVELS))
         return (not actionable, highest, -group.severity.total(), group.cause.id)
 
     return [group.as_dict() for group in sorted(groups.values(), key=priority)]

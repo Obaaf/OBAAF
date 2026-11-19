@@ -1743,13 +1743,18 @@ class WorkflowRules:
                 return True
         return False
 
-    def _pin_candidate(self, step: Step, shell: str) -> str | None:
+    def _pin_candidate(self, step: Step, shell: str, windows: bool = False) -> str | None:
         """One literal package in a direct workflow run. Normalized detection text loses its origin."""
         raw = step.raw.get("run")
         if step.via is not None or step.uses is not None or not isinstance(raw, str):
             return None
-        # A called workflow may already contain values substituted from a caller.
-        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash"):
+        # A `run` written once under a YAML anchor and reached through aliases is one edit for every
+        # step that reaches it, so none of them is a candidate (review of #258).
+        if "run" in getattr(step.raw, "shared_keys", ()):
+            return None
+        # A called workflow may already contain values substituted from a caller. A Windows runner's
+        # default shell is PowerShell, as agent_tool_installs reads it.
+        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash") or (windows and not shell):
             return None
         # Exactly one package token on one install line. The optional second line may
         # only query the installed CLI's version, using the catalogue's own spelling.
@@ -1855,7 +1860,8 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
-                         pin_candidate=self._pin_candidate(step, shell) if len(installs) == 1 and not piped else None,
+                         pin_candidate=self._pin_candidate(step, shell, windows) if len(installs) == 1 and not piped
+                         else None,
                          **agents)
 
     # -------------------------------------------------------------- GHA-026

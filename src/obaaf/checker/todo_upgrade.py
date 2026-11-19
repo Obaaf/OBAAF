@@ -21,8 +21,13 @@ def previous_acceptances(stale_entries: Iterable[dict], findings: Iterable[Findi
     # Retain the entries so object ids stay unique even when the input is a generator.
     seen_entries: dict[int, dict] = {}
     for entry in stale_entries:
-        if id(entry) not in seen_entries:
-            available[entry["rule"], entry["path"], entry.get("job") or ""] += 1
+        if not isinstance(entry, dict) or id(entry) in seen_entries:
+            continue
+        rule, path, job = entry.get("rule"), entry.get("path"), entry.get("job") or ""
+        # The baseline's loader checks these; an entry built otherwise that does not hold three
+        # strings gives no hint rather than stopping the report.
+        if isinstance(rule, str) and isinstance(path, str) and isinstance(job, str):
+            available[rule, path, job] += 1
             seen_entries[id(entry)] = entry
 
     candidates: dict[tuple[str, str, str], dict[int, Finding]] = defaultdict(dict)
