@@ -108,6 +108,10 @@ class Silent:
     reason: str
     kind: str = "narrower"   # narrower: OBAAF's rule is narrower on purpose; gap: OBAAF should report
     issue: str = ""          # for a gap, the issue that tracks it (#N)
+    # For a case OBAAF answers in part: the places the entry explains, numbered from 0 as zizmor's route
+    # and zizmor-cases.json number them ((N,), or (N, M) in a parallel group). Empty: OBAAF reports none
+    # of the audit's rules on the case's job.
+    steps: tuple = ()
 
 
 @dataclass
@@ -191,7 +195,7 @@ def load_mapping(path: Path | None = None) -> Mapping:
     seen = set()
     for i, entry in enumerate(data.get("silent") or []):
         where = f"silent[{i}]"
-        entry = _keys(entry, {"set", "file", "job", "audit", "kind", "issue", "reason"}, where)
+        entry = _keys(entry, {"set", "file", "job", "audit", "kind", "issue", "steps", "reason"}, where)
         item = Silent(_text(entry.get("set"), f"{where}.set"), _text(entry.get("file"), f"{where}.file"),
                       entry.get("job"), _text(entry.get("audit"), f"{where}.audit"),
                       _text(entry.get("reason"), f"{where}.reason"), _text(entry.get("kind"), f"{where}.kind"),
@@ -200,6 +204,14 @@ def load_mapping(path: Path | None = None) -> Mapping:
             raise ParityError(f"{where}.kind: one of {', '.join(KINDS)}")
         if (item.kind == "gap") != bool(re.fullmatch(r"#\d+", item.issue)):
             raise ParityError(f"{where}: a gap names its issue as #N, and only a gap names one")
+        places = entry.get("steps") or []
+        if not isinstance(places, list) or not all(
+                isinstance(p, list) and len(p) in (1, 2) and all(isinstance(n, int) and not isinstance(n, bool)
+                                                                and n >= 0 for n in p) for p in places):
+            raise ParityError(f"{where}.steps: a list of places, [N] or [N, M], numbered from 0")
+        if places and item.job is None:
+            raise ParityError(f"{where}.steps: only an entry for a job names steps")
+        item.steps = tuple(sorted(tuple(p) for p in places))
         if item.set not in sets:
             raise ParityError(f"{where}: no set {item.set!r}")
         if item.audit not in audits:
@@ -484,7 +496,7 @@ def _place(place: tuple) -> str:
     return f"step {place[0] + 1}" + (f", parallel step {place[1] + 1}" if len(place) > 1 else "")
 
 
-def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
+def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list, set]:
     """OBAAF's findings on a case's job, and what in the case none of them answers. A finding counts when
     it is of a mapped rule and not `fixed`, and is on the case's job (anywhere, for a case on the file).
     The job itself, when zizmor named it or a part of it that is not a step, is answered by any such
@@ -493,10 +505,12 @@ def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
     found = [h for h in result.hits if h.rule in rules and h.state != "fixed"
              and (case.job is None or h.job == case.job)]
     if case.job is None:
-        return found, ([] if found else ["the file"])
-    unmet = []
+        return found, ([] if found else ["the file"]), (set() if found else {"file"})
+    unmet: list = []
+    missing: set = set()   # the places none answers, and "job" for the job
     if case.job_level and not found:
         unmet.append(f"job {case.job}")
+        missing.add("job")
     places = result.steps.get(case.job)
     if case.steps and places is None:
         raise ParityError(f"{case.file}: OBAAF's reader has no job {case.job!r}, which zizmor names")
@@ -507,7 +521,8 @@ def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list]:
         if not any(h.step in keys or keys & h.covers for h in found):
             line = min(k[0] for k in keys)
             unmet.append(f"{_place(place)} (line {line})")
-    return found, unmet
+            missing.add(tuple(place))
+    return found, unmet, missing
 
 
 def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, findings=obaaf_findings) -> Comparison:
@@ -533,6 +548,7 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
     used: set = set()
     outcomes = []
     partly: set = set()
+    listed: set = set()
     for case in cases:
         if case.audit not in mapping.audits:
             continue
@@ -540,15 +556,17 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
         entry = silent.get(case.key())
         if result.errors:
             # OBAAF could not read the file: no reason recorded about it can be checked (a failure of its own).
-            found, unmet = [], ["a file OBAAF could not read"]
+            found, unmet, missing = [], ["a file OBAAF could not read"], {"file"}
         else:
-            found, unmet = answer(case, mapping.audits[case.audit], result)
+            found, unmet, missing = answer(case, mapping.audits[case.audit], result)
         if not unmet:
             outcomes.append(Outcome(case, "answered", found))
         elif entry is not None:
             used.add(case.key())
-            if found:
+            if found and set(entry.steps) != missing:
                 partly.add(case.key())
+            elif not found and entry.steps:
+                listed.add(case.key())
             label = f"{entry.kind}: " if entry.kind == "narrower" else f"gap ({entry.issue}): "
             outcomes.append(Outcome(case, "silent", found, label + entry.reason, unmet))
         else:
@@ -559,8 +577,11 @@ def compare(mapping: Mapping, set_name: str, cases: list[Case], base: Path, find
         if key in answered:
             stale.append((entry, "OBAAF now answers this case; remove the entry"))
         elif key in partly:
-            stale.append((entry, "OBAAF now reports a mapped rule on this job, though not on all zizmor names; "
-                                 "judge the reason again"))
+            stale.append((entry, "OBAAF reports a mapped rule on this job, though not on all zizmor names, and the "
+                                 "entry's `steps` are not the places it leaves unanswered; judge the reason again"))
+        elif key in listed:
+            stale.append((entry, "the entry names steps, but OBAAF reports none of the audit's rules on this job; "
+                                 "remove its `steps`"))
         elif key not in used:
             stale.append((entry, "zizmor reports no such case; remove or correct the entry"))
     recorded = []

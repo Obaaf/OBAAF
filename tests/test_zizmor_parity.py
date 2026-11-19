@@ -223,6 +223,26 @@ class Comparison(unittest.TestCase):
         self.assertEqual(1, result.failures)
         self.assertIn("judge the reason again", result.stale[0][1])
 
+    def test_an_entry_may_name_the_steps_it_explains_in_a_case_obaaf_answers_in_part(self):
+        case = self.case(steps=((0,), (1,)), job_level=False)
+        on_first = {"a.yml": [zp.Hit("OBAAF-GHA-010", "build", "new", S1)]}
+
+        def entry(steps):
+            item = zp.Silent("s", "a.yml", "build", "template-injection",
+                             "OBAAF does not count the second step's text as an outsider's.", "narrower")
+            item.steps = steps
+            return item
+
+        result = self.run_compare([case], on_first, silent=[entry(((1,),))])
+        self.assertEqual((["silent"], 0), ([o.status for o in result.outcomes], result.failures))
+        for wrong in ((), ((0,),), ((0,), (1,))):
+            with self.subTest(steps=wrong):
+                self.assertEqual(1, self.run_compare([case], on_first, silent=[entry(wrong)]).failures)
+        # Steps named while OBAAF reports nothing on the job: the entry should name none.
+        result = self.run_compare([case], {}, silent=[entry(((1,),))])
+        self.assertEqual(1, result.failures)
+        self.assertIn("remove its `steps`", result.stale[0][1])
+
     def test_a_step_or_job_obaaf_s_reader_does_not_have_is_an_error(self):
         for case in (self.case(steps=((5,),), job_level=False), self.case(job="nope", steps=((0,),), job_level=False)):
             with self.subTest(case=case), self.assertRaises(zp.ParityError):
@@ -334,7 +354,7 @@ class StepPlaces(unittest.TestCase):
         for (job, place), failures in case_on.items():
             with self.subTest(job=job, place=place):
                 case = zp.Case("w.yml", job, "template-injection", "high", "high", (1,), (place,), False)
-                found, unmet = zp.answer(case, ["OBAAF-GHA-010"], result)
+                found, unmet, _ = zp.answer(case, ["OBAAF-GHA-010"], result)
                 self.assertEqual(failures, len(unmet), (found, unmet))
 
     def test_obaaf_gha_006_against_a_case_on_several_cache_steps(self):
@@ -352,7 +372,7 @@ class StepPlaces(unittest.TestCase):
                 result = zp.obaaf_findings(path)
                 self.assertTrue([h for h in result.hits if h.rule == "OBAAF-GHA-006"], result.hits)
                 case = zp.Case("w.yml", "p", "cache-poisoning", "high", "low", (8, 10), ((0,), (1,)), False)
-                found, missing = zp.answer(case, ["OBAAF-GHA-006", "OBAAF-GHA-007"], result)
+                found, missing, _ = zp.answer(case, ["OBAAF-GHA-006", "OBAAF-GHA-007"], result)
                 self.assertEqual(unmet, len(missing), (found, missing))
                 self.assertTrue(found)
 
@@ -519,6 +539,11 @@ class MappingFile(unittest.TestCase):
             "loose version": good.replace("version: 1.32.0", "version: '1.32'"),
             "rule of another platform": good.replace("[OBAAF-GHA-010]", "[OBAAF-JEN-010]"),
             "duplicate": with_entry(entry.format(kind="narrower", reason=narrower) * 2),
+            "steps numbered from 1 as text": with_entry(entry.format(kind="narrower", reason=narrower)
+                                                        + "    steps: ['2']\n"),
+            "a negative step": with_entry(entry.format(kind="narrower", reason=narrower) + "    steps: [[-1]]\n"),
+            "steps without a job": with_entry(entry.format(kind="narrower", reason=narrower).replace(
+                "    job: j\n", "") + "    steps: [[1]]\n"),
         }
         for name, text in broken.items():
             with self.subTest(name=name):

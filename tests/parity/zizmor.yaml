@@ -15,8 +15,10 @@
 # job (anywhere in the file, where zizmor names no job), and for each step zizmor names, on that step
 # (OBAAF-GHA-006's one `restores` finding counts for each cache step of its job); a finding on the job
 # as a whole answers the job, never a step. A case that is not answered fails the test unless an entry
-# under `silent` names it with a reason. An entry under `silent` that names no case, or a case OBAAF
-# now answers in whole or in part, fails too, and so does a file OBAAF could not read, so this file
+# under `silent` names it with a reason. Where OBAAF answers part of a case, the entry lists under
+# `steps` the places it explains, numbered from 0 as zizmor-cases.json numbers them ([N], or [N, M] in
+# a parallel group). An entry under `silent` that names no case, a case OBAAF answers, or places other
+# than those OBAAF leaves unanswered, fails too, and so does a file OBAAF could not read, so this file
 # cannot say more than the tools do.
 # zizmor-cases.json also holds the SHA-256 of each file the cases were read from; a changed file fails
 # the test until the cases are recorded again from CI.
