@@ -1,6 +1,6 @@
 """Replay reported tightening commands with the selected offline settings evidence."""
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import shlex
@@ -12,6 +12,7 @@ from unittest.mock import patch
 from helpers import run_cli
 from obaaf import checker, fix
 from obaaf.audit import snapshot
+from obaaf.checker import baseline
 from test_settings_audit import recording, take
 
 
@@ -98,6 +99,27 @@ jobs:
             self.assertEqual(self.path.read_bytes(), old)
         for args in [("fix", "--gate", "medium"), ("fix", "egress", "--job", "assistant")]:
             self.assertEqual(run_cli(*args, self.option)[0], 2)
+
+    def test_withheld_checkout_and_pin_omit_retry_for_multiline_settings_path(self):
+        settings = Path("team\nsettings.json")
+        self.settings.rename(settings)
+        findings = checker.check(self.root).findings
+        for rule, step, selection in [("OBAAF-GHA-011", 1, ["--tighten", "checkout-credentials"]),
+                                      ("OBAAF-GHA-025", 2, ["--pin", "@openai/codex=1.2.3"])]:
+            with self.subTest(rule=rule):
+                finding = next(f for f in findings if f.rule == rule)
+                expires = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+                policy = Path("baseline.json")
+                policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [
+                    baseline.entry_for(finding, "@example/build", "previous review", expires)]}))
+                candidate = f"{self.path}#assistant/step-{step}"
+                code, out, err = run_cli("fix", ".", *selection, "--baseline", policy, f"--settings={settings}",
+                                         "--candidate", candidate)
+                self.assertEqual(code, 1, err or out)
+                self.assertIn("Review the reported findings", out)
+                self.assertIn("named retry cannot be printed on one line", out)
+                self.assertNotIn("obaaf fix", out)
+                self.assertNotIn("--- a/", out)
 
     def test_changed_snapshot_refused_before_write(self):
         display = fix._render
