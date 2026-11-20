@@ -114,6 +114,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
+| D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
 | D-119 | Identify the repository input when a preview refuses it | Proposed |
 | D-125 | A check counts only when nothing written in the workflow can change what it runs: every name in an `env` or written to `GITHUB_ENV` by an earlier step that changes what bash or the check's program runs, and every write to `GITHUB_ENV` whose names the checker cannot read | Proposed |
 | D-126 | OBAAF-GHA-006 reports, at medium, a job outside the release lane that holds what publishing needs and restores a cache, directly or through a job it needs; image pushes through build outputs, bake overrides and `docker buildx imagetools create` make a job a release job | Proposed |
@@ -1052,6 +1053,14 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. In a file read as JSON, equivalent string escapes and object member reordering are accepted.
 
 **Status.** Proposed, 2026-11-20 (A2e, #314 item 7).
+
+### D-117 Preserve the scan scope when a legacy baseline blocks a write
+
+**Decision.** When `check --write-baseline` finds a v0.1 destination, it leaves the file intact and exits 2. Its migration guidance uses the destination and the original check path, configuration and platform. It asks for the migration owner, reason and expiry. Arguments that cannot be displayed faithfully on one line receive manual guidance.
+
+**Reason.** Migration matches old entries against the selected workflows. Omitting the original scope can compare the entries against a different repository or configuration.
+
+**Status.** Proposed, 2026-11-20 (A1f, #308 review follow-up).
 
 ### D-119 Identify the repository input when a preview refuses it
 
