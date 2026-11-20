@@ -23,7 +23,7 @@ from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
-    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
+    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
@@ -611,18 +611,23 @@ def _forbids_restores(mode) -> bool:
     return mode in ("none", "write-only")
 
 
-def _image_build_only(step: Step) -> bool:
+def _local_like(uses) -> bool:
+    """A `uses` that may name an action of the repository itself (`./`, `$/` or `.\\` at its start, after any
+    space), read as the checker reads a local action for an agent."""
+    return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
+
+
+def _image_build_only(step: Step, job: Job | None = None) -> bool:
     """Whether a step that uses `docker/build-push-action` can only build an image (flagship slice 2d.14):
     its `with`, if written, is a mapping; `push` (in any letter case, as GitHub reads inputs) is not given
-    or is `false` in any case; and `outputs` is not given or names no registry and no push, with no
-    expression in it. Any other value is read as one that may push. `docker/bake-action` reads what it
+    or is `false` in any case; and no output of its `outputs` may push (`workflow.image_outputs_push`).
+    Any other value, `push:` with no value included, is read as one that may push. `docker/bake-action` reads what it
     pushes from files the checker does not read, so it is never taken to build only."""
     raw = step.raw.get("with")
     if not step.uses_action("docker/build-push-action") or (raw is not None and not isinstance(raw, dict)):
         return False
     push = as_text(step.with_.get("push", "")).strip().lower()
-    outputs = as_text(step.with_.get("outputs", "")).lower()
-    return push in ("", "false") and not any(word in outputs for word in ("${{", "registry", "push"))
+    return push in ("", "false") and not through_matrix(step.with_.get("outputs", ""), job, image_outputs_push)
 
 
 # What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
@@ -834,6 +839,7 @@ class WorkflowRules:
         relaned = {job_id for job_id, job in view.jobs.items() if set(job.lanes) != set(self.wf.jobs[job_id].lanes)}
         place = {id(finding): n for n, finding in enumerate(self.findings)}
         added: list = []
+        answered: set = set()
         for finding in found:
             if finding.step in inner:
                 # A step of an action: one finding for each step, as for steps written in the job.
@@ -858,7 +864,17 @@ class WorkflowRules:
             if finding.job not in relaned and there and all(
                     order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
                 continue
+            if finding.job in relaned and not finding.kind.startswith("capability"):
+                # Flagship slice 2d.14: where the action's steps made the job a release job, the first pass's
+                # "cannot tell whether it releases" case of the same rule there (OBAAF-GHA-006's and 015's
+                # `capability...`) is answered by the release case, when that is at least as severe.
+                for mate in there:
+                    if (mate.kind.startswith("capability") and mate.kind != "capability-call"
+                            and order.get(finding.severity, 3) <= order.get(mate.severity, 3)):
+                        answered.add(id(mate))
             added.append(finding)
+        if answered:
+            self.findings = [f for f in self.findings if id(f) not in answered]
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
@@ -3933,7 +3949,7 @@ class WorkflowRules:
             capabilities.append("packages: write")
         for step in job.steps:
             action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
-            if action and (builds or not _image_build_only(step)):
+            if action and (builds or not _image_build_only(step, job)):
                 capabilities.append(f"uses {step.action}")
         patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
         capabilities += [f"secret {name}" for name in sorted(job.secret_names())
@@ -4136,7 +4152,21 @@ class WorkflowRules:
         if not held:
             return
         mode = job.cache_mode
-        cache_steps = [s for s in job.steps if self._restores_cache(s)]
+        # A step that uses a local action is taken to restore unless its steps were read as the job's, which
+        # then decide (slice 2d.4b2's second pass): a local action is not a cache step by being local.
+        # In the second pass a local action inside one is followed by its steps, named after it.
+        read = {id(steps[0].via.raw) for steps in job.local_steps.values() if steps and steps[0].via is not None}
+        read |= {id(s.via.raw) for s in job.steps if s.via is not None}
+        inner_names = [s.name for s in job.steps if s.via is not None]
+
+        def restores(step: Step) -> bool:
+            if not _local_like(step.uses):
+                return self._restores_cache(step)
+            if step.via is None:
+                return id(step.raw) not in read
+            return not any(n.startswith((f"{step.name}: ", f"{step.name} > ")) for n in inner_names)
+
+        cache_steps = [s for s in job.steps if restores(s)]
         if cache_steps and not _forbids_restores(mode):
             names = ", ".join(f"'{s.name}'" for s in cache_steps)
             values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
@@ -4168,39 +4198,53 @@ class WorkflowRules:
 
     def _may_publish_holds(self, job: Job) -> list[str]:
         """What a job holds that publishing needs, for OBAAF-GHA-006 on a job that is not a release job
-        (flagship slice 2d.14): what OBAAF-GHA-015 counts (`_publishing_capabilities`); a reference that can
-        read every secret (`toJSON(secrets)`, a computed name, `secrets: inherit`), since which secrets
-        exist is not in the workflow (as OBAAF-GHA-018 reads it); and a token with `contents: write`, which
-        can create a GitHub release and upload its assets, in a job that a release event, a tag push or a
-        tag's creation can start. On other events `contents: write` is not counted: it is common in jobs
-        that commit back, which this rule would then take for jobs that may release. Permissions the job
-        does not declare are not counted (OBAAF-GHA-009 reports them)."""
+        (flagship slice 2d.14): what OBAAF-GHA-015 counts (`_publishing_capabilities`), less an image build
+        that cannot push; a reference that can read every secret (`toJSON(secrets)`, a computed name,
+        `secrets: inherit`), since which secrets exist is not in the workflow (as OBAAF-GHA-018 reads it);
+        and a token with `contents: write`, which can create a GitHub release and upload its assets, in a job
+        that a release event, a tag push, a tag's creation or another workflow's call can start
+        (`_release_or_tag_events`). On other events `contents: write` is not counted: it is common in jobs
+        that commit back, which this rule would then take for jobs that may release. A job of a called
+        workflow that declares no permissions holds what the jobs of this repository that call it grant
+        (`Job.granted_by_callers`, as OBAAF-GHA-003 and 004 read it); permissions nobody declares, the
+        repository's default, are not counted (OBAAF-GHA-009 reports them)."""
         held = self._publishing_capabilities(job, builds=False)
         if any(name.startswith("*") for name in job.secret_names()):
             held.append("every secret, through a reference that is not one literal name or secrets: inherit")
         permissions = job.permissions
-        if permissions is not None and permissions.level("contents") == "write":
-            events = self._release_or_tag_events(job)
-            if events:
-                held.append(f"contents: write, on {' or '.join(events)}")
+        if permissions is None:
+            granted = {scope: [entry for entry in job.granted_by_callers(scope) if entry.endswith(f"{scope}: write")]
+                       for scope in ("packages", "contents")}
+        else:
+            granted = {scope: [""] if permissions.level(scope) == "write" else [] for scope in ("packages", "contents")}
+        events = self._release_or_tag_events(job) if granted["contents"] else []
+        for scope in ("packages", "contents"):
+            if scope == "contents" and not events:
+                continue
+            on = f", on {' or '.join(events)}" if scope == "contents" else ""
+            for entry in granted[scope]:
+                where = f", granted by {entry[:-len(f' grants {scope}: write')]}" if entry else ""
+                text = f"{scope}: write{on}{where}"
+                if text not in held:
+                    held.append(text)
         return held
 
     def _release_or_tag_events(self, job: Job) -> list[str]:
         """The events among those that can start the job that can be for a release or a tag: `release`,
-        `create` (a branch's or a tag's creation), and `push` unless its filters keep tags out. GitHub runs
-        a push workflow for a tag unless it names `branches` or `branches-ignore` and neither `tags` nor
-        `tags-ignore` (path filters are not applied to tags). A filter written as anything but a mapping, or
-        with its keys in another spelling, is read as letting tags through, the wider reading. A push that
-        reaches a called workflow from its callers is read the same way."""
+        `create` (a branch's or a tag's creation), a `push` unless its filters keep tags out, and
+        `workflow_call`, which stands for a calling workflow's event, any event. GitHub runs a push workflow
+        for a tag unless it names `branches` or `branches-ignore` and neither `tags` nor `tags-ignore` (path
+        filters are not applied to tags). A filter written as anything but a mapping, or with its keys in
+        another spelling, is read as letting tags through, the wider reading."""
         triggers = job.triggers()
         events = [event for event in ("release", "create") if event in triggers]
-        if "push" in triggers:
-            own = self.wf.triggers
-            config = own.get("push")
+        if "push" in triggers and "push" in self.wf.triggers:
+            config = self.wf.triggers.get("push")
             keys = {key for key in config if isinstance(key, str)} if isinstance(config, dict) else set()
-            tags = "push" in own and (keys & {"tags", "tags-ignore"} or not keys & {"branches", "branches-ignore"})
-            if tags or "push" in self.wf.caller_events:
+            if keys & {"tags", "tags-ignore"} or not keys & {"branches", "branches-ignore"}:
                 events.append("a tag push")
+        if "workflow_call" in triggers:
+            events.append("a call from another workflow")
         return events
 
     def _called_caches(self, job: Job, effects: CallEffects) -> None:

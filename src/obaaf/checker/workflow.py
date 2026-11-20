@@ -2680,7 +2680,7 @@ class Job:
                 continue
             # Flagship slice 2d.2e: an image build that pushes (`push: true`, or a value set when the job
             # runs) publishes; since slice 2d.14, also one whose outputs push.
-            if image_step_pushes(step):
+            if image_step_pushes(step, self):
                 out.append(step)
                 continue
             # Everything the step runs as a command line, also with each command continued on the next
@@ -2858,24 +2858,93 @@ def _first_word_forms(segment: str) -> list[str]:
     return [segment]
 
 
-# An image build's output that pushes (flagship slice 2d.14): a registry output, `push=` with any value
-# but false, or a value set when the job runs.
-_PUSHING_OUTPUT = re.compile(r"type\s*=\s*registry|\bpush\s*=\s*(?!(false|0|f)\b)|\$\{\{", re.I)
+# Values of an image output's `push` that do not push (flagship slice 2d.14), as buildx reads a boolean.
+_IMAGE_FALSE = frozenset({"false", "0", "f"})
 
 
-def image_step_pushes(step: "Step") -> bool:
+def image_output_pushes(entry) -> bool:
+    """Whether one image output, written as buildx's `key=value` list (`type=registry`,
+    `type=image,name=x,push=true`), may push (flagship slice 2d.14): its type is `registry`; or `image`
+    with `push` or `push-by-digest` given and not false, or with a value set when the job runs anywhere in
+    it; or its type is set when the job runs; or it has no type and is set when the job runs as a whole
+    (`${{ inputs.output }}`). A value that is not text may push. `docker`, `local`, `tar`, `oci` and
+    `cacheonly` outputs, and a folder given alone (`-o ./out`), do not push."""
+    if not isinstance(entry, (str, int, float, bool)) and entry is not None:
+        return True
+    text = as_text(entry).strip().strip("'\"")
+    fields: dict = {}
+    for part in text.split(","):
+        key, sep, value = part.partition("=")
+        if sep:
+            fields.setdefault(key.strip().lower(), []).append(value.strip().strip("'\"").lower())
+    types = fields.get("type", [])
+    if not types:
+        return "${{" in text
+    if any("${{" in t or t == "registry" for t in types):
+        return True
+    if "image" in types:
+        return "${{" in text or any(p not in _IMAGE_FALSE for p in fields.get("push", []) + fields.get("push-by-digest", []))
+    return False
+
+
+def image_outputs_push(value) -> bool:
+    """Whether a `docker/build-push-action` step's `outputs`, one output a line, has one that may push."""
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return True
+    return any(image_output_pushes(line) for line in as_text(value).splitlines())
+
+
+def bake_set_pushes(value) -> bool:
+    """Whether a `docker/bake-action` step's `set`, one `target.key=value` a line, may push (flagship slice
+    2d.14): a `push` that is not false, an `output` that may push (`image_output_pushes`), or a key set when
+    the job runs. Other keys (`*.platform=${{ matrix.platform }}`, `*.cache-to=type=registry,...`) do not."""
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return True
+    for line in as_text(value).splitlines():
+        target, sep, given = line.strip().strip("'\"").partition("=")
+        if not sep:
+            if "${{" in target:
+                return True
+            continue
+        key = target.rsplit(".", 1)[-1].strip().lower()
+        if "${{" in key:
+            return True
+        if key in ("output", "outputs") and image_output_pushes(given):
+            return True
+        if key == "push" and ("${{" in given or given.strip().strip("'\"").lower() not in _IMAGE_FALSE):
+            return True
+    return False
+
+
+_WHOLE_MATRIX = re.compile(r"\s*\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*", re.I)
+
+
+def through_matrix(value, job: "Job | None", test) -> bool:
+    """`test(value)`, or, where the value is one `${{ matrix.NAME }}` and the job's matrix lists every value
+    of NAME as text (`Job._matrix_values`), whether `test` holds for any of them (flagship slice 2d.14: an
+    image build's outputs or bake overrides taken from the matrix). A matrix entry with no value for NAME
+    gives it none, which pushes nothing."""
+    if job is not None and isinstance(value, str):
+        match = _WHOLE_MATRIX.fullmatch(value)
+        choices = job._matrix_values(match.group(1)) if match else None
+        if choices is not None:
+            return any(test(choice) for choice in choices)
+    return test(value)
+
+
+def image_step_pushes(step: "Step", job: "Job | None" = None) -> bool:
     """Whether a step that uses `docker/build-push-action` or `docker/bake-action` pushes an image: its
     `push` is true or set when the job runs (flagship slice 2d.2e), or, since slice 2d.14, build-push-action's
-    `outputs` or bake-action's `set` names a registry output or a push (`type=registry`,
-    `type=image,push=true`, `*.output=type=registry`, `*.push=true`) or is set when the job runs. What a bake
-    file the action reads says is not read."""
-    if not (step.uses_action("docker/build-push-action") or step.uses_action("docker/bake-action")):
+    `outputs` (`image_outputs_push`) or bake-action's `set` (`bake_set_pushes`) may push, read through the
+    job's matrix (`through_matrix`). What a bake file the action reads says is not read."""
+    if step.uses_action("docker/build-push-action"):
+        outputs = through_matrix(step.with_.get("outputs", ""), job, image_outputs_push)
+    elif step.uses_action("docker/bake-action"):
+        outputs = through_matrix(step.with_.get("set", ""), job, bake_set_pushes)
+    else:
         return False
     push = as_text(step.with_.get("push", ""))
-    if "${{" in push or push.strip().lower() in ("true", "1", "yes"):
-        return True
-    given = as_text(step.with_.get("outputs", "")) + "\n" + as_text(step.with_.get("set", ""))
-    return bool(_PUSHING_OUTPUT.search(given))
+    return "${{" in push or push.strip().lower() in ("true", "1", "yes") or outputs
 
 
 def upload_readings(text: str) -> list[str]:

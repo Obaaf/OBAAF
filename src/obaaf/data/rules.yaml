@@ -263,13 +263,16 @@ rules:
       whether or not the job publishes. What it holds, a fact of the finding, is what OBAAF-GHA-015 counts
       (`packages: write`, an action under `publishing_actions` other than a `docker/build-push-action` step
       that cannot push, a secret whose name says it publishes), a reference that can read every secret,
-      and `contents: write` in a job that a release event, a tag push or a tag's creation can start. Not
-      followed: a `docker://` step, a step whose `if:` never lets it run (reported anyway), outputs passed
-      between jobs, actions that cache that are not listed (`nix-community/cache-nix-action`,
-      `denoland/setup-deno` and others), and, for a job that is not a release job, permissions it does not
-      declare (OBAAF-GHA-009 reports them), `contents: write` on other events, a credential whose name
-      matches no pattern, and a cache restored in a workflow the job calls, which is read in that workflow
-      with the secret names its jobs use (a credential passed to it under another name is not counted).
+      and `contents: write` in a job that a release event, a tag push, a tag's creation or another
+      workflow's call can start; a called job that declares no permissions holds what its callers in the
+      repository grant. For this case a local action is a cache step only when its steps were not read,
+      and where they make the job a release job the release case replaces it. Not followed: a `docker://`
+      step, a step whose `if:` never lets it run (reported anyway), outputs passed between jobs, actions
+      that cache that are not listed (`nix-community/cache-nix-action`, `denoland/setup-deno` and others),
+      and, for a job that is not a release job, permissions nobody declares (OBAAF-GHA-009 reports them),
+      `contents: write` on other events, a credential whose name matches no pattern, and a cache restored
+      in a workflow the job calls, which is read in that workflow with the secret names its jobs use (a
+      credential passed to it under another name is not counted).
     fix: >-
       Set `cache-mode: none` on release jobs and remove cache restore steps, or regenerate derived data
       inside the release lane.

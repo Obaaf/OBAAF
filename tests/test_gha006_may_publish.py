@@ -313,6 +313,159 @@ class ImagePushesTest(unittest.TestCase):
                 self.assertNotIn(("OBAAF-GHA-016", "unchecked"), self.lane(f"      - run: {command}\n"))
 
 
+class ImageBuildsThatDoNotPushTest(unittest.TestCase):
+    """The first review's false positives: image steps that push nothing are not release jobs. An
+    expression counts only where it can give the output's type or a push, and a bake `set` only for an
+    `output` or a `push`; in a command only `-o`/`--output` and bake's `--set` are read."""
+
+    def lane(self, step):
+        with TempDir() as tmp:
+            result = check(tmp, job(step, on="pull_request", job_extra="    environment: ci\n"))
+            return [(f.rule, f.kind) for f in result.findings if f.rule in ("OBAAF-GHA-016", "OBAAF-GHA-006")]
+
+    def test_action_inputs(self):
+        steps = {
+            "docker output to a file": ("docker/build-push-action", "outputs: type=docker,dest=${{ runner.temp }}/img.tar"),
+            "bake platform from a matrix": ("docker/bake-action", "set: '*.platform=${{ matrix.platforms }}'"),
+            "bake docker output named by an expression": ("docker/bake-action",
+                                                          "set: '*.output=type=docker,name=${{ env.TEST_IMAGE_ID }}'"),
+            "bake registry cache": ("docker/bake-action", "set: '*.cache-to=type=registry,ref=ghcr.io/o/a:cache'"),
+            "local output": ("docker/build-push-action", "outputs: type=local,dest=./pushdir"),
+            "docker output named like a registry": ("docker/build-push-action",
+                                                    "outputs: type=docker,name=myregistry.azurecr.io/x"),
+        }
+        for name, (action, extra) in steps.items():
+            with self.subTest(step=name):
+                step = f"      - uses: {action}@{SHA}\n        with:\n          {extra}\n"
+                self.assertEqual(self.lane(step), [])
+
+    def test_bake_overrides_from_a_written_out_matrix(self):
+        """docker/buildx's own e2e workflow takes bake's `set` from the matrix: read through it."""
+        def text(*overrides):
+            include = "".join(f"          - overrides: '{o}'\n" for o in overrides) + "          - other: x\n"
+            return ("on: pull_request\npermissions: {}\njobs:\n  bake:\n    runs-on: ubuntu-latest\n"
+                    f"    environment: ci\n    strategy:\n      matrix:\n        include:\n{include}"
+                    f"    steps:\n      - uses: docker/bake-action@{SHA}\n        with:\n"
+                    "          set: ${{ matrix.overrides }}\n")
+        with TempDir() as tmp:
+            quiet = check(tmp, text("*.output=/tmp/bake-build", "t.output=type=local,dest=./dist"))
+            self.assertEqual([f for f in quiet.findings if f.rule == "OBAAF-GHA-016"], [])
+            loud = check(tmp, text("*.output=/tmp/bake-build", "t.output=type=registry"))
+            self.assertEqual([f.kind for f in loud.findings if f.rule == "OBAAF-GHA-016"], ["unchecked"])
+
+    def test_image_output_with_an_expression_may_push(self):
+        step = (f"      - uses: docker/build-push-action@{SHA}\n        with:\n"
+                "          outputs: type=image,name=${{ env.IMAGE }}\n")
+        self.assertIn(("OBAAF-GHA-016", "unchecked"), self.lane(step))
+
+    def test_commands(self):
+        commands = (
+            "docker buildx build --cache-from type=registry,ref=ghcr.io/o/a:cache -t a --load .",
+            "docker buildx build --cache-to type=registry,ref=ghcr.io/o/a:cache -t a --load .",
+            "docker buildx bake --set '*.cache-from=type=registry,ref=x'",
+            "docker build --build-arg push=yes -t a .",
+            "docker build -t a . && echo type=registry",
+            "docker buildx build -o type=docker,dest=out.tar .",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.lane(f"      - run: {command}\n"), [])
+
+    def test_a_long_line_costs_what_it_reads(self):
+        import time
+        # 120 KB on one line: about 2 s here, where the unbounded patterns took over 30 s.
+        line = "docker build ; " * 8000
+        with TempDir() as tmp:
+            started = time.monotonic()
+            check(tmp, job(f"      - run: {line}\n", on="push"))
+            self.assertLess(time.monotonic() - started, 20)
+
+
+class CallerGrantsTest(unittest.TestCase):
+    """A called job that declares no permissions holds the token its callers grant (the first review)."""
+
+    CALLED = ("on:\n  workflow_call:\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+              f"      - uses: actions/setup-go@{SHA}\n      - run: make\n")
+
+    def found(self, grant, on="release"):
+        caller = (f"on: {on}\n{grant}jobs:\n  ship:\n    uses: ./.github/workflows/build.yml\n")
+        with TempDir() as tmp:
+            result = check(tmp, caller, name="caller.yml", extra={".github/workflows/build.yml": self.CALLED})
+            return [f for f in of(result) if f.job == "build"]
+
+    def test_granted_write_scopes_count(self):
+        grants = {
+            "write-all": ("permissions: write-all\n", "packages: write, granted by"),
+            "packages": ("permissions:\n  packages: write\n", "packages: write, granted by"),
+            "contents": ("permissions:\n  contents: write\n", "contents: write, on"),
+        }
+        for name, (grant, said) in grants.items():
+            with self.subTest(grant=name):
+                found = self.found(grant)
+                self.assertEqual([(f.severity, f.kind) for f in found], [("medium", "capability-restores")])
+                self.assertTrue(any(c.startswith(said) for c in found[0].facts["capabilities"]), found[0].facts)
+                self.assertTrue(any("caller.yml job 'ship'" in c for c in found[0].facts["capabilities"]))
+
+    def test_a_caller_that_grants_no_write_scope_or_declares_nothing(self):
+        self.assertEqual(self.found("permissions:\n  contents: read\n"), [])
+        self.assertEqual(self.found(""), [])
+
+
+class WorkflowCallTest(unittest.TestCase):
+    def test_contents_write_in_a_workflow_only_another_workflow_calls(self):
+        """`workflow_call` stands for a calling workflow's event, which may be a release."""
+        text = ("on:\n  workflow_call:\njobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                f"    permissions:\n      contents: write\n    steps:\n{GO}      - run: make\n")
+        with TempDir() as tmp:
+            found = of(check(tmp, text))
+            self.assertEqual([(f.severity, f.kind) for f in found], [("medium", "capability-restores")])
+            self.assertEqual(found[0].facts["capabilities"], ["contents: write, on a call from another workflow"])
+
+
+class ReleaseCaseAnswersTheCapabilityCaseTest(unittest.TestCase):
+    """Where a local action's steps make the job a release job, its release case answers the first
+    pass's "cannot tell whether it releases" (the first review found both on one step)."""
+
+    ACTION = "runs:\n  using: composite\n  steps:\n    - run: uv publish\n      shell: bash\n"
+
+    def test_one_finding_on_the_step(self):
+        with TempDir() as tmp:
+            steps = SETUP_UV + "      - uses: ./.github/actions/publish\n        env:\n" \
+                "          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_PUBLISH_TOKEN }}\n"
+            found = of(check(tmp, job(steps), extra={".github/actions/publish/action.yml": self.ACTION}))
+            self.assertEqual(sorted((f.severity, f.kind) for f in found), [("high", "restores")])
+
+    def test_the_same_for_obaaf_gha_015(self):
+        action = "runs:\n  using: composite\n  steps:\n    - run: npm publish\n      shell: bash\n"
+        text = ("on: pull_request_target\npermissions: {}\njobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: ./.github/actions/publish\n        env:\n"
+                "          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n")
+        with TempDir() as tmp:
+            found = of(check(tmp, text, extra={".github/actions/publish/action.yml": action}), "OBAAF-GHA-015")
+            self.assertEqual([f.kind for f in found], [""])
+
+    def test_a_local_action_with_no_cache_step_is_not_a_cache_step(self):
+        action = "runs:\n  using: composite\n  steps:\n    - run: make\n      shell: bash\n"
+        with TempDir() as tmp:
+            steps = "      - uses: ./.github/actions/build\n" + PUBLISH
+            self.assertEqual(of(check(tmp, job(steps), extra={".github/actions/build/action.yml": action})), [])
+
+    def test_a_nested_local_action_with_no_cache_step(self):
+        outer = "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n"
+        inner = "runs:\n  using: composite\n  steps:\n    - run: make\n      shell: bash\n"
+        with TempDir() as tmp:
+            steps = "      - uses: ./.github/actions/outer\n" + PUBLISH
+            extra = {".github/actions/outer/action.yml": outer, ".github/actions/inner/action.yml": inner}
+            self.assertEqual(of(check(tmp, job(steps), extra=extra)), [])
+
+    def test_a_local_action_that_is_not_composite_is_taken_to_restore(self):
+        action = "runs:\n  using: node20\n  main: index.js\n"
+        with TempDir() as tmp:
+            steps = "      - uses: ./.github/actions/js\n" + PUBLISH
+            found = of(check(tmp, job(steps), extra={".github/actions/js/action.yml": action}))
+            self.assertEqual([(f.severity, f.kind) for f in found], [("medium", "capability-restores")])
+
+
 class SelfHostedTest(unittest.TestCase):
     def test_self_hosted_has_its_own_kind(self):
         with TempDir() as tmp:
