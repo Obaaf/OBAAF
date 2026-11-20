@@ -226,10 +226,12 @@ def cmd_check(args) -> int:
         from obaaf.checker.workflow import one_line
 
         hint = migration_hint(scoped_migration_command(args.write_baseline, args.path, options))
-        print(f"error: {one_line(args.write_baseline)} is an {baseline_mod.FORMAT_V1} baseline. "
-              "Migration carries over only findings the file covers that a new baseline entry may accept. "
-              "It accepts nothing new. "
-              "To keep this file as it is, write the new baseline to another file.\n"
+        # The command converts the file in place, so it is introduced as that, after the other way out
+        # (review-gpt #317: it stood under "To keep this file as it is", which it does not do).
+        print(f"error: {one_line(args.write_baseline)} is an {baseline_mod.FORMAT_V1} baseline, and "
+              "--write-baseline does not write over it. Either convert it in place, which carries over only "
+              "findings the file covers that a new baseline entry may accept and accepts nothing new, or keep "
+              "it as it is and write the new baseline to another file. To convert it, then check again:\n"
               + hint, file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
