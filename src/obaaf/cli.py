@@ -116,6 +116,33 @@ def cmd_check(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    evidence = None
+    if args.settings is not None:
+        from obaaf.audit.cli import _origin
+        from obaaf.audit.github import plain
+        from obaaf.audit.snapshot import SnapshotError
+        from obaaf.settings_evidence import SettingsEvidence
+
+        identity_root = base
+        if target.is_file() and base.name == "workflows" and base.parent.name == ".github":
+            identity_root = base.parent.parent
+        try:
+            evidence = SettingsEvidence.load(Path(args.settings), _origin(str(identity_root)))
+        except SnapshotError as exc:
+            print(f"error: --settings: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        diagnostic = evidence.for_scan(base, not target.is_file() and not args.lanes)
+        print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
+              file=sys.stderr)
+        reasons = list(diagnostic.limitations)
+        if not config.protected_secrets:
+            reasons.extend(evidence.inventory_limitations())
+        for reason in reasons:
+            print(f"Settings evidence: {reason}.", file=sys.stderr)
+        for name, environment in sorted(config.protected_secrets.items()):
+            assessment = diagnostic.assess(name, environment or "")
+            print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
+                  file=sys.stderr)
     if args.expiry_warning < 0:
         print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
         return EXIT_USAGE
@@ -195,9 +222,11 @@ def cmd_check(args) -> int:
     # baseline being written: the gate will read it with --baseline, and --write-baseline ends as that
     # gate would (slice 3.2b).
     gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
-    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files,
+                           settings=evidence)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
+    result.settings_path = args.settings or ""
     # What a command the report suggests has to repeat to check the same thing.
     # One word each, so a value that begins with a hyphen is still read as a value.
     result.options = ([f"--config={args.config}"] if args.config else []) \
@@ -846,6 +875,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fail on findings at or above a severity (high, medium, low), or never. "
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
+    x.add_argument("--settings", metavar="FILE", help="inspect evidence from an explicitly named offline "
+                   "GitHub settings snapshot and check its code ownership")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true",
                    help="omit each finding's why and fix lines in text output")

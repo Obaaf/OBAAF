@@ -275,7 +275,23 @@ def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options or ())]
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult) -> str:
+    if "obaaf check . --lanes" not in text:
+        return text
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    if command != one_line(command):
+        return "Use the original check paths and options; they cannot be printed as a one-line command."
+    return text.replace("obaaf check . --lanes", command)
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
@@ -295,8 +311,13 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
             lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
                          f"{group['byHand']} require manual review.")
         action = group["nextAction"]
-        command = None
-        if "obaaf check . --lanes" in action:
+        command = group["command"]
+        if command:
+            if action == command:
+                action = "Review the acceptance details and supply them to the command below."
+            else:
+                action = action.removesuffix(command) + "the command below."
+        elif "obaaf check . --lanes" in action:
             # The command goes on a line of its own, so that copying it takes no full stop with it, and a
             # path or option that cannot be printed on one line loses only the command, not the advice.
             args = _check_args(result)
@@ -308,11 +329,14 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
         if group["command"] and result.errors:
             action, command = "Resolve the scan errors before migrating the baseline.", None
         if command is not None and command != one_line(command):
-            action, command = action.replace(
-                "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
-                "printed as a one-line command)"), None
+            if group["command"]:
+                action = "Use the original check paths and options; they cannot be printed as a one-line command."
+            else:
+                action = action.replace(
+                    "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
+                    "printed as a one-line command)")
+            command = None
         if action != one_line(action):
-            # The catalogue's own command, such as `obaaf baseline migrate` with the baseline's path.
             action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)
         if command is not None:
@@ -421,7 +445,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + (_lane_advice(fix, result) if result.settings_path else fix))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
