@@ -227,6 +227,47 @@ class CheckoutTighteningTest(unittest.TestCase):
         self.assertIn("At --fail-on never", preview)
         self.assertIn(self.name, preview)
 
+    def test_preview_and_named_retry_in_repository_named_egress(self):
+        repo = self.root / "egress"
+        repo.mkdir()
+        (self.root / ".github").rename(repo / ".github")
+        workflow = repo / self.rel
+        original = workflow.read_bytes()
+        config = repo / "team policy.yml"
+        config.write_text("{}")
+        options = [f"--config={config}", "--platform=github", "--fail-on=never"]
+        previous = Path.cwd()
+        os.chdir(self.root)
+        try:
+            code, output, error = run_cli("check", "egress", "--format=json", *options)
+            self.assertEqual(code, 0, error)
+            group = next(g for g in json.loads(output)["todo"] if g["id"] == "checkout-credentials")
+            preview = shlex.split(group["command"])
+            self.assertEqual(preview, ["obaaf", "fix", "./egress", *self.options, *options])
+            code, output, error = run_cli(*preview[1:])
+            self.assertEqual(code, 0, error)
+            self.assertIn(self.name, output)
+            self.assertEqual(workflow.read_bytes(), original)
+
+            finding = next(f for f in checker.check(repo).findings if f.rule == "OBAAF-GHA-011")
+            policy = self.accepted(finding).rename(repo / "baseline.json")
+            policy_bytes = policy.read_bytes()
+            code, output, error = run_cli("fix", "./egress", *self.options, *options,
+                                          "--baseline", policy, "--candidate", self.name)
+            self.assertEqual(code, 1, error or output)
+            marker = "preview the same request again with: "
+            refusal = next(line for line in output.splitlines() if marker in line)
+            retry = shlex.split(refusal.split(marker, 1)[1])
+            self.assertEqual(retry, ["obaaf", "fix", "./egress", *self.options, *options[:2],
+                                     f"--baseline={policy}", options[2], "--candidate=" + self.name])
+            code, output, error = run_cli(*retry[1:])
+            self.assertEqual(code, 1, error or output)
+            self.assertIn("Named checkout withheld", output)
+            self.assertEqual(workflow.read_bytes(), original)
+            self.assertEqual(policy.read_bytes(), policy_bytes)
+        finally:
+            os.chdir(previous)
+
     def test_named_retry_command_includes_the_original_gate_options(self):
         found = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-011")
         policy = self.accepted(found)
