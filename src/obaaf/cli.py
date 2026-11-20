@@ -133,7 +133,10 @@ def cmd_check(args) -> int:
         if target.is_file() or args.lanes:
             evidence.limitations += ("this scan does not check snapshot code ownership; run obaaf check "
                                      "on the repository directory without --lanes",)
-        elif not Path(args.settings).resolve().is_relative_to(base.resolve()):
+        elif not (Path(args.settings).resolve().is_relative_to(base.resolve())
+                  and checker._as_found(Path(args.settings), base.resolve(), strict=True)):
+            # Inside by both tests: where the file is, and the path OBAAF-REPO-001 checks for an owner.
+            # A link from outside to a file inside passes the first and is never checked for an owner.
             evidence.limitations += ("the snapshot is outside the checked repository; use a repository snapshot "
                                      "so its code ownership can be checked",)
         print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
@@ -932,7 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
     x.add_argument("--settings", metavar="FILE", help="inspect evidence from an explicitly named offline "
-                   "GitHub settings snapshot and check its code ownership")
+                   "GitHub settings snapshot (a repository scan also checks its code ownership)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true",
                    help="omit each finding's why and fix lines in text output")

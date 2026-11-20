@@ -55,7 +55,7 @@ What it does:
 
 - **It runs on every pull request and on pushes to `main`**, with a read-only token and without keeping the checkout's credentials.
 - **On a pull request it reads the checker configuration from the branch the pull request targets** (`.github/obaaf.yml`, `.github/obaaf.yaml` or `obaaf.yml`, the first that exists, as the checker chooses), so a pull request cannot accept its own findings by editing the configuration. It runs again when a pull request is moved to another target branch (the `edited` event, which also fires on a change to its title or description; a first-time contributor's run may then need approval again). The configuration must be a regular file there: the step cannot follow a link, and fails if it finds one. It can still edit the workflow file itself: require a code owner's review for `.github/` (the template's [CODEOWNERS example](../templates/github-actions/CODEOWNERS.example)).
-- **To inspect a saved settings snapshot**, pin a build whose help for the check command lists `--settings FILE`. Commit the output of `obaaf audit --snapshot-out .github/obaaf-settings.json` with code-owner review and set the repository variable `OBAAF_USE_SETTINGS` to `true`. The template reads the snapshot from the PR's target commit or the push being checked. If the selected file is missing or the checker pin predates the option, the step fails. The example pin on this page predates the option.
+- **To inspect a saved settings snapshot**, pin a build whose help for the check command lists `--settings FILE`. Commit the output of `obaaf audit --snapshot-out .github/obaaf-settings.json` with code-owner review and set the repository variable `OBAAF_USE_SETTINGS` to `true`. The template reads the snapshot from the branch the pull request targets, as it reads the configuration, or from the push being checked. If the selected file is missing or the checker pin predates the option, the step fails. The example pin on this page predates the option.
 - **The job writes the SARIF report without failing on findings, then runs the gate** at `--fail-on medium`, and keeps the report as an artifact for 14 days. A file the checker cannot read fails the job at the first command.
 - **The `upload` job is off until you set the repository variable `OBAAF_UPLOAD_SARIF` to `true`.** It then sends the report of each push to `main` to code scanning, under the category `obaaf`. Code scanning on a private repository needs GitHub Advanced Security.
 - **To require it**, wait for one run, then add the check `check` to the branch's ruleset. That is the job's id; if another workflow also has a job `check`, give this one a `name:` first, so the name you require is not shared. The template has no `merge_group` trigger: with a merge queue, add one, or the required check never reports there. A `merge_group` run reads the configuration in the queued change, as a push does; only the pull-request run reads the target branch's.
@@ -106,7 +106,7 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.base_ref }}
           path: .obaaf-base
           persist-credentials: false
           sparse-checkout: |
