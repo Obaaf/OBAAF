@@ -12,6 +12,7 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`.
 - **Old-baseline migration hints preserve the selected paths.** If a path or option cannot be printed faithfully on one line, the full text report and `--summary` give manual guidance. Printable paths, including spaces and leading dashes, keep a copyable migration command.
 - **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
