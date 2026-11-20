@@ -104,8 +104,11 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
+| D-100 | How init proposes the first agent lanes and secret environments | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
+| D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-119 | Identify the repository input when a preview refuses it | Proposed |
 
 ---
@@ -924,13 +927,25 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Status.** Proposed, 2026-11-19 (slice A2a, #261).
 
+### D-100 How init proposes the first agent lanes and secret environments
+
+**Decision.** Slice 3.3 proposes an agent lane when a workflow or its local composite action names a catalogued tool, or a job references a recognized model-provider key. A recognized environment variable bound to a differently named secret also counts. The preview gives the matching tool or key so a team can judge each candidate. A provider health check or perception job can hold the same key as an agent.
+
+For D-089, init proposes a required environment for a secret when every observed use identifies the same literal environment. A missing, computed or differing environment sends the name for review, as does a use in a reusable workflow whose secret might be a caller's parameter, or in a job that calls a reusable workflow, which cannot have an environment of its own. A name GitHub would not accept for a secret (one that does not use only letters, digits and underscores, starts with a digit or `GITHUB_`), or one with fewer than three letters or digits, is also listed for review, with the rule it fails. Unnamed or inherited secret access could include any named secret, so its environment also counts when deciding whether each name has one literal environment. GitHub storage and access settings require separate verification.
+
+If another supported configuration name already exists, init shows any differences and stops before creating a second configuration, even when their contents match. A target that already contains the proposed bytes is left in place. Both new files are prepared before either is installed. If installation of the second fails, init removes the first file it just created.
+
+**Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs; the review of #273 reproduced that at `6bc5dce` and at `665f15e` (38 proposed, all 19 declared among them). The review added `test_an_environment_on_a_calling_job_is_not_proposed` and `test_a_name_github_refuses_or_a_short_name_says_why`. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
+
+**Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
 ### D-102 Paperwork changes in the fix preview
 
-**Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away. With a partial check the preview withholds changes whose scope it cannot establish.
+**Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away, and is shown only when the proof finds no other finding changed, so it is withheld when its lane's rules add or change a finding. A check of anything but the repository's own folder is partial (a check of `.github` or `.github/workflows` does not read Jenkinsfiles), and with a partial check the preview withholds changes whose scope it cannot establish, lane corrections included.
 
 **Reason.** An acceptance changes which risk counts at the gate. The user needs to see its owner, reason and expiry before deciding whether to take it. A unique spelling correction can be checked on a copy. Plausible alternatives need a human decision.
 
-**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
+**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment lies in the text the removal would delete, or after the last removed entry on its line. A comment on a line of its own before or after the removed entries is kept, and then sits beside a kept entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
 **Status.** Proposed, 2026-11-19 (A2b, #275).
 
@@ -953,6 +968,26 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
 
 **Status.** Proposed, 2026-11-19 (slice 3.3, #142).
+
+### D-115 Legacy baseline migration reports current acceptance eligibility
+
+**Decision.** Direct migration matches legacy entries using their existing identities and applies the same eligibility policy used to write new baseline entries. The receipt names prohibited matches and explains the reason. When nothing can be carried over and at least one match is left open (prohibited, or waiting on an ignore entry), a nonempty input is preserved, including when a separate output path was supplied. An entry that names a finding a valid ignore entry accepts is counted and not carried over; when such entries are the only matches, the file is converted with no entries. When it writes a file, the receipt counts every finding outside the old file that the gate will count, and names those no entry can accept and those waiting on an ignore entry (both added by the review, `review-gpt` #313).
+
+**Reason.** In an in-place upgrade from 0.3.0, migration reported that it accepted a missing ownership finding that the next gate kept open. The receipt must count the acceptances the gate honors. An existing ignore decision stays with its configuration owner. Preserving a file whose only matches an ignore entry accepts left the gate asking for a migration that refused, with no reason given; the review found that and converts such a file.
+
+**Consequence.** A 0.3.0 ignore entry names no owner, so a finding both ignored and in the old file is not carried over: once the ignore entry is completed it keeps accepting the finding; once it is removed, migration carries the finding if the old file was kept, and after a conversion the finding is accepted with `obaaf check --write-baseline` like any new one. A preserved file whose matches were prohibited has nothing left to carry over once their files get an owner; migration then finds no match and says to delete it.
+
+**Status.** Proposed, 2026-11-20 (A2d, #312).
+
+### D-116 Comparing JSON edits in the adoption proof
+
+**Decision.** Read both versions of a file as the checker reads it: the baseline with the JSON decoder and the configuration the run's checker read with the YAML reader, whether named `.json`, `.yml` or `.yaml` and through any link (the file is matched by identity; a file with another suffix is still withheld, and a partial check that reads no configuration compares one by its suffix, though the planner proposes no configuration edit then), and any other file with the JSON decoder when it is named `.json` (the reader was chosen by suffix alone until the review of #316, which let a configuration named `.json` be compared as JSON). Compare decoded strings and retain each numeric token’s exact spelling. Decline duplicate object member names and nonstandard numeric constants anywhere in either document. Apply D-099’s existing declared-path comparison and traversal budget.
+
+**Reason.** JSON strings can contain characters the YAML reader normalises. Binary floating-point conversion can also erase a change between distinct decimal numbers. A proof must account for each such change outside the proposed fields.
+
+**Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. In a file read as JSON, equivalent string escapes and object member reordering are accepted.
+
+**Status.** Proposed, 2026-11-20 (A2e, #314 item 7).
 
 ### D-119 Identify the repository input when a preview refuses it
 
