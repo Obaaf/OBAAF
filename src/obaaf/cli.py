@@ -884,6 +884,9 @@ def build_parser() -> argparse.ArgumentParser:
     x = sub.add_parser("init", help="preview a GitHub Actions configuration and report-only workflow")
     x.add_argument("path", nargs="?", default=".", help="repository directory (default: current directory)")
     x.add_argument("--apply", action="store_true", help="create both files after reviewing the preview")
+    from obaaf.init_scanners import SCANNERS
+    x.add_argument("--with-scanner", action="append", choices=tuple(SCANNERS), default=[],
+                   help="add a report-only companion scanner (repeat for more than one)")
     x.set_defaults(func=cmd_init)
 
     # fix

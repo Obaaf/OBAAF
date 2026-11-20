@@ -30,7 +30,7 @@ Slice 2d.2j (issue #210); decision D-127. **OBAAF-JEN-003 now follows an AI agen
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
-- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`.
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose a correction to a lane name, where it changes no other finding, and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
 - **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git, and not marked assume-unchanged or skip-worktree. The command preserves its permissions and leaves the changes unstaged for review. Apply runs on Linux only.
 - A refused paperwork preview identifies an invalid baseline or configuration by its path in your repository. The diagnostic retains the reason the checker could not use the file.
