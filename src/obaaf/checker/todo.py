@@ -26,6 +26,8 @@ def tightening_command(result, request, candidate=None):
     args = ["obaaf", "fix", target, *request, *options]
     if not any(option == "--platform" or option.startswith("--platform=") for option in options):
         args.append("--platform=auto")
+    if result.settings_path:
+        args.append("--settings=" + str(result.settings_path))
     if result.baseline_path:
         args.append("--baseline=" + str(result.baseline_path))
     args.append("--fail-on=" + str(result.fail_on))

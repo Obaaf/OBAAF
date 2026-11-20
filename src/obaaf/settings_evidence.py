@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 
 from obaaf.audit import snapshot
 from obaaf.audit.github import plain
@@ -148,3 +149,25 @@ class SettingsEvidence:
             if any(not branches[p["name"]]["protected"] for p in policies):
                 return Assessment(NOT_MET, "a selected branch was observed as unprotected")
         return Assessment(VERIFIED, "the name appears only in the required environment and only protected branches may use it")
+
+
+def scan_identity(target: Path, base: Path) -> str | None:
+    from obaaf.audit.cli import _origin
+    if target.is_file() and base.name == "workflows" and base.parent.name == ".github":
+        base = base.parent.parent
+    return _origin(str(base))
+
+
+def report_settings(evidence, base, repository_scan, config):
+    diagnostic = evidence.for_scan(base, repository_scan)
+    print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
+          file=sys.stderr)
+    reasons = list(diagnostic.limitations)
+    if not config.protected_secrets:
+        reasons.extend(evidence.inventory_limitations())
+    for reason in reasons:
+        print(f"Settings evidence: {reason}.", file=sys.stderr)
+    for name, environment in sorted(config.protected_secrets.items()):
+        assessment = diagnostic.assess(name, environment or "")
+        print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
+              file=sys.stderr)

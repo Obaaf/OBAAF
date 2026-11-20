@@ -23,6 +23,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Keep settings in a fix preview.** Checkout and tool-pin commands suggested by a check carry its explicit settings snapshot into the preview and apply proof.
 - **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
 - **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.

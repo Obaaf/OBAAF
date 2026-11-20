@@ -78,6 +78,9 @@ def _rewrite(job, text, name, catalog, agents, pin):
 
 
 def run(args, catalog=None):
+    if getattr(args, "settings", None) is not None:
+        print("error: --settings is unsupported for egress drafts", file=sys.stderr)
+        return 2
     catalog = catalog or load()
     pins = catalog.detection.get("egress_action_releases") or []
     if not pins:

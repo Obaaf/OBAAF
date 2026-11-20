@@ -118,31 +118,15 @@ def cmd_check(args) -> int:
         return EXIT_USAGE
     evidence = None
     if args.settings is not None:
-        from obaaf.audit.cli import _origin
-        from obaaf.audit.github import plain
         from obaaf.audit.snapshot import SnapshotError
-        from obaaf.settings_evidence import SettingsEvidence
+        from obaaf.settings_evidence import SettingsEvidence, report_settings, scan_identity
 
-        identity_root = base
-        if target.is_file() and base.name == "workflows" and base.parent.name == ".github":
-            identity_root = base.parent.parent
         try:
-            evidence = SettingsEvidence.load(Path(args.settings), _origin(str(identity_root)))
+            evidence = SettingsEvidence.load(Path(args.settings), scan_identity(target, base))
         except SnapshotError as exc:
             print(f"error: --settings: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        diagnostic = evidence.for_scan(base, not target.is_file() and not args.lanes)
-        print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
-              file=sys.stderr)
-        reasons = list(diagnostic.limitations)
-        if not config.protected_secrets:
-            reasons.extend(evidence.inventory_limitations())
-        for reason in reasons:
-            print(f"Settings evidence: {reason}.", file=sys.stderr)
-        for name, environment in sorted(config.protected_secrets.items()):
-            assessment = diagnostic.assess(name, environment or "")
-            print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
-                  file=sys.stderr)
+        report_settings(evidence, base, not target.is_file() and not args.lanes, config)
     if args.expiry_warning < 0:
         print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
         return EXIT_USAGE
@@ -825,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate", metavar="NAME", help="request one step using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
     _fix_check_options(parser)
+    parser.add_argument("--settings", metavar="FILE", help="use this repository snapshot for paperwork and tightening proof")
     selection.add_argument("--gate", choices=("high", "medium", "low"), help="enable a blocking threshold on the generated init workflow")
     parser.epilog = "Use obaaf fix egress --job NAME [PATH] to preview confinement for one job."
     parser.add_argument("--owner", help="owner taking responsibility for the listed acceptances")
@@ -1119,6 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
         from obaaf.fix_egress import run
         parser = argparse.ArgumentParser(prog="obaaf fix egress", description="Preview confinement for one agent job.")
         _fix_check_options(parser)
+        parser.add_argument("--settings", help=argparse.SUPPRESS)
         parser.add_argument("--job", required=True, help="GitHub Actions job ID")
         parser.set_defaults(func=run)
         argv = argv[2:]
