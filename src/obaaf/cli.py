@@ -303,7 +303,8 @@ def cmd_baseline_migrate(args) -> int:
     if not target.exists():
         print(f"error: {target} not found", file=sys.stderr)
         return EXIT_USAGE
-    wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
+    today = date.today()
+    wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, today)
     if wrong:
         print("error: say who accepts the findings, why and until when: --owner OWNER --reason REASON "
               f"--expires YYYY-MM-DD. As given, the acceptance would not count, because {'; '.join(wrong)}.",
@@ -317,7 +318,7 @@ def cmd_baseline_migrate(args) -> int:
         return EXIT_USAGE
     out = Path(args.output or args.file)
     gate_files = [out, Path(args.config)] if args.config else [out]
-    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files, today=today)
     if not result.files and not result.errors:
         print(f"error: no CI definitions found under {target}: nothing was checked, so nothing of {args.file} "
               "can be carried over. Give the path the baseline was written for after the file name.",

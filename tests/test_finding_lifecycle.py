@@ -13,6 +13,7 @@ import random
 import shutil
 import unittest
 from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 from helpers import FIXTURES, RISKY, TEMPLATES, TempDir, run_cli
 
@@ -568,6 +569,22 @@ class MigrateTest(unittest.TestCase):
             self.assertIn("it names no owner", err)
             self.assertFalse(any(e["rule"] == "OBAAF-GHA-001" and e["path"] == ".github/workflows/ci.yml"
                                  for e in json.loads(old.read_text())["findings"]))
+
+    def test_metadata_and_check_share_one_day_even_across_midnight(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            real_check = checker.check
+
+            def check_next_day(target, **kwargs):
+                kwargs.setdefault("today", TODAY + timedelta(days=1))
+                return real_check(target, **kwargs)
+
+            with patch.object(checker, "check", side_effect=check_next_day) as checked:
+                code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT[:-1], TODAY.isoformat())
+            self.assertEqual(code, 0, err)
+            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("until " + TODAY.isoformat(), err)
+            self.assertEqual(checked.call_args.kwargs["today"], TODAY)
 
     def test_it_needs_an_owner_a_reason_and_a_date_that_count(self):
         with TempDir() as tmp:
