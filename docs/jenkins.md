@@ -249,6 +249,9 @@ limited by it.
   `environment` value (read as a label the file does not fix);
 - labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
   compares labels with case;
+- a build's caches and `tools` under the controller's home or an agent's root are ordinary even when
+  mounted writable, though other builds on that machine use them, and a job named `tools` under
+  `/home/jenkins/workspace` is read as such a folder;
 - a `node()` whose literal label is a pod template's literal label is read as that pod, though a static
   agent with the same label may take the build (only `POD_LABEL` is certain);
 - option-like text inside a quoted `--label` or `-e` value can be read as an option, because the

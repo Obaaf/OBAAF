@@ -2733,7 +2733,7 @@ The reviewer re-ran R001 to R212: only the cases the third commit names changed,
 
 ### Fifth pass, on `5f44ddc`
 
-The reviewer re-ran R001 to R230: only the cases the fourth commit names changed. Of 8 new attempts, 6 held. One was a way past: R234, the Git plugin's mirrors under `/var/lib/jenkins/caches`, which the controller fetches into, were taken for a build cache. One was a false positive: R235, read-only `/home/jenkins/agent/tools`. Both are fixed in the sixth commit of #331: `caches` no longer counts as a build cache, and an agent's root is read like the controller's home. Not changed: R232, a read-only `~/.npmrc`, is reported as the host's credentials, because the token in it is exposed. R238, a `node('linux')` inside `podTemplate(label: 'linux')`, is read as the pod and is listed in jenkins.md.
+The reviewer re-ran R001 to R230: only the cases the fourth commit names changed. Of 8 new attempts, 6 held. One was a way past: R234, the Git plugin's mirrors under `/var/lib/jenkins/caches`, which the controller fetches into, were taken for a build cache. One was a false positive: R235, read-only `/home/jenkins/agent/tools`. Both are fixed in the sixth commit of #331: `caches` no longer counts as a build cache, and an agent's root is read like the controller's home. Not changed: R232, a read-only `~/.npmrc`, is reported as the host's credentials, because the token in it is exposed. R238, a `node('linux')` inside `podTemplate(label: 'linux')`, is read as the pod and is listed in jenkins.md. The reviewer re-ran R001 to R238 on the sixth commit: only R234 and R235 changed, and it found nothing blocking. Its two remaining points are listed in jenkins.md: writable `tools`, and a job named `tools`.
 
 ### Reviewer B's attempts (2026-11-17)
 
