@@ -59,7 +59,11 @@ def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
         contents = _read(path)
         if contents is None:
             raise ValueError(f"{rel} disappeared during inspection")
-        workflow = parse(rel, contents.decode("utf-8"))
+        try:
+            text = contents.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"{rel} is not UTF-8 text (byte {error.start})") from None
+        workflow = parse(rel, text)
         if workflow.error or workflow.problems:
             raise ValueError(f"{rel}: {workflow.error or workflow.problems[0]}")
         errors = []
@@ -86,7 +90,10 @@ def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
                 evidence = tools + [f"references {name}" for name in sorted(provider)]
                 notes.append(f"{key}: {', '.join(evidence)}")
             kind, value = job.environment_reading
-            environment = value if kind == "literal" and "workflow_call" not in workflow.triggers else None
+            # A job that calls a reusable workflow cannot have an environment of its own, so an
+            # environment written on it protects nothing (OBAAF-GHA-024 reports such a job).
+            known = kind == "literal" and "workflow_call" not in workflow.triggers and not job.reusable
+            environment = value if known else None
             for name in names:
                 if name.startswith("*"):
                     notes.append(f"{key}: review access to unnamed or inherited secrets")
@@ -96,8 +103,14 @@ def _proposal(root: Path) -> tuple[dict[str, bytes], list[str]]:
     protected = {}
     for name, values in sorted(environments.items()):
         values = values | unnamed_environments
-        valid_name = re.fullmatch(r"[A-Z0-9_]+", name) and len(name.replace("_", "")) >= 3
-        if len(values) == 1 and None not in values and valid_name:
+        # GitHub's secret names: letters, digits and underscores, not starting with a digit or
+        # GITHUB_. Init also leaves names of fewer than three letters or digits to the team.
+        valid_name = (re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) and not name.startswith("GITHUB_")
+                      and len(name.replace("_", "")) >= 3)
+        if not valid_name:
+            notes.append(f"Review {name}: init proposes rules only for secret names GitHub accepts "
+                         "that have at least three letters or digits.")
+        elif len(values) == 1 and None not in values:
             protected[name] = next(iter(values))
         else:
             notes.append(f"Review {name}: no single literal environment can be proposed.")
@@ -113,6 +126,8 @@ def _install(root: Path, missing: dict[str, bytes]) -> None:
     # Prepare complete files first, then link them into place without replacing an existing name.
     staged = {}
     linked = []
+    umask = os.umask(0)
+    os.umask(umask)
     try:
         for name, content in missing.items():
             dest = root / name
@@ -120,6 +135,8 @@ def _install(root: Path, missing: dict[str, bytes]) -> None:
             with NamedTemporaryFile(dir=dest.parent, delete=False) as source:
                 staged[dest] = Path(source.name)
                 source.write(content)
+            # A temporary file is private (0600); give the new file the mode any other new file gets.
+            os.chmod(staged[dest], 0o666 & ~umask)
         for dest, source_path in staged.items():
             os.link(source_path, dest)
             linked.append(dest)
@@ -133,13 +150,28 @@ def _install(root: Path, missing: dict[str, bytes]) -> None:
             source_path.unlink(missing_ok=True)
 
 
+def _lines(text: str) -> list[str]:
+    # Split at "\n" only, as diff does: str.splitlines also breaks at "\r", U+2028 and others.
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+
+
 def _show_diff(old: bytes, proposed: bytes, old_name: str, new_name: str) -> None:
-    before = old.decode("utf-8", "backslashreplace").splitlines(keepends=True)
-    after = proposed.decode("utf-8").splitlines(keepends=True)
+    before = _lines(old.decode("utf-8", "backslashreplace"))
+    after = _lines(proposed.decode("utf-8"))
     for line in difflib.unified_diff(before, after, fromfile=old_name, tofile=new_name):
         print(one_line(line.removesuffix("\n")))
         if not line.endswith("\n"):
             print(r"\ No newline at end of file")
+
+
+def _enclosing_work_tree(root: Path) -> Path | None:
+    """The nearest folder above root that holds `.git`, when root itself holds none."""
+    if os.path.lexists(root / ".git"):
+        return None
+    for parent in root.parents:
+        if os.path.lexists(parent / ".git"):
+            return parent
+    return None
 
 
 def run(args) -> int:
@@ -151,6 +183,10 @@ def run(args) -> int:
             if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
                 raise ValueError(f"{folder} must be a directory inside the repository")
         proposal, notes = _proposal(root)
+        top = _enclosing_work_tree(root)
+        if top is not None:
+            notes.insert(0, f"Note: {root} is inside the Git repository at {top}, and GitHub reads workflows "
+                            f"only from a repository's top folder. To set up that repository, run obaaf init in {top}.")
         for note in notes:
             print(one_line(note))
         missing = {}
