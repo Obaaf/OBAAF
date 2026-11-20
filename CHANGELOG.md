@@ -8,10 +8,17 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The wheel includes the templates used by `obaaf templates install`. Give it the repository and full OBAAF commit for the generated workflows. Use `--source` to select your own template directory. The closing instructions identify the CODEOWNERS example for the templates you selected. Release 0.3.0 users can still use the clone instructions in the README. [Issue #142](https://github.com/Obaaf/OBAAF/issues/142)
 
+### Checking edits to JSON files
+
+The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
+
 ### Upgrading from 0.3.0
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`.
+- **Preview paperwork changes before accepting risk.** `obaaf fix` can propose a correction to a lane name, where it changes no other finding, and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
+- **`ignore: 5` is an error, not a traceback.** A number, `true`, text or a mapping as the checker configuration's `ignore` ended `obaaf check` with a Python traceback or a misleading message. It now ends with an error naming the file and exit status 2. A value that reads as nothing (no value, `null`, `false`, `0`, `''`, `{}`) still means no entries.
 - **Old-baseline migration hints preserve the selected paths.** If a path or option cannot be printed faithfully on one line, the full text report and `--summary` give manual guidance. Printable paths, including spaces and leading dashes, keep a copyable migration command.
 - **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
