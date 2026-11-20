@@ -355,6 +355,17 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
     return lines
 
 
+def _migration_hint(result: CheckResult, *, summary: bool) -> str:
+    command = migration_command(result)
+    if command != one_line(command):
+        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess it
+        # (review-gpt #308).
+        return ("Run obaaf baseline migrate yourself with the baseline's original path and the check's original "
+                "paths and options, which cannot be printed faithfully as a one-line command, and supply an owner, "
+                "reason and expiry.")
+    return "The full report gives the command." if summary else command
+
+
 def to_summary(result: CheckResult, catalog: Catalog | None = None,
                expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
     """The same list as the full text report, after the report's opening lines (the accepted risk first,
@@ -365,7 +376,7 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None,
              for line in _lead_lines(result, accepted_risk(result, expiring_within))]
     if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
         lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
-                     "finding until it is converted. The full report gives the command.")
+                     "finding until it is converted. " + _migration_hint(result, summary=True))
     lines += [f"error: {one_line(error)}" for error in result.errors]
     if result.errors:
         lines.append("The scan is incomplete and fails regardless of its findings.")
@@ -457,7 +468,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
                          "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
                          "accepts these findings, why and until when:")
-            lines.append(one_line("    " + migration_command(result)))
+            lines.append("    " + _migration_hint(result, summary=False))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "

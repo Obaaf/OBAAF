@@ -1,5 +1,7 @@
 """The summary changes how the checker reports, while preserving its verdict."""
 
+from datetime import date, timedelta
+import os
 import shlex
 import unittest
 
@@ -94,6 +96,55 @@ class SummaryCliTest(unittest.TestCase):
             code, short, _ = run_cli(*args, "--summary")
             self.assertEqual((1, 1), (full_code, code))
             self.assertIn("The baseline is in the old format (obaaf-baseline/v0.1)", short)
+
+    def test_printable_migration_hint_replays_in_both_views(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            name = "-old team baseline.json"
+            baseline = tmp / name
+            old.rename(baseline)
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                for display in ((), ("--summary",)):
+                    status, report, err = run_cli("check", repo, "--baseline=" + name, "--platform", "github",
+                                                  "--fail-on", "low", *display)
+                    self.assertEqual(status, 1, err)
+                    commands = {line.strip() for line in report.splitlines()
+                                if line.strip().startswith("obaaf baseline migrate ")}
+                    self.assertEqual(len(commands), 1)
+                    words = shlex.split(commands.pop())
+                    self.assertEqual(words[3:5], ["./" + name, str(repo)])
+                    self.assertIn("--platform=github", words)
+                decisions = {"OWNER": "@studio/build", "REASON": "Reviewed legacy findings",
+                             "YYYY-MM-DD": (date.today() + timedelta(days=30)).isoformat()}
+                status, out, err = run_cli(*(decisions.get(w, w) for w in words[1:]))
+                self.assertEqual(status, 0, out + err)
+                self.assertIn("obaaf-baseline/v0.2", baseline.read_text())
+            finally:
+                os.chdir(previous)
+
+    def test_unprintable_migration_arguments_get_manual_guidance_in_both_views(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            # With no matching acceptance there is no migration group in the to-do
+            # list; the lifecycle notice still has to explain what the user can do.
+            empty = tmp / "old\nempty.json"
+            empty.write_text('{"format":"obaaf-baseline/v0.1","findings":[]}')
+            config = tmp / "team\tpolicy.yml"
+            config.write_text("{}")
+            for options in (["--baseline", empty], ["--baseline", old, "--config", config]):
+                for display in ((), ("--summary",)):
+                    status, report, err = run_cli("check", repo, *options, "--fail-on", "low", *display)
+                    self.assertEqual(status, 1, err)
+                    self.assertIn("Run obaaf baseline migrate yourself with the baseline's original path", report)
+                    self.assertNotIn("The full report gives the command", report)
+                    self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ")
+                                         for line in report.splitlines()))
 
     def test_the_lanes_command_stands_on_its_own_line_and_runs(self):
         with TempDir() as root:
