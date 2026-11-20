@@ -172,7 +172,8 @@ def run(args, catalog=None):
                 lines.append("The action refuses these env names. Resolve their placement by hand: " + ", ".join(blocked))
             if broken:
                 lines.append("The action refuses an env value that holds a line break or NUL, so it would not run "
-                             "with these as written. Pass them another way, for example in a file: " + ", ".join(broken))
+                             "with these as written, and the checker's verdicts below do not show it, because the checker "
+                             "does not read env values. Pass them another way, for example in a file: " + ", ".join(broken))
             lines += [
                 "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
                 "without a container; no other step and no job or workflow env holds a credential; the job "
