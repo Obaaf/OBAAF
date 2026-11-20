@@ -56,6 +56,22 @@ class FixProofTest(unittest.TestCase):
         self.assertNotIn("obaaf-proof-", str(refused.exception))
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
+    def test_a_refusal_the_edit_causes_says_so_and_names_the_repository_file(self):
+        # Review of #320: the edit, not the user's file, made the configuration unusable.
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        config = Path("policy.json")
+        text = (f"ignore:\n  - rule: {self.finding.rule}\n    path: '{self.finding.path}'\n"
+                f"    reason: reviewed\n    until: '{expiry}'\n").encode()
+        (self.root / config).write_bytes(text)
+        options = dataclasses.replace(self.options, config=config)
+        edit = Edit(config, text, text.replace(expiry.encode(), b"soon"), (("ignore", 0, "until"),))
+        with self.assertRaises(ProofError) as refused:
+            prove(self.root, options, (edit,), (self.promise,))
+        message = str(refused.exception)
+        self.assertTrue(message.startswith("after the proposed edit: ./policy.json: "), message)
+        self.assertNotIn("obaaf-proof-", message)
+        self.assertEqual((self.root / config).read_bytes(), text)
+
     def test_withholds_unpromised_and_duplicate_promises(self):
         for promises in ((), (self.promise, self.promise)):
             with self.subTest(promises=promises), self.assertRaises(ProofError):

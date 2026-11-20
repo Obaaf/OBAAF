@@ -66,6 +66,8 @@ class FixCliTest(unittest.TestCase):
                     self.assertEqual(out, "")
                     self.assertNotIn("obaaf-proof-", err)
                     self.assertNotIn(str(self.root.parent), err.replace(str(self.root), ""))
+                    self.assertRegex(err, r"^error: (baseline [.](/[.]github)? cannot be read|"
+                                          r"config file not found: [.](/[.]github)?\n)")
 
     def test_manual_owner_guidance_makes_no_files(self):
         code, out, err = run_cli("fix", self.root)

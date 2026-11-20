@@ -98,11 +98,12 @@ def _input_message(root, error):
     # under either is shown from the repository's top folder ("./..."). The top folder itself is
     # ".", wherever the message names it and not only at its start: a config error for two
     # competing configs, and a directory given as --config or --baseline (`--baseline .`) whose
-    # error names the copy's folder (added by the review, review-gpt #320). A longer name that
-    # only begins with the root's text is left alone.
-    text = str(root)
-    message = str(error).replace(text + os.sep, "./")
-    return re.sub(re.escape(text) + r"(?![^\s'\":,;)\]])", ".", message)
+    # error names the copy's folder (added by the review, review-gpt #320). The root counts only
+    # where no path character (a letter, digit, `.`, `-` or `~`) touches it, so a longer name that
+    # begins or ends with its text is left alone; a `.` that ends a sentence does not touch it.
+    pattern = (r"(?<![\w.~-])" + re.escape(str(root))
+               + "(?:(" + re.escape(os.sep) + r")|(?![\w~-]|\.\w))")
+    return re.sub(pattern, lambda m: "./" if m.group(1) else ".", str(error))
 
 
 def _read_inputs(root, target, options, today, catalog):
