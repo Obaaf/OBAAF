@@ -89,12 +89,16 @@ def check_inputs(root, options, today, catalog):
     try:
         return _read_inputs(root, target, options, today, catalog)
     except (baseline.BaselineError, checker.ConfigError, ProofError) as exc:
-        # Both the source and the temporary tree have the same repository-relative paths.
-        # A config error may also name the root itself, e.g. for two competing configs.
-        message = str(exc).replace(str(root) + os.sep, "./")
-        if message.startswith(f"{root}:"):
-            message = "." + message[len(str(root)):]
-        raise ProofError(message) from exc
+        raise ProofError(_input_message(root, exc)) from exc
+
+
+def _input_message(root, error):
+    # Both the source and the temporary tree have the same repository-relative paths.
+    # A config error may name the root itself, e.g. for two competing configs.
+    message = str(error).replace(str(root) + os.sep, "./")
+    if message.startswith(f"{root}:"):
+        return "." + message[len(str(root)):]
+    return message
 
 
 def _read_inputs(root, target, options, today, catalog):
@@ -325,7 +329,7 @@ def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
     try:
         globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
     except checker.ConfigError as exc:
-        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
+        raise ProofError(f"the repository's own configuration could not be read: {_input_message(root, exc)}") from exc
     for edit in edits:
         rel = _relative(root, Path(edit.path))
         path = root / rel

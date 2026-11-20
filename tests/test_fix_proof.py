@@ -45,6 +45,17 @@ class FixProofTest(unittest.TestCase):
             prove(self.root, options, (self.edit,), (self.promise,))
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
+    def test_unreadable_default_config_names_its_source_with_an_explicit_config(self):
+        default = self.root / ".github/obaaf.yml"
+        default.write_text("[one]")
+        (self.root / "team.yml").write_text("{}")
+        options = dataclasses.replace(self.options, config=Path("team.yml"))
+        with self.assertRaises(ProofError) as refused:
+            prove(self.root, options, (self.edit,), (self.promise,))
+        self.assertIn("./.github/obaaf.yml: expected a mapping", str(refused.exception))
+        self.assertNotIn("obaaf-proof-", str(refused.exception))
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
     def test_withholds_unpromised_and_duplicate_promises(self):
         for promises in ((), (self.promise, self.promise)):
             with self.subTest(promises=promises), self.assertRaises(ProofError):
