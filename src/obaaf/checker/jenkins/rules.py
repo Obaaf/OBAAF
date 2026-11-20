@@ -899,14 +899,20 @@ def controller_label(label: str) -> str | None:
     return "expression" if holds else None
 
 
+@functools.lru_cache(maxsize=4096)
+def _label_terms(label: str) -> frozenset | None:
+    tree = _label_tree(label)
+    if tree is None:
+        return None
+    return frozenset(_required(tree)) or None
+
+
 def label_terms(label: str) -> set | None:
     """The labels a label expression requires every agent it selects to carry; None when it requires none
     (`!windows`, `docker -> linux`, `linux || !linux`) or cannot be read, which selects like `agent any`.
     Whitespace, brackets and quotes do not make two expressions different."""
-    tree = _label_tree(label)
-    if tree is None:
-        return None
-    return _required(tree) or None
+    terms = _label_terms(label)
+    return set(terms) if terms is not None else None
 
 
 def _last_command(script: str, start: int) -> bool:
@@ -1656,8 +1662,8 @@ class JenkinsRules:
                 pair = (agent.ctx.ws, info.ctx.ws)
                 if pair not in shared_cache:
                     if len(shared_cache) > 200_000:
-                        self.unknown("OBAAF-JEN-003", info.line, "the file has too many allocations to compare each "
-                                     "AI agent's with each effect's")
+                        self.unknown("OBAAF-JEN-003", 1, "the file has too many allocations to compare each AI "
+                                     "agent's with each effect's")
                         break
                     shared_cache[pair] = self._may_share_machine(agent, info)
                 if shared_cache[pair]:
