@@ -933,6 +933,15 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
 
+### D-113 Install the GitHub Actions templates from the distribution
+
+**Decision.** Ship the resources used by the GitHub Actions template installer in the OBAAF wheel and source distribution. By default the installer uses the templates that came with the installed version. An explicit `--source` selects the caller’s directory. The caller supplies the OBAAF repository and immutable commit for the generated workflows.
+
+**Reason.** A build engineer who installs OBAAF from a wheel can set up a repository offline without acquiring a second checkout. Keeping the tracked templates as the single source ties their contents to the package build.
+
+**Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
+
+**Status.** Proposed, 2026-11-19 (slice 3.3, #142).
 
 ### D-117 Preserve the scan scope when a legacy baseline blocks a write
 

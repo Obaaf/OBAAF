@@ -829,8 +829,9 @@ rules:
       `OBAAF_OWNER` is found in any letter case, and the all-zero SHA as exactly 40 zeros after `@` or as
       the ref of a `uses`.
     fix: >-
-      Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or
-      replace the placeholders by hand.
+      Replace the placeholders in the existing workflow with the OBAAF repository and its full commit SHA.
+      For a new destination, install the pinned workflows with
+      `obaaf templates install --dest DIR --obaaf-repo OWNER/obaaf --obaaf-sha SHA`.
 
   - id: OBAAF-GHA-024
     title: Protected secret used outside its environment
