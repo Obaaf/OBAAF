@@ -97,6 +97,60 @@ class GateTests(unittest.TestCase):
         self.assertIn("already gates", self.gate()[1])
         self.assertNotEqual(self.gate("--owner", "@demo")[0], 0)
 
+    def check_crlf_gate(self, *extra):
+        self.install(*extra)
+        (self.root / ".gitattributes").write_text(f"{WORKFLOW} text eol=crlf\n")
+        commit(self.root)
+        self.workflow.unlink()
+        subprocess.run(["git", "-C", str(self.root), "checkout", "--", str(WORKFLOW)], check=True)
+        before = self.workflow.read_bytes()
+        self.assertIn(b"\r\n", before)
+        self.assertNotIn(b"\n", before.replace(b"\r\n", b""))
+        status, preview = self.gate()
+        self.assertEqual(status, 0, preview)
+        self.assertIn("Gate preview at --fail-on medium", preview)
+        self.assertEqual(self.workflow.read_bytes(), before)
+        status, applied = self.gate("--apply")
+        self.assertEqual(status, 0, applied)
+        expected = before.replace(b'obaaf check source "${config[@]}" --fail-on never\r\n',
+                                  b"gate_check .github/obaaf-baseline.json --fail-on medium\r\n")
+        self.assertNotEqual(expected, before)
+        self.assertEqual(self.workflow.read_bytes(), expected)
+
+    def test_crlf_gate(self):
+        self.check_crlf_gate()
+
+    def test_crlf_gate_with_scanner(self):
+        self.check_crlf_gate("--with-scanner", "poutine")
+
+    def test_mixed_endings_and_custom_crlf_workflow_get_manual_guidance(self):
+        self.install()
+        generated = self.workflow.read_bytes().replace(b"\r\n", b"\n")
+        crlf = generated.replace(b"\n", b"\r\n")
+        for before in (crlf.replace(b"\r\n", b"\n", 1), crlf + b"# team change\r\n"):
+            with self.subTest(before=before[:80]):
+                self.workflow.write_bytes(before)
+                commit(self.root)
+                code, text = self.gate("--apply")
+                self.assertEqual(code, 0, text)
+                self.assertIn("by hand", text)
+                self.assertEqual(self.workflow.read_bytes(), before)
+
+    def test_unsupported_gate_preview_gives_manual_guidance_and_apply_refuses(self):
+        self.install()
+        commit(self.root)
+        before = self.workflow.read_bytes()
+        with patch("obaaf.fix_apply.XATTR_FUNCTIONS", ("no_such_function",)):
+            status, preview = self.gate()
+            self.assertEqual(status, 0, preview)
+            self.assertIn("Make the displayed changes by hand", preview)
+            self.assertNotIn("Run again with --apply", preview)
+            self.assertEqual(self.workflow.read_bytes(), before)
+            status, refusal = self.gate("--apply")
+            self.assertEqual(status, 2, refusal)
+            self.assertIn("supported only on Linux", refusal)
+            self.assertEqual(self.workflow.read_bytes(), before)
+
     def test_repeat_gate_validates_its_explicit_baseline(self):
         self.install()
         path = self.root / "accepted.json"
