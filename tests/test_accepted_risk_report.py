@@ -739,6 +739,10 @@ class SarifTest(unittest.TestCase):
         texts = [n["message"]["text"] for n in run["invocations"][0]["toolExecutionNotifications"]]
         self.assertIn("ci.yml: unreadable", texts)
         self.assertIn("('a', 'note')", texts)
+        incomplete = report.to_text(result)
+        self.assertIn("Resolve the scan errors before migrating the baseline.", incomplete)
+        self.assertNotIn("obaaf baseline migrate", incomplete)
+        result.errors = []
         hint, = [line for line in report.to_text(result).splitlines() if "obaaf baseline migrate" in line]
         self.assertTrue(hint.endswith("--expires YYYY-MM-DD 7 --x=y"), hint)
 

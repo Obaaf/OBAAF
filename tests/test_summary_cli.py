@@ -146,6 +146,41 @@ class SummaryCliTest(unittest.TestCase):
                     self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ")
                                          for line in report.splitlines()))
 
+    def test_manual_migration_in_the_action_list_names_the_original_baseline(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            odd = tmp / "team\tbaseline.json"
+            old.rename(odd)
+            for display in ((), ("--summary",)):
+                status, report, err = run_cli("check", repo, "--baseline", odd, "--fail-on", "low", *display)
+                self.assertEqual(status, 1, err)
+                actions = report.split("What to do next:", 1)[1]
+                self.assertIn("Run obaaf baseline migrate yourself", actions)
+                self.assertIn("baseline's original path", actions)
+                self.assertIn(r"team\tbaseline.json", actions)
+                self.assertNotIn(str(odd), actions)
+                self.assertNotIn("obaaf baseline migrate '", actions)
+
+    def test_incomplete_scan_defers_migration_in_both_views_even_without_a_matching_entry(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github/workflows/broken.yml").write_text("jobs: [")
+            odd = tmp / "team\tbaseline.json"
+            odd.write_bytes(old.read_bytes())
+            empty = tmp / "empty.json"
+            empty.write_text('{"format":"obaaf-baseline/v0.1","findings":[]}')
+            for baseline in (old, odd, empty):
+                for display in ((), ("--summary",)):
+                    status, report, err = run_cli("check", repo, "--baseline", baseline, "--fail-on", "never", *display)
+                    self.assertEqual(status, 1, err)
+                    self.assertIn("Resolve the scan errors before migrating the baseline.", report)
+                    for prompt in ("obaaf baseline migrate", "Convert it once", "The full report gives the command"):
+                        self.assertNotIn(prompt, report)
+
     def test_the_lanes_command_stands_on_its_own_line_and_runs(self):
         with TempDir() as root:
             path = root / ".github" / "workflows" / "w.yml"
@@ -193,24 +228,6 @@ class SummaryCliTest(unittest.TestCase):
         import json
         from datetime import date, timedelta
 
-        from test_finding_lifecycle import fixture_repo
-
-        with TempDir() as tmp:
-            repo, old = fixture_repo(tmp)
-            # The migrate command for a baseline whose path cannot be printed on one line is left out.
-            odd = tmp / "bl\nnl.json"
-            odd.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
-            code, short, _ = run_cli("check", repo, "--baseline", odd, "--fail-on", "low", "--summary")
-            self.assertEqual(1, code)
-            self.assertIn("Use the original check paths and options; they cannot be printed", short)
-            self.assertNotIn("bl\\nnl.json", short)
-            # With a scan error, the list does not suggest migrating the baseline.
-            bad = repo / ".github" / "workflows" / "zz-bad.yml"
-            bad.parent.mkdir(parents=True, exist_ok=True)
-            bad.write_text("jobs: [", encoding="utf-8")
-            code, short, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low", "--summary")
-            self.assertIn("Resolve the scan errors before migrating the baseline.", short)
-            self.assertNotIn("obaaf baseline migrate", short)
         with TempDir() as root:
             path = root / ".github" / "workflows" / "w.yml"
             path.parent.mkdir(parents=True)

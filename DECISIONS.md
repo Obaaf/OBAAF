@@ -106,6 +106,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
+| D-118 | Defer legacy migration guidance until the text report has a complete scan | Proposed |
 
 ---
 
@@ -941,3 +942,11 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Reason.** Migration matches old entries against the selected workflows. Omitting the original scope can compare the entries against a different repository or configuration.
 
 **Status.** Proposed, 2026-11-20 (A1f, #308 review follow-up).
+
+### D-118 Legacy migration advice in text reports
+
+**Decision.** The full and summary text reports direct the reader to resolve scan errors before migrating a legacy baseline. After a complete scan, if a migration argument cannot be printed faithfully on one line, the action list names the migration command, describes the original arguments and displays the baseline path with control characters escaped for identification.
+
+**Reason.** Migration requires a complete scan. A reader acting on the to-do list needs to identify the original baseline even when its name prevents a copyable command.
+
+**Status.** Proposed, 2026-11-20 (A1g, #315 items 1 and 2).
