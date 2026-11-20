@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Init handoff and explicit gate activation
+
+`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and, on a supported Linux host, `--apply` writes the proven edit. Pull requests use the target configuration and acceptances common to both commits. A pull request can fix a finding and retire its acceptance together.
+
 ### Installing the GitHub Actions templates from a wheel
 
 The wheel includes the templates used by `obaaf templates install`. Give it the repository and full OBAAF commit for the generated workflows. Use `--source` to select your own template directory. The closing instructions identify the CODEOWNERS example for the templates you selected. Release 0.3.0 users can still use the clone instructions in the README. [Issue #142](https://github.com/Obaaf/OBAAF/issues/142)

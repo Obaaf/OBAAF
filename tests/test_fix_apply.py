@@ -65,6 +65,19 @@ class FixApplyTest(unittest.TestCase):
         self.assertEqual(self.git("diff", "--cached"), b"")
         self.assertEqual((self.root / "local-notes").read_text(), "unrelated")
 
+    def test_paperwork_preview_guidance_matches_host_capabilities(self):
+        path = self.root / self.config
+        original = path.read_bytes()
+        for functions, expected in (((), "Run again with --apply"), (("missing_xattr",), "by hand")):
+            with self.subTest(functions=functions), patch.object(fix_apply, "XATTR_FUNCTIONS", functions):
+                code, out, err = run_cli("fix", self.root)
+                self.assertEqual(code, 0, err)
+                self.assertIn("--- a/.github/obaaf.yml", out)
+                self.assertIn(expected, out)
+                if functions:
+                    self.assertNotIn("--apply", out)
+                self.assertEqual(path.read_bytes(), original)
+
     def test_dirty_second_target_is_detected_before_preparing_any_output(self):
         for kind in ("unstaged", "staged", "untracked"):
             with self.subTest(kind=kind):
