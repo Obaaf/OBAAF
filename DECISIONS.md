@@ -106,6 +106,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-119 | Identify the repository input when a preview refuses it | Proposed |
 
 ---
 
