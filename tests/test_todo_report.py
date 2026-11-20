@@ -87,6 +87,14 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         ])
         self.assertEqual([g["count"] for g in groups], [1, 2, 1, 1, 1, 3])
 
+    def test_checkout_preview_precedes_higher_severity_manual_work(self):
+        checkout = Finding("OBAAF-GHA-011", "low", "ci.yml", 1, "Checkout.")
+        manual = Finding("OBAAF-JEN-001", "high", "Jenkinsfile", 1, "Review manually.")
+        groups = self.todo([manual, checkout])
+        self.assertEqual(groups[0]["id"], "checkout-credentials")
+        self.assertIsNotNone(groups[0]["command"])
+        self.assertIsNone(groups[1]["command"])
+
     def test_fields_of_a_rule_entry_and_an_acceptance_entry(self):
         ownerless = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
         ownerless.acceptance = acceptance.make(acceptance.IGNORE, None, "reviewed", "2027-01-01",

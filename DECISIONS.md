@@ -108,8 +108,10 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
+| D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 
 ---
 
@@ -968,6 +970,16 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
 
+### D-106 Checkout credential tightening by kind or candidate name
+
+**Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.
+
+**Reason.** Later Git operations may need the checkout credential. The adopter chooses whether to make this workflow change. A disappearing acceptance or a stale entry is a separate decision for its owner.
+
+**Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, and edits whose precise effect cannot be proven remain for manual review. The checker reads the workflow offline.
+
+**Status.** Proposed, 2026-11-19 (slice A5a, #285).
+
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
 **Decision.** From flagship slice 2d.3b (issue #79), under F-19. (1) `tests/parity/zizmor.yaml` pairs zizmor audits with the OBAAF rules that answer them: `template-injection` with OBAAF-GHA-010, `unpinned-uses` with 008, `excessive-permissions` with 009, `artipacked` with 011, and `cache-poisoning` with 006 and 007 (zizmor 1.32.0's audit also reports `cache-mode: write` on a job a dangerous trigger starts, which is 007's subject). (2) CI's advisory job `zizmor-parity` installs zizmor 1.32.0 with `--require-hashes --only-binary=:all: --no-deps` from `tests/parity/zizmor-requirements.txt`, which holds PyPI's SHA-256 for each of its 12 files and is checked against PyPI on every run; runs it offline, with no configuration, strict collection and the default persona, on two sets: OBAAF's risky workflows, and zizmor's own test workflows for the five audits at its release commit `21bd300`, checked out and never copied into this repository. A case is one file, job and audit zizmor reports, with the steps it names. It is answered when OBAAF reports a mapped rule, in any state but `fixed`, on the same job (anywhere in the file, for a case zizmor puts on no job), and for each step zizmor names, on that step, matched by its place in the job's `steps` (a `parallel` group's steps included) to the step OBAAF's own reader made of the same YAML node; OBAAF-GHA-006's one `restores` finding counts for every step that rule takes to restore a cache, and a finding on the job as a whole answers the job, never a step. The job fails when a case is neither answered nor named under `silent` with a kind (`narrower`, or `gap` with its issue) and a reason; when a `silent` entry names no case, one OBAAF answers, or, for a case OBAAF answers in part, places (`steps`) other than those OBAAF leaves unanswered; when OBAAF could not read a file the comparison needs; when OBAAF-GHA-002, 013 or 019 is not reported on a file where poutine or CodeQL reported their counterpart in landscape.md; and when zizmor's cases, or the SHA-256 of any file they were read from, differ from `tests/parity/zizmor-cases.json`. (3) The ordinary test suite runs the same comparison against the recorded cases for every set whose files are in this repository (today the risky workflows), and fails when one of those files has changed since the cases were recorded. (4) `mikefarah/yq` `cmd` and `Amadevus/pwsh-script` `script` join `script_inputs`, so an outsider's text expanded in either gets OBAAF-GHA-010.
@@ -989,3 +1001,13 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
 
 **Status.** Proposed, 2026-11-19 (A7a, #292).
+
+### D-110 Explicit exact versions for agent tool installs
+
+**Decision.** Slice A5b (#291) adds `obaaf fix --pin PACKAGE=VERSION` for GHA-025 findings with the checker's existing evidence of a simple direct npm install. One invocation accepts one package and one exact npm version. A single to-do group retains both candidate and manual counts. Its preview command repeats the check scope and asks the adopter to select a version. The edit inserts the version in the original workflow scalar and verifies that its decoded run text changes only by that insertion. A folded YAML command can qualify when the literal package argument occupies the next physical line.
+
+**Reason.** The adopter chooses the dependency and version. An offline check can identify a literal install and prove its effect on findings. It cannot establish that a registry has published the selected version or that a job will run with it.
+
+**Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review.
+
+**Status.** Proposed, 2026-11-19 (slice A5b, #291).
