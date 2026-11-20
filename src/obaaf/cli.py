@@ -242,6 +242,7 @@ def cmd_check(args) -> int:
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
+    result.settings_path = args.settings or ""
     result.options = options
     if applied is not None:
         baseline_mod.apply(result, applied)
