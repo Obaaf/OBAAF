@@ -809,7 +809,7 @@ def _fix_check_options(parser):
     parser.add_argument("--config", help="checker configuration used by the gate")
     parser.add_argument("--baseline", help="baseline used by the gate")
     parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
-    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+    parser.add_argument("--fail-on", help="the gate threshold used for the proof (default: medium)")
 
 
 def build_parser() -> argparse.ArgumentParser:

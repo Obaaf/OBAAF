@@ -170,6 +170,8 @@ def run(args):
 
     try:
         if args.gate is not None:
+            if args.candidate is not None:
+                raise ValueError("--candidate selects a tightening step and cannot be combined with --gate")
             from obaaf.fix_gate import run as run_gate
             root, options = _paths(args)
             with (apply_lock(root) if args.apply else nullcontext()) as lock:
@@ -204,7 +206,7 @@ def run(args):
             before.checked = str(args.path)
             before.options = ([f"--config={args.config}"] if args.config else []) + [f"--platform={args.platform}"]
             before.baseline_path = args.baseline or ""
-            before.fail_on = args.fail_on
+            before.fail_on = options.fail_on
             paths = _owner_paths(copy, options, before, today, catalog)
             proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan)
             if args.tighten:
