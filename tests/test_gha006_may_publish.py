@@ -508,6 +508,20 @@ class CallerGrantsTest(unittest.TestCase):
                 self.assertTrue(any(c.startswith(said) for c in found[0].facts["capabilities"]), found[0].facts)
                 self.assertTrue(any("caller.yml job 'ship'" in c for c in found[0].facts["capabilities"]))
 
+    def test_many_callers_are_one_bounded_entry(self):
+        """The fact does not grow with the callers (the lead found a benchmark of 2,000 callers eight times
+        slower when each was its own entry): three are named, and a digest of all."""
+        calls = "".join(f"  c{n}:\n    permissions:\n      packages: write\n    uses: ./.github/workflows/build.yml\n"
+                        for n in range(5))
+        with TempDir() as tmp:
+            result = check(tmp, f"on: push\njobs:\n{calls}", name="caller.yml",
+                           extra={".github/workflows/build.yml": self.CALLED})
+            found = [f for f in of(result) if f.job == "build"]
+            self.assertEqual(len(found), 1)
+            held = found[0].facts["capabilities"]
+            self.assertEqual(len(held), 1)
+            self.assertIn("and 2 more (sha256:", held[0])
+
     def test_a_caller_that_grants_no_write_scope_or_declares_nothing(self):
         self.assertEqual(self.found("permissions:\n  contents: read\n"), [])
         self.assertEqual(self.found(""), [])

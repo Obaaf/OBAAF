@@ -112,6 +112,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-119 | Identify the repository input when a preview refuses it | Proposed |
 | D-125 | A check counts only when nothing written in the workflow can change what it runs: every name in an `env` or written to `GITHUB_ENV` by an earlier step that changes what bash or the check's program runs, and every write to `GITHUB_ENV` whose names the checker cannot read | Proposed |
+| D-126 | OBAAF-GHA-006 reports, at medium, a job outside the release lane that holds what publishing needs and restores a cache, directly or through a job it needs; image pushes through build outputs, bake overrides and `docker buildx imagetools create` make a job a release job | Proposed |
 
 ---
 

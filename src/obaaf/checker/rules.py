@@ -4148,9 +4148,6 @@ class WorkflowRules:
         repository is read for the jobs it needs, as for a release job (`_jobs_feeding`); a cache restored in
         the workflow it calls is read there, with the secret names that workflow's jobs use, so a credential
         the caller passes under another name is not counted."""
-        held = self._may_publish_holds(job)
-        if not held:
-            return
         mode = job.cache_mode
         # A step that uses a local action is taken to restore unless its steps were read as the job's, which
         # then decide (slice 2d.4b2's second pass): a local action is not a cache step by being local.
@@ -4167,8 +4164,15 @@ class WorkflowRules:
             return not (after is not None and after.via is step.via
                         and after.name.startswith((f"{step.name}: ", f"{step.name} > ")))
 
-        cache_steps = [s for n, s in enumerate(job.steps) if restores(n, s)]
-        if cache_steps and not _forbids_restores(mode):
+        cache_steps = [] if _forbids_restores(mode) else [s for n, s in enumerate(job.steps) if restores(n, s)]
+        feeding = self._jobs_feeding(job)
+        # What the job holds is worked out only for a job that restores: reading what callers grant costs, and
+        # a repository's many called jobs mostly restore nothing (the lead found a benchmark of 2,000 callers
+        # eight times slower when it was worked out for every job).
+        held = self._may_publish_holds(job) if cache_steps or feeding else []
+        if not held:
+            return
+        if cache_steps:
             names = ", ".join(f"'{s.name}'" for s in cache_steps)
             values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
                       "mode": Fact(mode or "", mode or "not set")}
@@ -4187,7 +4191,6 @@ class WorkflowRules:
                          "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
                          "code from a poisoned cache entry would run while it holds them.", job, cache_steps[0],
                          severity="medium", kind="capability-restores", controls=controls, **values)
-        feeding = self._jobs_feeding(job)
         if feeding:
             self.add("OBAAF-GHA-006", job.line,
                      "Job '{job}' holds what publishing needs ({capabilities}), downloads artifacts and needs {jobs}, "
@@ -4220,14 +4223,22 @@ class WorkflowRules:
             granted = {scope: [""] if permissions.level(scope) == "write" else [] for scope in ("packages", "contents")}
         events = self._release_or_tag_events(job) if granted["contents"] else []
         for scope in ("packages", "contents"):
-            if scope == "contents" and not events:
+            if not granted[scope] or (scope == "contents" and not events):
                 continue
             on = f", on {' or '.join(events)}" if scope == "contents" else ""
-            for entry in granted[scope]:
-                where = f", granted by {entry[:-len(f' grants {scope}: write')]}" if entry else ""
-                text = f"{scope}: write{on}{where}"
-                if text not in held:
-                    held.append(text)
+            # The callers that grant it, as one bounded entry: the first three named, and a digest of all, so
+            # the fact does not grow with the callers and a change to any changes it.
+            wheres = sorted({entry[:-len(f" grants {scope}: write")] for entry in granted[scope] if entry})
+            if not wheres:
+                text = f"{scope}: write{on}"
+            elif len(wheres) <= 3:
+                text = f"{scope}: write{on}, granted by {', '.join(wheres)}"
+            else:
+                digest = hashlib.sha256("\n".join(wheres).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                text = (f"{scope}: write{on}, granted by {', '.join(wheres[:3])} and {len(wheres) - 3} more "
+                        f"(sha256:{digest})")
+            if text not in held:
+                held.append(text)
         return held
 
     def _release_or_tag_events(self, job: Job) -> list[str]:
