@@ -33,6 +33,16 @@ The changes below are on the development branch for the prospective 0.4.0 releas
 
 Try the new pin in a dedicated pull request, migrate the old baseline, and run the existing gate before accepting any newly reported findings. The upgrade guide gives the commands, the changes rule by rule, and a measured example from the first adopter. [Upgrade guide](docs/upgrading.md)
 
+### What an earlier step writes to GITHUB_ENV can change what a check runs
+
+Slice 2d.13 (F-278); decision D-125. **A release job that writes `PATH` (or another variable that changes what a later step runs) to `GITHUB_ENV` before its check now gets OBAAF-GHA-016 `cannot-tell` (high). It can turn a passing gate red.**
+
+- **The gap.** A check (`obaaf verify release`, `gh attestation verify` and the others) counted after a step that wrote `echo "PATH=$PWD/fake:$PATH" >> "$GITHUB_ENV"`, though the runner gives every later step what a step writes there (actions/runner v2.338.2 refuses only `NODE_OPTIONS`), so the check ran whatever `obaaf` that step put first on the PATH. `SHELLOPTS=noexec` written the same way makes bash read the check's step and run none of it, and the step succeeds. Only `BASH_ENV`, `BASH_FUNC` and `GITHUB_PATH` in an earlier step's text, and `BASH_ENV`, `ENV` and `BASH_FUNC...` in an `env`, were looked for.
+- **What counts now.** A variable that changes what bash or the check's program runs (`PATH`, `HOME`, `ENV`, `SHELLOPTS`, `PS4`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS`, any `BASH...` or `LD_...` name, any `PYTHON...` name but six that load nothing), in the `env` of the check's step, its job or its workflow, or written to `GITHUB_ENV` by an earlier step of the job. A write OBAAF cannot read the names of counts as one: a computed name, `printf`, `cat`, a here-document, a group, a variable holding the file's path, PowerShell or Python, an action, `core.exportVariable` or `core.addPath`, `::set-env`, and `${{ github.env }}` or `${{ github.path }}`. `echo "VERSION=$V" >> "$GITHUB_ENV"` changes nothing.
+- **Also changed by it.** OBAAF-GHA-021's record and proposal checks, and a provenance command (`cosign attest`, `obaaf attest build-record`) that OBAAF-GHA-017 counts as signing, are read the same way.
+- **Shown on GitHub.** CI's new advisory job `github-env-premise` writes a stand-in `obaaf` onto the PATH and `SHELLOPTS=noexec` through `GITHUB_ENV` on a GitHub-hosted runner, and checks that the stand-in ran and that a step ending in `exit 1` succeeded without running.
+- **Not read.** A name a script assembles, what a program or action an earlier step runs writes to the runner's files, and a line break in what a variable or a command gives a value at run time.
+
 ### A parity test against zizmor, and two actions whose inputs are code
 
 Slice 2d.3b (issue #79); decision D-108. **A step that gives `mikefarah/yq` an outsider's text in `cmd`, or `Amadevus/pwsh-script` in `script`, now gets OBAAF-GHA-010 (high). It can turn a passing gate red.**

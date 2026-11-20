@@ -590,8 +590,23 @@ rules:
       special parameter, a `$(...)` (a subshell), or `${NAME}` with nothing but `[@]`, `[*]`, a length,
       a default (`-`, `:-`, `+`, `:+`) or a pattern removed (`#`, `%`), since any other form (a
       subscript, an offset, `${!...}`, `$((`, `[[`) can evaluate a value as arithmetic that assigns; the
-      check's own words are held to the same; and no earlier step may name `BASH_ENV`, `BASH_FUNC` or
-      `GITHUB_PATH` (a search of its text, not a guarantee). Given `--help` or `--version` it is no
+      check's own words are held to the same. No `env` of the step, its job or its workflow may name a
+      variable that changes what the shell or the check's program runs (`PATH`, `HOME`, `ENV`,
+      `SHELLOPTS`, `PS4`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS`, a `BASH...` or
+      `LD_...` name, or a `PYTHON...` one but six that load nothing), or a name written as an
+      expression (flagship slice 2d.13). No earlier step of the job may set such a variable for the
+      steps after it: its script, `env` and inputs may not name `BASH_ENV`, `BASH_FUNC`, `GITHUB_PATH`,
+      `addPath`, `exportVariable`, `set-env`, `add-path`, `_runner_file_commands` or
+      `ACTIONS_ALLOW_UNSECURE_COMMANDS`, nor reach `github.env`, `github.path` or the whole `github`
+      context in an expression, and may name `GITHUB_ENV` only in a bash or sh `run` script, in
+      `echo NAME=value >> "$GITHUB_ENV"` with a plain word for a name that is not such a variable
+      (the runner gives every later step what a step writes there, and refuses only `NODE_OPTIONS`;
+      `SHELLOPTS=noexec` makes bash read the check's step and run none of it). A write in any other
+      form, a name put together from a variable or an expression, and a word with a backslash or a
+      line break count as such a variable. This is a reading of the workflow's text, not a guarantee:
+      a name a script assembles, and what a program or action an earlier step runs writes to the
+      runner's files, are not read; nor is a line break in the value a variable or a command gives
+      such a write at run time. Given `--help` or `--version` it is no
       check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot
       vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own,
       early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://`

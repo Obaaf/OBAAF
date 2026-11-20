@@ -712,6 +712,14 @@ def _lex(text: str, variables: dict) -> tuple[list, str]:
     return commands, lexer.problem
 
 
+def lex(text: str) -> tuple[list, str]:
+    """A bash script's commands as `Command`s of `Word`s, with nothing put in for its variables, and the
+    problem that stopped the reading ("" when it read the whole text). An unknown expansion stays in a
+    word's `text` between two `\\x03` marks; a redirection's target is a word with `redirect` set. Used
+    by OBAAF-GHA-016's reading of writes to `GITHUB_ENV` (flagship slice 2d.13)."""
+    return _lex(text, {})
+
+
 # ------------------------------------------------------------------------------------- reading commands
 def _base(word: str) -> str:
     return _WINDOWS_SUFFIX_RE.sub("", word.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]).casefold()
