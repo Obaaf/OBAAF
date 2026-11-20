@@ -72,14 +72,18 @@ _HOST_CAPS = {"ALL", "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "DAC_READ_SEARCH", 
 # the container runtimes' state and sockets (rootless Docker's under /run/user). Their subfolders count too.
 _HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/run/containerd",
                "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio", "/var/run/crio",
-               "/run/user", "/var/run/user", "/var/lib/jenkins/secrets", "/var/lib/jenkins/credentials.xml",
-               "/var/lib/jenkins/users", "/var/lib/jenkins/jobs", "/var/lib/jenkins/nodes",
-               "/var/lib/jenkins/workspace")
+               "/run/user", "/var/run/user", "/home/jenkins/agent", "/home/jenkins/workspace")
+# The controller's home in the Debian and Red Hat packages and in the official image: secrets, jobs, plugins and
+# init scripts (code run at the next start) all count; only the caches a build keeps there do not.
+_JENKINS_HOMES = ("/var/lib/jenkins", "/var/jenkins_home")
+_CACHE_DIRS = (".m2", ".gradle", ".cache", ".npm", ".ivy2", ".sbt", ".pip", ".yarn", ".pnpm-store", "caches", "tools")
+# Files that hold credentials for other hosts and registries, wherever they are.
+_CREDENTIAL_FILES = (".netrc", ".git-credentials", ".npmrc", ".pypirc", ".dockercfg")
 # Folders whose whole mount does, but whose subfolders are ordinary (`/etc/localtime`, `/root/.m2`, `/dev/shm`):
 # the runtime sockets' folders, devices, configuration, homes (a user's home holds its keys and, for the agent's
 # user, every job's workspace), the controller's home, the system's programs.
 _HOST_FOLDERS = ("/run", "/var/run", "/dev", "/etc", "/root", "/home", "/boot", "/usr", "/bin", "/sbin", "/lib",
-                 "/lib64", "/var", "/var/lib", "/opt", "/var/lib/jenkins")
+                 "/lib64", "/var", "/var/lib", "/opt")
 # Of those, the ones only programs live in: reading them gives nothing, so a read-only mount of them is ordinary.
 _READ_ONLY_HARMLESS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/boot")
 # Folders inside a home that hold credentials for other hosts and registries.
@@ -126,12 +130,18 @@ def _host_path(source: str, readonly: bool = False) -> str | None:
         return None            # read-only cgroups, which systemd in a container reads
     if any(norm == p or norm.startswith(p + "/") for p in _HOST_TREES):
         return f"a mount of the host's {norm}"
+    for home in _JENKINS_HOMES:
+        if norm == home or (norm.startswith(home + "/") and norm[len(home) + 1:].split("/")[0] not in _CACHE_DIRS):
+            return f"a mount of the controller's home ({norm})"
+    name = norm.rsplit("/", 1)[-1]
+    if name in _CREDENTIAL_FILES:
+        return f"a mount of the host's credentials ({norm})"
     if norm in _HOST_FOLDERS and not (readonly and norm in _READ_ONLY_HARMLESS):
         return f"a mount of the host's {norm}"
     parts = norm.strip("/").split("/")
     if len(parts) == 2 and parts[0] == "home":
         return f"a mount of the host's {norm}"          # a user's whole home
-    if any(f"/{d}/" in norm + "/" for d in _CREDENTIAL_DIRS):
+    if any(f"/{d}/" in norm + "/" for d in _CREDENTIAL_DIRS) and name not in ("known_hosts", "known_hosts2"):
         return f"a mount of the host's credentials ({norm})"
     return None
 
@@ -340,7 +350,7 @@ def _pod_settings(text: str) -> tuple:
                 continue
             for key, value in node.items():
                 key = str(key)
-                true = value is True or (isinstance(value, int) and not isinstance(value, bool) and value == 1) or (
+                true = value is True or (isinstance(value, int) and not isinstance(value, bool) and value != 0) or (
                     isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "1"))
                 if key == "privileged" and true:
                     found.append("a privileged container")

@@ -707,5 +707,26 @@ class ThirdReviewTest(unittest.TestCase):
         text = two_stages(AGENT, "echo ok", top="agent { kubernetes { yaml '''" + spec + "''' } }")
         self.assertEqual([s for s, _ in findings(text, "OBAAF-JEN-006")], ["high"])
 
+
+class FourthReviewTest(unittest.TestCase):
+    """The fourth review pass (cases R213 to R230)."""
+
+    def test_r217_r218_the_template_label_written_out_or_held_in_a_variable(self):
+        for prefix, node in (("", 'node("ci-${env.BUILD_NUMBER}")'), ("def label = 'ci-pod'\n", "node('ci-pod')")):
+            template = 'label: "ci-${env.BUILD_NUMBER}"' if not prefix else "label: label"
+            text = (prefix + f"podTemplate({template}, containers: [containerTemplate(name: 'a', image: 'x')]) {{\n"
+                    f"  {node} {{ sh 'claude -p fix' }}\n}}\n")
+            self.assertIn("service account token",
+                          " ".join(f.message for f in analyze(text).findings if f.rule == "OBAAF-JEN-006"), node)
+
+    def test_r222_r227_the_controller_home_and_credential_files(self):
+        review = NoNetworkTest().review
+        for args in ("-v /var/lib/jenkins/init.groovy.d:/i", "-v /var/lib/jenkins/plugins:/p", "-v /var/jenkins_home:/jh",
+                     "-v /var/lib/jenkins/secret.key:/k:ro", "-v /home/jenkins/agent:/a", "-v /home/ci/.netrc:/root/.netrc",
+                     "-v /home/ci/.git-credentials:/g:ro"):
+            self.assertEqual([s for s, _ in findings(review(args), "OBAAF-JEN-006")], ["high"], args)
+        for args in ("-v /var/jenkins_home/.m2:/root/.m2", "-v /home/jenkins/.ssh/known_hosts:/root/.ssh/known_hosts:ro"):
+            self.assertEqual(findings(review(args), "OBAAF-JEN-006"), [], args)
+
 if __name__ == "__main__":
     unittest.main()

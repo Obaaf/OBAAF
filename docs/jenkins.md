@@ -154,7 +154,7 @@ every step runs in:
 | `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
 | a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
 | `ws()` | another directory on the same node, written by the same user: counted as shared |
-| `node(POD_LABEL)` (`"${POD_LABEL}"`, or the variable the template's `label:` names) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim, or one export of one server, share it. Any other label there is an ordinary agent |
+| `node(POD_LABEL)` (`"${POD_LABEL}"`, or the template's own `label:`: the same text, variable or literal) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim, or one export of one server, share it. Any other label there is an ordinary agent |
 | a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
 | a closure, where it is written | one of its own; where the file calls it, the caller's |
 
@@ -201,12 +201,14 @@ OBAAF-JEN-006 reads docker run options as docker splits them: grouped short opti
 written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
 and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
 socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
-rootless Docker's socket folder (`/run/user/...`), the controller's secrets, jobs and workspaces, a
-user's whole home (`/home/jenkins`), a home's credential folders (`.ssh`, `.docker`, `.kube`, `.aws`,
-`.gnupg`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
-`/var/lib/jenkins` and others, read-only too; only the folders that hold programs, such as `/usr` and
+rootless Docker's socket folder (`/run/user/...`), the controller's home (`/var/lib/jenkins`,
+`/var/jenkins_home`) and anything in it but a build's caches (`.m2`, `.gradle`, `.cache`, `tools` and
+others), an agent's root (`/home/jenkins/agent`), a user's whole home (`/home/jenkins`), a home's
+credential folders (`.ssh` but its `known_hosts`, `.docker`, `.kube`, `.aws`, `.gnupg`) and credential
+files (`.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
+read-only too; only the folders that hold programs, such as `/usr` and
 `/opt`, are ordinary read-only) reaches the host. A folder inside one (`/root/.m2`,
-`/etc/localtime:ro`, `/dev/shm`, `/var/lib/jenkins/.m2`) and read-only `/sys/fs/cgroup` do not.
+`/etc/localtime:ro`, `/dev/shm`, `/var/jenkins_home/.m2`) and read-only `/sys/fs/cgroup` do not.
 `--volumes-from` is an unknown. Jenkins splits `args` itself, not exactly as a shell does, so the
 options are read both as a shell splits them and between blanks, and anything either reading finds
 counts; a backslash in them is an unknown. Booleans are read as docker reads them (`--privileged=t` is

@@ -2713,6 +2713,24 @@ The reviewer re-ran R001 to R177; no case got worse, and it confirmed the second
 | R206 | 002 | `node(params.TARGET ?: 'built-in')` inside a pod template | pass | blocking way past | fixed: the floating unknown is back |
 | R208 | 006 | `privileged: 1` | pass | way past (unsure) | fixed: 1 counts as true |
 
+### Fourth pass, on `6614662`
+
+The reviewer re-ran R001 to R212: only the cases the third commit names changed, as intended. 18 new attempts on that commit's diff: 6 ways past (3 blocking), 1 false positive, 1 unsure, 10 held. The fifth commit of #331 fixes these:
+
+| Id | What the file does | Result at `6614662` | Verdict | Now |
+| --- | --- | --- | --- | --- |
+| R217 | `podTemplate(label: "ci-${env.BUILD_NUMBER}")` and `node("ci-${env.BUILD_NUMBER}")` | 006 pass | blocking way past | fixed: the same label text is the pod |
+| R218 | `def label = 'ci-pod'; podTemplate(label: label)` and `node('ci-pod')` | 006 pass | way past | fixed: the literal the variable holds |
+| R222 | `/var/lib/jenkins/init.groovy.d`, `/plugins`, read-write | pass | blocking way past | fixed: the controller's home counts but its caches |
+| R223 | `-v /var/jenkins_home:/jh` | pass | blocking way past | fixed |
+| R224 | `/home/jenkins/agent` | pass | way past | fixed |
+| R225 | `/home/jenkins/.ssh/known_hosts:ro` | high | false positive | fixed |
+| R226 | `~/.netrc`, `~/.git-credentials` | pass | way past | fixed: credential files |
+| R227 | `/var/lib/jenkins/secret.key:ro` | pass | way past (minor) | fixed |
+| R229 | NFS servers `nfs1.example` and `NFS1.example` | pass | way past (minor) | fixed: server names without case |
+| R230 | `privileged: 2` | pass | unsure | now high: any number but 0 counts |
+| R213–R216, R219–R221, R228 | `master`, `!built-in \|\| master`, `master && !built-in`, `!(built-in -> linux)`, dotted homes, a credential folder at depth, `secrets/../.m2`, NFS without a server | as expected | held | held |
+
 ### Reviewer B's attempts (2026-11-17)
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.

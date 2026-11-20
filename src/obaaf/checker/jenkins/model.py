@@ -74,6 +74,7 @@ class Agent:
     # containerTemplate, a hostPathVolume, hostNetwork.
     pod_settings: list = field(default_factory=list)
     label_ref: str | None = None   # the variable a podTemplate's `label:` names, when it is not a literal
+    label_text: str | None = None  # its text, interpolations shown as ${...}
 
 
 @dataclass
@@ -1096,6 +1097,7 @@ def _k8s_key(a: Agent, key: str, value) -> None:
     elif key == "label":
         a.label = literal(value)
         a.label_ref = path_of(value) if a.label is None else None
+        a.label_text = text_of(value)
     elif key == "containers" and isinstance(value, ListLit):
         for item in value.items:
             if isinstance(item, Call) and callee_name(item) == "containerTemplate":
@@ -1126,7 +1128,7 @@ def _k8s_key(a: Agent, key: str, value) -> None:
                     if found is not None and tag != "claim":
                         found = re.sub(r"/+", "/", found).rstrip("/") or "/"
                     if found is not None and tag == "nfs":
-                        server = literal(named_arg(value, "serverAddress"))
+                        server = (literal(named_arg(value, "serverAddress")) or "").lower() or None
                         found = f"{server}:{found}" if server is not None else None
                     which = f"{tag}:{found}" if found is not None else None
                     break
@@ -1844,9 +1846,17 @@ class Builder:
             pod_label = path_of(arg) in ("POD_LABEL", "env.POD_LABEL") or (
                 isinstance(arg, Str) and arg.interpolated and arg.text().strip() in (
                     "${POD_LABEL}", "${env.POD_LABEL}", "$POD_LABEL"))
-            pod = ctx.agent if ctx.agent is not None and ctx.agent.kind == "kubernetes" and (
-                pod_label or (label and label == ctx.agent.label) or (
-                    ctx.agent.label_ref and path_of(arg) == ctx.agent.label_ref)) else None
+            template = ctx.agent if ctx.agent is not None and ctx.agent.kind == "kubernetes" else None
+            same = False
+            if template is not None:
+                # The template's label, as the file writes it: the same text ("ci-${env.BUILD_NUMBER}" in both),
+                # the same variable, or the literal that variable holds (the fourth review of 2d.2j).
+                held = (self.p.literals[template.label_ref].text() if template.label_ref in self.p.literals
+                        and template.label_ref not in self.p.nonliteral_names else None)
+                same = bool((label and label in (template.label, held)) or (
+                    template.label_ref and path_of(arg) == template.label_ref) or (
+                    template.label_text and text_of(arg) == template.label_text))
+            pod = template if template is not None and (pod_label or same) else None
             if pod is not None:
                 wid = self.new_ws("kubernetes", call.line, pod.label, pod.pod_workspace,
                                   how=f"node() at line {call.line}, in the pod of podTemplate at line {pod.line}")
