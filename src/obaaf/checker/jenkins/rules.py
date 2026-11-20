@@ -1367,25 +1367,38 @@ class JenkinsRules:
         # pairs only with another allocation: the agent's own stage holding a credential is OBAAF-JEN-001's.
         # Labels pair when they are the same text or require a common label (`linux && docker`, `linux`).
         entries = [(label, label_terms(label), a, c, under) for label, uses in labels.items() for a, c, under in uses]
+        privileged = [e for e in entries if any(i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in e[4])]
+        if not privileged:
+            return
+        # Indexed, so a file of thousands of allocations is not compared pair by pair.
+        by_change: dict = {}
+        by_agent: dict = {}
+        term_index: dict = {}
+        for e in entries:
+            lu, tu, au, _, under = e
+            if lu not in by_change and any(i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under):
+                by_change[lu] = e
+            if any(i.ai for i in under):
+                kept = by_agent.setdefault(lu, [])
+                if len(kept) < 2 and all(x[2] is not au for x in kept):
+                    kept.append(e)
+            for term in tu or ():
+                term_index.setdefault(term, set()).add(lu)
         done: set = set()
-        for steer in ("change requests", "an AI agent"):
-            for lu, tu, au, cu, under_u in entries:
-                if steer == "change requests":
-                    hit = any(i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under_u)
-                else:
-                    hit = any(i.ai for i in under_u)
-                if not hit:
+        for steer, table in (("change requests", by_change), ("an AI agent", by_agent)):
+            for lp, tp, ap, cp, _ in privileged:
+                if (lp, ap.line) in done:
                     continue
-                for lp, tp, ap, cp, under_p in entries:
-                    if not any(i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in under_p):
+                candidates = [lp] + sorted({x for t in tp or () for x in term_index.get(t, ())} - {lp})
+                for lu in candidates:
+                    hit = table.get(lu)
+                    if hit is None:
                         continue
-                    if steer == "an AI agent" and ap is au:
+                    u = hit if steer == "change requests" else next((x for x in hit if x[2] is not ap), None)
+                    if u is None:
                         continue
+                    tu, cu = u[1], u[3]
                     common = (tu & tp) if tu and tp else set()
-                    if lp != lu and not common:
-                        continue
-                    if (lp, ap.line) in done:
-                        continue
                     done.add((lp, ap.line))
                     labelled = (f"Agents labelled '{lp}'" if lp == lu else
                                 f"Agents labelled '{lu}' and '{lp}', which can be the same machines (both require "
@@ -1402,6 +1415,7 @@ class JenkinsRules:
                                  f"'{stage_label(cp.stage)}', which holds credentials or publishes. An agent steered by "
                                  "what it reads can leave files or processes on a persistent agent that the privileged "
                                  "stage then uses.", cp.stage, severity="medium")
+                    break
 
     # ------------------------------------------------------------------ JEN-003
     def ws_key(self, info: Info) -> tuple:
@@ -1568,6 +1582,8 @@ class JenkinsRules:
                     by_key.setdefault(target, []).append(item)
                     queue.append(item)
         shared_cache: dict[tuple, bool] = {}
+        # One AI step for each workspace stands for the others in the question of which machine it may be.
+        ai_by_machine = list({i.ctx.ws: i for i in reversed(ai) if i.ctx.ws}.values())[::-1]
         for info in self.infos:
             if not (info.push or info.trigger or info.publish) or self.redundant(info):
                 continue
@@ -1636,9 +1652,13 @@ class JenkinsRules:
                          "unless the step runs after cleanWs() or deleteDir() or in a fresh pod.", stage,
                          severity="medium")
                 continue
-            for agent in ai:
+            for agent in ai_by_machine:
                 pair = (agent.ctx.ws, info.ctx.ws)
                 if pair not in shared_cache:
+                    if len(shared_cache) > 200_000:
+                        self.unknown("OBAAF-JEN-003", info.line, "the file has too many allocations to compare each "
+                                     "AI agent's with each effect's")
+                        break
                     shared_cache[pair] = self._may_share_machine(agent, info)
                 if shared_cache[pair]:
                     self.unknown("OBAAF-JEN-003", info.line,
