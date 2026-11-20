@@ -481,6 +481,38 @@ def concurrent(a, b) -> bool:
     return False
 
 
+# Terms and operators of a Jenkins label expression (flagship slice 2d.2j). A label may hold `-` (built-in) but
+# not the `->` operator.
+_LABEL_TOKEN = re.compile(r"&&|\|\||<->|->|!|\(|\)|\"[^\"]*\"|[^\s&|!()<>\"-]+(?:-(?!>)[^\s&|!()<>\"-]*)*|-")
+
+
+def controller_label(label: str) -> str | None:
+    """"exact" for the built-in node's own label, "expression" for a label expression with a term naming it
+    that no `!` negates (`built-in || linux` can place work there), None otherwise."""
+    text = label.strip()
+    if text.lower() in CONTROLLER_LABELS:
+        return "exact"
+    groups, pending = [False], False
+    for tok in _LABEL_TOKEN.findall(text):
+        if tok == "!":
+            pending = not pending
+        elif tok == "(":
+            groups.append(groups[-1] ^ pending)
+            pending = False
+        elif tok == ")":
+            if len(groups) > 1:
+                groups.pop()
+            pending = False
+        elif tok in ("&&", "||", "->", "<->", "-"):
+            pending = False
+        else:
+            negated = groups[-1] ^ pending
+            pending = False
+            if tok.strip('"').lower() in CONTROLLER_LABELS and not negated:
+                return "expression"
+    return None
+
+
 def _last_command(script: str, start: int) -> bool:
     """Whether nothing but blank lines and comments follows position `start`'s line in the script."""
     end = script.find("\n", start)
@@ -540,6 +572,7 @@ class JenkinsRules:
         self.by_agent: dict[int, list[Info]] = {}
         self.by_stage: dict[tuple, list[Info]] = {}
         self.publishing_stages: set = set()
+        self._elsewhere: set | None = None
 
     # ------------------------------------------------------------------ plumbing
     def add(self, rule: str, line: int, message: str, stage: tuple | None = None, severity: str | None = None,
@@ -899,14 +932,16 @@ class JenkinsRules:
         labels: dict[str, list] = {}
         for agent, ctx in self.p.agents:
             under = self.under(agent)
-            label = (agent.label or "").strip().lower()
-            if label in CONTROLLER_LABELS:
+            on_controller = controller_label(agent.label or "") if agent.kind != "kubernetes" else None
+            if on_controller:
                 risky = [i for i in under if i.ai or i.ctx.cr in (CR_YES, CR_POSSIBLE)]
                 severity = "high" if risky or not under else "medium"
                 why = ("steps that change requests or an AI agent can steer" if risky else
                        "steps from branches without change requests")
+                where = ("runs on the controller (label '{}')" if on_controller == "exact" else
+                         "can run on the controller (label expression '{}')").format(agent.label)
                 self.add("OBAAF-JEN-002", agent.line,
-                         f"Stage '{stage_label(ctx.stage)}' runs on the controller (label '{agent.label}'), with "
+                         f"Stage '{stage_label(ctx.stage)}' {where}, with "
                          f"{why}. Code on the built-in node can read $JENKINS_HOME, including the keys that decrypt "
                          "every stored credential.", ctx.stage, severity=severity)
             elif agent.kind in ("any", "unknown") or (agent.kind in ("label", "node") and (
@@ -929,9 +964,13 @@ class JenkinsRules:
                          "can place work on any agent, including the built-in node if it has executors; which agents "
                          "exist and who else uses them is controller configuration")
         # One persistent agent label shared by change-request work and privileged work.
+        # An AI agent is steered by the text it reads, so its work counts like a change request's (flagship slice
+        # 2d.2j, as the rule's own description and the unknown above already said). Work an agent alone steers
+        # pairs only with another allocation: the agent's own stage holding a credential is OBAAF-JEN-001's.
         for label, uses in labels.items():
             untrusted = [(a, c) for a, c, under in uses if any(
                 i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under)]
+            steered = [(a, c) for a, c, under in uses if any(i.ai for i in under)]
             privileged = [(a, c) for a, c, under in uses if any(
                 i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in under)]
             if untrusted and privileged:
@@ -941,29 +980,186 @@ class JenkinsRules:
                          f"'{stage_label(untrusted[0][1].stage)}') and stage '{stage_label(c.stage)}', which holds "
                          "credentials or publishes. Code from a change request can leave files or processes on a "
                          "persistent agent that the privileged stage then uses.", c.stage, severity="medium")
+                continue
+            pairs = [(u, p) for u in steered for p in privileged if u[0] is not p[0]]
+            if pairs:
+                (_, uc), (a, c) = pairs[0]
+                self.add("OBAAF-JEN-002", a.line,
+                         f"Agents labelled '{label}' run both an AI agent (stage '{stage_label(uc.stage)}') and stage "
+                         f"'{stage_label(c.stage)}', which holds credentials or publishes. An agent steered by what it "
+                         "reads can leave files or processes on a persistent agent that the privileged stage then "
+                         "uses.", c.stage, severity="medium")
 
     # ------------------------------------------------------------------ JEN-003
-    def agent_effects(self) -> None:
-        # A stage and its own post blocks share a workspace.
-        groups: dict[tuple, list[Info]] = {}
+    def ws_key(self, info: Info) -> tuple:
+        """What a step shares files with (flagship slice 2d.2j): the node its workspace is on, since ws() on the
+        same node is written by the same user; when the model knows no workspace for the step, its stage and
+        that stage's post blocks, as the rule read every step before 2d.2j."""
+        if info.ctx.ws:
+            return ("machine", self.p.workspaces[info.ctx.ws].machine)
+        return ("stage", base_stage(info.ctx.stage))
+
+    @staticmethod
+    def may_follow(first: Info, later: Info) -> bool:
+        """Whether `later` can run after `first` in the same build: later in the file's order, in a sibling
+        parallel branch, or inside a loop around both."""
+        if later.index > first.index or concurrent(first.ctx, later.ctx):
+            return True
+        loops = {g for g in first.ctx.guards if g.startswith("loop ")}
+        return bool(loops & set(later.ctx.guards))
+
+    @staticmethod
+    def stash_name(info: Info) -> str:
+        """The stash a stash or unstash step names; "?" when the file does not fix it."""
+        call = info.use.call
+        node = step_arg(call, "name")
+        if node is None and call.args and not isinstance(call.args[0], MapLit):
+            node = call.args[0]
+        return literal(node) if node is not None and literal(node) is not None else "?"
+
+    def _where(self, info: Info) -> str:
+        w = self.p.workspaces.get(info.ctx.ws)
+        return w.how if w else "the same stage"
+
+    def _cleaned(self, agent: Info, effect: Info) -> bool:
+        """Whether the workspace is emptied between what the agent leaves in it and the effect of a later build:
+        cleanWs() or deleteDir() at its root, before the effect and certain to run, or in a post always or
+        cleanup block after the agent."""
         for info in self.infos:
-            groups.setdefault(base_stage(info.ctx.stage), []).append(info)
-        for stage, infos in groups.items():
-            ai = [i for i in infos if i.ai]
-            if not ai:
+            if info.use.name not in ("cleanWs", "deleteDir") or info.ctx.ws != effect.ctx.ws or info.ctx.dir:
                 continue
-            self.applicable.add("OBAAF-JEN-003")
-            for info in infos:
-                if info.ai and not (info.push or info.trigger or info.publish):
+            if self.gates(info, effect) or (info.ctx.post in ("always", "cleanup") and self.may_follow(agent, info)):
+                return True
+        return False
+
+    def _may_share_machine(self, a: Info, b: Info) -> bool:
+        """Whether two steps in separate allocations may still run on the same agent, where Jenkins keeps a
+        job's workspace directory between allocations: neither is a pod of its own, and their labels do not
+        tell their agents apart (the same label, any agent, or one the file does not fix)."""
+        if not a.ctx.ws or not b.ctx.ws:
+            return False
+        wa = self.p.workspaces[self.p.workspaces[a.ctx.ws].machine]
+        wb = self.p.workspaces[self.p.workspaces[b.ctx.ws].machine]
+        if wa.id == wb.id:
+            return False       # one allocation: decided above, not a question of which agent
+        kinds = {wa.kind, wb.kind}
+        if "kubernetes" in kinds or "closure" in kinds:
+            return False
+        if kinds & {"any", "unknown", "context"}:
+            return True
+        if wa.custom and wa.custom == wb.custom:
+            return True
+        la, lb = wa.label, wb.label
+        return la is None or lb is None or "${" in la or "${" in lb or la == lb
+
+    def redundant(self, info: Info) -> bool:
+        """A step read where its closure is written, when the closure is also read where it is called (flagship
+        slice 2d.2j): the call is where it runs, so the reading where it is written adds nothing."""
+        w = self.p.workspaces.get(info.ctx.ws)
+        if w is None or w.kind != "closure":
+            return False
+        if self._elsewhere is None:
+            self._elsewhere = {id(i.use.call) for i in self.infos
+                               if self.p.workspaces.get(i.ctx.ws) is None
+                               or self.p.workspaces[i.ctx.ws].kind != "closure"}
+        return id(info.use.call) in self._elsewhere
+
+    def agent_effects(self) -> None:
+        ai = [i for i in self.infos if i.ai and not self.redundant(i)]
+        if not ai:
+            return
+        self.applicable.add("OBAAF-JEN-003")
+        # Where what an agent wrote may be: the workspace it ran in, from that step on, and any workspace that
+        # unstashes a stash taken there after the agent ran (flagship slice 2d.2j). (key, from step, agent, via)
+        sources: list[tuple] = [(self.ws_key(i), i, i, None) for i in ai]
+        stashes = [i for i in self.infos if i.use.name == "stash"]
+        unstashes = [i for i in self.infos if i.use.name == "unstash"]
+        seen = {(key, src.index) for key, src, _, _ in sources}
+        queue = list(sources)
+        while queue:
+            key, src, agent, _ = queue.pop()
+            for st in stashes:
+                if self.ws_key(st) != key or not (st is src or self.may_follow(src, st)):
                     continue
-                effect = ("pushes to the repository" if info.push else
-                          f"starts job {info.trigger} (as SYSTEM unless build authorization is configured)"
-                          if info.trigger else f"publishes ({info.publish})" if info.publish else None)
-                if effect:
+                name = self.stash_name(st)
+                for un in unstashes:
+                    other = self.stash_name(un)
+                    if (name != other and "?" not in (name, other)) or not self.may_follow(st, un):
+                        continue
+                    target = self.ws_key(un)
+                    if (target, un.index) in seen:
+                        continue
+                    seen.add((target, un.index))
+                    item = (target, un, agent, (st, un))
+                    sources.append(item)
+                    queue.append(item)
+        for info in self.infos:
+            if not (info.push or info.trigger or info.publish) or self.redundant(info):
+                continue
+            effect = ("pushes to the repository" if info.push else
+                      f"starts job {info.trigger} (as SYSTEM unless build authorization is configured)"
+                      if info.trigger else f"publishes ({info.publish})")
+            key = self.ws_key(info)
+            here = [s for s in sources if s[0] == key]
+            stage = base_stage(info.ctx.stage)
+            if key[0] == "stage":
+                # No workspace known: every agent of the stage counts, in any order, as before slice 2d.2j.
+                direct = [s for s in here if s[3] is None]
+                if direct:
                     self.add("OBAAF-JEN-003", info.line,
-                             f"Stage '{stage_label(stage)}' runs an AI agent at line {ai[0].line} and the step at line "
-                             f"{info.line} {effect}, in the same workspace. What the agent wrote or was told can reach "
-                             "that effect without review.", stage, severity="high")
+                             f"Stage '{stage_label(stage)}' runs an AI agent at line {direct[0][2].line} and the step at "
+                             f"line {info.line} {effect}, in the same workspace. What the agent wrote or was told can "
+                             "reach that effect without review.", stage, severity="high")
+                    continue
+            after = [s for s in here if s[1] is info or self.may_follow(s[1], info)]
+            direct = [s for s in after if s[3] is None]
+            if direct:
+                agent = direct[0][2]
+                if base_stage(agent.ctx.stage) == stage and agent.ctx.ws == info.ctx.ws:
+                    message = (f"Stage '{stage_label(stage)}' runs an AI agent at line {agent.line} and the step at line "
+                               f"{info.line} {effect}, in the same workspace.")
+                elif agent.ctx.ws == info.ctx.ws:
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect}, in the same "
+                               f"workspace as the AI agent at line {agent.line} in stage "
+                               f"'{stage_label(base_stage(agent.ctx.stage))}' ({self._where(agent)}).")
+                else:
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} in another "
+                               f"workspace ({self._where(info)}) on the same node as the AI agent at line {agent.line} in "
+                               f"stage '{stage_label(base_stage(agent.ctx.stage))}', which runs as the same user and can "
+                               "write into it.")
+                self.add("OBAAF-JEN-003", info.line, message + " What the agent wrote or was told can reach that effect "
+                         "without review.", stage, severity="high")
+                continue
+            if after:
+                _, un, agent, (st, _) = after[0]
+                self.add("OBAAF-JEN-003", info.line,
+                         f"The step at line {info.line} in stage '{stage_label(stage)}' {effect}, after unstash at line "
+                         f"{un.line} brings in stash '{self.stash_name(st)}', taken at line {st.line} after the AI agent "
+                         f"at line {agent.line} in stage '{stage_label(base_stage(agent.ctx.stage))}' ran in that "
+                         "workspace. What the agent wrote can reach that effect without review.", stage, severity="high")
+                continue
+            before = [s for s in here if s[3] is None]
+            kept = [s for s in before if self.p.workspaces[info.ctx.ws].kind != "kubernetes"
+                    and not self._cleaned(s[2], info)]
+            if kept:
+                agent = kept[0][2]
+                self.add("OBAAF-JEN-003", info.line,
+                         f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} before the AI agent at "
+                         f"line {agent.line} in stage '{stage_label(base_stage(agent.ctx.stage))}' runs in the same "
+                         "workspace. Jenkins keeps that workspace between builds, so what the agent leaves there (a Git "
+                         "hook, .git/config, a script the step runs) is in place for this step in the next build, "
+                         "unless the step runs after cleanWs() or deleteDir() or in a fresh pod.", stage,
+                         severity="medium")
+                continue
+            for agent in ai:
+                if self._may_share_machine(agent, info):
+                    self.unknown("OBAAF-JEN-003", info.line,
+                                 f"the AI agent at line {agent.line} (stage '{stage_label(base_stage(agent.ctx.stage))}') "
+                                 f"and the step at line {info.line} that {effect.split(' (')[0]} run in separate "
+                                 "allocations that may be the same agent, where Jenkins keeps the job's workspace "
+                                 "directory between allocations; which agents carry which labels is controller "
+                                 "configuration")
+                    break
 
     # ------------------------------------------------------------------ JEN-004
     def pipeline_code(self) -> None:
@@ -1137,13 +1333,31 @@ class JenkinsRules:
         return None
 
     # ------------------------------------------------------------------ JEN-007
+    @staticmethod
+    def no_network(info: Info) -> bool:
+        """Whether a step runs inside a container started with no network (flagship slice 2d.2j): a docker or
+        dockerfile agent, or docker.image().inside, whose run options fix one network, `none`, and nothing
+        that reaches the host (OBAAF-JEN-006's list), so the process in it cannot give itself a route out."""
+        agent = info.ctx.agent
+        if agent is None or agent.kind not in ("docker", "dockerfile") or not agent.args or "${" in agent.args:
+            return False
+        networks = re.findall(r"(?:^|\s)--(?:net|network)(?:=|\s+)(['\"]?)([^\s'\"]+)\1", agent.args)
+        if [value for _, value in networks] != ["none"]:
+            return False
+        # A socket mounted from the host is a way out whatever the network (what listens on it decides).
+        if re.search(r"(?:-v|--volume|--mount)(?:=|\s+)\S*sock", agent.args):
+            return False
+        return not any(rx.search(agent.args) for rx, _ in DOCKER_HOST_ARGS)
+
     def agent_egress(self) -> None:
         declared = "OBAAF_EGRESS" in self.p.env_values
         for stage, infos in self.stages().items():
-            ai = [i for i in infos if i.ai]
+            ai = [i for i in infos if i.ai and not self.redundant(i)]
             if not ai:
                 continue
             self.applicable.add("OBAAF-JEN-007")
+            if all(self.no_network(i) for i in ai):
+                continue
             note = (" OBAAF_EGRESS declares a policy, but a declaration is not enforcement." if declared else "")
             self.add("OBAAF-JEN-007", ai[0].line,
                      f"Nothing in the Jenkinsfile limits the network access of the AI agent in stage "

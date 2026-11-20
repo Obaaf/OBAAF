@@ -1,0 +1,431 @@
+"""Jenkins stages, agents and workspaces (flagship slice 2d.2j): OBAAF-JEN-002, 003, 006 and 007.
+
+Every Jenkinsfile here is an inert test input: it is parsed, never run. The verdicts follow what the
+Jenkins handbook says an agent does (Pipeline Syntax: the top-level agent is "where the entire Pipeline
+... will execute"; `reuseNode` runs a container "on the node specified at the top-level of the Pipeline,
+in the same workspace"), and what Jenkins does with a job's workspace directory on an agent: it keeps it
+between allocations. docs/jenkins.md lists what the checker cannot decide.
+"""
+
+import textwrap
+import unittest
+
+import helpers  # noqa: F401  (puts src/ on the path)
+
+from obaaf.catalog import load
+from obaaf.checker import jenkins
+
+CATALOG = load()
+
+
+def analyze(text):
+    return jenkins.analyze("Jenkinsfile", textwrap.dedent(text).encode(), CATALOG, None)
+
+
+def findings(text, rule):
+    return [(f.severity, f.line) for f in analyze(text).findings if f.rule == rule]
+
+
+def status(text, rule):
+    result = analyze(text)
+    return next(row["status"] for row in jenkins.coverage(result, result.findings) if row["rule"] == rule)
+
+
+def two_stages(first, second, top="agent { label 'linux' }", first_agent="", second_agent=""):
+    return f"""
+pipeline {{
+  {top}
+  stages {{
+    stage('Fix') {{
+      {first_agent}
+      steps {{
+        {first}
+      }}
+    }}
+    stage('Push') {{
+      {second_agent}
+      steps {{
+        {second}
+      }}
+    }}
+  }}
+}}
+"""
+
+
+AGENT = "sh 'claude -p \"fix the failing test\"'"
+PUSH = "sh 'git push origin HEAD:main'"
+
+
+class SharedWorkspaceTest(unittest.TestCase):
+    """What the agent wrote reaches the effect in the same workspace: high."""
+
+    def test_stages_under_the_top_level_agent_share_its_workspace(self):
+        self.assertEqual(findings(two_stages(AGENT, PUSH), "OBAAF-JEN-003"), [("high", 14)])
+        self.assertEqual(findings(two_stages(AGENT, PUSH, top="agent any"), "OBAAF-JEN-003"), [("high", 14)])
+
+    def test_the_pipeline_post_block_runs_in_the_top_level_workspace(self):
+        text = """
+pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Fix') {
+      steps { sh 'claude -p fix' }
+    }
+  }
+  post {
+    success { sh 'git push origin HEAD' }
+  }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 10)])
+
+    def test_nested_stages_and_the_parent_post_share_the_parent_workspace(self):
+        text = """
+pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Maintain') {
+      stages {
+        stage('Fix') {
+          steps { sh 'claude -p fix' }
+        }
+        stage('Ship') {
+          steps { sh 'git push' }
+        }
+      }
+      post {
+        success { sh 'npm publish' }
+      }
+    }
+  }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 11), ("high", 15)])
+
+    def test_scripted_stages_inside_one_node_share_its_workspace(self):
+        text = """
+node('linux') {
+  sh 'claude -p fix'
+  stage('Fix') { sh 'claude -p again' }
+  stage('Push') { sh 'git push' }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 5)])
+
+    def test_reuse_node_runs_the_container_in_the_same_workspace(self):
+        text = two_stages(AGENT, "sh 'npm publish'",
+                          first_agent="agent { docker { image 'node:20'; reuseNode true } }")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 14)])
+        # A reuseNode the file does not fix is read as reused.
+        computed = text.replace("reuseNode true", "reuseNode params.REUSE")
+        self.assertEqual(findings(computed, "OBAAF-JEN-003"), [("high", 14)])
+
+    def test_a_stage_with_agent_none_stays_in_the_top_level_workspace(self):
+        text = two_stages(AGENT, PUSH, second_agent="agent none")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 14)])
+
+    def test_another_stage_starting_a_job_with_what_the_agent_wrote(self):
+        text = two_stages("sh 'claude -p \"write NOTES.md\"'",
+                          "build job: 'release', parameters: [string(name: 'NOTES', value: readFile('NOTES.md'))]")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 14)])
+
+    def test_a_scripted_stage_inside_a_declarative_stage(self):
+        text = """
+pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Fix') {
+      steps {
+        script {
+          stage('Agent') { sh 'claude -p fix' }
+          sh 'git push'
+        }
+      }
+    }
+  }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 9)])
+
+    def test_sibling_parallel_branches_in_one_workspace(self):
+        text = """
+pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Both') {
+      parallel {
+        stage('Push') { steps { sh 'git push' } }
+        stage('Fix') { steps { sh 'claude -p fix' } }
+      }
+    }
+  }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 7)])
+
+    def test_ws_on_the_same_node_is_written_by_the_same_user(self):
+        text = """
+node('linux') {
+  sh 'claude -p fix'
+  ws("${WORKSPACE}@docs") {
+    sh 'git push'
+  }
+}
+"""
+        result = [f for f in analyze(text).findings if f.rule == "OBAAF-JEN-003"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("high", 5)])
+        self.assertIn("on the same node", result[0].message)
+
+
+class StashTest(unittest.TestCase):
+    STASHED = """
+pipeline {
+  agent none
+  stages {
+    stage('Fix') {
+      agent { label 'sandbox' }
+      steps {
+        FIRST
+        SECOND
+      }
+    }
+    stage('Push') {
+      agent { label 'trusted' }
+      steps {
+        unstash 'tree'
+        sh 'git push'
+      }
+    }
+  }
+}
+"""
+
+    def case(self, first, second):
+        return self.STASHED.replace("FIRST", first).replace("SECOND", second)
+
+    def test_a_stash_taken_after_the_agent_carries_what_it_wrote(self):
+        text = self.case(AGENT, "stash name: 'tree', includes: '**'")
+        result = [f for f in analyze(text).findings if f.rule == "OBAAF-JEN-003"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("high", 16)])
+        self.assertIn("stash 'tree'", result[0].message)
+
+    def test_a_computed_stash_name_may_be_the_one_unstashed(self):
+        text = self.case(AGENT, "stash name: \"tree-${env.BUILD_ID}\"")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 16)])
+
+    def test_a_stash_taken_before_the_agent_or_under_another_name(self):
+        self.assertEqual(findings(self.case("stash 'tree'", AGENT), "OBAAF-JEN-003"), [])
+        self.assertEqual(findings(self.case(AGENT, "stash 'report'"), "OBAAF-JEN-003"), [])
+        self.assertEqual(status(self.case(AGENT, "stash 'report'"), "OBAAF-JEN-003"), "pass")
+
+
+class SeparateWorkspaceTest(unittest.TestCase):
+    """Separate allocations: no finding where their agents differ, an unknown where they may not."""
+
+    def test_nodes_with_different_labels_do_not_share(self):
+        text = """
+node('sandbox') { stage("${env.A}") { sh 'claude -p x' } }
+node('trusted') { stage("${env.B}") { sh 'git push' } }
+"""
+        self.assertEqual(status(text, "OBAAF-JEN-003"), "pass")
+        same_name = """
+node('sandbox') { stage('Work') { sh 'claude -p x' } }
+node('trusted') { stage('Work') { sh 'git push https://example.invalid/other.git' } }
+"""
+        self.assertEqual(status(same_name, "OBAAF-JEN-003"), "pass")
+        one_stage = """
+stage('Nightly') {
+  node('sandbox') { sh 'claude -p x' }
+  node('trusted') { sh 'git push https://example.invalid/other.git' }
+}
+"""
+        self.assertEqual(status(one_stage, "OBAAF-JEN-003"), "pass")
+
+    def test_closures_are_judged_where_they_are_called(self):
+        text = """
+def review = { sh 'claude -p review' }
+def release = { sh 'git push' }
+stage('Review') { node('sandbox') { review() } }
+stage('Release') { node('trusted') { release() } }
+"""
+        self.assertEqual(status(text, "OBAAF-JEN-003"), "pass")
+        # Read where it is written, it was a second OBAAF-JEN-007 finding for a stage named 'pipeline'.
+        self.assertEqual(len(findings(text, "OBAAF-JEN-007")), 1)
+        together = """
+def fix = { sh 'claude -p fix'; sh 'git push' }
+node('linux') { stage('Fix') { fix() } }
+"""
+        self.assertEqual(findings(together, "OBAAF-JEN-003"), [("high", 2)])
+        self.assertEqual(len([f for f in analyze(together).findings if f.rule == "OBAAF-JEN-003"]), 1)
+
+    def test_the_same_label_or_any_agent_may_be_the_same_machine(self):
+        text = two_stages(AGENT, PUSH, top="agent none", first_agent="agent { label 'linux' }",
+                          second_agent="agent { label 'linux' }")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [])
+        self.assertEqual(status(text, "OBAAF-JEN-003"), "unknown")
+        anywhere = text.replace("agent { label 'linux' }", "agent any", 1)
+        self.assertEqual(status(anywhere, "OBAAF-JEN-003"), "unknown")
+        apart = text.replace("agent { label 'linux' }", "agent { label 'sandbox' }", 1)
+        self.assertEqual(status(apart, "OBAAF-JEN-003"), "pass")
+
+    def test_pods_are_never_the_same_machine(self):
+        pod = "agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}' } }"
+        text = two_stages(AGENT, PUSH, top="agent none", first_agent=pod, second_agent=pod)
+        self.assertEqual(status(text, "OBAAF-JEN-003"), "pass")
+
+
+class EarlierEffectTest(unittest.TestCase):
+    """An effect before the agent in the same workspace meets what the agent left there in the next build."""
+
+    MIRROR = """
+pipeline {
+  AGENT
+  stages {
+    stage('Mirror') {
+      steps {
+        BEFORE
+        sh 'git push mirror HEAD'
+        sh 'claude -p "summarise the diff" > summary.md'
+      }
+    }
+  }
+}
+"""
+
+    def case(self, agent="agent { label 'linux' }", before=""):
+        return self.MIRROR.replace("AGENT", agent).replace("BEFORE", before)
+
+    def test_a_kept_workspace_is_medium(self):
+        result = [f for f in analyze(self.case()).findings if f.rule == "OBAAF-JEN-003"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("medium", 8)])
+        self.assertIn("next build", result[0].message)
+
+    def test_a_fresh_pod_or_a_cleaned_workspace_is_not(self):
+        pod = "agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}' } }"
+        self.assertEqual(status(self.case(agent=pod), "OBAAF-JEN-003"), "pass")
+        self.assertEqual(status(self.case(before="cleanWs()"), "OBAAF-JEN-003"), "pass")
+        self.assertEqual(status(self.case(before="deleteDir()"), "OBAAF-JEN-003"), "pass")
+        # deleteDir() inside dir() empties that folder only.
+        self.assertEqual(findings(self.case(before="dir('out') { deleteDir() }"), "OBAAF-JEN-003"), [("medium", 8)])
+
+
+class FallbackTest(unittest.TestCase):
+    def test_steps_with_no_known_workspace_keep_the_stage_grouping(self):
+        # agent none and no stage agent: Jenkins would refuse to run sh here, but the finding stays.
+        text = two_stages(f"{AGENT}\n{PUSH}", "echo done", top="agent none")
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 9)])
+
+    def test_a_method_nothing_here_calls_shares_its_caller_workspace(self):
+        text = """
+def call() {
+  sh 'claude -p fix'
+  sh 'git push'
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 4)])
+
+    def test_the_body_of_a_step_whose_code_is_elsewhere(self):
+        text = """
+withLibraryNode {
+  sh 'claude -p fix'
+  sh 'git push'
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 4)])
+
+
+class ControllerTest(unittest.TestCase):
+    def test_a_label_expression_that_can_select_the_built_in_node(self):
+        self.assertEqual(findings("node('built-in || linux') { sh 'make' }", "OBAAF-JEN-002"), [("high", 1)])
+        self.assertEqual(findings("node('(master) && x') { sh 'make' }", "OBAAF-JEN-002"), [("high", 1)])
+        self.assertEqual(findings('node(\'"built-in" || linux\') { sh \'make\' }', "OBAAF-JEN-002"), [("high", 1)])
+        for negated in ("!built-in && linux", "!(built-in || master)", "linux && !master"):
+            self.assertEqual(findings(f"node('{negated}') {{ sh 'make' }}", "OBAAF-JEN-002"), [], negated)
+        self.assertEqual(findings("node('built-in-tools') { sh 'make' }", "OBAAF-JEN-002"), [])
+
+    def test_a_container_on_the_built_in_node(self):
+        text = two_stages("sh 'make'", "sh 'make test'", top="agent { docker { image 'node:20'; label 'built-in' } }")
+        self.assertEqual(findings(text, "OBAAF-JEN-002"), [("high", 3)])
+
+
+class SharedLabelTest(unittest.TestCase):
+    TEXT = """
+pipeline {
+  agent none
+  stages {
+    stage('Fix') {
+      agent { label 'linux' }
+      when { branch 'main' }
+      steps { sh 'claude -p fix' }
+    }
+    stage('Release') {
+      agent { label 'LABEL' }
+      when { branch 'main' }
+      steps { sh 'npm publish' }
+    }
+  }
+}
+"""
+
+    def test_an_agent_and_a_publishing_stage_on_one_persistent_label(self):
+        result = [f for f in analyze(self.TEXT.replace("LABEL", "linux")).findings if f.rule == "OBAAF-JEN-002"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("medium", 11)])
+        self.assertIn("an AI agent (stage 'Fix')", result[0].message)
+        self.assertEqual(findings(self.TEXT.replace("LABEL", "release"), "OBAAF-JEN-002"), [])
+
+    def test_an_agent_stage_alone_is_not_paired_with_itself(self):
+        text = """
+pipeline {
+  agent none
+  stages {
+    stage('Fix') {
+      agent { label 'linux' }
+      when { branch 'main' }
+      steps {
+        withCredentials([string(credentialsId: 'model-key', variable: 'KEY')]) { sh 'claude -p fix' }
+      }
+    }
+  }
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-002"), [])
+
+
+class NoNetworkTest(unittest.TestCase):
+    def review(self, args):
+        return f"""
+pipeline {{
+  agent {{ docker {{ image 'agent-image'; args '{args}' }} }}
+  stages {{
+    stage('Review') {{
+      steps {{ sh 'claude -p review' }}
+    }}
+  }}
+}}
+"""
+
+    def test_a_container_with_no_network_limits_the_agent(self):
+        for args in ("--network none", "--network=none", "--rm --net none -e CI=1", '--network "none"'):
+            self.assertEqual(status(self.review(args), "OBAAF-JEN-007"), "pass", args)
+        inside = "node('linux') { docker.image('agent-image').inside('--network=none') { sh 'claude -p x' } }"
+        self.assertEqual(status(inside, "OBAAF-JEN-007"), "pass")
+
+    def test_what_can_undo_or_bypass_it(self):
+        for args in ("--network none --privileged", "--network none -v /var/run/docker.sock:/var/run/docker.sock",
+                     "--network none -v /run/proxy.sock:/run/proxy.sock", "--network none --network host",
+                     "--network bridge", "--network ${NET}", "--cap-add SYS_ADMIN --network none"):
+            self.assertEqual(findings(self.review(args), "OBAAF-JEN-007"), [("low", 6)], args)
+
+    def test_an_agent_outside_the_container_is_not_limited(self):
+        text = """
+node('linux') {
+  docker.image('tools').inside('--network none') { sh 'make' }
+  sh 'claude -p review'
+}
+"""
+        self.assertEqual(findings(text, "OBAAF-JEN-007"), [("low", 4)])
+
+
+if __name__ == "__main__":
+    unittest.main()
