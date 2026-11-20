@@ -189,6 +189,25 @@ class FixProofReviewTest(unittest.TestCase):
             prove(self.root, options, (Edit(cfg, before, after, (("agents", "commands"),)),), ())
         self.assertEqual((self.root / cfg).read_bytes(), before)
 
+    def test_a_linked_configuration_or_baseline_keeps_its_role(self):
+        # From the second pass of the review of #316: an edit names a link's target, so the role
+        # is found by file identity, not by the name given on the command line.
+        import os
+        workflow = Path(".github/workflows/build.yml")
+        (self.root / workflow).write_text("name: Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                                          "    steps:\n      - run: echo hi\n")
+        cfg = Path("conf.json")
+        before = b'{"agents": {"actions": ["acme/tool-\\ud83d\\ude00"], "commands": ["zzz-one"]}}'
+        after = '{"agents": {"actions": ["acme/tool-\U0001F600"], "commands": ["zzz-two"]}}'.encode()
+        (self.root / cfg).write_bytes(before)
+        os.symlink("conf.json", self.root / "gate.yml")
+        os.symlink("../conf.json", self.root / ".github/obaaf.yml")
+        for config in (Path("gate.yml"), None):
+            with self.subTest(config=config):
+                options = CheckOptions(path=Path("."), config=config, platform="github", fail_on="high")
+                with self.assertRaisesRegex(ProofError, "structure changed"):
+                    prove(self.root, options, (Edit(cfg, before, after, (("agents", "commands"),)),), ())
+
     def test_a_baseline_named_yaml_is_compared_as_json(self):
         # From the review of #316: baseline.load reads any name as JSON, where a raw NEL and a
         # space differ; the YAML reader turns the NEL into a space.
@@ -201,6 +220,11 @@ class FixProofReviewTest(unittest.TestCase):
         path = Path("accepted.yaml")
         (self.root / path).write_bytes(before)
         options = dataclasses.replace(self.options, baseline=path)
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(path, before, after, (), removed=(("findings", 1),)),), ())
+        import os
+        os.symlink("accepted.yaml", self.root / "linked.json")
+        options = dataclasses.replace(self.options, baseline=Path("linked.json"))
         with self.assertRaisesRegex(ProofError, "structure changed"):
             prove(self.root, options, (Edit(path, before, after, (), removed=(("findings", 1),)),), ())
 

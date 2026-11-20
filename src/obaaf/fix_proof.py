@@ -199,16 +199,24 @@ def _invalid_json_constant(token):
     raise ValueError(f"{token} is not a JSON number")
 
 
-def _reader(rel: Path, options) -> str:
-    """Read a file as the checker does: the baseline as JSON and the configuration as YAML,
-    whatever their names, and any other file by its suffix. Choosing by suffix alone let a
-    configuration named `.json`, which the checker reads as YAML, be compared as JSON, where
-    some text decodes differently (review of #316)."""
-    if options is not None and options.baseline is not None and rel == Path(options.baseline):
+def _same_file(a, b) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _reader(path: Path, baseline_file, config_file) -> str:
+    """Read a file as the checker does: the baseline as JSON and the configuration it read as
+    YAML, whatever their names and through any link, and any other file by its suffix.
+    Choosing by suffix alone let a configuration named `.json`, which the checker reads as
+    YAML, be compared as JSON, where some text decodes differently; comparing names alone
+    missed a configuration or baseline reached through a link (review of #316)."""
+    if baseline_file is not None and _same_file(path, baseline_file):
         return "json"
-    if options is not None and options.config is not None and rel == Path(options.config):
+    if config_file is not None and _same_file(path, config_file):
         return "yaml"
-    return "json" if rel.suffix.lower() == ".json" else "yaml"
+    return "json" if path.suffix.lower() == ".json" else "yaml"
 
 
 def _document(data: bytes, reader: str):
@@ -259,7 +267,7 @@ def _names_node(doc, key) -> bool:
     return True
 
 
-def _apply(dest, edits, expected, options=None):
+def _apply(dest, edits, expected, baseline_file=None, config_file=None):
     touched = set()
     for edit in edits:
         rel = Path(edit.path)
@@ -276,7 +284,7 @@ def _apply(dest, edits, expected, options=None):
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
-        reader = _reader(_relative(dest, rel), options)
+        reader = _reader(path, baseline_file, config_file)
         old = _document(edit.before, reader)
         new = _document(edit.after, reader)
         if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
@@ -376,7 +384,10 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             check_copy_matches(root, original, before)
             expected_files = _manifest(dest)
             _read_as_jenkins(dest, options, before, edits)
-            _apply(dest, edits, expected_files, options)
+            # The files the checker read in each role on the copy, before any edit is written.
+            _apply(dest, edits, expected_files,
+                   dest / options.baseline if options.baseline is not None else None,
+                   before.config.path)
             after = check_inputs(dest, options, today, catalog)
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
