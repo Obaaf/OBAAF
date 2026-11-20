@@ -556,6 +556,66 @@ class MigrateTest(unittest.TestCase):
                 self.assertEqual(old.read_bytes(), before)
                 self.assertEqual(output.read_bytes(), b"existing output")
                 self.assertFalse((tmp / "absent.json").exists())
+            # Once the files have an owner the finding has gone and the entry matches nothing:
+            # migration says the file has nothing left to carry over.
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 1, err)
+            self.assertIn("none of the 1 entries", err)
+            self.assertIn("nothing left to carry over: delete it", err)
+            self.assertEqual(old.read_bytes(), before)
+
+    def test_findings_outside_the_old_file_are_counted_and_those_no_entry_can_accept_named(self):
+        # Review of #313: the receipt counted only findings a new entry could accept, so a finding
+        # outside the old file that no entry can accept went unmentioned while the gate failed on it.
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] != "OBAAF-REPO-001"]
+            old.write_text(json.dumps(data))
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)
+            self.assertIn("among them: OBAAF-REPO-001", err)
+            self.assertIn("no entry can accept this finding", err)
+            self.assertIn("vouching for itself", err)
+            code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+
+    def test_entries_an_ignore_entry_accepts_are_counted_and_the_file_converted(self):
+        # Review of #313: completing an ignore entry, as the receipt advises, used to leave a file
+        # that migration refused ("Nothing was written", no reason) and the gate still asked to convert.
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] == "OBAAF-GHA-008"]
+            self.assertEqual(len(data["findings"]), 2)
+            old.write_text(json.dumps(data))
+            before = old.read_bytes()
+            config = repo / ".github" / "obaaf.yml"
+            ignore = ("ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/agent.yml\n"
+                      f"    reason: {REASON}\n    until: {SOON}\n")
+            config.write_text(ignore)
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 1, err)
+            self.assertEqual(err.count("matched but not carried over: OBAAF-GHA-008"), 2, err)
+            self.assertIn("it names no owner", err)
+            self.assertIn("Act on the lines above and run this again", err)
+            self.assertEqual(old.read_bytes(), before)
+            config.write_text(ignore + f"    owner: \"{OWNER}\"\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("0 finding(s) carried over", err)
+            self.assertIn("2 old entries name findings that an ignore entry in the configuration accepts, "
+                          "so they are not carried over.", err)
+            self.assertNotIn("matched but not carried over", err)
+            converted = json.loads(old.read_text())
+            self.assertEqual((converted["format"], converted["findings"]), (baseline.FORMAT, []))
+            _, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertNotIn("baseline migrate", out)
 
     def test_a_matched_invalid_ignore_stays_with_its_original_owner(self):
         with TempDir() as tmp:

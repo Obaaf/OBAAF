@@ -970,9 +970,11 @@ If another supported configuration name already exists, init shows any differenc
 
 ### D-115 Legacy baseline migration reports current acceptance eligibility
 
-**Decision.** Direct migration matches legacy entries using their existing identities and applies the same eligibility policy used to write new baseline entries. The receipt names prohibited matches and explains the reason. A nonempty input with no eligible matches is preserved, including when a separate output path was supplied.
+**Decision.** Direct migration matches legacy entries using their existing identities and applies the same eligibility policy used to write new baseline entries. The receipt names prohibited matches and explains the reason. A nonempty input whose matches are all prohibited or waiting on an ignore entry is preserved, including when a separate output path was supplied. An entry that names a finding a valid ignore entry accepts is counted and not carried over; when such entries are the only matches, the file is converted with no entries. The receipt still counts the findings outside the old file, and names those no entry can accept (both added by the review, `review-gpt` #313).
 
-**Reason.** In an in-place upgrade from 0.3.0, migration reported that it accepted a missing ownership finding that the next gate kept open. The receipt must count the acceptances the gate honors. An existing ignore decision stays with its configuration owner.
+**Reason.** In an in-place upgrade from 0.3.0, migration reported that it accepted a missing ownership finding that the next gate kept open. The receipt must count the acceptances the gate honors. An existing ignore decision stays with its configuration owner. Preserving a file whose only matches an ignore entry accepts left the gate asking for a migration that refused, with no reason given; the review found that and converts such a file.
+
+**Consequence.** A 0.3.0 ignore entry names no owner, so a finding both ignored and in the old file is not carried over until its ignore entry is completed or removed. A preserved file whose matches were prohibited has nothing left to carry over once their files get an owner; migration then finds no match and says to delete it.
 
 **Status.** Proposed, 2026-11-20 (A2d, #312).
 

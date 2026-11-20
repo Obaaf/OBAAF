@@ -187,7 +187,8 @@ def cmd_check(args) -> int:
         import shlex
         print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with: "
               f"obaaf baseline migrate {shlex.quote(str(args.write_baseline))} --owner OWNER --reason REASON "
-              "--expires YYYY-MM-DD (it carries over the findings the file covers and accepts nothing new), or "
+              "--expires YYYY-MM-DD (it carries over the findings the file covers that a new entry may accept, "
+              "and accepts nothing new), or "
               "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
@@ -293,8 +294,8 @@ def cmd_check(args) -> int:
 
 def cmd_baseline_migrate(args) -> int:
     """Turn an obaaf-baseline/v0.1 file into the current format. It carries over the findings the old
-    file covers that are still found, with the owner, reason and expiry date given here, and accepts
-    nothing the old file did not cover."""
+    file covers that are still found and that a new baseline entry may accept (D-115), with the owner,
+    reason and expiry date given here, and accepts nothing the old file did not cover."""
     from datetime import date
 
     from obaaf import checker
@@ -352,27 +353,38 @@ def cmd_baseline_migrate(args) -> int:
                if f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE]
     covered = [f for f in matched if id(f) in eligible]
     gone = result.baseline_stale
+    # Each entry a finding used up is either on that finding (matched) or was used up by a finding an
+    # ignore entry accepts (only ignore entries suppress a finding): the configuration accepts those
+    # already, so they are carried nowhere (added by the review, review-gpt #313).
+    by_ignore = len(old.entries) - len(gone) - len(matched)
     if old.entries and len(gone) == len(old.entries):
         print(f"error: none of the {len(old.entries)} entries of {args.file} matches a finding in {target}. An "
               "old-format entry matches on the exact wording of its finding, so check that this is the "
-              "repository the baseline was written for, with the configuration it was written with. Nothing "
-              "was written.", file=sys.stderr)
+              "repository the baseline was written for, with the configuration it was written with. If the "
+              "findings it named have all gone, it has nothing left to carry over: delete it. Nothing was "
+              "written.", file=sys.stderr)
         return EXIT_FAIL
-    for f in matched:
-        if id(f) in eligible:
-            continue
+    held = [f for f in matched if id(f) not in eligible]
+    for f in held:
         why = acceptance_mod.UNACCEPTABLE_PROBLEM
         if acceptance_mod.acceptable(f):
             problems = ignore_problems.get(id(f), [])
             why = "renew, complete or remove the ignore entry in the configuration"
             if problems:
-                why += " (" + "; ".join(problems) + ")"
+                why += ": " + "; ".join(problems)
         print(one_line(f"  matched but not carried over: {f.rule} {f.path}:{f.line} - {f.message} ({why})."),
               file=sys.stderr)
-    if old.entries and not covered:
-        print("No matched finding can be newly accepted by this baseline. Nothing was written.", file=sys.stderr)
+    if by_ignore:
+        print(f"  {by_ignore} old entr{'y names a finding' if by_ignore == 1 else 'ies name findings'} that an "
+              "ignore entry in the configuration accepts, so "
+              f"{'it is' if by_ignore == 1 else 'they are'} not carried over.", file=sys.stderr)
+    if old.entries and not covered and held:
+        print(f"No matched finding can be newly accepted by this baseline. Nothing was written: {args.file} is "
+              "kept as it is, and accepts nothing in this version. Act on the lines above and run this again.",
+              file=sys.stderr)
         if gone:
-            print(f"{len(gone)} old entry or entries also matched no current finding.", file=sys.stderr)
+            print(f"{len(gone)} old entr{'y also matches' if len(gone) == 1 else 'ies also match'} no current "
+                  "finding.", file=sys.stderr)
         return EXIT_FAIL
     made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, result.today)
     try:
@@ -380,8 +392,10 @@ def cmd_baseline_migrate(args) -> int:
     except OSError as exc:
         print(f"error: cannot write the baseline to {out}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    carried = {id(f) for f in covered}
-    others = [f for f in candidates if id(f) not in carried]
+    # The findings no entry of the old file named that still count when the check runs, as before this
+    # slice; a finding no entry can accept is among them and named (added by the review, review-gpt #313).
+    named = {id(f) for f in matched}
+    others = [f for f in baseline_mod.acceptable(result) if id(f) not in named]
     print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
           file=sys.stderr)
     if gone:
@@ -394,6 +408,10 @@ def cmd_baseline_migrate(args) -> int:
     if others:
         print(f"{len(others)} finding(s) were not in the old baseline and are not accepted by the new one; "
               "they count when the check runs.", file=sys.stderr)
+        for f in others:
+            if not acceptance_mod.acceptable(f):
+                print(one_line(f"  among them: {f.rule} {f.path}:{f.line} - {f.message} "
+                               f"({acceptance_mod.UNACCEPTABLE_PROBLEM})."), file=sys.stderr)
     return EXIT_OK
 
 
