@@ -145,7 +145,7 @@ def _rows(findings):
     return Counter((baseline.key(f), f.severity, f.state) for f in findings)
 
 
-def _named(rows, limit: int = 5) -> str:
+def _named(rows, limit: int = 3) -> str:
     """Rule, file, job and step of each finding in a Counter of rows, for a refusal to name."""
     names = []
     for (identity, severity, state), count in sorted(rows.items()):
@@ -475,8 +475,9 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             after_detail = _evidence(after.findings)
             permitted_old = _rows(before.findings) - previous_rows
             permitted_new = +expected - previous_rows
+            # `|` keeps the larger count: one finding whose evidence changed is in both differences.
             changed = (_changed_occurrences(before_detail - after_detail) - permitted_old
-                       + (_changed_occurrences(after_detail - before_detail) - permitted_new))
+                       | (_changed_occurrences(after_detail - before_detail) - permitted_new))
             if changed:
                 raise ProofError(f"an unrelated finding changed its acceptance or control evidence: {_named(changed)}")
             newly = _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog))

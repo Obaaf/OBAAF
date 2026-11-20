@@ -125,7 +125,7 @@ def _verified_plan(source, copy, options, before, metadata, plan):
                 "their owner.")
         # A named request run again unchanged fails the same way: say so, and keep its options for after.
         if metadata.get("candidate"):
-            return f"{text} After resolving it, run the same request again: {command}"
+            return f"{text} After resolving it, preview the same request again with: {command}"
         return f"{text} Retry this step alone with {command}"
 
     def verify(candidate):

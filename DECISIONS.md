@@ -996,7 +996,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Reason.** Later Git operations may need the checkout credential. The adopter chooses whether to make this workflow change. A disappearing acceptance or a stale entry is a separate decision for its owner.
 
-**Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, a workflow file that is not UTF-8 text, and edits whose precise effect cannot be proven remain for manual review. A refusal names the findings, entries or files involved. The checker reads the workflow offline.
+**Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, a workflow file that is not UTF-8 text, and edits whose precise effect cannot be proven remain for manual review. A refusal from comparing findings or baseline and ignore entries names them, and a workflow refused for its encoding is named. The checker reads the workflow offline.
 
 **Status.** Proposed, 2026-11-19 (slice A5a, #285).
 

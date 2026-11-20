@@ -88,7 +88,7 @@ class CheckoutTighteningTest(unittest.TestCase):
         refusal = next(line for line in out.splitlines() if "finding changes differ" in line)
         self.assertRegex(refusal, r"OBAAF-GHA-\d{3} in \.github/workflows/ci\.yml test")
         self.assertNotIn("Retry this step alone", out)
-        self.assertIn("After resolving it, run the same request again: obaaf fix", refusal)
+        self.assertIn("After resolving it, preview the same request again with: obaaf fix", refusal)
         code, out, err = self.run_fix(*self.options)
         self.assertIn("Retry this step alone with", out)
 
@@ -105,7 +105,13 @@ class CheckoutTighteningTest(unittest.TestCase):
         self.assertEqual(fix_proof._named(evidence), text)
         many = Counter({(key, severity, f"state{i}"): 1 for i, ((key, severity, _), _) in
                         enumerate(list(rows.items()) * 7)})
-        self.assertTrue(fix_proof._named(many).endswith(f" and {len(many) - 5} more"))
+        self.assertTrue(fix_proof._named(many).endswith(f" and {len(many) - 3} more"))
+        # One finding whose control evidence changed is in both differences and is named once.
+        row = next(r for r in rows if '"OBAAF-GHA-011"' in r[0])
+        before = Counter({(row, None, ("c", "n", "cannot tell", "")): 1})
+        after = Counter({(row, None, ("c", "n", "verified", "")): 1})
+        changed = (fix_proof._changed_occurrences(before - after) | fix_proof._changed_occurrences(after - before))
+        self.assertTrue(fix_proof._named(changed).startswith("1 × OBAAF-GHA-011"))
 
     def test_a_workflow_that_is_not_utf8_is_named_and_does_not_block_another_file(self):
         # Review of #287: one Latin-1 workflow made every request exit 2 with a bare decode error.
@@ -121,6 +127,8 @@ class CheckoutTighteningTest(unittest.TestCase):
         code, out, err = self.run_fix(*self.options, "--candidate", self.name)
         self.assertEqual(code, 1, err or out)
         self.assertIn(f"{self.rel}: review its checkouts by hand; the file is not UTF-8 text", out)
+        code, out, err = self.run_fix(*self.options, "--candidate", f"{self.rel}#nojob/step-9")
+        self.assertEqual(code, 2, err or out)
         code, out, err = self.run_fix(*self.options)
         self.assertEqual(code, 0, err or out)
         self.assertIn(f"{self.rel}: review its checkouts by hand", out)
@@ -227,8 +235,8 @@ class CheckoutTighteningTest(unittest.TestCase):
         code, out, error = self.run_fix(*self.options, "--candidate", self.name, "--config", config,
                                         "--baseline", policy, "--platform", "github", "--fail-on", "high")
         self.assertEqual(code, 1, error)
-        line = next(line for line in out.splitlines() if "run the same request again: " in line)
-        args = shlex.split(line.split("run the same request again: ", 1)[1])
+        line = next(line for line in out.splitlines() if "preview the same request again with: " in line)
+        args = shlex.split(line.split("preview the same request again with: ", 1)[1])
         self.assertEqual(args, ["obaaf", "fix", str(self.root), "--tighten", "checkout-credentials",
                                 f"--config={config}", "--platform=github", f"--baseline={policy}",
                                 "--fail-on=high", "--candidate=" + self.name])
