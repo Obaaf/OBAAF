@@ -52,13 +52,13 @@ class FixProofTest(unittest.TestCase):
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
     def test_unexpected_file_change_during_check_is_detected(self):
-        run = fix_proof._run
+        run = fix_proof.check_inputs
         def recording(root, *args):
             result = run(root, *args)
             if root != self.root and (root / self.file).read_bytes() != self.old:
                 (root / "unexpected").write_bytes(b"some other writer")
             return result
-        with patch.object(fix_proof, "_run", recording), self.assertRaisesRegex(ProofError, "outside"):
+        with patch.object(fix_proof, "check_inputs", recording), self.assertRaisesRegex(ProofError, "outside"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
 
     def test_explicit_config_baseline_and_gate_are_used_for_acceptance(self):
@@ -231,7 +231,7 @@ class FixProofReviewTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30)
 
     def test_a_source_change_while_the_proof_runs_is_withheld(self):
-        run = fix_proof._run
+        run = fix_proof.check_inputs
         source = self.root / self.file
 
         def changing(root, *args):
@@ -240,7 +240,7 @@ class FixProofReviewTest(unittest.TestCase):
                 source.write_bytes(self.old + b"# changed while the proof ran\n")
             return result
 
-        with patch.object(fix_proof, "_run", changing), self.assertRaisesRegex(ProofError, "changed while"):
+        with patch.object(fix_proof, "check_inputs", changing), self.assertRaisesRegex(ProofError, "changed while"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
 
     def test_a_jenkinsfile_named_like_yaml_is_withheld(self):
