@@ -108,6 +108,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
@@ -970,6 +971,13 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
 
+### D-105 Draft confinement for one agent job
+
+**Decision.** Preview one recognisable run step with the egress action at a listed release commit. Check the draft on a private copy and report the target job's control verdicts, including unmet conditions. Leave host selection, job splits and unsupported credential placement to the team.
+
+**Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
+
+**Status.** Proposed, 2026-11-19 (A3a, #281). No release commit is listed pending #248.
 ### D-106 Checkout credential tightening by kind or candidate name
 
 **Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.

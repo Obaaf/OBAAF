@@ -15,6 +15,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
 - **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git. The command preserves its permissions and leaves the changes unstaged for review.
 
+- **Preview confinement for one agent job.** The development command `obaaf fix egress --job NAME [PATH]` reports that the draft is unavailable until a released egress-action commit is listed. With a listed commit, it checks the proposed job on a private copy and prints the control verdicts and remaining manual work.
+
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
 - **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
