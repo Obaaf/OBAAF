@@ -354,3 +354,57 @@ jobs:
           python3 scripts/page_blocks.py "$PAGE" 6 > "$RUNNER_TEMP/clean.sh"
           bash -c '. "$HOME/obaaf-try/venv/bin/activate" && . "$RUNNER_TEMP/clean.sh"'
           test ! -e "$HOME/obaaf-try"
+
+  github-env-premise:
+    # What OBAAF-GHA-016 assumes of the runner (plan slice 2d.13, F-278). A step's write to GITHUB_ENV
+    # reaches every later step of the job, so a PATH written there decides which `obaaf` a later check
+    # runs, and SHELLOPTS=noexec makes bash read a later step's script and run none of it: the step
+    # succeeds. This job shows both on a GitHub-hosted runner. It checks nothing out, holds no secret
+    # and writes only under the runner's temporary folder.
+    name: "Runner premise: what GITHUB_ENV sets for later steps (OBAAF-GHA-016)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Advisory: it is not a required check of main, so its failure is reported and does not fail the
+    # run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    steps:
+      - name: Put a stand-in obaaf first on the PATH through GITHUB_ENV
+        run: |
+          mkdir -p "$RUNNER_TEMP/premise/bin"
+          cat > "$RUNNER_TEMP/premise/bin/obaaf" <<'SH'
+          #!/bin/sh
+          touch "$RUNNER_TEMP/premise/stand-in-ran"
+          SH
+          chmod +x "$RUNNER_TEMP/premise/bin/obaaf"
+          echo "PATH=$RUNNER_TEMP/premise/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: A check as a release job writes it (the stand-in runs)
+        run: obaaf verify release --policy .github/obaaf-policy.yaml --artifacts dist
+
+      - name: Turn on noexec through GITHUB_ENV
+        run: echo "SHELLOPTS=noexec" >> "$GITHUB_ENV"
+
+      - name: A step that fails if bash runs any of it
+        run: |
+          touch "$RUNNER_TEMP/premise/noexec-step-ran"
+          exit 1
+
+      # Run whatever happened before, so a step that failed (the stand-in not found, or bash running the
+      # step that ends with exit 1) is reported here and fails the job, never skipped.
+      - name: Judge what the two steps did
+        if: always()
+        shell: /usr/bin/python3 -I -S {0}
+        run: |
+          import os, subprocess
+          tmp = os.environ["RUNNER_TEMP"]
+          bash = subprocess.run(["/usr/bin/bash", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+          print("image:", os.environ.get("ImageOS"), os.environ.get("ImageVersion"), "|", bash)
+          print("PATH starts with:", os.environ["PATH"].split(":")[0])
+          print("SHELLOPTS:", os.environ.get("SHELLOPTS"))
+          ran = os.path.exists(os.path.join(tmp, "premise", "stand-in-ran"))
+          skipped = not os.path.exists(os.path.join(tmp, "premise", "noexec-step-ran"))
+          print("the check's step ran the stand-in obaaf:", ran)
+          print("the step that ends with exit 1 succeeded without running:", skipped)
+          assert os.environ["PATH"].startswith(os.path.join(tmp, "premise", "bin") + ":")
+          assert os.environ.get("SHELLOPTS") == "noexec"
+          assert ran and skipped
