@@ -125,22 +125,45 @@ class PinTest(unittest.TestCase):
         self.assertIn("At --fail-on never", out)
 
     def test_accepted_target_stays_withheld_and_named_retry_preserves_package_and_version(self):
-        f = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-025")
+        target = self.root / "egress"
+        target.mkdir()
+        self.path.parent.parent.rename(target / ".github")
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(self.root)
+        f = next(f for f in checker.check(target).findings if f.rule == "OBAAF-GHA-025")
         expiry = (date.today() + timedelta(days=30)).isoformat()
-        policy = self.root / "baseline.json"
+        policy = target / "baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        code, report, err = run_cli("check", "egress", "--format", "json", "--baseline", policy,
+                                    "--platform", "github", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        group, = [g for g in json.loads(report)["todo"] if g["id"] == "agent-tool-version"]
+        preview = shlex.split(group["command"])
+        self.assertEqual(preview[:3], ["obaaf", "fix", "./egress"])
+        preview[preview.index(self.package + "=VERSION")] = self.pin
         policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [
             baseline.entry_for(f, "@team", "previous review", expiry)]}))
         original = policy.read_bytes()
-        code, out, err = self.fix("--pin", self.pin, "--candidate", self.name, "--baseline", policy, "--apply")
+        workflow = (target / self.rel).read_bytes()
+        code, out, err = run_cli(*preview[1:], "--candidate", self.name, "--apply")
         self.assertEqual(code, 1, err or out)
         self.assertIn("1 unmatched", out)
-        line = next(l for l in out.splitlines() if "Retry this step alone with " in l)
-        command = shlex.split(line.split("Retry this step alone with ", 1)[1])
+        prefix = "After resolving it, preview the same request again with: "
+        line = next(l for l in out.splitlines() if prefix in l)
+        command = shlex.split(line.split(prefix, 1)[1])
+        self.assertEqual(command[:3], ["obaaf", "fix", "./egress"])
         self.assertIn(self.pin, command)
         self.assertIn("--candidate=" + self.name, command)
         self.assertIn("--baseline=" + str(policy), command)
+        self.assertIn("--platform=github", command)
+        self.assertIn("--fail-on=never", command)
+        self.assertNotIn("--apply", command)
         self.assertNotIn("--- a/", out)
+        code, out, err = run_cli(*command[1:])
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(prefix, out)
         self.assertEqual(policy.read_bytes(), original)
+        self.assertEqual((target / self.rel).read_bytes(), workflow)
 
     def test_all_manual_group_has_no_pin_command(self):
         self.write(f"- run: npx {self.package}\n")

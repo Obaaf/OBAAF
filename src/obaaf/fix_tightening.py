@@ -236,6 +236,21 @@ def plan(root, options, result, *, candidate=None, pin=None, selected=None):
         path = (base / name).relative_to(root)
         before = (root / path).read_bytes()
         try:
+            text = before.decode()
+        except UnicodeDecodeError:
+            # The checker reads such a file; an edit to it is not offered. Name it, and keep the other files'
+            # proposals available (review of #287: one Latin-1 workflow made every request exit 2).
+            # A name in this file counts as known only for a job the checker reported here (the step
+            # index cannot be checked without reading the file).
+            named = candidate is not None and any(
+                candidate.startswith(f"{quote(path.as_posix(), safe='/')}#{quote(f.job, safe='')}/step-")
+                for f in findings if not pin or f.pin_candidate == pin[0])
+            seen = seen or named
+            if named or candidate is None:
+                refused.append(f"{path}: review its {label}s by hand; the file is not UTF-8 text, so no edit "
+                               "is offered")
+            continue
+        try:
             steps, _ = _steps(text, path, pin)
         except (ValueError, yaml.YAMLError):
             steps = {}
