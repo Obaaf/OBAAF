@@ -995,6 +995,6 @@ If another supported configuration name already exists, init shows any differenc
 
 **Reason.** The private working copy is removed when the preview exits. The user needs the matching path in their own tree and the reason the checker refused the input.
 
-**Consequence.** A malformed baseline or configuration still refuses the preview. Findings, edits and gate decisions keep their existing meanings.
+**Consequence.** A baseline or configuration the check reads and cannot use still refuses the preview (exit 2). The repository's own configuration, which is read beside an explicit `--config` only to find Jenkins files, holds back each candidate instead, and the preview lists it among the changes it could not make automatically (exit 0). The top folder is shown as `.`, also when a folder is given as `--config` or `--baseline`, and a refusal that the proposed edit itself causes begins "after the proposed edit:", because the user's file is unchanged (both added by the review, `review-gpt` #320). Findings, edits and gate decisions keep their existing meanings.
 
 **Status.** Proposed, 2026-11-20 (slice A2f, #314 item 9).

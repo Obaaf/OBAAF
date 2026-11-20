@@ -1,6 +1,7 @@
 """The paperwork preview exposes only verified edits and never writes them."""
 
 from datetime import date, timedelta
+import os
 import unittest
 
 from helpers import TempDir, run_cli
@@ -51,6 +52,20 @@ class FixCliTest(unittest.TestCase):
                 self.assertNotIn("obaaf-proof-", err)
                 self.assertEqual(path.read_bytes(), data)
                 path.unlink()
+
+    def test_a_folder_as_a_preview_input_is_named_as_the_repository_folder(self):
+        # Review of #320: `--baseline .` named the private copy's folder, which is gone by then.
+        here = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, here)
+        for flag in ("--baseline", "--config"):
+            for value in (".", self.root, self.root / ".github"):
+                with self.subTest(flag=flag, value=value):
+                    code, out, err = run_cli("fix", ".", flag, value)
+                    self.assertEqual(code, 2, err)
+                    self.assertEqual(out, "")
+                    self.assertNotIn("obaaf-proof-", err)
+                    self.assertNotIn(str(self.root.parent), err.replace(str(self.root), ""))
 
     def test_manual_owner_guidance_makes_no_files(self):
         code, out, err = run_cli("fix", self.root)

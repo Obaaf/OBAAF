@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 
 import yaml
@@ -93,12 +94,15 @@ def check_inputs(root, options, today, catalog):
 
 
 def _input_message(root, error):
-    # Both the source and the temporary tree have the same repository-relative paths.
-    # A config error may name the root itself, e.g. for two competing configs.
-    message = str(error).replace(str(root) + os.sep, "./")
-    if message.startswith(f"{root}:"):
-        return "." + message[len(str(root)):]
-    return message
+    # Both the source and the temporary tree have the same repository-relative paths, so a path
+    # under either is shown from the repository's top folder ("./..."). The top folder itself is
+    # ".", wherever the message names it and not only at its start: a config error for two
+    # competing configs, and a directory given as --config or --baseline (`--baseline .`) whose
+    # error names the copy's folder (added by the review, review-gpt #320). A longer name that
+    # only begins with the root's text is left alone.
+    text = str(root)
+    message = str(error).replace(text + os.sep, "./")
+    return re.sub(re.escape(text) + r"(?![^\s'\":,;)\]])", ".", message)
 
 
 def _read_inputs(root, target, options, today, catalog):
@@ -406,7 +410,12 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             _apply(dest, edits, expected_files,
                    dest / options.baseline if options.baseline is not None else None,
                    before.config.path)
-            after = check_inputs(dest, options, today, catalog)
+            try:
+                after = check_inputs(dest, options, today, catalog)
+            except ProofError as exc:
+                # The edit made the file unusable; the user's own file is still as it was
+                # (added by the review, review-gpt #320).
+                raise ProofError(f"after the proposed edit: {exc}") from exc
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
             if expected_files != _manifest(dest):
