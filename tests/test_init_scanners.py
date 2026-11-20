@@ -78,7 +78,8 @@ class CompanionTests(unittest.TestCase):
         code, text = self.invoke("--apply", *(arg for name in SCANNERS for arg in ("--with-scanner", name)))
         self.assertEqual(code, 0, text)
         docker = self.root / "docker"
-        docker.write_text('#!/bin/sh\nexit "$SCANNER_STATUS"\n')
+        docker.write_text('#!/bin/sh\nif [ "$1" = pull ]; then exit "${PULL_STATUS:-0}"; fi\n'
+                          'echo "::error::forged by the scanner"\nexit "$SCANNER_STATUS"\n')
         docker.chmod(0o755)
         env = {**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}", "RUNNER_TEMP": str(self.root),
                "GITHUB_WORKSPACE": str(self.root)}
@@ -86,6 +87,36 @@ class CompanionTests(unittest.TestCase):
             for code in (0, 1, 3, 125):
                 with self.subTest(step=step["name"], code=code):
                     run = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]],
-                                         env={**env, "SCANNER_STATUS": str(code)}, capture_output=True)
+                                         env={**env, "SCANNER_STATUS": str(code)}, capture_output=True, text=True)
                     expected = 0 if step["name"] == "Report actionlint findings" and code == 1 else code
                     self.assertEqual(run.returncode, expected, run.stderr)
+                    # The scanner's output is between the stop and the resume of workflow commands.
+                    lines = run.stdout.splitlines()
+                    token = lines[0].removeprefix("::stop-commands::")
+                    self.assertNotEqual(token, lines[0])
+                    self.assertEqual(lines[1:], ["::error::forged by the scanner", f"::{token}::"])
+            # The Docker client exits 1 when it cannot reach the daemon: a failed pull fails every step,
+            # actionlint's included, instead of passing as actionlint's finding status (review of #276).
+            for code in (1, 125):
+                with self.subTest(step=step["name"], pull=code):
+                    run = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]],
+                                         env={**env, "SCANNER_STATUS": "0", "PULL_STATUS": str(code)},
+                                         capture_output=True, text=True)
+                    self.assertEqual(run.returncode, code, run.stderr)
+                    self.assertNotIn("forged", run.stdout)
+
+    def test_pins_match_the_upgrade_guide_and_no_credential_reaches_a_scanner(self):
+        from obaaf.init_scanners import SCANNERS as PINS
+        guide = (Path(__file__).resolve().parents[1] / "docs/upgrading.md").read_text(encoding="utf-8")
+        code, text = self.invoke("--apply", *(arg for name in SCANNERS for arg in ("--with-scanner", name)))
+        self.assertEqual(code, 0, text)
+        for (image, _), step in zip(PINS.values(), self.scanner_steps()):
+            name, digest = image.split("@")
+            self.assertIn(f"`{digest}`", guide)
+            self.assertIn(f"`{name}:", guide)
+            script = step["run"]
+            self.assertEqual(script.count(image), 2, script)          # the pull and the run
+            for credential in ("GITHUB_TOKEN", "GH_TOKEN", "github.token", "secrets.", "--env-file", "-e ",
+                               "docker.sock"):
+                self.assertNotIn(credential, script)
+            self.assertNotIn("env", step)

@@ -951,7 +951,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Reason.** Teams can start with one report and add the tools whose checks they want. Pinning the Linux image manifests makes the selected tools identifiable. Reading the checkout with a read-only mount and container networking disabled keeps the scans local after the runner fetches the images.
 
-**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
+**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow; each step pulls its image before running it, so a Docker or registry failure fails the step rather than passing as actionlint's finding status. A pull request can change what a scanner reports, because the scanners read its files. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
 
 **Status.** Proposed, 2026-11-19 (3.3b, #84).
 

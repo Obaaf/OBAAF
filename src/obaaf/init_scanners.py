@@ -35,6 +35,9 @@ def steps(selected: list[str]) -> bytes:
                 'chmod 644 "$policy"',
             ]
         script += [
+            # Pull first, so a Docker or registry failure fails the step on its own status. `docker run`
+            # also exits 1 when it cannot reach the daemon, which actionlint's finding status would hide.
+            f'docker pull --quiet {image} > /dev/null || exit "$?"',
             'status=0',
             'docker run --rm --network none --read-only --cap-drop ALL --security-opt=no-new-privileges ' + '\\',
             '  --user "$(id -u):$(id -g)" --tmpfs /tmp --env HOME=/tmp --workdir /source ' + '\\',

@@ -184,8 +184,9 @@ def run(args) -> int:
                 raise ValueError(f"{folder} must be a directory inside the repository")
         proposal, notes = _proposal(root, args.with_scanner)
         if not args.with_scanner:
-            print("Optional companion checks: add --with-scanner zizmor, --with-scanner actionlint, "
-                  "or --with-scanner poutine to the same init command.")
+            print("Optional companion checks: run init with --with-scanner zizmor, --with-scanner actionlint "
+                  "or --with-scanner poutine to preview their steps. Once the workflow exists, init reports "
+                  "a conflict and shows the steps as a diff to copy into it.")
         top = _enclosing_work_tree(root)
         if top is not None:
             notes.insert(0, f"Note: {root} is inside the Git repository at {top}, and GitHub reads workflows "
