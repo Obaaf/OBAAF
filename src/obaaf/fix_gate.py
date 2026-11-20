@@ -68,8 +68,9 @@ def run(args, root, options, lock, show_diff):
     updated = _candidate(original, path, args.gate)
     if updated is None:
         print(f"Review your CI workflow by hand. Use --fail-on {args.gate} in its obaaf check command. "
-              f"Read the configuration and --baseline {one_line(shlex.quote(str(path)))} from the target commit "
-              "on pull requests. If that commit has no baseline, omit --baseline.")
+              f"On pull requests, read the target configuration and compare {one_line(shlex.quote(str(path)))} "
+              "in both commits. Use only identical baseline entries, up to the count present in both. "
+              "If either file is missing, omit --baseline. On pushes, use the pushed policy.")
         return 0
     if options.baseline is not None:
         if not (root / path).is_file():

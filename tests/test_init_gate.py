@@ -1,9 +1,11 @@
 import contextlib
+from datetime import date, timedelta
 from io import StringIO
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -194,76 +196,126 @@ class GateTests(unittest.TestCase):
         self.assertIn("Applied the displayed gate change", text)
         self.assertTrue(self.workflow.read_bytes().endswith(tail))
 
-    @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
-    def test_actual_ci_script_reads_only_the_target_policy_on_pr(self):
-        self.install()
-        baseline = self.root / ".github/obaaf-baseline.json"
-        baseline.write_text(json.dumps({"format": "obaaf-baseline/v0.2", "findings": []}))
-        commit(self.root)
-        self.assertEqual(self.gate("--apply")[0], 0)
-        text = self.workflow.read_text()
-        script = yaml.safe_load(text)["jobs"]["check"]["steps"][3]["run"]
+    def execute_ci(self, event):
         work = self.root.parent
         temp = work / "temp"
-        temp.mkdir()
+        temp.mkdir(exist_ok=True)
+        path = os.pathsep.join((str(work), str(Path(sys.executable).parent), os.environ["PATH"]))
+        script = yaml.safe_load(self.workflow.read_text())["jobs"]["check"]["steps"][3]["run"]
+        return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, text=True,
+                              capture_output=True, env={**os.environ, "GITHUB_EVENT_NAME": event,
+                              "RUNNER_TEMP": str(temp), "PATH": path})
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
+    def test_actual_ci_script_limits_pr_acceptances_to_both_commits(self):
+        self.install()
+        work = self.root.parent
+        policy = work / "policy"
+        (policy / ".github").mkdir(parents=True)
+        (policy / ".github/obaaf.yml").write_text("# target config\n")
+        commit(policy)
+        relative = Path("adoption/policy/team-baseline.json")
+        baseline = self.root / relative
+        baseline.parent.mkdir(parents=True)
+        shared = {"rule": "OBAAF-GHA-011", "severity": "medium", "path": "workflow.yml",
+                  "owner": "@demo", "reason": "pending review", "expires": str(date.today() + timedelta(days=30))}
+        second = dict(shared, path="other.yml")
+        changed = dict(shared, severity="high")
+        added = dict(shared, path="new.yml")
+
+        def write(path, entries):
+            path.write_text(json.dumps({"format": "obaaf-baseline/v0.2", "findings": entries}))
+
+        source_entries = [added, second, shared, shared, changed]
+        write(baseline, [])
+        commit(self.root)
+        status, output = self.gate("--apply", "--baseline", baseline)
+        self.assertEqual(status, 0, output)
+        write(baseline, source_entries)
+        commit(self.root)
         stub = work / "obaaf"
         stub.write_text("""#!/bin/bash
 set -eu
-echo "$*"
 while (( $# )); do
   case "$1" in
     --config) cat "$2"; shift ;;
-    --baseline) cat "$2"; shift ;;
+    --baseline) cp -- "$2" observed.json; shift ;;
   esac
   shift
 done
 """)
         stub.chmod(0o755)
-        policy = work / "policy"
-        folder = policy / ".github"
-        folder.mkdir(parents=True)
-        (folder / "obaaf.yml").write_text("# target config\n")
-        config = self.root / ".github/obaaf.yml"
-        config.write_text("# PR config\n")
-        commit(policy)
+        observed = work / "observed.json"
 
-        def execute(event):
-            return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, text=True,
-                                  capture_output=True, env={**os.environ, "GITHUB_EVENT_NAME": event,
-                                  "RUNNER_TEMP": str(temp), "PATH": str(work) + os.pathsep + os.environ["PATH"]})
+        def run(event):
+            observed.unlink(missing_ok=True)
+            result = self.execute_ci(event)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if event == "pull_request":
+                self.assertIn("# target config", result.stdout)
+            return json.loads(observed.read_text())["findings"] if observed.exists() else []
 
-        baseline.write_text("PR BASELINE\n")
-        missing = execute("pull_request")
-        self.assertEqual(missing.returncode, 0, missing.stderr)
-        self.assertIn("# target config", missing.stdout)
-        self.assertNotIn("--baseline", missing.stdout)
-        self.assertNotIn("PR BASELINE", missing.stdout)
-        pushed = execute("push")
-        self.assertEqual(pushed.returncode, 0, pushed.stderr)
-        self.assertIn("PR BASELINE", pushed.stdout)
-        (folder / baseline.name).write_text("TARGET BASELINE\n")
+        self.assertEqual(run("pull_request"), [])
+        self.assertEqual(run("push"), source_entries)
+        target = policy / relative
+        target.parent.mkdir(parents=True)
+        write(target, [shared, dict(changed, owner="@other"), second])
         commit(policy)
-        target = execute("pull_request")
-        self.assertEqual(target.returncode, 0, target.stderr)
-        self.assertIn("TARGET BASELINE", target.stdout)
-        self.assertNotIn("PR BASELINE", target.stdout)
-        # A PR that removes the directory containing a custom baseline still uses the target's file.
-        custom = Path("adoption/policy/team-baseline.json")
-        (self.root / custom).parent.mkdir(parents=True)
-        (self.root / custom).write_text('{"format":"obaaf-baseline/v0.2","findings":[]}')
-        self.workflow.write_text(text.replace("gate_check .github/obaaf-baseline.json --fail-on medium",
-                                              'obaaf check source "${config[@]}" --fail-on never'))
-        commit(self.root)
-        code, out = self.gate("--apply", "--baseline", self.root / custom)
-        self.assertEqual(code, 0, out)
-        script = yaml.safe_load(self.workflow.read_text())["jobs"]["check"]["steps"][3]["run"]
-        (policy / custom).parent.mkdir(parents=True)
-        (policy / custom).write_text("CUSTOM TARGET BASELINE\n")
-        commit(policy)
+        # The working copies disagree with both commits.
+        write(target, [added])
+        write(baseline, [added])
+        self.assertEqual(run("pull_request"), [shared, second])
         shutil.rmtree(self.root / "adoption")
-        nested = execute("pull_request")
-        self.assertEqual(nested.returncode, 0, nested.stderr)
-        self.assertIn("CUSTOM TARGET BASELINE", nested.stdout)
-
+        commit(self.root)
+        self.assertEqual(run("pull_request"), [])
         shutil.rmtree(policy / ".git")
-        self.assertNotEqual(execute("pull_request").returncode, 0)
+        self.assertNotEqual(self.execute_ci("pull_request").returncode, 0)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
+    def test_real_pr_gate_allows_a_fix_and_rejects_an_unfixed_finding(self):
+        self.install()
+        (self.root / ".github/CODEOWNERS").write_text("* @reviewers\n")
+        example = self.root / ".github/workflows/build.yml"
+        example.write_text("""name: build
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+""")
+        baseline = self.root / ".github/obaaf-baseline.json"
+        code, report = command("check", self.root, "--write-baseline", baseline, "--owner", "@demo",
+                               "--reason", "Scheduled for remediation", "--expires",
+                               date.today() + timedelta(days=30), "--fail-on", "never")
+        self.assertEqual(code, 0, report)
+        document = json.loads(baseline.read_text())
+        rel = example.relative_to(self.root).as_posix()
+        removed = [entry for entry in document["findings"]
+                   if entry["path"] == rel and entry["rule"] == "OBAAF-GHA-011"]
+        self.assertEqual(len(removed), 1, report)
+        commit(self.root)
+        code, report = self.gate("--apply")
+        self.assertEqual(code, 0, report)
+        commit(self.root)
+        work = self.root.parent
+        subprocess.run(["git", "clone", "-q", str(self.root), str(work / "policy")], check=True)
+        checker = work / "obaaf"
+        checker.write_text(f"#!{sys.executable}\nfrom obaaf.cli import main\nraise SystemExit(main())\n")
+        checker.chmod(0o755)
+
+        def check(event, expected):
+            result = self.execute_ci(event)
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+        check("pull_request", 0)
+        document["findings"] = [entry for entry in document["findings"] if entry not in removed]
+        baseline.write_text(json.dumps(document))
+        commit(self.root)
+        check("pull_request", 1)
+        example.write_text(example.read_text() + "        with:\n          persist-credentials: false\n")
+        commit(self.root)
+        check("pull_request", 0)
+        check("push", 0)
