@@ -281,7 +281,8 @@ def _strip_comment_text(line: str) -> str:
 # the programs it names run: which program a name finds (`PATH`); bash's start and its reading
 # (`BASH_ENV`, `ENV`, `SHELLOPTS`, whose `noexec` makes bash read the script and run none of it,
 # `BASHOPTS`, `BASH_FUNC_NAME%%`, `BASH_COMPAT`, `PS4`, `EXECIGNORE` and the rest of `BASH...`); the
-# loader's (`LD_...`, `GCONV_PATH`), which load code into every program the step starts, bash included;
+# loader's (`LD_...` and `GCONV_PATH` on Linux, `DYLD_...` on macOS, whose `DYLD_INSERT_LIBRARIES` the runner
+# keeps for each step's process there), which load code into every program the step starts, bash included;
 # Python's, which load code into `obaaf` (`PYTHONPATH`, `PYTHONHOME`, `PYTHONWARNINGS`, `PYTHONUSERBASE`
 # and the rest of `PYTHON...`), and `HOME`, under which an interpreter outside a virtual environment
 # finds the user's own packages; and `ACTIONS_ALLOW_UNSECURE_COMMANDS`, with which any line a later step
@@ -291,7 +292,7 @@ def _strip_comment_text(line: str) -> str:
 # programs read for their own settings (`GIT_...`, `GH_...`, `SSL_CERT_FILE`) is not read.
 _STEERING_NAMES = frozenset({"PATH", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND", "EXECIGNORE", "GCONV_PATH", "HOME",
                              "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
-_STEERING_PREFIXES = ("BASH", "LD_", "PYTHON")
+_STEERING_PREFIXES = ("BASH", "LD_", "DYLD_", "PYTHON")
 # Python's variables that load nothing: output buffering, bytecode files, the standard streams' encoding
 # (looked up only among the standard library's `encodings` modules, a name with a dot refused), UTF-8
 # mode, the hash seed, and turning the user's own packages off.
@@ -307,29 +308,56 @@ def steers(name) -> bool:
 
 
 _NAMES_GITHUB_ENV = re.compile(r"GITHUB_ENV", re.I)
+
+
+def _squeeze(text: str) -> str:
+    """Text as bash puts a word together, for searching names: a backslash and the line break after it (a
+    continued line) taken out, then `$''` and `$""`, then quotes, backslashes and the lexer's `\x03`
+    marks. So `$GITHUB_\\<line break>ENV`, `GITHUB_E""NV` and `GITHUB_E\\NV` are found (the review of
+    slice 2d.13; the lexer reads the first as `$GITHUB_` and `ENV`). It can join what bash keeps apart,
+    which only finds more."""
+    text = re.sub(r"\\\r?\n", "", text)
+    text = text.replace("$''", "").replace('$""', "")
+    return re.sub(r"[\"'\\\x03]", "", text)
+
+
+def _names_env(text: str) -> bool:
+    return bool(_NAMES_GITHUB_ENV.search(text) or _NAMES_GITHUB_ENV.search(_squeeze(text)))
 # The two ways a script names the file, as the lexer gives a redirection's target.
 _GITHUB_ENV_TARGETS = frozenset({"\x03$GITHUB_ENV\x03", "\x03${GITHUB_ENV}\x03"})
 _ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # Words that may begin a command before its name; the lexer gives `then echo ...` as one command.
 _LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+# What a write's output may also be sent to beside the file: a duplicated descriptor (`2>&1`) or nothing.
+_OTHER_TARGETS = frozenset({"/dev/null"})
+# A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
+# most one escape, a line break at its end.
+_PRINTF_FORMAT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=|<<)([^%\\\n\r\x03]|%s)*(\\n)?\Z")
+# An assignment as a command substitution in a written value could print it on a line of its own.
+_ASSIGNED_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(=|<<)")
 # Ways a script can make `echo` something other than bash's own: a function, a builtin loaded or turned
 # off, an alias (which bash expands only after `shopt -s expand_aliases`, another of these words).
-_ECHO_REPLACED_RE = re.compile(r"(?<![\w./-])(function|enable|alias|shopt)(?![\w./-])|(?<![\w./-])echo\s*\(\s*\)")
+_ECHO_REPLACED_RE = re.compile(r"(?<![\w./-])(function|enable|alias|shopt)(?![\w./-])|"
+                               r"(?<![\w./-])(echo|printf)\s*\(\s*\)")
 
 
 def _github_env_names(script: str) -> set | None:
     """The names a bash or sh script writes to GITHUB_ENV, or None when the checker cannot read them all
-    (flagship slice 2d.13). Only one form is read: `echo` with words and no option, its output
-    redirected to `$GITHUB_ENV` or `${GITHUB_ENV}` (quoted or not), the name before the first `=` (or
-    `<<`, the runner's multi-line form) a plain word written out in the script. Every other mention of
-    GITHUB_ENV, in a command, a here-document, a command substitution or a redirection, gives None, as
-    does a name put together from a variable, an expression, a glob or a brace expansion, a word that
-    can put a line break in what `echo` prints (a backslash, which sh's `echo` reads as an escape, or a
-    line break written inside quotes), a script that can replace `echo`, and a script the lexer cannot
-    read. A value is read as one line: a line break in what a variable or a command gives it at run
-    time, which would let the write set a second name, is not read (for an outsider's text, see #232).
-    The lines of the runner's multi-line form are each read as a name, which is never fewer names than
-    the runner sets."""
+    (flagship slice 2d.13). Two forms are read, with the output redirected to `$GITHUB_ENV` or
+    `${GITHUB_ENV}` (quoted or not; `2>&1` or `/dev/null` may be beside it): `echo` with words and no
+    option, the name before the first `=` (or `<<`, the runner's multi-line form) a plain word written
+    out in the script; and `printf` with a literal format that begins with such a name, has `%s` for its
+    only conversion and no escape but a line break at its end. Every other mention of GITHUB_ENV, in a
+    command, a here-document, a command substitution or a redirection, gives None, as does a name put
+    together from a variable, an expression, a glob or a brace expansion, a word that can put a line
+    break in what is printed (a backslash, which sh's `echo` reads as an escape, or a line break written
+    inside quotes), a command substitution in a written value whose script assigns a steering name (it
+    could print it on a line of its own), a script that can replace `echo` or `printf`, and a script
+    the lexer cannot read. A value is otherwise read as one line: a line break that a variable, a file
+    or a command's output puts in it at run time, which would let the write set a second name, is not
+    read (an outsider's text there is also #232). Every line the runner reads begins where a write
+    begins, and the lines of the runner's multi-line form are each read as a name, so this is never
+    fewer names than the runner sets."""
     if _ECHO_REPLACED_RE.search(script):
         return None
     commands, problem = agent_flags.lex(script)
@@ -337,28 +365,37 @@ def _github_env_names(script: str) -> set | None:
         return None
     names: set = set()
     for command in commands:
-        if any(_NAMES_GITHUB_ENV.search(text) for _kind, text, _literal in command.stdin):
+        if any(_names_env(text) for _kind, text, _literal in command.stdin):
             return None             # a here-document or here-string that names it
-        if any(_NAMES_GITHUB_ENV.search(inner) for word in command.words for inner in word.inner):
+        if any(_names_env(inner) for word in command.words for inner in word.inner):
             return None             # a command substitution that names it, which can write the file
-        if not any(_NAMES_GITHUB_ENV.search(w.text) or _NAMES_GITHUB_ENV.search(w.shown) for w in command.words):
+        if not any(_names_env(w.text) or _names_env(w.shown) for w in command.words):
             continue
         words = list(command.words)
         while words and not words[0].redirect and not words[0].computed and words[0].text in _LEADING_WORDS:
             words.pop(0)
-        if not words or words[0].redirect or words[0].computed or words[0].text != "echo":
+        if not words or words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
             return None
         targets = [w for w in words[1:] if w.redirect]
         arguments = [w for w in words[1:] if not w.redirect]
-        # Its output goes to the file; a duplicated descriptor (`2>&1`) is allowed beside it.
         if not arguments or not any(w.text in _GITHUB_ENV_TARGETS for w in targets) or any(
-                w.text not in _GITHUB_ENV_TARGETS and not w.text.isdigit() for w in targets):
+                w.text not in _GITHUB_ENV_TARGETS and w.text not in _OTHER_TARGETS and not w.text.isdigit()
+                for w in targets):
             return None
-        if any(_NAMES_GITHUB_ENV.search(w.text) or _NAMES_GITHUB_ENV.search(w.shown) for w in arguments):
+        if any(_names_env(w.text) or _names_env(w.shown) for w in arguments):
             return None
-        if arguments[0].text.startswith("-") or any(c in w.text for w in arguments for c in "\\\n\r"):
+        if any(steers(m.group(1)) for w in arguments for inner in w.inner for m in _ASSIGNED_NAME_RE.finditer(inner)):
             return None
-        line = " ".join(w.text for w in arguments)
+        if words[0].text == "printf":
+            form = arguments[0]
+            if form.computed or not _PRINTF_FORMAT_RE.match(form.text) or any(
+                    c in w.text for w in arguments[1:] for c in "\\\n\r"):
+                return None
+            line = form.text
+        else:
+            if arguments[0].text.startswith("-") or any(c in w.text for w in arguments for c in "\\\n\r"):
+                return None
+            line = " ".join(w.text for w in arguments)
         equals, heredoc = line.find("="), line.find("<<")
         cut = equals if equals >= 0 and (heredoc < 0 or equals < heredoc) else heredoc
         # The name is a plain word: no unknown expansion (marked `\x03`), glob or brace in it.
@@ -368,7 +405,7 @@ def _github_env_names(script: str) -> set | None:
     return names
 
 
-_ALWAYS_CACHES = ("Swatinem/rust-cache","hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
+_ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
 
@@ -4201,15 +4238,33 @@ class WorkflowRules:
         return found[1]
 
     # What a step's text may use to set variables or the PATH for the steps after it, other than a plain
-    # `echo` to GITHUB_ENV: bash's own names, the PATH file, the toolkit's calls (github-script and
+    # write to GITHUB_ENV: bash's own names, the PATH file, the toolkit's calls (github-script and
     # JavaScript actions), the workflow commands a runner obeys when `ACTIONS_ALLOW_UNSECURE_COMMANDS` is
     # true, and the runner's folder that holds the file commands' files. Any letter case.
     _SETS_LATER_STEPS_RE = re.compile(r"BASH_ENV|BASH_FUNC|GITHUB_PATH|addPath|add-path|set-env|exportVariable|"
                                       r"_runner_file_commands|ACTIONS_ALLOW_UNSECURE_COMMANDS", re.I)
     _GITHUB_ENV_RE = re.compile(r"GITHUB_ENV", re.I)
-    # The runner's own contexts for the two files (`github.env` and `github.path`), or the whole
-    # `github` context, which holds both and can be written out as text.
-    _FILE_CONTEXTS = ({"github"}, {"env", "path"})
+    # The runner's own contexts for its files (`github.env`, `github.path` and the others), or the whole
+    # `github` context, which holds them and can be written out as text.
+    _FILE_CONTEXTS = ({"github"}, {"env", "path", "output", "state", "step_summary"})
+    # The runner keeps a step's file-command files side by side, named with one suffix
+    # (`FileCommandManager.InitializeFiles`), so the path of another of them leads to GITHUB_ENV's: its
+    # value changed by a parameter expansion, given to a command that works on paths, copied into a
+    # variable, or reached by an indirect expansion (found by the review of slice 2d.13).
+    _SIBLING = r"GITHUB_(ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)"
+    _SIBLING_RE = re.compile(_SIBLING, re.I)
+    _SIBLING_REACHED_RE = re.compile(
+        r"\$\{\s*#?\s*" + _SIBLING + r"\s*[^}\s]"
+        r"|\$\{\s*!(?!\s*[A-Za-z_]\w*\[[@*]\]\})"
+        r"|(?<![\w-])(dirname|basename|realpath|readlink|cd|pushd|find|ls|stat|printenv)(?![\w-])[^\n;|&]*" + _SIBLING +
+        r"|[A-Za-z_]\w*\+?=\s*\$\{?\s*" + _SIBLING + r"(?![A-Za-z0-9_])", re.I)
+    # Words with which code in another language changes a path.
+    _PATH_TRANSFORM_RE = re.compile(r"dirname|basename|realpath|readlink|replace|parent|split|sub\s*\(|join|\.\.|"
+                                    r"substr|slice|with_name|resolve|Split-Path|Join-Path", re.I)
+
+    @staticmethod
+    def _squeezed(text: str) -> str:
+        return _squeeze(text)
 
     def _changes_later_steps(self, job: Job, step: Step) -> bool:
         """Whether a step's text may change, for the steps after it in the job, what their shell or the
@@ -4220,15 +4275,20 @@ class WorkflowRules:
         that file, and refuses only `NODE_OPTIONS` (actions/runner v2.338.2, `SetEnvFileCommand` in
         src/Runner.Worker/FileCommandManager.cs).
 
-        True when the step's script, `env` or inputs name one of `_SETS_LATER_STEPS_RE`, reach the
-        runner's context for the files (`${{ github.env }}`, `${{ github.path }}`, the whole `github`
-        context), or name GITHUB_ENV anywhere but in a write `_github_env_names` reads in a bash or sh
-        `run` script, or when such a write sets a name that `steers`. Only the workflow's text is read:
-        a name the script puts together, and what a program or an action the step runs writes, are not."""
+        True when the step's script, `shell`, `env` or inputs, as `_squeezed` gives them, name one of
+        `_SETS_LATER_STEPS_RE`; reach the runner's contexts for its files (`${{ github.env }}` and the
+        rest, the whole `github` context); reach GITHUB_ENV's file through another file command's
+        path (`_SIBLING_REACHED_RE`, and in code in another language a word that changes a path); or name
+        GITHUB_ENV anywhere but in a write `_github_env_names` reads in a bash or sh `run` script, or
+        when such a write sets a name that `steers`. Only the workflow's text is read: a name or a path
+        the script puts together otherwise, and what a program or an action the step runs writes, are
+        not."""
         inputs = " ".join(str(value) for value in step.with_.values())
-        beside = str(step.raw.get("env", "")) + "\n" + inputs
+        shell = step.raw.get("shell")
+        beside = str(step.raw.get("env", "")) + "\n" + inputs + "\n" + (str(shell) if shell is not None else "")
         text = step.scripts() + "\n" + beside
-        if self._SETS_LATER_STEPS_RE.search(text):
+        squeezed = self._squeezed(text)
+        if self._SETS_LATER_STEPS_RE.search(squeezed) or self._SIBLING_REACHED_RE.search(squeezed):
             return True
         try:
             for body in expr_mod.bodies(text):
@@ -4237,10 +4297,12 @@ class WorkflowRules:
                     return True
         except expr_mod.TooComplex:
             return True
-        if not self._GITHUB_ENV_RE.search(text):
+        bash = bool(step.run) and not step.uses and self._step_shell(job, step) in ("bash", "sh")
+        if not bash and self._SIBLING_RE.search(squeezed) and self._PATH_TRANSFORM_RE.search(squeezed):
+            return True
+        if not self._GITHUB_ENV_RE.search(squeezed):
             return False
-        if step.uses or not step.run or self._GITHUB_ENV_RE.search(beside) \
-                or self._step_shell(job, step) not in ("bash", "sh"):
+        if not bash or self._GITHUB_ENV_RE.search(self._squeezed(beside)):
             return True
         names = _github_env_names(step.run)
         return names is None or any(steers(name) for name in names)

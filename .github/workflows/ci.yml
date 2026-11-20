@@ -371,7 +371,10 @@ jobs:
       - name: Put a stand-in obaaf first on the PATH through GITHUB_ENV
         run: |
           mkdir -p "$RUNNER_TEMP/premise/bin"
-          printf '#!/bin/sh\ntouch "$RUNNER_TEMP/premise/stand-in-ran"\n' > "$RUNNER_TEMP/premise/bin/obaaf"
+          cat > "$RUNNER_TEMP/premise/bin/obaaf" <<'SH'
+          #!/bin/sh
+          touch "$RUNNER_TEMP/premise/stand-in-ran"
+          SH
           chmod +x "$RUNNER_TEMP/premise/bin/obaaf"
           echo "PATH=$RUNNER_TEMP/premise/bin:$PATH" >> "$GITHUB_ENV"
 
@@ -386,7 +389,10 @@ jobs:
           touch "$RUNNER_TEMP/premise/noexec-step-ran"
           exit 1
 
+      # Run whatever happened before, so a step that failed (the stand-in not found, or bash running the
+      # step that ends with exit 1) is reported here and fails the job, never skipped.
       - name: Judge what the two steps did
+        if: always()
         shell: /usr/bin/python3 -I -S {0}
         run: |
           import os, subprocess

@@ -48,6 +48,8 @@ class ProgramChangedThroughGitHubEnvTest(unittest.TestCase):
         "PYTHONWARNINGS (imports a module)": 'echo "PYTHONWARNINGS=ignore::x.W" >> "$GITHUB_ENV"',
         "HOME (Python's user site)": 'echo "HOME=/tmp/home" >> "$GITHUB_ENV"',
         "ACTIONS_ALLOW_UNSECURE_COMMANDS": 'echo "ACTIONS_ALLOW_UNSECURE_COMMANDS=true" >> "$GITHUB_ENV"',
+        "a steering name printed by a command substitution": 'echo "V=$(echo; echo PATH=/tmp/x)" >> "$GITHUB_ENV"',
+        "PATH through printf": "printf 'PATH=%s\\n' \"$P\" >> \"$GITHUB_ENV\"",
         "a heredoc-style write of PATH": 'echo "PATH<<EOF" >> "$GITHUB_ENV"\necho /x >> "$GITHUB_ENV"\necho EOF >> "$GITHUB_ENV"',
     }
 
@@ -75,6 +77,12 @@ class ProgramChangedThroughGitHubEnvTest(unittest.TestCase):
         "a name that only starts like PATH": 'echo "PATHNAME=x" >> "$GITHUB_ENV"\necho "ENVIRONMENT=prod" >> "$GITHUB_ENV"',
         "PYTHONUNBUFFERED": 'echo "PYTHONUNBUFFERED=1" >> "$GITHUB_ENV"',
         "a continued line": 'echo "VERSION=1" \\\n  >> "$GITHUB_ENV"',
+        "printf with %s": "printf 'VERSION=%s\\n' \"$V\" >> \"$GITHUB_ENV\"",
+        "stderr to /dev/null": 'echo "SUMMARY=ok" >> "$GITHUB_ENV" 2>/dev/null',
+        "a command's output that sets nothing": 'echo "DIGEST=$(sha256sum dist/x | cut -c1-64)" >> "$GITHUB_ENV"',
+        "an output written plainly": 'echo "v=1" >> "$GITHUB_OUTPUT"\necho "## done" >> "${GITHUB_STEP_SUMMARY}"',
+        "an output through tee": 'echo "v=1" | tee -a "$GITHUB_OUTPUT"',
+        "an array's keys": 'a=(x y)\nfor i in "${!a[@]}"; do echo "$i"; done',
     }
 
     def test_a_harmless_name_written_to_github_env_keeps_the_check(self):
@@ -109,7 +117,6 @@ class WriteTheCheckerCannotReadTest(unittest.TestCase):
         "a name from a brace expansion": "echo {A,PATH}=1 >> $GITHUB_ENV",
         "a file's lines": 'cat env.txt >> "$GITHUB_ENV"',
         "a heredoc": 'cat >> "$GITHUB_ENV" <<EOF\nVERSION=1\nEOF',
-        "printf": "printf 'VERSION=%s\\n' \"$V\" >> \"$GITHUB_ENV\"",
         "tee": 'tee -a "$GITHUB_ENV" < env.txt',
         "a group": '{ echo "A=1"; echo "B=2"; } >> "$GITHUB_ENV"',
         "a subshell": '( echo "A=1" ) >> "$GITHUB_ENV"',
@@ -132,6 +139,17 @@ class WriteTheCheckerCannotReadTest(unittest.TestCase):
         "the runner's context, upper case": 'echo "VERSION=1" >> "${{ GITHUB.ENV }}"',
         "the runner's context as JSON": "echo '${{ toJSON(github) }}' > ctx.json\npython3 w.py ctx.json",
         "the PATH file through the context": 'echo /tmp/fake >> "${{ github.path }}"',
+        "a continued line inside the variable's name": 'echo "PATH=/tmp/x:$PATH" >> "$GITHUB_\\\nENV"',
+        "the name split by quotes for printenv": 'echo "PATH=/x" >> "$(printenv GITHUB_E""NV)"',
+        "the output file's path changed into the env file's": 'echo "PATH=/x" >> "${GITHUB_OUTPUT/set_output_/set_env_}"',
+        "the state file's path changed": 'echo "PATH=/x" >> "${GITHUB_STATE/save_state_/set_env_}"',
+        "an indirect expansion": 'for v in ${!GITHUB_E*}; do echo "PATH=/x" >> "${!v}"; done',
+        "the folder of the output file": 'echo "PATH=/x" >> "$(dirname "$GITHUB_OUTPUT")"/set_env_*',
+        "the output file's path copied": 'o="$GITHUB_OUTPUT"\necho "PATH=/x" >> "${o%output*}env${o#*output}"',
+        "the output context's folder": 'echo "PATH=/x" >> "$(dirname "${{ github.output }}")"/set_env_*',
+        "printf with another conversion": "printf 'A=%b\\n' \"$V\" >> \"$GITHUB_ENV\"",
+        "printf with a second line": "printf 'A=1\\nPATH=/x\\n' >> \"$GITHUB_ENV\"",
+        "printf with a computed name": "printf '%s=1\\n' PATH >> \"$GITHUB_ENV\"",
     }
 
     def test_an_unread_write_before_the_check_makes_it_cannot_tell(self):
@@ -158,6 +176,10 @@ class WriteTheCheckerCannotReadTest(unittest.TestCase):
                 "add-path": run('echo "::add-path::/x"', "Prepare"),
                 "the runner's folder for file commands": run('echo A=1 >> "$RUNNER_TEMP"/_runner_file_commands/f',
                                                              "Prepare"),
+                "python reaching it from the output file": run(
+                    "import os\nd = os.path.dirname(os.environ['GITHUB_OUTPUT'])", "Prepare", "        shell: python\n"),
+                "a custom shell that writes it": run("echo ignored", "Prepare", "        shell: bash -c \"echo "
+                                                     "PATH=/tmp/x:$PATH >> $GITHUB_ENV\" {0}\n"),
             }
             for label, step in steps.items():
                 with self.subTest(label):
@@ -165,11 +187,39 @@ class WriteTheCheckerCannotReadTest(unittest.TestCase):
                     self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), CANNOT_TELL)
 
 
+class OtherFileCommandsTest(unittest.TestCase):
+    """Writing the step's outputs keeps the check; reaching GITHUB_ENV's file from their path does not."""
+
+    def test_an_output_written_in_python_keeps_the_check(self):
+        with TempDir() as tmp:
+            step = run("import os\nwith open(os.environ['GITHUB_OUTPUT'], 'a') as f:\n    f.write('v=1\\n')",
+                       "Prepare", "        shell: python\n")
+            self.assertEqual(of(check(tmp, release(step + run(VERIFY, "Verify") + UPLOAD)), "OBAAF-GHA-016"), [])
+
+
+class MacLoaderTest(unittest.TestCase):
+    """The rule counts a check on a macOS runner, where the loader's variables are `DYLD_...`, and the runner
+    keeps `DYLD_INSERT_LIBRARIES` for each step's process (Handlers/ScriptHandler.cs, v2.338.2)."""
+
+    def test_dyld_names_make_the_check_cannot_tell(self):
+        with TempDir() as tmp:
+            for name in ("DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
+                with self.subTest(name):
+                    text = before_check(f'echo "{name}=/tmp/x.dylib" >> "$GITHUB_ENV"').replace(
+                        "ubuntu-latest", "macos-14")
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), CANNOT_TELL)
+                    in_env = release(run(VERIFY, "Verify", f"        env:\n          {name}: /tmp/x.dylib\n")
+                                     + UPLOAD).replace("ubuntu-latest", "macos-14")
+                    self.assertEqual(kinds(check(tmp, in_env), "OBAAF-GHA-016"), CANNOT_TELL)
+            plain = before_check('echo "VERSION=1" >> "$GITHUB_ENV"').replace("ubuntu-latest", "macos-14")
+            self.assertEqual(of(check(tmp, plain), "OBAAF-GHA-016"), [])
+
+
 class ProgramChangedThroughEnvTest(unittest.TestCase):
     """An `env` of the check's step, its job or its workflow that changes what the check runs. Before
     this slice only `BASH_ENV`, `ENV` and `BASH_FUNC...` there made the check not count."""
 
-    STEERING = ["PATH", "SHELLOPTS", "BASHOPTS", "PS4", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH",
+    STEERING = ["PATH", "SHELLOPTS", "BASHOPTS", "PS4", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "PYTHONPATH",
                 "PYTHONHOME", "HOME", "GCONV_PATH", "EXECIGNORE", "ACTIONS_ALLOW_UNSECURE_COMMANDS",
                 " path ", "${{ inputs.name }}"]
     HARMLESS = ["PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING", "VERSION", "GH_TOKEN",
