@@ -94,6 +94,33 @@ class EgressDraftTests(unittest.TestCase):
             self.assertIn("names NODE_OPTIONS under env, a name the action at a listed commit sets", out)
             self.assertIn("env: NODE_OPTIONS ANTHROPIC_BASE_URL github_pat", out)
 
+    def test_a_value_with_a_line_break_is_named(self):
+        """Second review pass: the action refuses an env value holding a line break or NUL, and a prompt
+        written as a block was drafted without a word."""
+        step = STEP.replace("          REVIEW_KEY: ${{ secrets.OTHER }}\n",
+                            "          PROMPT: |\n            first line\n            second line\n") \
+            .replace("claude -p review", 'claude -p "$PROMPT"')
+        with TempDir() as root:
+            self.workflow(root, step)
+            code, out, err = self.draft(root)
+            self.assertEqual(code, 0, err)
+            line = next(line for line in out.splitlines() if "line break or NUL" in line)
+            self.assertTrue(line.endswith(": PROMPT"), line)
+        with TempDir() as root:
+            self.workflow(root)
+            self.assertNotIn("line break or NUL", self.draft(root)[1])
+
+    def test_characters_that_are_not_printable_are_shown_escaped(self):
+        """Second review pass: a direction override or U+0085 was printed as it is, so the printed job
+        could read otherwise than the job that was checked."""
+        for char, escape in (("\u202e", "\\u202E"), ("\x85", "\\N"), ("\u200b", "\\u200B")):
+            with self.subTest(escape), TempDir() as root:
+                self.workflow(root, STEP.replace("name: Review", f'name: "a{escape}b"'))
+                code, out, err = self.draft(root)
+                self.assertEqual(code, 0, err)
+                self.assertNotIn(char, out)
+                self.assertIn(f'name: "a{escape}b"', out)
+
     def test_text_outside_the_basic_plane_dates_and_an_empty_env_are_drafted(self):
         """Review of A3a: an emoji was written as two JSON halves YAML reads as two characters, so the
         draft was refused; a date in the job printed every verdict and then refused; `env:` with no value

@@ -52,6 +52,18 @@ def _text(dumper, value):
 _DisplayDumper.add_representer(str, _text)
 
 
+def _needs_escapes(value):
+    """Whether any text in `value` holds a character other than a line feed or tab that Python does
+    not count as printable."""
+    if isinstance(value, str):
+        return any(c not in "\n\t" and not c.isprintable() for c in value)
+    if isinstance(value, dict):
+        return any(_needs_escapes(k) or _needs_escapes(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_needs_escapes(v) for v in value)
+    return False
+
+
 def _flow(data):
     """One line of YAML for `data`. PyYAML escapes what YAML cannot hold as it is (a character outside
     the Basic Multilingual Plane as one `\\U` escape, the Unicode line separators), quotes text that would
@@ -83,6 +95,10 @@ def _rewrite(job, text, name, catalog, agents, pin):
     # and `NODE_OPTIONS` or `ANTHROPIC_BASE_URL` were not, though the action refuses them).
     blocked = [k for k in passed if k in egress.WITHHELD_BY_AWF or egress.removed_before_inputs(k)
                or egress.reserved_under_env(k)]
+    # The action also refuses a value holding a line break or NUL, which AWF's environment file cannot
+    # carry (second review pass: a prompt written as a block in `env` was drafted without a word).
+    broken = [k for k in passed if k not in blocked and isinstance(env[k], str)
+              and any(c in env[k] for c in "\n\r\0")]
     # The reserved name grants no real destination. The proxy reaches its own
     # provider API without also granting the command direct access to that host.
     inputs = {"allow": "replace-with-required-host.invalid", "run": step["run"]}
@@ -111,7 +127,7 @@ def _rewrite(job, text, name, catalog, agents, pin):
     expected["jobs"][name]["steps"][index] = new
     if yamlutil.load(edited) != expected:
         raise ValueError("could not preserve the surrounding workflow; review this job by hand")
-    return edited, _plain(expected["jobs"][name]), blocked
+    return edited, _plain(expected["jobs"][name]), blocked, broken
 
 
 def run(args, catalog=None):
@@ -131,25 +147,32 @@ def run(args, catalog=None):
             before = check_inputs(copy, options, today, catalog)
             check_copy_matches(root, check_inputs(root, options, today, catalog), before)
             path, text, job = _job(copy, options, before, args.job)
-            edited, draft, blocked = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
+            edited, draft, blocked, broken = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
             path.write_text(edited, encoding="utf-8")
             after = check_inputs(copy, options, today, catalog)
             shown = path.relative_to(copy).as_posix()
             # Everything is worked out before anything is printed, so a refusal prints only itself
             # (review of A3a: a date in the job printed the verdicts and then refused).
-            draft_text = yaml.dump({args.job: draft}, Dumper=_DisplayDumper, sort_keys=False, allow_unicode=True)
+            # Escapes for the whole job when any text holds a character Python does not count as printable
+            # (a direction override, a zero-width space, U+0085, a private-use character): printed as it
+            # is, it could make a script read otherwise, or read back as other text (second review pass).
+            draft_text = yaml.dump({args.job: draft}, Dumper=_DisplayDumper, sort_keys=False,
+                                   allow_unicode=not _needs_escapes(draft))
             lines = [
                 "Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "
                 "evaluates this exact placeholder list. If you adopt the draft, review the action's denied "
                 "output after a run. Under confinement, the command's writes stay in the action's scratch "
                 "directory, it reaches only the listed hosts, their subdomains and the proxied provider APIs, "
-                "and its environment holds only the variables named under env. It can still read its copy of "
+                "and it sees none of the runner's environment except the variables named under env. It can still read its copy of "
                 "the workspace and the runner's /tmp; docs/egress-control.md lists what it can still do.",
                 "Only ANTHROPIC_API_KEY and OPENAI_API_KEY can be held by the proxy. If you pass another "
                 "provider key through env, the agent can read it. Review acceptance or use your own proxy.",
             ]
             if blocked:
                 lines.append("The action refuses these env names. Resolve their placement by hand: " + ", ".join(blocked))
+            if broken:
+                lines.append("The action refuses an env value that holds a line break or NUL, so it would not run "
+                             "with these as written. Pass them another way, for example in a file: " + ", ".join(broken))
             lines += [
                 "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
                 "without a container; no other step and no job or workflow env holds a credential; the job "

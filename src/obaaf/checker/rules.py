@@ -3086,7 +3086,8 @@ class WorkflowRules:
                 place.proxy.append((name, found))
             elif name in env_names:
                 if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
-                        or (listed and egress_mod.removed_before_inputs(name)):
+                        or (listed and (egress_mod.removed_before_inputs(name)
+                                        or egress_mod.reserved_under_env(name))):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:

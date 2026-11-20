@@ -1285,6 +1285,11 @@ class KeyOutOfReachTest(unittest.TestCase):
                               control.detail)
                 control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name, ref="v1"))))
                 self.assertNotIn("a name the action at a listed commit sets", control.detail)
+        # A credential under a reserved name is not said to reach the command (second review pass).
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "ANTHROPIC_BASE_URL": "${{ secrets.GW }}"}
+        control = key_control(run_check(workflow(keyed(step_env=step_env, env_input="ANTHROPIC_BASE_URL"))))
+        self.assertEqual(control.verdict, NOT_MET, control.detail)
+        self.assertNotIn("passed to the command as ANTHROPIC_BASE_URL", control.detail)
         # Exactly as the action matches: a spelling it does not list is passed to the command.
         for name in ("Node_Options", "NODE_OPTIONS_EXTRA", "MY_BASE_URL_X"):
             step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", name: "x"}
