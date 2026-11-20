@@ -740,8 +740,9 @@ def cmd_templates_install(args) -> int:
     if bundled:
         # The templates are this version's; a clone checked out at the pinned commit matched it by
         # construction, the wheel does not (review-gpt #309).
-        print(f"These templates came with obaaf {__version__}. Pin the commit of that version with --obaaf-sha, "
-              "or the workflows may use inputs the pinned commit's actions do not have.")
+        print(f"These templates came with obaaf {__version__}. Give --obaaf-sha the commit this package was built "
+              "from (for a release, its tag's commit), or the workflows may use inputs the pinned commit's actions "
+              "do not have.")
     print("Next: edit the build and publish steps, set up the GitHub environments, then run 'obaaf check'.")
     return EXIT_OK
 

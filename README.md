@@ -63,7 +63,7 @@ obaaf assess score answers.yaml           # your tier and what to fix first
 
 Your answers never leave your machine. Then follow [the adoption guide](docs/adoption-guide.md).
 
-**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles. The development wheel includes the GitHub Actions templates. With that wheel, skip the clone and checkout below and omit the `--source` option. Set `--obaaf-sha` to the full commit used to build your wheel. For release 0.3.0, use the full example below. [Jenkins instructions](docs/jenkins.md)
+**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles. A development build installed from a commit ([how](docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the GitHub Actions templates. With it, skip the clone and checkout below, omit the `--source` option, and set `--obaaf-sha` to the same full commit you installed. For release 0.3.0, use the full example below. [Jenkins instructions](docs/jenkins.md)
 
 ```bash
 obaaf check path/to/your/repository

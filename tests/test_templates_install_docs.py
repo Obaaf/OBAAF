@@ -185,7 +185,7 @@ class TemplateSourceSelection(unittest.TestCase):
             target.write_text("name: Local\n", encoding="utf-8")
             code, out, err = run_cli(*args)
             self.assertEqual(code, 0, err)
-            self.assertIn(str(example), out)
+            self.assertIn(str(example.resolve()), out)
             self.assertEqual(target.read_text(encoding="utf-8"), "name: Local\n")
             self.assertEqual(run_cli(*args, "--force")[0], 0)
             self.assertEqual(target.read_bytes(), workflow.read_bytes())
