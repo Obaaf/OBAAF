@@ -1,0 +1,57 @@
+name: OBAAF pipeline check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install the pinned checker
+        uses: Obaaf/OBAAF/actions/setup-obaaf@4e2ba222d31f9ce8e7e352f18e8f88c75aabcbd8
+
+      - name: Check out the repository to inspect
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+
+      - name: Read pull request policy from the target commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+          sparse-checkout: |
+            /.github/obaaf.yml
+            /.github/obaaf.yaml
+            /obaaf.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Report findings
+        shell: bash
+        run: |
+          config=()
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            policy="$RUNNER_TEMP/obaaf-policy.yml"
+            echo '{}' > "$policy"
+            for name in .github/obaaf.yml .github/obaaf.yaml obaaf.yml; do
+              if [[ -L policy/.github || -L "policy/$name" ]]; then
+                echo 'The target branch checker configuration must be a regular file.' >&2
+                exit 1
+              fi
+              if [[ -f "policy/$name" ]]; then
+                cp "policy/$name" "$policy"
+                break
+              fi
+            done
+            config=(--config "$policy")
+          fi
+          obaaf check source "${config[@]}" --fail-on never

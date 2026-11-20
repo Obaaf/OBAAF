@@ -2229,6 +2229,9 @@ class Config:
             raise ConfigError(f"{path}: unknown setting(s) {', '.join(unknown)}; the checker reads "
                               f"{', '.join(sorted(CONFIG_KEYS))}")
         ignore = data.get("ignore") or []
+        if not isinstance(ignore, list):
+            # `ignore: 5` raised TypeError here (found by the review of #278).
+            raise ConfigError(f"{path}: ignore must be a list of entries")
         for entry in ignore:
             if not isinstance(entry, dict):
                 raise ConfigError(f"{path}: every ignore entry must be a mapping")
@@ -2307,6 +2310,8 @@ class CheckResult:
     checked: str = ""                                        # the path the command line asked to check
     options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
     today: date | None = None                                # the day acceptances were judged against
+
+    fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
 
     @property
     def workflow_files(self) -> list[str]:

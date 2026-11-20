@@ -23,9 +23,9 @@ jobs:
 
 
 class EgressDraftTests(unittest.TestCase):
-    def draft(self, root):
+    def draft(self, root, releases=(SHA,)):
         cat = load()
-        cat = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": [SHA]})
+        cat = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": list(releases)})
         with patch("obaaf.fix_egress.load", return_value=cat):
             return run_cli("fix", "egress", "--job", "review", root)
 
@@ -37,7 +37,7 @@ class EgressDraftTests(unittest.TestCase):
         return path
 
     def test_unlisted_stops_before_reading_path(self):
-        code, out, _ = run_cli("fix", "egress", "--job", "review", "absent")
+        code, out, _ = self.draft("absent", releases=())
         self.assertEqual(code, 0)
         self.assertIn("No released commit", out)
 

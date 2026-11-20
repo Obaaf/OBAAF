@@ -143,6 +143,121 @@ repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and
 in the configuration, and stages declared with `OBAAF_LANE = 'agent'`. Not recognizing an agent is
 never evidence that a stage runs none.
 
+**Workspaces and agents** (flagship slice 2d.2j). OBAAF-JEN-003 asks whether what an AI agent wrote
+can reach a push, a `build` step or a publish without review, so the checker records the workspace
+every step runs in:
+
+| In the Jenkinsfile | Workspace |
+| --- | --- |
+| a top-level `agent` | one, for every stage that has no `agent` of its own, the pipeline's `post` and the stages' `post` blocks |
+| a stage's own `agent` (label, node, any, docker, dockerfile, kubernetes), `node()`, a `matrix` agent | a new one |
+| `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
+| a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
+| `ws()` | another directory on the same node, written by the same user: counted as shared |
+| `node(POD_LABEL)` (`"${POD_LABEL}"`, or the template's own `label:`: the same text, variable or literal) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim, or one export of one server, share it. Any other label there is an ordinary agent |
+| a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
+| a closure, where it is written | one of its own; where the file calls it, the caller's |
+
+The table follows the Jenkins handbook ([Pipeline Syntax](https://www.jenkins.io/doc/book/pipeline/syntax/):
+the top-level agent "specifies where the entire Pipeline ... will execute", and `reuseNode` runs the
+container "on the node specified at the top-level of the Pipeline, in the same workspace"; [Using
+Docker with Pipeline](https://www.jenkins.io/doc/book/pipeline/docker/); read on 2026-11-20). Where the
+handbook says nothing (that a stage's `post` runs in the stage's workspace, that a nested stage
+without an agent runs in its parent's), the checker takes the reading under which more steps share a
+workspace.
+
+The verdicts:
+
+- an agent and an effect in the same workspace, the effect running after the agent (later in the
+  file, in a sibling parallel branch, or inside a loop, `retry` or `waitUntil` around both): **high**;
+- a `stash` taken after the agent and `unstash`ed before the effect (the same name, or a name the file
+  does not fix), or `archiveArtifacts` brought back with `unarchive`: **high**;
+- the effect before the agent in a workspace Jenkins keeps between builds: **medium**, because what
+  the agent leaves there (a Git hook, `.git/config`, a script the effect runs) is in place for the
+  effect in the next build. A fresh pod, or `deleteDir()`, a full `cleanWs()` (or the `WsCleanup`
+  step) or a checkout with `WipeWorkspace` that certainly runs before the effect (or a clean in a
+  `post { always }` or `cleanup` block after the agent), clears it; `cleanWs` with `patterns`,
+  `externalDelete` or a `cleanWhen...: false`, and `CleanBeforeCheckout` (`git clean`, which keeps
+  `.git`), do not;
+- the agent and the effect in separate allocations that may land on the same machine (the same label,
+  label expressions that require a common label such as `linux && docker` and `linux`, an expression
+  that requires none such as `sandbox -> gpu`, any agent, a label the file does not fix, the same
+  `customWorkspace` or `ws()` path, or pods whose workspace claim the file does not fix):
+  **unknown**, because Jenkins keeps a job's workspace directory on an agent between allocations and
+  which agents carry which labels is controller configuration;
+- different labels, or separate pods with their own workspace: no finding.
+
+OBAAF-JEN-002 counts an AI agent's work like a change request's: an agent stage and a stage that
+holds credentials or publishes on the same persistent label, or on labels that require a common one,
+is a medium finding. Label expressions are parsed with Jenkins's operators (`!`, `&&`, `||`, `->`,
+`<->`, brackets). One that names the built-in node where a match can require it and holds on that
+node (`built-in || linux`, `linux -> built-in`, `built-in && !master`: since Jenkins 2.307 the built-in
+node carries `built-in` and not `master` unless the old label was kept) can place work on the
+controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
+`$JENKINS_HOME` (when the controller itself runs in a container, Docker Pipeline also passes it
+`--volumes-from`). A label expression that requires no label (`!windows`) is read like `agent any`.
+
+OBAAF-JEN-006 reads docker run options as docker splits them: grouped short options (`-itv`), values
+written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
+and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
+socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
+rootless Docker's socket folder (`/run/user/...`), the controller's home (`/var/lib/jenkins`,
+`/var/jenkins_home`) and an agent's root (`/home/jenkins/agent`), whole or any part but a build's caches
+(`.m2`, `.gradle`, `.cache`, `tools` and others; the Git plugin's mirrors under `caches` count), a user's whole home (`/home/jenkins`), a home's
+credential folders (`.ssh` but its `known_hosts`, `.docker`, `.kube`, `.aws`, `.gnupg`) and credential
+files (`.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
+read-only too; only the folders that hold programs, such as `/usr` and
+`/opt`, are ordinary read-only) reaches the host. A folder inside one (`/root/.m2`,
+`/etc/localtime:ro`, `/dev/shm`, `/var/jenkins_home/.m2`) and read-only `/sys/fs/cgroup` do not.
+`--volumes-from` is an unknown. Jenkins splits `args` itself, not exactly as a shell does, so the
+options are read both as a shell splits them and between blanks, and anything either reading finds
+counts; a backslash in them is an unknown. Booleans are read as docker reads them (`--privileged=t` is
+privileged), paths are cleaned (`//var/run`), `--mount` fields are read as CSV with keys in any case,
+`--use-api-socket` mounts the Docker socket, and Windows drive roots and the Docker named pipe count.
+Pod specs are read as YAML, which also reads JSON: string booleans count, a projected
+`serviceAccountToken` volume mounts a token whatever `automountServiceAccountToken` says, only the
+first document is read for the token, and a spec nested too deeply or too large to read is an unknown.
+`podTemplate`'s own `privileged`, `hostPathVolume`, `hostNetwork` and a `hostPathWorkspaceVolume`
+count; a Kubernetes agent with no pod spec at all mounts the service account token.
+
+OBAAF-JEN-007 passes a stage whose agent's shell steps run in a container started with exactly one
+network, `none`, and nothing that reaches the host. A host path mounted into that container may hold
+a socket, which is a way out whatever the network, so the finding stays and names the paths. A step
+that Docker Pipeline does not launch in the container (`aiAgent`, which the plugin runs itself) is not
+limited by it.
+
+**What the checker cannot decide here.** Reported as unknown, or left as a finding:
+
+- which machines carry which labels, whether a persistent agent is shared with other jobs, and what a
+  pod template defined on the controller (`inheritFrom`) mounts;
+- `matrix` cells: each cell has its own allocation, but the checker reads the cells as one, so an
+  agent in one cell and a push in another, kept apart only by `when` conditions on the axes, is
+  reported as sharing a workspace;
+- what an agent leaves outside the workspace on a persistent agent (`$HOME/.gitconfig`, tool caches):
+  a clean workspace does not remove it, which is why OBAAF-JEN-002 reports agent work on shared labels;
+- a later step outside the container that runs what an agent with no network wrote into the
+  workspace: OBAAF-JEN-007 judges where the agent runs, not what is done with its output;
+- what reaches an effect through values rather than files: the agent's output read into a variable
+  and passed to `build job:` parameters or a commit message, or `copyArtifacts` of the running build;
+- agent commands and effects the checker does not recognise (a push through `/usr/bin/git`, a
+  quoted option value before `push`, `gh api`, a repository script or Makefile that runs one): the
+  recorded attempts in [bypass-attempts.md](bypass-attempts.md#2d2j-agent-stages-and-workspaces)
+  list them, and #330 tracks them;
+- a closure handed to code outside the file, which is read where it is written, in a workspace of
+  its own;
+- a pod spec whose YAML redefines the plugin's workspace volume, and a label built from an
+  `environment` value (read as a label the file does not fix);
+- labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
+  compares labels with case;
+- a build's caches and `tools` under the controller's home or an agent's root are ordinary even when
+  mounted writable, though other builds on that machine use them, and a job named `tools` under
+  `/home/jenkins/workspace` is read as such a folder;
+- a `node()` whose literal label is a pod template's literal label is read as that pod, though a static
+  agent with the same label may take the build (only `POD_LABEL` is certain);
+- option-like text inside a quoted `--label` or `-e` value can be read as an option, because the
+  options are also read split between blanks; a workspace claim mounted read-only by the agent's pod
+  still counts as shared.
+
 **Publishing.** The upload commands shared with the workflow checker, plus `mvn deploy`, `gradle
 publish`, JFrog, Helm, crane and skopeo pushes, `curl --upload-file`, `docker.image(...).push()`
 and steps such as `s3Upload`, `nexusArtifactUploader`, `rtUpload`, `androidApkUpload` and

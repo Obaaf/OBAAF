@@ -81,7 +81,7 @@ def run(args, catalog=None):
     catalog = catalog or load()
     pins = catalog.detection.get("egress_action_releases") or []
     if not pins:
-        print("No released commit of the egress action is listed. Draft unavailable until #248 is approved.")
+        print("No released commit of the egress action is listed in the installed catalogue. Draft unavailable.")
         return 0
     try:
         pin = pins[-1]

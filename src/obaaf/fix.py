@@ -1,4 +1,4 @@
-"""Show offline, proven paperwork changes without modifying the source tree."""
+"""Preview offline paperwork changes and apply the proven diff on explicit request."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sys
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from datetime import date
 
 from obaaf.checker.workflow import one_line
@@ -43,7 +44,9 @@ def _paths(args):
 def _show_diff(edit):
     before = edit.before.decode("utf-8").splitlines(keepends=True)
     after = edit.after.decode("utf-8").splitlines(keepends=True)
-    for line in difflib.unified_diff(before, after, fromfile=f"a/{edit.path}", tofile=f"b/{edit.path}"):
+    # The path can come from a link the repository names, so it is shown as one escaped line.
+    name = one_line(Path(edit.path).as_posix())
+    for line in difflib.unified_diff(before, after, fromfile=f"a/{name}", tofile=f"b/{name}"):
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         if not line.endswith("\n"):
             print(r"\ No newline at end of file")
@@ -154,8 +157,9 @@ def _verified_plan(source, copy, options, before, metadata):
 def run(args):
     from obaaf import checker
     from obaaf.catalog import load
+    from obaaf.fix_apply import apply_edits, apply_lock
     from obaaf.fix_copy import private_copy
-    from obaaf.fix_proof import check_copy_matches, check_inputs
+    from obaaf.fix_proof import ProofError, check_copy_matches, check_inputs, prove
 
     try:
         if (args.reason is not None or args.expires is not None) and not all((args.owner, args.reason, args.expires, args.baseline)):
@@ -163,7 +167,7 @@ def run(args):
         root, options = _paths(args)
         checker.parse_fail_on(options.fail_on)
         metadata = dict(owner=args.owner, reason=args.reason, expires=args.expires)
-        with private_copy(root) as copy:
+        with (apply_lock(root) if args.apply else nullcontext()) as lock, private_copy(root) as copy:
             today, catalog = date.today(), load()
             before = check_inputs(copy, options, today, catalog)
             source = check_inputs(root, options, today, catalog)
@@ -171,6 +175,22 @@ def run(args):
             paths = _owner_paths(copy, options, before, today, catalog)
             proposal, after, reasons = _verified_plan(root, copy, options, before, metadata)
             _render(proposal, source, after, reasons, paths, options.fail_on, catalog)
+            if args.apply:
+                sys.stdout.flush()
+                if proposal.edits:
+                    final = prove(root, options, proposal.edits, proposal.promises)
+                    try:
+                        check_copy_matches(root, after, final)
+                    except ProofError as exc:
+                        raise ProofError("checker results changed since the displayed preview; rerun to review them") from exc
+                    warnings = apply_edits(root, lock, proposal.edits)
+                    print(f"Applied the displayed diff to {len(proposal.edits)} file(s).")
+                    for warning in warnings:
+                        print(one_line(warning), file=sys.stderr)
+                else:
+                    print("No proven changes to apply.")
+            elif proposal.edits:
+                print("Run again with --apply to write these changes.")
         return 0
     except (ValueError, OSError) as error:
         print("error: " + one_line(error), file=sys.stderr)
