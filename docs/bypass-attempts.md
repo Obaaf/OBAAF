@@ -2690,6 +2690,29 @@ The same reviewer re-ran R001 to R115 on the fixes and wrote 62 more. No earlier
 | R175, R176 | 006/007 | 3,000-deep YAML; 4,000 `-v` | — | held | held |
 | R177 | 006 | six 1,200-deep pod specs, 15 KB | 5.0 s | slow | fixed: 0.01 s, an unknown |
 
+### Third pass, on `0521213`
+
+The reviewer re-ran R001 to R177; no case got worse, and it confirmed the second pass's fixes. 35 new attempts: 11 ways past, 5 false positives, 19 held. The fourth commit of #331 fixes these:
+
+| Id | Rule | What the file does | Result at `0521213` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R180 | 006 | `--label description='mounts -v /var/run:/var/run …'` | high | false positive (contrived) | not fixed: the blank-split reading, listed in jenkins.md |
+| R183 | 006 | `/sys/fs/cgroup:ro` | high | false positive (unsure) | fixed: read-only cgroups are ordinary |
+| R184 | 006 | `/var/lib/jenkins/.m2:/root/.m2` | high | false positive | fixed: only the controller's secrets, jobs, nodes, users and workspaces count inside its home |
+| R185 | 006 | `-v /home/jenkins:/home/jenkins` with an agent | pass | way past | fixed: a user's whole home counts |
+| R186 | 006/007 | `--network none -v /run/user/1000:…` | 006 pass | way past | fixed: rootless Docker's socket folder |
+| R187 | 006 | `/root/.ssh:ro` | pass | way past (unsure of scope) | fixed: a home's credential folders count |
+| R188 | 006 | `/etc:/host/etc:ro` | pass | way past (minor) | fixed: read-only is ordinary only for program folders |
+| R191 | 002 | `node('built-in && !master')`, agent step | unknown | blocking way past | fixed: the built-in node carries one of its two labels |
+| R192 | 002 | 200 nested brackets around `built-in` | floating unknown | way past (minor) | not fixed: an expression too deep to read is an unknown |
+| R200 | 003 | same claim, mounted read-only by the agent's pod | high | false positive (minor) | not fixed: listed in jenkins.md |
+| R201 | 003 | NFS `/exports/ws` and `/exports/ws/`, one server | pass | way past (minor) | fixed: paths cleaned |
+| R202 | 003 | the same NFS path on two servers | high | false positive | fixed: the server is part of the key |
+| R204 | 003 | `hostPathWorkspaceVolume` `/srv/ws` and `/srv/ws/` | pass | way past (minor) | fixed: unknown |
+| R205 | 002/003 | `node(params.STATIC_AGENT)` inside a pod template | 003 pass | way past | fixed: only `POD_LABEL` or the template's label variable is the pod |
+| R206 | 002 | `node(params.TARGET ?: 'built-in')` inside a pod template | pass | blocking way past | fixed: the floating unknown is back |
+| R208 | 006 | `privileged: 1` | pass | way past (unsure) | fixed: 1 counts as true |
+
 ### Reviewer B's attempts (2026-11-17)
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.

@@ -69,14 +69,21 @@ MUTABLE_SELECTORS = {"lastSuccessful", "lastCompleted", "latestSavedBuild", "per
 _HOST_CAPS = {"ALL", "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "DAC_READ_SEARCH", "SYS_MODULE", "SYS_RAWIO",
               "SYS_BOOT", "DAC_OVERRIDE", "SYS_CHROOT", "MKNOD", "BPF", "PERFMON", "SYSLOG"}
 # Host folders whose mount gives a container the host, written or read: the root, the kernel's file systems,
-# the container runtimes' state and sockets, the controller's home. Their subfolders count too.
-_HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/var/lib/jenkins",
-               "/run/containerd", "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio",
-               "/var/run/crio")
+# the container runtimes' state and sockets (rootless Docker's under /run/user). Their subfolders count too.
+_HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/run/containerd",
+               "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio", "/var/run/crio",
+               "/run/user", "/var/run/user", "/var/lib/jenkins/secrets", "/var/lib/jenkins/credentials.xml",
+               "/var/lib/jenkins/users", "/var/lib/jenkins/jobs", "/var/lib/jenkins/nodes",
+               "/var/lib/jenkins/workspace")
 # Folders whose whole mount does, but whose subfolders are ordinary (`/etc/localtime`, `/root/.m2`, `/dev/shm`):
-# the runtime sockets' folders, devices, configuration, homes, the system's programs.
+# the runtime sockets' folders, devices, configuration, homes (a user's home holds its keys and, for the agent's
+# user, every job's workspace), the controller's home, the system's programs.
 _HOST_FOLDERS = ("/run", "/var/run", "/dev", "/etc", "/root", "/home", "/boot", "/usr", "/bin", "/sbin", "/lib",
-                 "/lib64", "/var", "/var/lib", "/opt")
+                 "/lib64", "/var", "/var/lib", "/opt", "/var/lib/jenkins")
+# Of those, the ones only programs live in: reading them gives nothing, so a read-only mount of them is ordinary.
+_READ_ONLY_HARMLESS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/boot")
+# Folders inside a home that hold credentials for other hosts and registries.
+_CREDENTIAL_DIRS = (".ssh", ".docker", ".kube", ".aws", ".gnupg", ".azure", ".config/gcloud")
 _HOST_NAMESPACES = {"--pid": "the host PID namespace", "--ipc": "the host IPC namespace",
                     "--userns": "the host user namespace", "--uts": "the host UTS namespace",
                     "--cgroupns": "the host cgroup namespace"}
@@ -115,10 +122,17 @@ def _host_path(source: str, readonly: bool = False) -> str | None:
     norm = _clean(path)
     if norm == "/":
         return "a mount of the host root file system"
+    if readonly and (norm == "/sys/fs/cgroup" or norm.startswith("/sys/fs/cgroup/")):
+        return None            # read-only cgroups, which systemd in a container reads
     if any(norm == p or norm.startswith(p + "/") for p in _HOST_TREES):
         return f"a mount of the host's {norm}"
-    if norm in _HOST_FOLDERS and not (readonly and norm not in ("/run", "/var/run", "/dev")):
+    if norm in _HOST_FOLDERS and not (readonly and norm in _READ_ONLY_HARMLESS):
         return f"a mount of the host's {norm}"
+    parts = norm.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "home":
+        return f"a mount of the host's {norm}"          # a user's whole home
+    if any(f"/{d}/" in norm + "/" for d in _CREDENTIAL_DIRS):
+        return f"a mount of the host's credentials ({norm})"
     return None
 
 
@@ -326,7 +340,8 @@ def _pod_settings(text: str) -> tuple:
                 continue
             for key, value in node.items():
                 key = str(key)
-                true = value is True or (isinstance(value, str) and value.strip().lower() in ("true", "yes", "on"))
+                true = value is True or (isinstance(value, int) and not isinstance(value, bool) and value == 1) or (
+                    isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "1"))
                 if key == "privileged" and true:
                     found.append("a privileged container")
                 elif key == "allowPrivilegeEscalation" and true:
@@ -824,22 +839,36 @@ def _required(tree) -> set:
     return set()           # `!a`, `a -> b` (`!a || b`), `a <-> b` (both false holds) require nothing
 
 
-def _possible(tree, fixed: set) -> set:
-    """The truth values the expression can take on an agent that carries the labels in `fixed` and may carry
-    any other."""
+def _positive(tree, sign: bool = True) -> set:
+    """The labels the expression names where a match can require them: under no negation, or two, on the
+    right of `->`, on either side of `<->`."""
     op = tree[0]
     if op == "atom":
-        return {True} if tree[1].lower() in fixed else {True, False}
+        return {tree[1].lower()} if sign else set()
     if op == "!":
-        return {not v for v in _possible(tree[1], fixed)}
-    a, b = _possible(tree[1], fixed), _possible(tree[2], fixed)
+        return _positive(tree[1], not sign)
+    if op == "->":
+        return _positive(tree[1], not sign) | _positive(tree[2], sign)
+    if op == "<->":
+        return set().union(*(_positive(t, b) for t in tree[1:] for b in (True, False)))
+    return _positive(tree[1], sign) | _positive(tree[2], sign)
+
+
+def _possible_on(tree, present: set) -> set:
+    """Truth values on the built-in node when it carries the controller labels in `present` and not the others,
+    with any other label it may also carry."""
+    op = tree[0]
+    if op == "atom":
+        name = tree[1].lower()
+        if name in CONTROLLER_LABELS:
+            return {name in present}
+        return {True, False}
+    if op == "!":
+        return {not v for v in _possible_on(tree[1], present)}
+    a, b = _possible_on(tree[1], present), _possible_on(tree[2], present)
     combine = {"&&": lambda x, y: x and y, "||": lambda x, y: x or y, "->": lambda x, y: (not x) or y,
                "<->": lambda x, y: x == y}[op]
     return {combine(x, y) for x in a for y in b}
-
-
-def _atoms(tree) -> set:
-    return {tree[1].lower()} if tree[0] == "atom" else set().union(*(_atoms(t) for t in tree[1:]))
 
 
 def controller_label(label: str) -> str | None:
@@ -849,9 +878,13 @@ def controller_label(label: str) -> str | None:
     if text.lower() in CONTROLLER_LABELS:
         return "exact"
     tree = _label_tree(text)
-    if tree is None or not (_atoms(tree) & CONTROLLER_LABELS):
+    if tree is None or not (_positive(tree) & CONTROLLER_LABELS):
         return None
-    return "expression" if True in _possible(tree, set(CONTROLLER_LABELS)) else None
+    # The built-in node carries `built-in` since Jenkins 2.307, `master` before it, and both where an
+    # administrator kept the old label: an expression that names one of them where a match can require it, and
+    # holds on any of these, can place work there (the third review of 2d.2j: `built-in && !master`).
+    holds = any(True in _possible_on(tree, set(labels)) for labels in ({"built-in"}, {"master"}, CONTROLLER_LABELS))
+    return "expression" if holds else None
 
 
 def label_terms(label: str) -> set | None:

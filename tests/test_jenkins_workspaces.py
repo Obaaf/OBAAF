@@ -655,5 +655,57 @@ class SecondReviewTest(unittest.TestCase):
                      "userRemoteConfigs: [[url: 'https://example.invalid/r.git']]])")
         self.assertEqual(findings(mirror.case(before=keeps_git), "OBAAF-JEN-003"), [("medium", 8)])
 
+
+class ThirdReviewTest(unittest.TestCase):
+    """The third review pass (cases R178 to R212)."""
+
+    def test_r191_the_built_in_node_carries_one_of_its_labels(self):
+        self.assertEqual(findings("node('built-in && !master') { sh 'claude -p x' }", "OBAAF-JEN-002"), [("high", 1)])
+        self.assertEqual(findings("node('master && !built-in') { sh 'make' }", "OBAAF-JEN-002"), [("high", 1)])
+        for elsewhere in ("linux && !master", "!built-in", "!(built-in || master) && linux"):
+            self.assertEqual(findings(f"node('{elsewhere}') {{ sh 'make' }}", "OBAAF-JEN-002"), [], elsewhere)
+
+    def test_r205_r206_a_computed_label_in_a_pod_template_is_not_always_the_pod(self):
+        text = ("podTemplate(yaml: 'spec: {automountServiceAccountToken: false}') {\n"
+                "  node(params.TARGET ?: 'built-in') { sh 'claude -p fix' }\n}\n")
+        self.assertEqual(status(text, "OBAAF-JEN-002"), "unknown")
+        static = ("podTemplate(yaml: 'spec: {automountServiceAccountToken: false}') {\n"
+                  "  node(params.STATIC_AGENT) {\n    sh 'git push'\n    sh 'claude -p fix'\n  }\n}\n")
+        self.assertEqual(findings(static, "OBAAF-JEN-003"), [("medium", 3)])
+
+    def test_r183_r188_homes_credentials_and_runtime_folders(self):
+        review = NoNetworkTest().review
+        for args in ("-v /home/jenkins:/home/jenkins", "-v /run/user/1000:/run/user/1000", "-v /root/.ssh:/root/.ssh:ro",
+                     "-v /etc:/host/etc:ro", "-v /home/ci/.docker:/root/.docker"):
+            self.assertEqual([s for s, _ in findings(review(args), "OBAAF-JEN-006")], ["high"], args)
+            self.assertEqual(status(review(f"--network none {args}"), "OBAAF-JEN-007"), "fail", args)
+        for args in ("-v /var/lib/jenkins/.m2:/root/.m2", "-v /sys/fs/cgroup:/sys/fs/cgroup:ro",
+                     "-v /usr/share/zoneinfo:/usr/share/zoneinfo:ro", "-v /opt:/opt:ro"):
+            self.assertEqual(findings(review(args), "OBAAF-JEN-006"), [], args)
+        self.assertEqual([s for s, _ in findings(review("-v /var/lib/jenkins/secrets:/s"), "OBAAF-JEN-006")], ["high"])
+
+    def test_r201_r204_nfs_and_host_path_workspaces(self):
+        def nfs(server, path):
+            return ("agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}'; workspaceVolume "
+                    f"nfsWorkspaceVolume(serverAddress: '{server}', serverPath: '{path}', readOnly: false) }} }}")
+        same = two_stages(AGENT, PUSH, top="agent none", first_agent=nfs("nfs1", "/exports/ws"),
+                          second_agent=nfs("nfs1", "/exports/ws/"))
+        self.assertEqual(findings(same, "OBAAF-JEN-003"), [("high", 14)])
+        apart = two_stages(AGENT, PUSH, top="agent none", first_agent=nfs("nfs1", "/exports/ws"),
+                           second_agent=nfs("nfs2.example", "/exports/ws"))
+        self.assertEqual(findings(apart, "OBAAF-JEN-003"), [])
+
+        def host(path):
+            return ("agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}'; workspaceVolume "
+                    f"hostPathWorkspaceVolume(hostPath: '{path}') }} }}")
+        node_dirs = two_stages(AGENT, PUSH, top="agent none", first_agent=host("/srv/ws"), second_agent=host("/srv/ws/"))
+        self.assertEqual(status(node_dirs, "OBAAF-JEN-003"), "unknown")
+
+    def test_r208_privileged_written_as_one(self):
+        spec = "spec:\n  automountServiceAccountToken: false\n  containers:\n  - name: a\n    image: x\n    " \
+               "securityContext:\n      privileged: 1\n"
+        text = two_stages(AGENT, "echo ok", top="agent { kubernetes { yaml '''" + spec + "''' } }")
+        self.assertEqual([s for s, _ in findings(text, "OBAAF-JEN-006")], ["high"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,7 @@ class Agent:
     # What podTemplate's own arguments give the pod that reaches the host (flagship slice 2d.2j): a privileged
     # containerTemplate, a hostPathVolume, hostNetwork.
     pod_settings: list = field(default_factory=list)
+    label_ref: str | None = None   # the variable a podTemplate's `label:` names, when it is not a literal
 
 
 @dataclass
@@ -1094,6 +1095,7 @@ def _k8s_key(a: Agent, key: str, value) -> None:
         a.inherit = literal(value) or ("?" if value is not None else None)
     elif key == "label":
         a.label = literal(value)
+        a.label_ref = path_of(value) if a.label is None else None
     elif key == "containers" and isinstance(value, ListLit):
         for item in value.items:
             if isinstance(item, Call) and callee_name(item) == "containerTemplate":
@@ -1121,13 +1123,17 @@ def _k8s_key(a: Agent, key: str, value) -> None:
             for key, tag in (("claimName", "claim"), ("serverPath", "nfs"), ("hostPath", "host")):
                 if isinstance(value, Call) and named_arg(value, key) is not None:
                     found = literal(named_arg(value, key))
+                    if found is not None and tag != "claim":
+                        found = re.sub(r"/+", "/", found).rstrip("/") or "/"
+                    if found is not None and tag == "nfs":
+                        server = literal(named_arg(value, "serverAddress"))
+                        found = f"{server}:{found}" if server is not None else None
                     which = f"{tag}:{found}" if found is not None else None
                     break
             a.pod_workspace = which or "?"
             if kind == "hostPathWorkspaceVolume":
                 path = (which or "host:?")[5:]
-                a.pod_settings.append("a mount of the host root file system" if path.strip("/") == "" and path
-                                      else "a hostPath volume")
+                a.pod_settings.append("a mount of the host root file system" if path == "/" else "a hostPath volume")
 
 
 def _container_image(a: Agent, item: Call) -> None:
@@ -1835,8 +1841,12 @@ class Builder:
             # pod the template describes, so they stay under it, in a workspace of that pod.
             # Any label the file does not fix there is read as the pod's (`POD_LABEL`, "${POD_LABEL}", the
             # template's own label variable); a literal is the pod's only when it is the template's label.
+            pod_label = path_of(arg) in ("POD_LABEL", "env.POD_LABEL") or (
+                isinstance(arg, Str) and arg.interpolated and arg.text().strip() in (
+                    "${POD_LABEL}", "${env.POD_LABEL}", "$POD_LABEL"))
             pod = ctx.agent if ctx.agent is not None and ctx.agent.kind == "kubernetes" and (
-                dynamic or (label and label == ctx.agent.label)) else None
+                pod_label or (label and label == ctx.agent.label) or (
+                    ctx.agent.label_ref and path_of(arg) == ctx.agent.label_ref)) else None
             if pod is not None:
                 wid = self.new_ws("kubernetes", call.line, pod.label, pod.pod_workspace,
                                   how=f"node() at line {call.line}, in the pod of podTemplate at line {pod.line}")

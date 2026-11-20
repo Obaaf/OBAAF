@@ -154,7 +154,7 @@ every step runs in:
 | `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
 | a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
 | `ws()` | another directory on the same node, written by the same user: counted as shared |
-| `node(POD_LABEL)` (or any label the file does not fix) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim or export share it |
+| `node(POD_LABEL)` (`"${POD_LABEL}"`, or the variable the template's `label:` names) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim, or one export of one server, share it. Any other label there is an ordinary agent |
 | a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
 | a closure, where it is written | one of its own; where the file calls it, the caller's |
 
@@ -190,8 +190,10 @@ The verdicts:
 OBAAF-JEN-002 counts an AI agent's work like a change request's: an agent stage and a stage that
 holds credentials or publishes on the same persistent label, or on labels that require a common one,
 is a medium finding. Label expressions are parsed with Jenkins's operators (`!`, `&&`, `||`, `->`,
-`<->`, brackets). One that names the built-in node and can hold on it (`built-in || linux`,
-`linux -> built-in`) can place work on the controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
+`<->`, brackets). One that names the built-in node where a match can require it and holds on that
+node (`built-in || linux`, `linux -> built-in`, `built-in && !master`: since Jenkins 2.307 the built-in
+node carries `built-in` and not `master` unless the old label was kept) can place work on the
+controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
 `$JENKINS_HOME` (when the controller itself runs in a container, Docker Pipeline also passes it
 `--volumes-from`). A label expression that requires no label (`!windows`) is read like `agent any`.
 
@@ -199,9 +201,12 @@ OBAAF-JEN-006 reads docker run options as docker splits them: grouped short opti
 written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
 and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
 socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
-or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/usr` and others; a
-read-only one counts only where it holds sockets or devices) reaches the host. A folder inside one
-(`/root/.m2`, `/etc/localtime:ro`, `/dev/shm`) does not.
+rootless Docker's socket folder (`/run/user/...`), the controller's secrets, jobs and workspaces, a
+user's whole home (`/home/jenkins`), a home's credential folders (`.ssh`, `.docker`, `.kube`, `.aws`,
+`.gnupg`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
+`/var/lib/jenkins` and others, read-only too; only the folders that hold programs, such as `/usr` and
+`/opt`, are ordinary read-only) reaches the host. A folder inside one (`/root/.m2`,
+`/etc/localtime:ro`, `/dev/shm`, `/var/lib/jenkins/.m2`) and read-only `/sys/fs/cgroup` do not.
 `--volumes-from` is an unknown. Jenkins splits `args` itself, not exactly as a shell does, so the
 options are read both as a shell splits them and between blanks, and anything either reading finds
 counts; a backslash in them is an unknown. Booleans are read as docker reads them (`--privileged=t` is
@@ -241,7 +246,10 @@ limited by it.
 - a pod spec whose YAML redefines the plugin's workspace volume, and a label built from an
   `environment` value (read as a label the file does not fix);
 - labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
-  compares labels with case.
+  compares labels with case;
+- option-like text inside a quoted `--label` or `-e` value can be read as an option, because the
+  options are also read split between blanks; a workspace claim mounted read-only by the agent's pod
+  still counts as shared.
 
 **Publishing.** The upload commands shared with the workflow checker, plus `mvn deploy`, `gradle
 publish`, JFrog, Helm, crane and skopeo pushes, `curl --upload-file`, `docker.image(...).push()`
