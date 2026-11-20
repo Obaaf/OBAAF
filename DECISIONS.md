@@ -105,6 +105,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-100 | How init proposes the first agent lanes and secret environments | Proposed |
+| D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 
 ---
@@ -934,6 +935,16 @@ If another supported configuration name already exists, init shows any differenc
 **Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs; the review of #273 reproduced that at `6bc5dce` and at `665f15e` (38 proposed, all 19 declared among them). The review added `test_an_environment_on_a_calling_job_is_not_proposed` and `test_a_name_github_refuses_or_a_short_name_says_why`. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
 
 **Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
+### D-102 Paperwork changes in the fix preview
+
+**Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away, and is shown only when the proof finds no other finding changed, so it is withheld when its lane's rules add or change a finding. A check of anything but the repository's own folder is partial (a check of `.github` or `.github/workflows` does not read Jenkinsfiles), and with a partial check the preview withholds changes whose scope it cannot establish, lane corrections included.
+
+**Reason.** An acceptance changes which risk counts at the gate. The user needs to see its owner, reason and expiry before deciding whether to take it. A unique spelling correction can be checked on a copy. Plausible alternatives need a human decision.
+
+**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment lies in the text the removal would delete, or after the last removed entry on its line. A comment on a line of its own before or after the removed entries is kept, and then sits beside a kept entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
+
+**Status.** Proposed, 2026-11-19 (A2b, #275).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 

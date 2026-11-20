@@ -81,7 +81,8 @@ def _relative(root: Path, path: Path) -> Path:
     return relative
 
 
-def _run(root, options, today, catalog):
+def check_inputs(root, options, today, catalog):
+    """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
@@ -106,6 +107,15 @@ def _equivalent_notes(source, copy, git):
               "was not used (it is not the top of a git work tree); these folders were not entered: ")
     advisory = [n for n in copy if n.startswith(prefix) and n.endswith(". A Jenkinsfile in them was not read.")]
     return git and len(advisory) == 1 and source == [n for n in copy if n != advisory[0]]
+
+
+def check_copy_matches(root, original, before):
+    """Before planning or proving, make sure the copy sees the same input and results."""
+    if (original.files != before.files or original.findings != before.findings
+            or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
+            or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
+            or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
+        raise ProofError("checker results on the source and unedited copy differ")
 
 
 def _rows(findings):
@@ -331,17 +341,13 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
         today = date.today()
         catalog = load()
         with private_copy(root) as dest:
-            before = _run(dest, options, today, catalog)
-            original = _run(root, options, today, catalog)
-            if (original.files != before.files or original.findings != before.findings
-                    or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
-                    or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
-                    or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
-                raise ProofError("checker results on the source and unedited copy differ")
+            before = check_inputs(dest, options, today, catalog)
+            original = check_inputs(root, options, today, catalog)
+            check_copy_matches(root, original, before)
             expected_files = _manifest(dest)
             _read_as_jenkins(dest, options, before, edits)
             _apply(dest, edits, expected_files)
-            after = _run(dest, options, today, catalog)
+            after = check_inputs(dest, options, today, catalog)
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
             if expected_files != _manifest(dest):
@@ -362,6 +368,13 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                     expected[promise.identity, promise.severity, ACCEPTED] += 1
                 elif promise.outcome != "gone" or promise.approval is not None:
                     raise ProofError("unknown or invalid promised finding transition")
+            losses = (_rows(f for f in before.findings if f.state == ACCEPTED)
+                      - _rows(f for f in after.findings if f.state == ACCEPTED))
+            promised_gone = Counter((p.identity, p.severity, p.previous) for p in promises
+                                    if p.outcome == "gone" and p.previous == ACCEPTED)
+            missing = sum((losses - promised_gone).values())
+            if missing:
+                raise ProofError(f"{missing} previously accepted finding(s) would lose their acceptance")
             if _rows(after.findings) != +expected:
                 raise ProofError("finding changes differ from the promised identities, severities or states")
             if _approvals(after.findings) - _approvals(before.findings) != approved:

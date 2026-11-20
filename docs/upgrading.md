@@ -31,6 +31,19 @@ Init reads GitHub workflow files locally. It proposes agent lanes for catalogued
 
 The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
 
+### Preview the changes to your OBAAF files
+
+In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check; the configuration and baseline must be inside the repository. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
+
+To see which old acceptances would carry over, supply the owner, reason and expiry you intend to record. For example, replace the values in this command before using it.
+
+```sh
+obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
+  --owner @YOUR-TEAM --reason "Your reason for retaining these risks" --expires YYYY-MM-DD
+```
+
+Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |
