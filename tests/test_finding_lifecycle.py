@@ -10,6 +10,7 @@ import itertools
 import json
 import os
 import random
+import shlex
 import shutil
 import unittest
 from datetime import date, datetime, timedelta
@@ -610,6 +611,56 @@ class MigrateTest(unittest.TestCase):
 
 class WriteBaselineTest(unittest.TestCase):
     """`--write-baseline` accepts findings in somebody's name, and never renews an acceptance by itself."""
+
+    def test_legacy_write_refusal_preserves_file_and_replays_the_original_scope(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            before = old.read_bytes()
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                repo.rename("-team repo")
+                old.rename("-old baseline.json")
+                old = tmp / "-old baseline.json"
+                config = tmp / "team policy.yml"
+                config.write_text("{}")
+                for name in ("team\tpolicy.yml", "team policy.yml"):
+                    config.rename(tmp / name)
+                    config = tmp / name
+                    code, out, err = run_cli("check", "--write-baseline=-old baseline.json",
+                                             "--config=" + name, "--platform", "github", "--fail-on", "never",
+                                             *ACCEPT, "--", "-team repo")
+                    self.assertEqual((code, out, old.read_bytes()), (2, "", before))
+                    if "\t" in name:
+                        self.assertNotIn("\t", err)
+                        self.assertIn("Run obaaf baseline migrate yourself", err)
+                        self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ") for line in err.splitlines()))
+                    else:
+                        command, = [line.strip() for line in err.splitlines()
+                                    if line.strip().startswith("obaaf baseline migrate ")]
+                        words = shlex.split(command)
+                        self.assertEqual(words, ["obaaf", "baseline", "migrate", "./-old baseline.json",
+                                                 "./-team repo", "--owner", "OWNER", "--reason", "REASON",
+                                                 "--expires", "YYYY-MM-DD", "--config=" + name, "--platform=github"])
+                        decisions = dict(zip(("OWNER", "REASON", "YYYY-MM-DD"), (OWNER, REASON, SOON)))
+                        status, out, err = run_cli(*(decisions.get(word, word) for word in words[1:]))
+                        self.assertEqual(status, 0, out + err)
+                        migrated = json.loads(old.read_bytes())
+                        self.assertEqual(migrated["format"], baseline.FORMAT)
+                        self.assertTrue(migrated["findings"])
+            finally:
+                os.chdir(previous)
+
+    def test_legacy_write_refusal_escapes_the_destination_in_stderr(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            destination = old.rename(tmp / "old\nbaseline.json")
+            before = destination.read_bytes()
+            code, out, err = run_cli("check", repo, "--write-baseline", destination)
+            self.assertEqual((code, out, destination.read_bytes()), (2, "", before))
+            self.assertIn(r"old\nbaseline.json", err)
+            self.assertNotIn(destination.name, err)
+            self.assertIn("Run obaaf baseline migrate yourself", err)
 
     def test_new_acceptances_need_an_owner_a_reason_and_a_date(self):
         with TempDir() as tmp:

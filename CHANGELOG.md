@@ -8,6 +8,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Writing over a legacy baseline still exits 2 and preserves the file.** The refusal now gives a migration command for the selected repository, configuration and platform, or manual guidance for paths that cannot be printed on one line.
 - **Old-baseline migration hints preserve the selected paths.** If a path or option cannot be printed faithfully on one line, the full text report and `--summary` give manual guidance. Printable paths, including spaces and leading dashes, keep a copyable migration command.
 - **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
