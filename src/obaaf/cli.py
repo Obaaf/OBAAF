@@ -217,13 +217,22 @@ def cmd_check(args) -> int:
             print(f"error: {exc}. --write-baseline replaces a baseline and does not write over a file that is "
                   "not one; name another file or remove this one.", file=sys.stderr)
             return EXIT_USAGE
+    # What a command the report suggests has to repeat to check the same thing.
+    # One word each, so a value that begins with a hyphen is still read as a value.
+    options = ([f"--config={args.config}"] if args.config else []) \
+        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
     if previous is not None and previous.legacy:
-        import shlex
-        print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with: "
-              f"obaaf baseline migrate {shlex.quote(str(args.write_baseline))} --owner OWNER --reason REASON "
-              "--expires YYYY-MM-DD (it carries over the findings the file covers that a new entry may accept, "
-              "and accepts nothing new), or "
-              "write the new baseline to another file.", file=sys.stderr)
+        from obaaf.checker.todo_acceptance import migration_hint, scoped_migration_command
+        from obaaf.checker.workflow import one_line
+
+        hint = migration_hint(scoped_migration_command(args.write_baseline, args.path, options))
+        # The command converts the file in place, so it is introduced as that, after the other way out
+        # (review-gpt #317: it stood under "To keep this file as it is", which it does not do).
+        print(f"error: {one_line(args.write_baseline)} is an {baseline_mod.FORMAT_V1} baseline, and "
+              "--write-baseline does not write over it. Either convert it in place, which carries over only "
+              "findings the file covers that a new baseline entry may accept and accepts nothing new, or keep "
+              "it as it is and write the new baseline to another file. To convert it, then check again:\n"
+              + hint, file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
     # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
@@ -233,10 +242,7 @@ def cmd_check(args) -> int:
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
-    # What a command the report suggests has to repeat to check the same thing.
-    # One word each, so a value that begins with a hyphen is still read as a value.
-    result.options = ([f"--config={args.config}"] if args.config else []) \
-        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
+    result.options = options
     if applied is not None:
         baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
