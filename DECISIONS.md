@@ -942,7 +942,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Reason.** An acceptance changes which risk counts at the gate. The user needs to see its owner, reason and expiry before deciding whether to take it. A unique spelling correction can be checked on a copy. Plausible alternatives need a human decision.
 
-**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment in or beside the entries to remove would be lost from, or moved onto, another entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
+**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment lies in the text the removal would delete, or after the last removed entry on its line. A comment on a line of its own before or after the removed entries is kept, and then sits beside a kept entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
 **Status.** Proposed, 2026-11-19 (A2b, #275).
 
