@@ -612,8 +612,8 @@ rules:
       an expression. Anything else counts as setting such a variable, and so does any of these names in
       the step's `shell`, `env` or inputs, in a step that is not such a script (code in another
       language, an action), or in the workflow's or the job's `env`, `defaults` or `strategy`, which a
-      step can run, and a container job's `env`, or its `options` giving the container a variable, when
-      they name such a variable (what its image holds is not read). Names are searched with continued
+      step can run, and a container job's `env` when it names such a variable, or any `-e`, `--env` or
+      `--env-file` in its `options` (what its image holds is not read). Names are searched with continued
       lines joined, `$'...'` decoded and quotes taken out. This is a reading of the workflow's text, not a guarantee: a name or a path a script
       assembles otherwise, and what a program or action an earlier step runs writes to the runner's
       files, are not read; nor is a line break that a variable, a file or a command's output puts in

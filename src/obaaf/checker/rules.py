@@ -344,6 +344,9 @@ _ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
 # The redirections that write to GITHUB_ENV from its end, or from its start after emptying it.
 _WRITE_OPS = frozenset({">>", ">", "&>>", "&>", ">|", ">&"})
+# A continued line beside an operator's character: bash joins the line first, so `<\<line break>>` is
+# `<>`, while the lexer reads `<` and `>` (the fourth review of slice 2d.13).
+_SPLIT_OPERATOR_RE = re.compile(r"[<>&|]\\\r?\n|\\\r?\n[<>&|]")
 # What a write's output may also be sent to beside GITHUB_ENV: a duplicated descriptor (`2>&1`) or nothing.
 _OTHER_TARGETS = frozenset({"/dev/null"})
 # A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
@@ -389,8 +392,10 @@ def _github_env_names(script: str) -> set | None:
     by side and any of their paths leads to GITHUB_ENV's (the second review of slice 2d.13), and so does
     listing names with `${!GITHUB_E*}` and any write to GITHUB_PATH. A write to GITHUB_ENV is read in two
     forms, redirected with `>>`, `>`, `&>>`, `&>`, `>|` or `>&` (`<>` writes over what is there, and is
-    refused), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word (dash, Ubuntu's sh, does not read
-    it, and its `echo` reads the backslash): `echo` with words and no option, the name
+    refused, and so is a script with a continued line beside an operator's character, which bash joins
+    into an operator the lexer reads in two), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word
+    (dash, Ubuntu's sh, does not read it, and its `echo` reads the backslash): `echo` with words and no
+    option, the name
     before the first `=` (or `<<`, the runner's multi-line form) a plain word written out in the
     script; and `printf` with a literal format that begins with such a name, has `%s` for its only
     conversion and no escape but a line break at its end. Any other write gives None, as does a name put
@@ -437,7 +442,7 @@ def _github_env_names(script: str) -> set | None:
             return None             # a descriptor left open on a file command, whose path `/proc` then gives
         if "GITHUB_ENV" not in targets:
             continue                # a write to an output, the summary or the state
-        if _ECHO_REPLACED_RE.search(script):
+        if _ECHO_REPLACED_RE.search(script) or _SPLIT_OPERATOR_RE.search(script):
             return None
         if words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
             return None

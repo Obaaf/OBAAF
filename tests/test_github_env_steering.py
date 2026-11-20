@@ -261,6 +261,8 @@ class TheThirdReviewTest(unittest.TestCase):
         "a read-write redirection": 'echo "VVVVPATH=/tmp/x:/usr/bin:/bin" >> "$GITHUB_ENV"\necho "V=1" 1<> "$GITHUB_ENV"',
         "printf with a read-write redirection": "printf 'V=%s\\n' 1 1<>\"$GITHUB_ENV\"",
         "a descriptor left open on an output": 'exec 3>>"$GITHUB_OUTPUT"\nf=$(readlink /proc/self/fd/3)',
+        "a continued line inside <>": 'echo "VVVVPATH=/tmp/x:/usr/bin" >> "$GITHUB_ENV"\necho "V=1" 1<\\\n>"$GITHUB_ENV"',
+        "a continued line inside <> with no descriptor": 'echo "VVVVPATH=/x" >> "$GITHUB_ENV"\necho "V=1" <\\\n>"$GITHUB_ENV"',
     }
 
     def test_each_way_past_is_cannot_tell(self):
