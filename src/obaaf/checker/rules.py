@@ -4165,13 +4165,18 @@ class WorkflowRules:
                         and after.name.startswith((f"{step.name}: ", f"{step.name} > ")))
 
         cache_steps = [] if _forbids_restores(mode) else [s for n, s in enumerate(job.steps) if restores(n, s)]
-        feeding = self._jobs_feeding(job)
-        # What the job holds is worked out only for a job that restores: reading what callers grant costs, and
-        # a repository's many called jobs mostly restore nothing (the lead found a benchmark of 2,000 callers
-        # eight times slower when it was worked out for every job).
-        held = self._may_publish_holds(job) if cache_steps or feeding else []
+        # What the job holds is worked out only for a job that restores or downloads, and the jobs it needs
+        # only for one that holds something: reading what callers grant costs, and so does following a long
+        # chain of `needs` (the lead found a benchmark of 2,000 callers eight times slower when the first was
+        # worked out for every job, and the review a chain of 2,000 downloading jobs eighteen times slower
+        # when the second was).
+        downloads = self._downloads_artifacts(job)
+        if not cache_steps and not downloads:
+            return
+        held = self._may_publish_holds(job)
         if not held:
             return
+        feeding = self._jobs_feeding(job) if downloads else []
         if cache_steps:
             names = ", ".join(f"'{s.name}'" for s in cache_steps)
             values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
@@ -4671,9 +4676,7 @@ class WorkflowRules:
         # downloads: a called release job's, for a job the call makes a release job, and any called job's, for
         # one declared a release job, whose call is the release it declares. A needed job that calls a workflow
         # restores what the jobs it calls restore.
-        effects = job.call_effects if job.called else None
-        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
-        if not called and not any(s.uses_action("actions/download-artifact") for s in job.steps):
+        if not self._downloads_artifacts(job):
             return []
         out, seen, todo = [], {job.id}, list(job.needs)
         while todo:
@@ -4690,6 +4693,14 @@ class WorkflowRules:
                 out.append(name)
             todo += dep.needs
         return sorted(out)
+
+    @staticmethod
+    def _downloads_artifacts(job: Job) -> bool:
+        """Whether a job downloads the run's artifacts: a step that uses `actions/download-artifact`, or, for a
+        job that calls workflows of the repository, a called job that does (`_jobs_feeding`)."""
+        effects = job.call_effects if job.called else None
+        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
+        return called or any(s.uses_action("actions/download-artifact") for s in job.steps)
 
     @staticmethod
     def _cache_step(step: Step) -> str:
