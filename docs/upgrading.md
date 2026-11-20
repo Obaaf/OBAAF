@@ -65,6 +65,27 @@ obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
 
 Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
 
+### Tighten credentials on a checkout
+
+Run `obaaf fix . --tighten checkout-credentials` with the same gate options, including its baseline. The command previews a literal `persist-credentials: false` on directly identified checkout steps reported by OBAAF-GHA-011. Review later Git operations that use the checkout credential. A checker proof reads the workflow without running those steps.
+
+The preview gives each candidate a name based on its workflow, job and step number. To request one checkout by name, copy the displayed name and supply it to `--candidate`. For example:
+
+```sh
+obaaf fix . --tighten checkout-credentials --candidate '.github/workflows/ci.yml#build/step-1' \
+  --baseline .github/obaaf-baseline.json --fail-on low
+```
+
+If the change disturbs accepted findings, the report gives the count and identifies the affected rules and locations. If it leaves unmatched entries, it names them. Review the entries with their owner, make any separately approved changes, and rerun the named preview with the same gate options. Add `--apply` to write a proven diff to clean tracked targets. An unresolved named request exits 1 and leaves the files untouched.
+
+### Preview confinement for one agent job
+
+Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs` key. If your installed catalogue lists no released egress-action commit, the command explains the hold and stops.
+
+Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
+
+Because `obaaf fix egress` selects this command, write a repository folder named `egress` as `./egress` in other `obaaf fix` commands. The commands OBAAF prints already do.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |

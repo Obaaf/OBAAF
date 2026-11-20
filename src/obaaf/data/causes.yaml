@@ -70,7 +70,7 @@ causes:
     sentence: "Checkout leaves a credential available to later steps."
     rules: [OBAAF-GHA-011]
     fix_kind: tightening
-    next: "Set persist-credentials to false on the reported checkout step and review later steps that need credentials."
+    next: "Review later steps that need Git credentials."
   - id: agent-instruction-source
     sentence: "The workflow does not establish that the agent reads instructions from a trusted revision."
     rules: [OBAAF-GHA-012]

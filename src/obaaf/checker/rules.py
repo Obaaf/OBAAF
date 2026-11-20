@@ -76,6 +76,8 @@ class Control:
     detail: str = ""
     id: str = ""        # a short name that stays the same when `name` is reworded
 
+    action_conditions: tuple[str, ...] = field(default=(), compare=False, repr=False)
+
     def __post_init__(self) -> None:
         if self.verdict not in (VERIFIED, NOT_MET, CANNOT_TELL):
             raise ValueError(f"a control is {VERIFIED}, {NOT_MET} or {CANNOT_TELL}, not {self.verdict!r}")
@@ -2540,7 +2542,8 @@ class WorkflowRules:
         if readings:
             rank = {VERIFIED: 0, CANNOT_TELL: 1, NOT_MET: 2}
             best = min(readings, key=lambda r: rank[r.verdict])     # the first of the best, in the order above
-            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID), best.kind, best.values
+            conditions = tuple(c for reading in readings for c in reading.conditions)
+            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
         if declared:
@@ -2783,6 +2786,17 @@ class WorkflowRules:
             return "runs an agent CLI"
         return None
 
+    def draft_agent_steps(self, job: Job) -> list[Step]:
+        """Direct agent candidates for a draft, excluding steps that only install or mention a CLI."""
+        candidates = []
+        for step in job.steps:
+            reason = self._agent_step(step, step.agent_text(self._agent_patterns()))
+            if reason == "runs an agent CLI" and (self._installs_only(job, step) or self._package_mention_only(step)):
+                continue
+            if reason:
+                candidates.append(step)
+        return candidates
+
     _OUTPUTS = frozenset({"workspace", "scratch"})
 
     # A command that installs packages with a JavaScript package manager, with `sudo` and its short
@@ -2982,6 +2996,11 @@ class WorkflowRules:
                 place.problems.append(f"{where} names {name} under env, and the action at a listed commit removes "
                                       "every OPENSSL_ variable from its own steps before it reads env (slice 2c.11a), "
                                       "so it finds the name unset and refuses to run (issue #197)")
+            elif listed and egress_mod.reserved_under_env(name):
+                # Known only for a listed commit, as above (added by the review of A3a, review-gpt #283).
+                place.problems.append(f"{where} names {name} under env, a name the action at a listed commit "
+                                      "sets, withholds or reads as AWF's own configuration, so the action "
+                                      "refuses to run")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
@@ -3067,7 +3086,8 @@ class WorkflowRules:
                 place.proxy.append((name, found))
             elif name in env_names:
                 if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
-                        or (listed and egress_mod.removed_before_inputs(name)):
+                        or (listed and (egress_mod.removed_before_inputs(name)
+                                        or egress_mod.reserved_under_env(name))):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:
@@ -3277,11 +3297,20 @@ class WorkflowRules:
                 shown = f"{host} (through AWF's API proxy)"
                 if shown not in allow_shown:
                     allow_shown.append(shown)
+        # The ordinary report summarises these groups and prioritises definite
+        # problems. Keep the complete evidence for the one-job draft as well.
+        grouped = {}
+
+        def group(bucket, entries, explanation):
+            summary = egress_mod.joined(entries, 3) + explanation
+            grouped[summary] = "; ".join(entries) + explanation
+            bucket.append(summary)
+
         if agents_outside:
-            problems.append(f"{egress_mod.joined(agents_outside, 3)}, outside the confined command")
+            group(problems, agents_outside, ", outside the confined command")
         if outside:
-            problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
-                            "(the checker tells where an agent runs by where its key goes)")
+            group(problems, outside, ", so the agent may run outside the confined command "
+                  "(the checker tells where an agent runs by where its key goes)")
         elif not agents_outside and not any(place.reaches for place in placements):
             recognised = [step for step in confined if self._agent_step(step, step.agent_text(self._agent_patterns()))
                           or step.index in job.agent_script_steps]
@@ -3328,9 +3357,9 @@ class WorkflowRules:
                 unsure.append(f"{where}, before it, may leave a process running beside it "
                               f"({egress_mod.leaves_process(step.run)}), which could reach what the command wrote")
         if after:
-            unsure.append(f"{egress_mod.joined(after, 3)} can run after it or beside it, and the checker cannot tell "
-                          "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
-                          "taken to save files as data)")
+            group(unsure, after, " can run after it or beside it, and the checker cannot tell "
+                  "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
+                  "taken to save files as data)")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
@@ -3339,8 +3368,10 @@ class WorkflowRules:
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
+        conditions = tuple(grouped.get(message, message) for message in (*problems, *unsure))
         return egress_mod.Reading(verdict, detail, "egress-action",
-                                  {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()})
+                                  {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()},
+                                  conditions)
 
     # ---- Harden-Runner
     def _harden_runner(self, job: Job) -> egress_mod.Reading | None:
