@@ -418,7 +418,7 @@ class Hit:
     job: str | None
     state: str
     step: tuple | None = None      # the step the finding names, as (line, name); None for one on the job
-    covers: frozenset = frozenset()   # for OBAAF-GHA-006's `restores` finding: every step it is about
+    covers: frozenset = frozenset()   # for OBAAF-GHA-006's `restores` findings: every step it is about
 
 
 @dataclass
@@ -461,7 +461,7 @@ def obaaf_findings(path: Path) -> FileResult:
     for f in result.findings:
         covers = frozenset()
         job = parsed.jobs.get(f.job) if f.job is not None else None
-        if f.rule == "OBAAF-GHA-006" and f.kind.startswith("restores") and job is not None:
+        if f.rule == "OBAAF-GHA-006" and f.kind.startswith(("restores", "capability-restores")) and job is not None:
             # One finding for all the job's cache steps, at the first; the others are in its facts. The
             # steps are the ones the rule counts (WorkflowRules._restores_cache), not a match of the facts.
             covers = frozenset((st.line, st.name) for st in job.steps if WorkflowRules._restores_cache(st))
@@ -501,7 +501,8 @@ def answer(case: Case, rules: list, result: FileResult) -> tuple[list, list, set
     it is of a mapped rule and not `fixed`, and is on the case's job (anywhere, for a case on the file).
     The job itself, when zizmor named it or a part of it that is not a step, is answered by any such
     finding. Each step zizmor named is answered only by a finding on that step, or by OBAAF-GHA-006's
-    `restores` finding when it is about that step: a finding on the job as a whole answers no step."""
+    `restores` or `capability-restores` finding when it is about that step: a finding on the job as a whole
+    answers no step."""
     found = [h for h in result.hits if h.rule in rules and h.state != "fixed"
              and (case.job is None or h.job == case.job)]
     if case.job is None:

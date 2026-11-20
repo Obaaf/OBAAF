@@ -89,6 +89,53 @@ class EvidenceTests(unittest.TestCase):
         self.env["branch_policies"][0]["type"] = "tag"
         self.assertEqual(self.result().verdict, "not met")
 
+    def test_each_check_named_in_d104_decides_on_its_own(self):
+        """One change per case, each of which only that check catches (review of #284: with any one of
+        these checks removed, the other tests still passed)."""
+        def protected_mode_unread(s, e):
+            e["deployment_branches"] = "protected"
+            e.pop("branch_policies")
+            s["branch_protection"] = {"status": "unread", "reason_code": "forbidden",
+                                      "reason": "protection refused", "needs": "read"}
+
+        def twin(s, e, name):
+            s["environments"]["value"].append({**copy.deepcopy(e), "name": name})
+            s["environment_secrets"]["value"].setdefault(name, [])
+
+        cases = [
+            ("api host", lambda s, e: self.data.update(api="https://github.example.com/api/v3"),
+             "release", "API host differs"),
+            ("observed name", lambda s, e: s["repository"]["value"].update(full_name="example-studio/other"),
+             "release", "observed repository identity"),
+            ("repository unread", lambda s, e: s.update(repository={
+                "status": "unread", "reason_code": "forbidden", "reason": "repository refused", "needs": "read"}),
+             "release", "repository refused"),
+            ("environment listed twice", lambda s, e: s["environments"]["value"].append(copy.deepcopy(e)),
+             "release", "inventories disagree"),
+            ("two environments one name", lambda s, e: twin(s, e, "Release"), "release", "ambiguous"),
+            ("computed environment", lambda s, e: None, "${{ inputs.target }}", "literal environment"),
+            ("policy of no type", lambda s, e: e["branch_policies"][0].update(type="other"),
+             "release", "literal branches"),
+            ("brace in a policy", lambda s, e: e["branch_policies"][0].update(name="{main,dev}"),
+             "release", "literal branches"),
+            ("branch not observed", lambda s, e: e["branch_policies"][0].update(name="develop"),
+             "release", "was not observed"),
+            ("protection unread", protected_mode_unread, "release", "protection refused"),
+        ]
+        for label, change, environment, reason in cases:
+            with self.subTest(label):
+                self.setUp()
+                change(self.settings, self.env)
+                try:
+                    result = self.read().assess("PACKAGE_INDEX_TOKEN", environment)
+                except snapshot.SnapshotError as exc:
+                    self.fail(f"the snapshot format refused the case itself: {exc}")
+                self.assertEqual(result.verdict, "cannot tell", result.reason)
+                self.assertIn(reason, result.reason)
+        self.setUp()
+        result = self.read().assess("PACKAGE_*", "release")
+        self.assertEqual((result.verdict, result.reason), ("cannot tell", "a literal secret name is needed"))
+
     def test_personal_repository_requires_observed_owner_type(self):
         self.settings["organization_secrets"] = {"status": "not_applicable", "reason": "personal repository"}
         self.assertEqual(self.result().verdict, "cannot tell")
@@ -145,6 +192,25 @@ jobs:
             self.assertEqual(status, 0, err)
             self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
             self.assertIn("outside the checked repository", err)
+            # A link from outside to the repository's snapshot: the file is inside, but the path given is
+            # not one OBAAF-REPO-001 checks for an owner, so nothing has checked who may change it.
+            link = Path(directory) / "link.json"
+            link.symlink_to(self.path)
+            status, out, err = run_cli(*args, "--settings", str(link))
+            self.assertEqual(status, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
+            self.assertIn("outside the checked repository", err)
+            self.assertFalse(any("settings.json" in str(f) for f in json.loads(out)["findings"]
+                                 if f["rule"] == "OBAAF-REPO-001"))
+            # And the reverse: a link inside the repository to a snapshot outside it. The link has an
+            # owner, but what it leads to does not.
+            inner = self.root / ".github/outside-link.json"
+            inner.symlink_to(outside)
+            status, _, err = run_cli(*args, "--settings", str(inner))
+            self.assertEqual(status, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
+            self.assertIn("outside the checked repository", err)
+            inner.unlink()
         self.path.write_text("{}")
         self.assertEqual(run_cli(*args)[0], 0)
         self.assertEqual(run_cli(*args, "--settings", str(self.path))[0], 2)
