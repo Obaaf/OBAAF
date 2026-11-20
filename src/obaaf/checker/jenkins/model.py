@@ -1107,7 +1107,7 @@ def _k8s_key(a: Agent, key: str, value) -> None:
             if isinstance(item, Call) and callee_name(item) == "hostPathVolume":
                 path = literal(named_arg(item, "hostPath")) or "?"
                 a.pod_settings.append("a mount of the Docker socket" if "docker.sock" in path else "a hostPath volume")
-    elif key == "hostNetwork" and path_of(value) == "true":
+    elif key == "hostNetwork" and (path_of(value) == "true" or (literal(value) or "").lower() == "true"):
         a.pod_settings.append("host networking")
     elif key == "workspaceVolume" and value is not None:
         # The Kubernetes plugin's workspace volumes: emptyDir, a per-pod dynamic claim and a generic ephemeral
@@ -1116,17 +1116,24 @@ def _k8s_key(a: Agent, key: str, value) -> None:
         if kind in ("emptyDirWorkspaceVolume", "dynamicPVC", "genericEphemeralVolume"):
             a.pod_workspace = None
         else:
+            # "claim:NAME" and "nfs:PATH" are one directory wherever the pod runs; "host:PATH" is the node's.
             which = None
-            if isinstance(value, Call):
-                which = next((literal(named_arg(value, k)) for k in ("claimName", "hostPath", "serverPath")
-                              if named_arg(value, k) is not None), None)
+            for key, tag in (("claimName", "claim"), ("serverPath", "nfs"), ("hostPath", "host")):
+                if isinstance(value, Call) and named_arg(value, key) is not None:
+                    found = literal(named_arg(value, key))
+                    which = f"{tag}:{found}" if found is not None else None
+                    break
             a.pod_workspace = which or "?"
+            if kind == "hostPathWorkspaceVolume":
+                path = (which or "host:?")[5:]
+                a.pod_settings.append("a mount of the host root file system" if path.strip("/") == "" and path
+                                      else "a hostPath volume")
 
 
 def _container_image(a: Agent, item: Call) -> None:
     """The image of a containerTemplate: a named argument, or `image '...'` in its closure (flagship
     slice 2d.2k: the closure form was reported as "Image '?'"); and `privileged: true` (slice 2d.2j)."""
-    if path_of(named_arg(item, "privileged")) == "true":
+    if path_of(named_arg(item, "privileged")) == "true" or (literal(named_arg(item, "privileged")) or "").lower() == "true":
         a.pod_settings.append("a privileged container")
     img = named_arg(item, "image")
     if img is None and item.closure is not None:
@@ -1819,15 +1826,17 @@ class Builder:
             return
         if name == "node" and call.closure is not None:
             arg = first_arg(call) if call.args else named_arg(call, "label")
-            label = literal(arg)
+            label = literal(arg) if not (isinstance(arg, Str) and arg.interpolated) else None
             if label is None and isinstance(arg, Name) and arg.name in self.p.literals and \
                     arg.name not in self.p.nonliteral_names:
                 label = self.p.literals[arg.name].text()     # def where = 'built-in'; node(where) (2d.2j)
             dynamic = arg is not None and label is None
             # node(POD_LABEL) inside podTemplate is the pod itself (flagship slice 2d.2j): its steps run in the
             # pod the template describes, so they stay under it, in a workspace of that pod.
+            # Any label the file does not fix there is read as the pod's (`POD_LABEL`, "${POD_LABEL}", the
+            # template's own label variable); a literal is the pod's only when it is the template's label.
             pod = ctx.agent if ctx.agent is not None and ctx.agent.kind == "kubernetes" and (
-                path_of(arg) in ("POD_LABEL", "env.POD_LABEL") or (label and label == ctx.agent.label)) else None
+                dynamic or (label and label == ctx.agent.label)) else None
             if pod is not None:
                 wid = self.new_ws("kubernetes", call.line, pod.label, pod.pod_workspace,
                                   how=f"node() at line {call.line}, in the pod of podTemplate at line {pod.line}")

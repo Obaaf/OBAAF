@@ -154,7 +154,7 @@ every step runs in:
 | `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
 | a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
 | `ws()` | another directory on the same node, written by the same user: counted as shared |
-| `node(POD_LABEL)` inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export |
+| `node(POD_LABEL)` (or any label the file does not fix) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim or export share it |
 | a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
 | a closure, where it is written | one of its own; where the file calls it, the caller's |
 
@@ -174,31 +174,44 @@ The verdicts:
   does not fix), or `archiveArtifacts` brought back with `unarchive`: **high**;
 - the effect before the agent in a workspace Jenkins keeps between builds: **medium**, because what
   the agent leaves there (a Git hook, `.git/config`, a script the effect runs) is in place for the
-  effect in the next build. A fresh pod, or `deleteDir()` or a full `cleanWs()` that certainly runs
-  before the effect (or in a `post { always }` or `cleanup` block after the agent), clears it;
-  `cleanWs` with `patterns`, `externalDelete` or a `cleanWhen...: false` does not;
+  effect in the next build. A fresh pod, or `deleteDir()`, a full `cleanWs()` (or the `WsCleanup`
+  step) or a checkout with `WipeWorkspace` that certainly runs before the effect (or a clean in a
+  `post { always }` or `cleanup` block after the agent), clears it; `cleanWs` with `patterns`,
+  `externalDelete` or a `cleanWhen...: false`, and `CleanBeforeCheckout` (`git clean`, which keeps
+  `.git`), do not;
 - the agent and the effect in separate allocations that may land on the same machine (the same label,
-  overlapping label expressions such as `linux && docker` and `linux`, any agent, a label the file
-  does not fix, the same `customWorkspace` or `ws()` path, or pods mounting the same workspace claim):
+  label expressions that require a common label such as `linux && docker` and `linux`, an expression
+  that requires none such as `sandbox -> gpu`, any agent, a label the file does not fix, the same
+  `customWorkspace` or `ws()` path, or pods whose workspace claim the file does not fix):
   **unknown**, because Jenkins keeps a job's workspace directory on an agent between allocations and
   which agents carry which labels is controller configuration;
 - different labels, or separate pods with their own workspace: no finding.
 
 OBAAF-JEN-002 counts an AI agent's work like a change request's: an agent stage and a stage that
-holds credentials or publishes on the same persistent label is a medium finding. A label expression
-with a term naming the built-in node that no `!` negates (`built-in || linux`) can place work on the
-controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
+holds credentials or publishes on the same persistent label, or on labels that require a common one,
+is a medium finding. Label expressions are parsed with Jenkins's operators (`!`, `&&`, `||`, `->`,
+`<->`, brackets). One that names the built-in node and can hold on it (`built-in || linux`,
+`linux -> built-in`) can place work on the controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
 `$JENKINS_HOME` (when the controller itself runs in a container, Docker Pipeline also passes it
 `--volumes-from`). A label expression that requires no label (`!windows`) is read like `agent any`.
 
 OBAAF-JEN-006 reads docker run options as docker splits them: grouped short options (`-itv`), values
 written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
 and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
-socket, or system folders (`/var/run`, `/run`, `/proc`, `/sys`, `/dev`, `/etc`, `/root`,
-`/var/lib/docker` and others) reaches the host; an ordinary folder (`/home/ci/.m2`) does not.
-`--volumes-from` is an unknown. Pod specs are read as YAML, which also reads JSON; `podTemplate`'s own
-`privileged: true`, `hostPathVolume` and `hostNetwork` count; a Kubernetes agent with no pod spec at all
-mounts the service account token.
+socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
+or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/usr` and others; a
+read-only one counts only where it holds sockets or devices) reaches the host. A folder inside one
+(`/root/.m2`, `/etc/localtime:ro`, `/dev/shm`) does not.
+`--volumes-from` is an unknown. Jenkins splits `args` itself, not exactly as a shell does, so the
+options are read both as a shell splits them and between blanks, and anything either reading finds
+counts; a backslash in them is an unknown. Booleans are read as docker reads them (`--privileged=t` is
+privileged), paths are cleaned (`//var/run`), `--mount` fields are read as CSV with keys in any case,
+`--use-api-socket` mounts the Docker socket, and Windows drive roots and the Docker named pipe count.
+Pod specs are read as YAML, which also reads JSON: string booleans count, a projected
+`serviceAccountToken` volume mounts a token whatever `automountServiceAccountToken` says, only the
+first document is read for the token, and a spec nested too deeply or too large to read is an unknown.
+`podTemplate`'s own `privileged`, `hostPathVolume`, `hostNetwork` and a `hostPathWorkspaceVolume`
+count; a Kubernetes agent with no pod spec at all mounts the service account token.
 
 OBAAF-JEN-007 passes a stage whose agent's shell steps run in a container started with exactly one
 network, `none`, and nothing that reaches the host. A host path mounted into that container may hold
@@ -224,7 +237,11 @@ limited by it.
   recorded attempts in [bypass-attempts.md](bypass-attempts.md#2d2j-agent-stages-and-workspaces)
   list them, and #330 tracks them;
 - a closure handed to code outside the file, which is read where it is written, in a workspace of
-  its own.
+  its own;
+- a pod spec whose YAML redefines the plugin's workspace volume, and a label built from an
+  `environment` value (read as a label the file does not fix);
+- labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
+  compares labels with case.
 
 **Publishing.** The upload commands shared with the workflow checker, plus `mvn deploy`, `gradle
 publish`, JFrog, Helm, crane and skopeo pushes, `curl --upload-file`, `docker.image(...).push()`

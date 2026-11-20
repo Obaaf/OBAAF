@@ -444,9 +444,14 @@ class ReviewTest(unittest.TestCase):
         pvc = ("agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}'; workspaceVolume "
                "persistentVolumeClaimWorkspaceVolume(claimName: 'ci-ws', readOnly: false) } }")
         text = two_stages(AGENT, PUSH, top="agent none", first_agent=pvc, second_agent=pvc)
-        self.assertEqual(status(text, "OBAAF-JEN-003"), "unknown")
+        # Two pods on one named claim share its directory (the second review: R019 is high, not unknown).
+        result = [f for f in analyze(text).findings if f.rule == "OBAAF-JEN-003"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("high", 14)])
+        self.assertIn("claim 'ci-ws'", result[0].message)
         other = text.replace("'ci-ws'", "'other-ws'", 1)
         self.assertEqual(status(other, "OBAAF-JEN-003"), "pass")
+        computed = text.replace("claimName: 'ci-ws'", "claimName: params.CLAIM", 1)
+        self.assertEqual(status(computed, "OBAAF-JEN-003"), "unknown")
         before = two_stages(f"{PUSH}\n{AGENT}", "echo ok", top=pvc)
         self.assertEqual(findings(before, "OBAAF-JEN-003"), [("medium", 8)])
         scripted = """
@@ -565,6 +570,90 @@ podTemplate(ARGS) {
         analyze(f"node('linux') {{\n{steps}\n}}")
         self.assertLess(time.monotonic() - start, 3.0)
 
+
+
+class SecondReviewTest(unittest.TestCase):
+    """The second review pass on the fixes (cases R116 to R177)."""
+
+    def test_r116_r126_docker_options_as_docker_and_jenkins_read_them(self):
+        review = NoNetworkTest().review
+        for args in ("--privileged=t", "--privileged=True", "-v //var/run://var/run",
+                     "--mount type=bind,Source=/var/run,target=/r", '--mount type=bind,"src=/var/run",target=/r',
+                     "--mount type=bind,src=../../../../../..,target=/h", "--use-api-socket",
+                     "--device-cgroup-rule=b_*:*_rwm", r"-v C:\\:C:\\host", r"-v \\\\.\\pipe\\docker_engine:/p",
+                     "-v /var/lib/docker:/d:ro", "-v /proc:/host/proc:ro"):
+            self.assertNotEqual(status(review(args), "OBAAF-JEN-006"), "pass", args)
+            self.assertEqual(status(review(f"--network none {args}"), "OBAAF-JEN-007"), "fail", args)
+        # Jenkins splits `args` itself; a backslash makes the split uncertain, so both readings count.
+        self.assertEqual(status(review(r"-e A=\\ --privileged"), "OBAAF-JEN-006"), "fail")
+
+    def test_r127_r137_ordinary_mounts_are_not_host_access(self):
+        review = NoNetworkTest().review
+        for args in ("-v /root/.m2:/root/.m2", "-v /etc/localtime:/etc/localtime:ro", "-v /etc/passwd:/etc/passwd:ro",
+                     "-v /dev/shm:/dev/shm", "-v /var/run/docker.sock", "-v $HOME/.m2:/root/.m2",
+                     "-v /home/jenkins/.gradle:/root/.gradle"):
+            self.assertEqual(findings(review(args), "OBAAF-JEN-006"), [], args)
+        # A whole system folder still is, and so is a socket's folder read-only.
+        for args in ("-v /etc:/host-etc", "-v /run:/run:ro", "-v /root:/root"):
+            self.assertEqual([s for s, _ in findings(review(args), "OBAAF-JEN-006")], ["high"], args)
+
+    def test_r143_r151_pod_specs(self):
+        def pod(spec):
+            return two_stages(AGENT, "echo ok", top="agent { kubernetes { yaml '''" + spec + "''' } }")
+
+        def problems(spec):
+            return " ".join(f.message for f in analyze(pod(spec)).findings if f.rule == "OBAAF-JEN-006")
+        safe = "spec:\n  automountServiceAccountToken: false\n  containers:\n  - name: a\n    image: x\n"
+        self.assertEqual(problems(safe), "")
+        self.assertIn("privileged", problems(safe.replace("image: x", "image: x\n    securityContext:\n"
+                                                                        "      privileged: 'true'")))
+        self.assertEqual(problems(safe.replace("spec:\n", "spec:\n  hostUsers: false\n")), "")
+        projected = safe + ("  volumes:\n  - name: t\n    projected:\n      sources:\n"
+                            "      - serviceAccountToken:\n          path: token\n")
+        self.assertIn("service account token", problems(projected))
+        second = "spec:\n  containers:\n  - name: a\n    image: x\n---\nspec:\n  automountServiceAccountToken: false\n"
+        self.assertIn("service account token", problems(second))
+        env = safe.replace("image: x", "image: x\n    env:\n    - name: NOTE\n      value: no docker.sock here")
+        self.assertEqual(problems(env), "")
+        aliases = ("spec:\n  automountServiceAccountToken: false\n  hostAliases: &h\n"
+                   + "".join(f"  - ip: 10.0.0.{i % 250}\n    hostnames: [h{i}]\n" for i in range(520))
+                   + "  x: [" + ", ".join(["*h"] * 40) + "]\n  containers:\n  - name: a\n    image: x\n"
+                   "    securityContext: {privileged: true}\n")
+        self.assertNotEqual(status(pod(aliases), "OBAAF-JEN-006"), "pass")
+
+    def test_r157_r159_pods_and_their_workspace_volumes(self):
+        for node in ("node(label)", 'node("${POD_LABEL}")', "node(env.POD_LABEL)"):
+            text = ('def label = "agent-${UUID.randomUUID()}"\npodTemplate(label: label, containers: '
+                    f"[containerTemplate(name: 'a', image: 'x')]) {{\n  {node} {{ sh 'claude -p fix' }}\n}}\n")
+            self.assertIn("service account token",
+                          " ".join(f.message for f in analyze(text).findings if f.rule == "OBAAF-JEN-006"), node)
+        root = ("podTemplate(yaml: 'spec: {automountServiceAccountToken: false}', workspaceVolume: "
+                "hostPathWorkspaceVolume(hostPath: '/')) {\n  node(POD_LABEL) { sh 'make' }\n}\n")
+        self.assertIn("host root", " ".join(f.message for f in analyze(root).findings if f.rule == "OBAAF-JEN-006"))
+
+    def test_r101_r153_r155_r171_label_expressions(self):
+        self.assertEqual(status("node('docker -> linux') { sh 'make' }", "OBAAF-JEN-002"), "unknown")
+        reasons = [u.reason for u in analyze("node('docker -> linux') { sh 'make' }").unknowns]
+        self.assertTrue(any("requires none" in r for r in reasons), reasons)
+        self.assertEqual(findings("node('linux -> built-in') { sh 'make' }", "OBAAF-JEN-002"), [("high", 1)])
+        for left in ("sandbox -> gpu", "linux <-> sandbox"):
+            text = two_stages(AGENT, PUSH, top="agent none", first_agent=f"agent {{ label '{left}' }}",
+                              second_agent="agent { label 'trusted' }")
+            self.assertEqual(status(text, "OBAAF-JEN-003"), "unknown", left)
+        shared = SharedLabelTest.TEXT.replace("label 'linux'", "label 'linux && docker'").replace("LABEL", "linux")
+        result = [f for f in analyze(shared).findings if f.rule == "OBAAF-JEN-002"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("medium", 11)])
+        self.assertIn("both require 'linux'", result[0].message)
+
+    def test_r138_r139_other_ways_to_wipe_the_workspace(self):
+        mirror = EarlierEffectTest()
+        for clean in ("step([$class: 'WsCleanup'])",
+                      "checkout([$class: 'GitSCM', branches: [[name: 'main']], extensions: [[$class: 'WipeWorkspace']], "
+                      "userRemoteConfigs: [[url: 'https://example.invalid/r.git']]])"):
+            self.assertEqual(status(mirror.case(before=clean), "OBAAF-JEN-003"), "pass", clean)
+        keeps_git = ("checkout([$class: 'GitSCM', extensions: [[$class: 'CleanBeforeCheckout']], "
+                     "userRemoteConfigs: [[url: 'https://example.invalid/r.git']]])")
+        self.assertEqual(findings(mirror.case(before=keeps_git), "OBAAF-JEN-003"), [("medium", 8)])
 
 if __name__ == "__main__":
     unittest.main()

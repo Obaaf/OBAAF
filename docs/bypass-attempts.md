@@ -2634,6 +2634,62 @@ Not fixed and listed in jenkins.md: matrix cells (R104), values that carry an ag
 | R114 | 003 | 400+400 steps, 30 KB | 3.99 s | slow | fixed: 0.22 s; 2:unknown 3:fail 6:n/a 7:fail |
 | R115 | 003 | 1.4 KB file, methods expanded 60 times | 12.5 s | slow | fixed: 0.34 s; 2:unknown 3:fail 6:n/a 7:fail |
 
+### Second pass, on `3d797e0`
+
+The same reviewer re-ran R001 to R115 on the fixes and wrote 62 more. No earlier case got worse. It confirmed every claimed fix but one: R019, two pods on one named workspace claim, share its directory for certain, so it is now high, not unknown. It also asked for R101 to pair in OBAAF-JEN-002, which it now does. The new attempts: 26 ways past (15 of them blocking, 5 of those resting on behaviour the reviewer was not sure of), 9 false positives, 1 slow, 25 held. The third commit of #331 fixes 24 of the ways past, 8 of the false positives and the slow case, by class. Each is a test in `SecondReviewTest`. The options are read both as a shell and as blanks split them. Docker's booleans, path cleaning and `--mount` CSV are followed. System folders count whole and not their subfolders. Pod specs read string booleans and projected tokens and report what they cannot read. A computed label in a pod template is the pod. Label expressions are parsed with Jenkins's operators. `WsCleanup` and `WipeWorkspace` clean.
+
+| Id | Rule | What the file does | Result at `3d797e0` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R116 | 006/007 | `--network none --privileged=t` | P/P | blocking way past | fixed: docker's booleans |
+| R117 | 006 | `-v //var/run://var/run` | 006 P | blocking way past | fixed: paths cleaned |
+| R118 | 006/007 | `--mount type=bind,Source=/var/run` | P/P | blocking way past | fixed: keys in any case |
+| R119 | 006/007 | `--mount 'type=bind,"src=/var/run",…'` | P/P | blocking way past | fixed: CSV fields |
+| R120 | 006 | `--mount …,src=../../../../../..` | 006 P | blocking way past (unsure) | fixed: a relative source with `..` counts |
+| R121 | 006/007 | `--use-api-socket` | P/P | blocking way past | fixed |
+| R122 | 006/007 | `--device-cgroup-rule='b *:* rwm'` | P/P | blocking way past | fixed |
+| R123 | 006/007 | `-e 'A\' -e 'B --privileged -e 'C=1` | P/P | blocking way past (unsure) | fixed: both readings count, a backslash is an unknown |
+| R124 | 006/007 | `-e X=\ --privileged` | P/P | way past (unsure) | fixed: same |
+| R125 | 006/007 | `-v \\.\pipe\docker_engine:…` | P/P | way past | fixed |
+| R126 | 006/007 | `-v C:\:C:\host` | P/P | way past | fixed |
+| R127 | 006 | `-v /var/run/docker.sock` (one field) | high | false positive | fixed: an anonymous volume |
+| R128–R130, R132, R133 | 006 | `/run/`, `type=BIND`, `cap_dac_read_search`, `-v=`, `/run/../` | high | held | held |
+| R131 | 006 | `--security-opt label:type:spc_t` | P | unsure | now high (`label=type…` counts) |
+| R134 | 006 | `-v /root/.m2:/root/.m2` (Jenkins's Maven tutorial) | high | blocking false positive | fixed: a folder inside a system folder is not host access |
+| R135 | 006 | read-only `/etc/localtime`, `/etc/passwd`, `/etc/group` | high | blocking false positive | fixed |
+| R136 | 006 | `$HOME/.m2`, `/home/jenkins/.gradle` | P | held | held |
+| R137 | 006 | `-v /dev/shm:/dev/shm` | high | false positive | fixed |
+| R138 | 003 | `step([$class:'WsCleanup'])` before push | medium | false positive (earlier) | fixed |
+| R139 | 003 | checkout with `WipeWorkspace` | medium | false positive (earlier) | fixed |
+| R140, R142 | 003 | `cleanWs([cleanWhenSuccess:false])`; all `cleanWhen*` true | M / P | held | held |
+| R141 | 003 | `cleanWs(patterns: [])` | medium | false positive (minor) | not fixed: any `patterns` is read as partial |
+| R143 | 006 | `privileged: "true"` (string) | P | way past (unsure) | fixed: string booleans count |
+| R144 | 006 | privileged pod past a 20,000-node walk (aliases) | P | blocking way past | fixed: aliases are walked within a larger cap, and a spec too large is an unknown |
+| R145 | 006 | `hostUsers: false` | high | blocking false positive | fixed: `hostUsers` is not read |
+| R146 | 006 | automount false, projected `serviceAccountToken` | P | way past | fixed |
+| R147 | 006 | a second YAML document sets automount false | P | way past (unsure) | fixed: only the first document counts for the token, and more than one is an unknown |
+| R148 | 006 | custom tag forces the fallback; JSON-form privileged | wrong reason | way past (unsure) | fixed: the fallback reads JSON forms and says the spec was not read |
+| R149, R150 | 006 | merge key; privileged initContainer | high | held | held |
+| R151 | 006 | an env value that mentions `docker.sock` | high | false positive | fixed: only a hostPath's path counts |
+| R152 | 006 | capabilities `add:` as one string | P | held | held |
+| R153 | 002 | `docker -> linux` | label unknown | way past | fixed: an expression that requires no label selects like `agent any` |
+| R154 | 003 | `sandbox -> gpu` vs `trusted` | P | way past | fixed: unknown |
+| R155 | 003 | `linux <-> sandbox` vs `trusted` | P | way past (minor) | fixed: unknown |
+| R156 | 002 | quoted `"built-in && x"` | unknown | held | held |
+| R157 | 006 | `podTemplate(label: label) { node(label) }` | P | blocking way past | fixed: a computed label in a pod template is the pod |
+| R158 | 006 | `node("${POD_LABEL}")` | P | blocking way past | fixed |
+| R159 | 006 | `hostPathWorkspaceVolume(hostPath: '/')` | P | blocking way past | fixed |
+| R160 | 003 | YAML volume named `workspace-volume` on a claim | P | way past (unsure) | not fixed: listed in jenkins.md |
+| R161, R162 | 003 | `$class` map form; `dynamicPVC` | M / P | held | held |
+| R163 | 006 | `containerTemplate(privileged: 'true')` | P | way past (unsure) | fixed |
+| R164 | 006 | `volumes:` list held in a variable | unknown | held | held |
+| R165–R168 | 003 | `options { retry }` at pipeline and stage level; retry in a method; with conditions | H, M, H, H | held | held |
+| R169 | 002 | `environment { RUN_ON = 'built-in' }` + `label "${env.RUN_ON}"` | floating unknown | way past (unsure) | not fixed: listed in jenkins.md |
+| R170 | 002 | `@Field final String WHERE='master'` | high | held | held |
+| R171 | 002 | AI on `linux && docker`, publish on `linux` | unknown | way past (minor) | fixed: labels that require a common one pair |
+| R172–R174 | all | ordinary podTemplate; default pod; `ws()` paths on different labels | clean | held | held |
+| R175, R176 | 006/007 | 3,000-deep YAML; 4,000 `-v` | — | held | held |
+| R177 | 006 | six 1,200-deep pod specs, 15 KB | 5.0 s | slow | fixed: 0.01 s, an unknown |
+
 ### Reviewer B's attempts (2026-11-17)
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.

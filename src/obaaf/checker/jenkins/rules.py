@@ -11,6 +11,7 @@ it. A finding describes what the file shows; an unknown says what the file canno
 from __future__ import annotations
 
 import bisect
+import csv
 import functools
 import posixpath
 import json
@@ -26,9 +27,10 @@ from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
     COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline,
     StepUse,
-    chain_name, code_text_arg, first_arg, literal, named_arg, shell_script, source_texts, untrusted_source,
+    chain_name, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
+    untrusted_source,
 )
-from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Name, Prop, Str, path_of
+from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Name, Prop, Str, callee_name, path_of
 from obaaf.checker.rules import Finding
 from obaaf.checker.workflow import declared_lane
 
@@ -66,125 +68,89 @@ MUTABLE_SELECTORS = {"lastSuccessful", "lastCompleted", "latestSavedBuild", "per
 # and `--device`, and took `--privileged=false` for privileged, with a reader of the options as docker does.
 _HOST_CAPS = {"ALL", "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "DAC_READ_SEARCH", "SYS_MODULE", "SYS_RAWIO",
               "SYS_BOOT", "DAC_OVERRIDE", "SYS_CHROOT", "MKNOD", "BPF", "PERFMON", "SYSLOG"}
-# Host paths whose mount gives a container the host: the root, the daemons' sockets and their folders, the
-# kernel's and the devices' file systems, configuration and homes, and the container runtimes' state.
-_HOST_PATHS = ("/var/run", "/run", "/proc", "/sys", "/dev", "/etc", "/root", "/boot", "/var/lib/docker",
-               "/var/lib/containerd", "/var/lib/kubelet", "/var/lib/jenkins", "/usr", "/bin", "/sbin", "/lib")
+# Host folders whose mount gives a container the host, written or read: the root, the kernel's file systems,
+# the container runtimes' state and sockets, the controller's home. Their subfolders count too.
+_HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/var/lib/jenkins",
+               "/run/containerd", "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio",
+               "/var/run/crio")
+# Folders whose whole mount does, but whose subfolders are ordinary (`/etc/localtime`, `/root/.m2`, `/dev/shm`):
+# the runtime sockets' folders, devices, configuration, homes, the system's programs.
+_HOST_FOLDERS = ("/run", "/var/run", "/dev", "/etc", "/root", "/home", "/boot", "/usr", "/bin", "/sbin", "/lib",
+                 "/lib64", "/var", "/var/lib", "/opt")
 _HOST_NAMESPACES = {"--pid": "the host PID namespace", "--ipc": "the host IPC namespace",
                     "--userns": "the host user namespace", "--uts": "the host UTS namespace",
                     "--cgroupns": "the host cgroup namespace"}
 # Short options of docker run that take no value, and those that take one.
 _SHORT_BOOL = set("dtiP")
 _SHORT_VALUE = set("vewhlmpuca")
+# Go's strconv.ParseBool, which docker's flags use: anything else is an error, so only these are false.
+_FALSE = {"0", "f", "F", "false", "FALSE", "False"}
+_WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
-def pod_settings(text: str) -> tuple[list[str], str | None, bool]:
-    """(what reaches the host, the service account named, whether the token is not mounted) for a pod spec.
-    The spec is read as YAML, which JSON also is (flagship slice 2d.2j: a JSON spec's `"privileged": true` was
-    missed by the line patterns); text that does not parse falls back to the patterns."""
-    try:
-        docs = [d for d in yaml.safe_load_all(text) if d is not None] if text.strip() else []
-    except Exception:          # not YAML: the patterns below still read it
-        docs = None
-    if docs is None or any(not isinstance(d, dict) for d in docs):
-        found = [label for rx, label in POD_HOST_SETTINGS if rx.search(text)]
-        account = re.search(r"^\s*serviceAccount(?:Name)?:\s*['\"]?([\w.-]+)", text, re.M)
-        return found, account.group(1) if account else None, bool(
-            re.search(r"automountServiceAccountToken:\s*false", text))
-    found: list[str] = []
-    account = None
-    no_token = False
-    stack: list = list(docs)
-    seen = 0
-    while stack and seen < 20_000:
-        node = stack.pop()
-        seen += 1
-        if isinstance(node, list):
-            stack += node
-            continue
-        if not isinstance(node, dict):
-            if isinstance(node, str) and "docker.sock" in node:
-                found.append("a mount of the Docker socket")
-            continue
-        for key, value in node.items():
-            key = str(key)
-            if key == "privileged" and value is True:
-                found.append("a privileged container")
-            elif key == "allowPrivilegeEscalation" and value is True:
-                found.append("allowPrivilegeEscalation: true")
-            elif key in ("hostNetwork", "hostPID", "hostIPC", "hostUsers") and value is (key != "hostUsers"):
-                found.append({"hostNetwork": "host networking", "hostPID": "the host PID namespace",
-                              "hostIPC": "the host IPC namespace", "hostUsers": "the host user namespace"}[key])
-            elif key == "hostPath":
-                found.append("a hostPath volume")
-            elif key == "add" and isinstance(value, list) and {str(c).upper().removeprefix("CAP_")
-                                                                for c in value} & _HOST_CAPS:
-                found.append("extra capabilities")
-            elif key in ("serviceAccountName", "serviceAccount") and isinstance(value, str) and account is None:
-                account = value
-            elif key == "automountServiceAccountToken" and value is False:
-                no_token = True
-            stack.append(value)
-    return found, account, no_token
+def _clean(path: str) -> str:
+    """A host path as docker cleans it: repeated slashes, `.` and `..` resolved (Go's filepath.Clean)."""
+    if path.startswith("/"):
+        return posixpath.normpath("/" + path.lstrip("/"))
+    return path
 
 
-def docker_bind_sources(args: str) -> list[str]:
-    """The host paths that docker run options bind into a container (`-v /a:/b`, `--mount type=bind,source=/a`);
-    named volumes are not host paths."""
-    try:
-        words = shlex.split(args)
-    except ValueError:
-        return ["(options that cannot be split)"]
-    out = []
-    for i, w in enumerate(words):
-        value = None
-        if w in ("-v", "--volume", "--mount") and i + 1 < len(words):
-            value = words[i + 1]
-        elif w.startswith(("--volume=", "--mount=")):
-            value = w.split("=", 1)[1]
-        elif w.startswith("-") and not w.startswith("--") and "v" in w:
-            k = w.index("v")
-            if all(c in _SHORT_BOOL for c in w[1:k]):
-                value = w[k + 1:].lstrip("=") or (words[i + 1] if i + 1 < len(words) else "")
-        if value is None:
-            continue
-        if "=" in value and (value.startswith(("type=", "source=", "src=", "target=", "dst=", "destination=")) or
-                             "," in value):
-            fields = dict(x.partition("=")[::2] for x in value.split(","))
-            value = fields.get("source") or fields.get("src") or ""
-        else:
-            value = value.split(":", 1)[0]
-        if value.startswith(("/", "~", ".", "$")):
-            out.append(value)
-    return out
-
-
-def _host_path(source: str) -> str | None:
+def _host_path(source: str, readonly: bool = False) -> str | None:
     """What mounting this host path gives a container, or None for an ordinary folder."""
     path = source.strip().strip("'\"")
-    if "sock" in path.rsplit("/", 1)[-1] and (path.endswith(".sock") or "docker.sock" in path or "podman" in path):
-        return "a mount of the Docker socket" if "docker" in path else "a mount of a container runtime socket"
-    norm = posixpath.normpath(path) if path.startswith("/") else path
-    if norm == "/" or norm == "//":
+    low = path.lower().replace("\\", "/")
+    if "docker_engine" in low or low.endswith("docker.sock") or "/docker.sock" in low:
+        return "a mount of the Docker socket"
+    if low.endswith(".sock") or "/pipe/" in low:
+        return "a mount of a container runtime socket"
+    if _WINDOWS_PATH.match(path):
+        rest = path[2:].replace("\\", "/").strip("/")
+        if not rest or rest.lower() in ("windows", "programdata/docker", "windows/system32"):
+            return "a mount of the host root file system" if not rest else f"a mount of the host's {path}"
+        return None
+    if not path.startswith("/"):
+        if ".." in path.replace("\\", "/").split("/"):
+            return "a mount of a host path outside the workspace"
+        return None
+    norm = _clean(path)
+    if norm == "/":
         return "a mount of the host root file system"
-    if any(norm == p or norm.startswith(p + "/") for p in _HOST_PATHS):
+    if any(norm == p or norm.startswith(p + "/") for p in _HOST_TREES):
+        return f"a mount of the host's {norm}"
+    if norm in _HOST_FOLDERS and not (readonly and norm not in ("/run", "/var/run", "/dev")):
         return f"a mount of the host's {norm}"
     return None
 
 
-def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
-    """(what reaches the host, why the options cannot all be read, the networks named) for docker run options
-    written in a Jenkinsfile. The options are split as a shell splits them; a value the file does not fix, or
-    text that cannot be split, is a reason, never a pass."""
-    problems: list[str] = []
+def _split_options(args: str) -> tuple[list[list[str]], list[str]]:
+    """The ways the options may be split, and why that is not certain. Jenkins splits `args` itself, and not
+    exactly as a shell does (a backslash is read differently), so the words a shell would see and the words
+    between blanks are both read, and anything either finds counts (the second review of slice 2d.2j)."""
     unread: list[str] = []
-    networks: list[str] = []
-    if "${" in args or "$(" in args or "`" in args:
-        unread.append("docker run options are computed at run time")
+    readings = [[w.strip("'\"") for w in args.split()]]
     try:
-        words = shlex.split(args, comments=False, posix=True)
+        readings.insert(0, shlex.split(args, comments=False, posix=True))
     except ValueError:
-        return problems, unread + ["docker run options could not be split as the shell would"], networks
+        unread.append("docker run options could not be split as the shell would")
+    if "\\" in args:
+        unread.append("docker run options hold a backslash, which Jenkins and a shell split differently")
+    return readings, unread
+
+
+def _mount_fields(value: str) -> dict:
+    """`--mount` fields as docker reads them: comma-separated values with CSV quoting, keys in any case."""
+    try:
+        row = next(csv.reader([value]))
+    except (csv.Error, StopIteration):
+        row = value.split(",")
+    fields = {}
+    for item in row:
+        key, eq, val = item.partition("=")
+        fields[key.strip().lower()] = val if eq else "true"
+    return fields
+
+
+def _read_words(words: list[str], problems: list, unread: list, networks: list, mounts: list) -> None:
     i = 0
     while i < len(words):
         w = words[i]
@@ -192,27 +158,32 @@ def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
         if w.startswith("--"):
             flag, eq, value = w.partition("=")
             takes = flag in _DOCKER_VALUE or flag in ("--mount", "--volumes-from", "--device", "--cap-add",
-                                                      "--security-opt", "--network", "--net")
+                                                      "--security-opt", "--network", "--net", "--device-cgroup-rule")
             if not eq and takes and flag not in _DOCKER_BOOL:
                 value = words[i] if i < len(words) else ""
                 i += 1
             if flag == "--privileged":
-                if not eq or value.lower() in ("true", "1", "yes"):
+                if not eq or value.strip() not in _FALSE:
                     problems.append("--privileged")
-            elif flag in ("--volume",):
-                found = _host_path(value.split(":", 1)[0])
-                if found:
-                    problems.append(found)
+            elif flag == "--use-api-socket":
+                if not eq or value.strip() not in _FALSE:
+                    problems.append("a mount of the Docker socket")
+            elif flag == "--volume":
+                _volume(value, problems, mounts)
             elif flag == "--mount":
-                fields = dict(x.partition("=")[::2] for x in value.split(","))
+                fields = _mount_fields(value)
                 source = fields.get("source") or fields.get("src") or ""
-                if fields.get("type", "volume") == "bind" or source.startswith("/"):
-                    found = _host_path(source)
+                kind = fields.get("type", "volume").lower()
+                if kind == "bind" or source.startswith("/") or _WINDOWS_PATH.match(source):
+                    mounts.append(source)
+                    ro = fields.get("readonly", fields.get("ro", "false")).strip() not in _FALSE
+                    found = _host_path(source, ro)
                     if found:
                         problems.append(found)
             elif flag == "--volumes-from":
                 unread.append(f"--volumes-from {value} mounts what another container holds, which the file does "
                               "not show (a controller running in a container passes its own volumes this way)")
+                mounts.append(f"the volumes of {value}")
             elif flag in ("--network", "--net"):
                 networks.append(value)
                 if value == "host":
@@ -223,11 +194,12 @@ def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
                 caps = {c.strip().upper().removeprefix("CAP_") for c in value.split(",")}
                 if caps & _HOST_CAPS:
                     problems.append("extra capabilities")
-            elif flag == "--device":
+            elif flag in ("--device", "--device-cgroup-rule"):
                 problems.append("a host device")
             elif flag == "--security-opt":
-                v = value.replace(":", "=")
-                if v in ("seccomp=unconfined", "apparmor=unconfined", "label=disable", "systempaths=unconfined"):
+                v = value.replace(":", "=", 1)
+                if v in ("seccomp=unconfined", "apparmor=unconfined", "label=disable", "systempaths=unconfined") \
+                        or v.startswith("label=type"):
                     problems.append("an unconfined security profile")
             continue
         if w.startswith("-") and len(w) > 1:
@@ -240,23 +212,157 @@ def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
                     if k + 1 >= len(w):
                         i += 1
                     if ch == "v":
-                        found = _host_path(value.split(":", 1)[0])
-                        if found:
-                            problems.append(found)
+                        _volume(value, problems, mounts)
                     break
                 unread.append(f"docker run option -{ch} is not one the checker reads")
                 break
-    return problems, unread, networks
+
+
+def _volume(value: str, problems: list, mounts: list) -> None:
+    """`-v SOURCE:TARGET[:OPTIONS]`. One field is an anonymous volume at that path in the container; a source
+    without a slash is a named volume."""
+    if _WINDOWS_PATH.match(value):
+        cut = value.find(":", 2)
+        source, rest = (value, "") if cut == -1 else (value[:cut], value[cut + 1:])
+    elif value.startswith("\\\\") or value.startswith("//./"):
+        cut = value.find(":")
+        source, rest = (value, "") if cut == -1 else (value[:cut], value[cut + 1:])
+    else:
+        source, sep, rest = value.partition(":")
+        if not sep:
+            return
+    if not (source.startswith(("/", ".", "~", "$", "\\")) or _WINDOWS_PATH.match(source)):
+        return
+    mounts.append(source)
+    ro = "ro" in rest.rsplit(":", 1)[-1].split(",") if ":" in rest else False
+    found = _host_path(source, ro)
+    if found:
+        problems.append(found)
+
+
+def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
+    """(what reaches the host, why the options cannot all be read, the networks named) for docker run options
+    written in a Jenkinsfile. A value the file does not fix, or text that cannot be split for certain, is a
+    reason, never a pass."""
+    found = _docker_read(args)
+    return list(found[0]), list(found[1]), list(found[2])
+
+
+def docker_bind_sources(args: str) -> list[str]:
+    """The host paths that docker run options bind into a container; named volumes are not host paths."""
+    return list(_docker_read(args)[3])
+
+
+@functools.lru_cache(maxsize=512)
+def _docker_read(args: str) -> tuple[list, list, list, list]:
+    problems: list[str] = []
+    unread: list[str] = []
+    networks: list[str] = []
+    mounts: list[str] = []
+    if "${" in args or "$(" in args or "`" in args:
+        unread.append("docker run options are computed at run time")
+    readings, why = _split_options(args)
+    unread += why
+    for n, words in enumerate(readings):
+        nets: list[str] = []
+        _read_words(words, problems, unread if n == 0 else [], nets, mounts)
+        if n == 0:
+            networks = nets
+        elif nets != networks:
+            networks = networks + ["(read differently)"]
+    return (list(dict.fromkeys(problems)), list(dict.fromkeys(unread)), networks, list(dict.fromkeys(mounts)))
+
+
+def pod_settings(text: str) -> tuple[list[str], str | None, bool, list[str]]:
+    found, account, no_token, unread = _pod_settings(text)
+    return list(found), account, no_token, list(unread)
+
+
+@functools.lru_cache(maxsize=256)
+def _pod_settings(text: str) -> tuple:
+    """(what reaches the host, the service account named, whether the token is not mounted, why the spec could
+    not all be read) for a pod spec. The spec is read as YAML, which JSON also is (flagship slice 2d.2j: a JSON
+    spec's `"privileged": true` was missed by the line patterns); text that does not parse falls back to the
+    patterns and says so. Only the first document is the pod; a later one is reported, not read."""
+    unread: list[str] = []
+    depth = max((len(m.group(0)) for m in re.finditer(r"[\[{]+|^[ \t]+", text, re.M)), default=0)
+    docs = None
+    if depth > 400:
+        unread.append("the pod spec is nested too deeply to read")
+    elif text.strip():
+        try:
+            docs = [d for d in yaml.safe_load_all(text) if d is not None]
+        except Exception:      # not YAML (or a tag safe_load refuses): the patterns below still read it
+            docs = None
+    else:
+        docs = []
+    if docs is None or any(not isinstance(d, dict) for d in docs):
+        if text.strip() and depth <= 400:
+            unread.append("the pod spec could not be read as YAML")
+        found = [label for rx, label in POD_HOST_SETTINGS if rx.search(text)]
+        account = re.search(r"[\"']?serviceAccount(?:Name)?[\"']?\s*:\s*['\"]?([\w.-]+)", text)
+        no_token = bool(re.search(r"[\"']?automountServiceAccountToken[\"']?\s*:\s*['\"]?false", text)) and \
+            "serviceAccountToken" not in text.replace("automountServiceAccountToken", "")
+        return found, account.group(1) if account else None, no_token, unread
+    if len(docs) > 1:
+        unread.append("the pod spec holds more than one YAML document; only the first is read for the token")
+    found: list[str] = []
+    account = None
+    no_token = False
+    projected = False
+    for n, doc in enumerate(docs):
+        stack: list = [doc]
+        seen = 0
+        while stack:
+            seen += 1
+            if seen > 50_000:
+                unread.append("the pod spec is too large to read in full")
+                break
+            node = stack.pop()
+            if isinstance(node, list):
+                stack += node
+                continue
+            if not isinstance(node, dict):
+                continue
+            for key, value in node.items():
+                key = str(key)
+                true = value is True or (isinstance(value, str) and value.strip().lower() in ("true", "yes", "on"))
+                if key == "privileged" and true:
+                    found.append("a privileged container")
+                elif key == "allowPrivilegeEscalation" and true:
+                    found.append("allowPrivilegeEscalation: true")
+                elif key in ("hostNetwork", "hostPID", "hostIPC") and true:
+                    found.append({"hostNetwork": "host networking", "hostPID": "the host PID namespace",
+                                  "hostIPC": "the host IPC namespace"}[key])
+                elif key == "hostPath":
+                    path = value.get("path", "") if isinstance(value, dict) else str(value or "")
+                    found.append("a mount of the Docker socket" if "docker.sock" in str(path) else
+                                 "a mount of the host root file system" if _clean(str(path)) == "/" else
+                                 "a hostPath volume")
+                elif key == "add" and isinstance(value, list) and {str(c).upper().removeprefix("CAP_")
+                                                                    for c in value} & _HOST_CAPS:
+                    found.append("extra capabilities")
+                elif key == "serviceAccountToken":
+                    projected = True          # a projected token volume mounts a token whatever automount says
+                elif n == 0 and key in ("serviceAccountName", "serviceAccount") and isinstance(value, str) \
+                        and account is None:
+                    account = value
+                elif n == 0 and key == "automountServiceAccountToken" and (
+                        value is False or (isinstance(value, str) and value.strip().lower() == "false")):
+                    no_token = True
+                stack.append(value)
+    return list(dict.fromkeys(found)), account, no_token and not projected, list(dict.fromkeys(unread))
 
 
 POD_HOST_SETTINGS = [
-    (re.compile(r"^[ \t]*privileged:[ \t]*true\b", re.M), "a privileged container"),
-    (re.compile(r"^[ \t]*allowPrivilegeEscalation:[ \t]*true\b", re.M), "allowPrivilegeEscalation: true"),
-    (re.compile(r"^[ \t]*hostNetwork:[ \t]*true\b", re.M), "host networking"),
-    (re.compile(r"^[ \t]*hostPID:[ \t]*true\b", re.M), "the host PID namespace"),
-    (re.compile(r"^[ \t]*hostIPC:[ \t]*true\b", re.M), "the host IPC namespace"),
+    (re.compile(r"[\"']?privileged[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "a privileged container"),
+    (re.compile(r"[\"']?allowPrivilegeEscalation[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M),
+     "allowPrivilegeEscalation: true"),
+    (re.compile(r"[\"']?hostNetwork[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "host networking"),
+    (re.compile(r"[\"']?hostPID[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "the host PID namespace"),
+    (re.compile(r"[\"']?hostIPC[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "the host IPC namespace"),
     (re.compile(r"docker\.sock"), "a mount of the Docker socket"),
-    (re.compile(r"^[ \t]*-?[ \t]*hostPath:", re.M), "a hostPath volume"),
+    (re.compile(r"[\"']?hostPath[\"']?[ \t]*:", re.M), "a hostPath volume"),
     (re.compile(r"\b(SYS_ADMIN|SYS_PTRACE|NET_ADMIN)\b"), "extra capabilities"),
 ]
 
@@ -662,54 +768,100 @@ def concurrent(a, b) -> bool:
 _LABEL_TOKEN = re.compile(r"&&|\|\||<->|->|!|\(|\)|\"[^\"]*\"|[^\s&|!()<>\"-]+(?:-(?!>)[^\s&|!()<>\"-]*)*|-")
 
 
+def _label_tree(label: str):
+    """A Jenkins label expression as a tree, by its operators from tightest to loosest: `!`, `&&`, `||`, `->`,
+    `<->`, with brackets. None when it cannot be read (flagship slice 2d.2j)."""
+    tokens = _LABEL_TOKEN.findall(label)
+    if "".join(tokens) != re.sub(r"\s+", "", label) or not tokens:
+        return None
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def binary(op, lower):
+        nonlocal pos
+        left = lower()
+        while peek() == op:
+            pos += 1
+            left = (op, left, lower())
+        return left
+
+    def unary():
+        nonlocal pos
+        tok = peek()
+        if tok == "!":
+            pos += 1
+            return ("!", unary())
+        if tok == "(":
+            pos += 1
+            inner = binary("<->", lambda: binary("->", lambda: binary("||", lambda: binary("&&", unary))))
+            if peek() != ")":
+                raise ValueError(label)
+            pos += 1
+            return inner
+        if tok is None or tok in ("&&", "||", "->", "<->", ")", "-"):
+            raise ValueError(label)
+        pos += 1
+        return ("atom", tok.strip('"'))
+
+    try:
+        tree = binary("<->", lambda: binary("->", lambda: binary("||", lambda: binary("&&", unary))))
+    except (ValueError, RecursionError):
+        return None
+    return tree if pos == len(tokens) else None
+
+
+def _required(tree) -> set:
+    """The labels every agent the expression selects must carry."""
+    op = tree[0]
+    if op == "atom":
+        return {tree[1]}
+    if op == "&&":
+        return _required(tree[1]) | _required(tree[2])
+    if op == "||":
+        return _required(tree[1]) & _required(tree[2])
+    return set()           # `!a`, `a -> b` (`!a || b`), `a <-> b` (both false holds) require nothing
+
+
+def _possible(tree, fixed: set) -> set:
+    """The truth values the expression can take on an agent that carries the labels in `fixed` and may carry
+    any other."""
+    op = tree[0]
+    if op == "atom":
+        return {True} if tree[1].lower() in fixed else {True, False}
+    if op == "!":
+        return {not v for v in _possible(tree[1], fixed)}
+    a, b = _possible(tree[1], fixed), _possible(tree[2], fixed)
+    combine = {"&&": lambda x, y: x and y, "||": lambda x, y: x or y, "->": lambda x, y: (not x) or y,
+               "<->": lambda x, y: x == y}[op]
+    return {combine(x, y) for x in a for y in b}
+
+
+def _atoms(tree) -> set:
+    return {tree[1].lower()} if tree[0] == "atom" else set().union(*(_atoms(t) for t in tree[1:]))
+
+
 def controller_label(label: str) -> str | None:
-    """"exact" for the built-in node's own label, "expression" for a label expression with a term naming it
-    that no `!` negates (`built-in || linux` can place work there), None otherwise."""
+    """"exact" for the built-in node's own label; "expression" for a label expression that names it and can
+    hold on it (`built-in || linux`, `linux -> built-in`); None otherwise, also when it cannot be read."""
     text = label.strip()
     if text.lower() in CONTROLLER_LABELS:
         return "exact"
-    groups, pending = [False], False
-    for tok in _LABEL_TOKEN.findall(text):
-        if tok == "!":
-            pending = not pending
-        elif tok == "(":
-            groups.append(groups[-1] ^ pending)
-            pending = False
-        elif tok == ")":
-            if len(groups) > 1:
-                groups.pop()
-            pending = False
-        elif tok in ("&&", "||", "->", "<->", "-"):
-            pending = False
-        else:
-            negated = groups[-1] ^ pending
-            pending = False
-            if tok.strip('"').lower() in CONTROLLER_LABELS and not negated:
-                return "expression"
-    return None
+    tree = _label_tree(text)
+    if tree is None or not (_atoms(tree) & CONTROLLER_LABELS):
+        return None
+    return "expression" if True in _possible(tree, set(CONTROLLER_LABELS)) else None
 
 
 def label_terms(label: str) -> set | None:
-    """The labels a label expression requires, as terms no `!` negates; None when it requires none (`!windows`
-    can select any agent). Whitespace, brackets and quotes do not make two expressions different."""
-    groups, pending, terms = [False], False, set()
-    for tok in _LABEL_TOKEN.findall(label):
-        if tok == "!":
-            pending = not pending
-        elif tok == "(":
-            groups.append(groups[-1] ^ pending)
-            pending = False
-        elif tok == ")":
-            if len(groups) > 1:
-                groups.pop()
-            pending = False
-        elif tok in ("&&", "||", "->", "<->", "-"):
-            pending = False
-        else:
-            if not (groups[-1] ^ pending):
-                terms.add(tok.strip('"'))
-            pending = False
-    return terms or None
+    """The labels a label expression requires every agent it selects to carry; None when it requires none
+    (`!windows`, `docker -> linux`, `linux || !linux`) or cannot be read, which selects like `agent any`.
+    Whitespace, brackets and quotes do not make two expressions different."""
+    tree = _label_tree(label)
+    if tree is None:
+        return None
+    return _required(tree) or None
 
 
 def _last_command(script: str, start: int) -> bool:
@@ -1168,28 +1320,43 @@ class JenkinsRules:
         # An AI agent is steered by the text it reads, so its work counts like a change request's (flagship slice
         # 2d.2j, as the rule's own description and the unknown above already said). Work an agent alone steers
         # pairs only with another allocation: the agent's own stage holding a credential is OBAAF-JEN-001's.
-        for label, uses in labels.items():
-            untrusted = [(a, c) for a, c, under in uses if any(
-                i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under)]
-            steered = [(a, c) for a, c, under in uses if any(i.ai for i in under)]
-            privileged = [(a, c) for a, c, under in uses if any(
-                i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in under)]
-            if untrusted and privileged:
-                a, c = privileged[0]
-                self.add("OBAAF-JEN-002", a.line,
-                         f"Agents labelled '{label}' run both work that change requests reach (stage "
-                         f"'{stage_label(untrusted[0][1].stage)}') and stage '{stage_label(c.stage)}', which holds "
-                         "credentials or publishes. Code from a change request can leave files or processes on a "
-                         "persistent agent that the privileged stage then uses.", c.stage, severity="medium")
-                continue
-            pairs = [(u, p) for u in steered for p in privileged if u[0] is not p[0]]
-            if pairs:
-                (_, uc), (a, c) = pairs[0]
-                self.add("OBAAF-JEN-002", a.line,
-                         f"Agents labelled '{label}' run both an AI agent (stage '{stage_label(uc.stage)}') and stage "
-                         f"'{stage_label(c.stage)}', which holds credentials or publishes. An agent steered by what it "
-                         "reads can leave files or processes on a persistent agent that the privileged stage then "
-                         "uses.", c.stage, severity="medium")
+        # Labels pair when they are the same text or require a common label (`linux && docker`, `linux`).
+        entries = [(label, label_terms(label), a, c, under) for label, uses in labels.items() for a, c, under in uses]
+        done: set = set()
+        for steer in ("change requests", "an AI agent"):
+            for lu, tu, au, cu, under_u in entries:
+                if steer == "change requests":
+                    hit = any(i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under_u)
+                else:
+                    hit = any(i.ai for i in under_u)
+                if not hit:
+                    continue
+                for lp, tp, ap, cp, under_p in entries:
+                    if not any(i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in under_p):
+                        continue
+                    if steer == "an AI agent" and ap is au:
+                        continue
+                    common = (tu & tp) if tu and tp else set()
+                    if lp != lu and not common:
+                        continue
+                    if (lp, ap.line) in done:
+                        continue
+                    done.add((lp, ap.line))
+                    labelled = (f"Agents labelled '{lp}'" if lp == lu else
+                                f"Agents labelled '{lu}' and '{lp}', which can be the same machines (both require "
+                                f"{', '.join(repr(x) for x in sorted(common))}),")
+                    if steer == "change requests":
+                        self.add("OBAAF-JEN-002", ap.line,
+                                 f"{labelled} run both work that change requests reach (stage "
+                                 f"'{stage_label(cu.stage)}') and stage '{stage_label(cp.stage)}', which holds "
+                                 "credentials or publishes. Code from a change request can leave files or processes on "
+                                 "a persistent agent that the privileged stage then uses.", cp.stage, severity="medium")
+                    else:
+                        self.add("OBAAF-JEN-002", ap.line,
+                                 f"{labelled} run both an AI agent (stage '{stage_label(cu.stage)}') and stage "
+                                 f"'{stage_label(cp.stage)}', which holds credentials or publishes. An agent steered by "
+                                 "what it reads can leave files or processes on a persistent agent that the privileged "
+                                 "stage then uses.", cp.stage, severity="medium")
 
     # ------------------------------------------------------------------ JEN-003
     def ws_key(self, info: Info) -> tuple:
@@ -1197,7 +1364,10 @@ class JenkinsRules:
         same node is written by the same user; when the model knows no workspace for the step, its stage and
         that stage's post blocks, as the rule read every step before 2d.2j."""
         if info.ctx.ws:
-            return ("machine", self.p.workspaces[info.ctx.ws].machine)
+            machine = self.p.workspaces[self.p.workspaces[info.ctx.ws].machine]
+            if machine.kind == "kubernetes" and machine.custom and machine.custom.startswith(("claim:", "nfs:")):
+                return ("volume", machine.custom)    # pods on one named claim share its directory
+            return ("machine", machine.id)
         return ("stage", base_stage(info.ctx.stage))
 
     @staticmethod
@@ -1236,19 +1406,29 @@ class JenkinsRules:
 
     @staticmethod
     def full_clean(info: Info) -> bool:
-        """deleteDir(), or cleanWs() that empties the whole workspace whatever the build's result: no patterns,
+        """deleteDir(), a checkout that wipes the workspace first, or cleanWs() (or the WsCleanup step) that empties
+        the whole workspace whatever the build's result: no patterns,
         no external command, no condition left false (the review of slice 2d.2j: `cleanWs(patterns: ...)` and
         `cleanWhenSuccess: false` keep `.git`)."""
         if info.ctx.dir:
             return False
         if info.use.name == "deleteDir":
             return True
-        if info.use.name != "cleanWs":
-            return False
         call = info.use.call
-        entries = list(call.named) + ([(k, v) for k, v in call.args[0].entries]
-                                      if call.args and isinstance(call.args[0], MapLit) else [])
-        for key, value in entries:
+        entries_all = list(call.named) + ([(k, v) for k, v in call.args[0].entries]
+                                          if call.args and isinstance(call.args[0], MapLit) else [])
+        if info.use.name == "checkout":
+            # extensions: [[$class: 'WipeWorkspace']] (or wipeWorkspace()) deletes the workspace before checkout;
+            # CleanBeforeCheckout runs `git clean`, which keeps .git.
+            return any(literal(n) == "WipeWorkspace" or (isinstance(n, Call) and callee_name(n) == "wipeWorkspace")
+                       for _, v in entries_all for n in find_nodes(v, lambda x: isinstance(x, (Str, Call)), 500))
+        if info.use.name == "step":
+            if not any((k if isinstance(k, str) else literal(k)) == "$class" and literal(v) in (
+                    "WsCleanup", "hudson.plugins.ws_cleanup.WsCleanup") for k, v in entries_all):
+                return False
+        elif info.use.name != "cleanWs":
+            return False
+        for key, value in entries_all:
             key = key if isinstance(key, str) else literal(key)
             if key in ("patterns", "externalDelete"):
                 return False
@@ -1368,6 +1548,12 @@ class JenkinsRules:
                 if base_stage(agent.ctx.stage) == stage and agent.ctx.ws == info.ctx.ws:
                     message = (f"Stage '{stage_label(stage)}' runs an AI agent at line {agent.line} and the step at line "
                                f"{info.line} {effect}, in the same workspace.")
+                elif key[0] == "volume" and agent.ctx.ws != info.ctx.ws:
+                    kind, _, name = key[1].partition(":")
+                    shown = f"claim '{name}'" if kind == "claim" else f"NFS export '{name}'"
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} in a pod whose "
+                               f"workspace is the same volume ({shown}) as the AI agent's at line {agent.line} in stage "
+                               f"'{stage_label(base_stage(agent.ctx.stage))}'.")
                 elif agent.ctx.ws == info.ctx.ws:
                     message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect}, in the same "
                                f"workspace as the AI agent at line {agent.line} in stage "
@@ -1552,8 +1738,10 @@ class JenkinsRules:
                                                                    or agent.inherit):
                 pod = ""      # no pod spec at all: the plugin's default pod, which mounts the token (2d.2j)
             if pod is not None:
-                settings, account, no_token = pod_settings(pod)
+                settings, account, no_token, unread = pod_settings(pod)
                 problems += settings
+                for reason in unread:
+                    self.unknown("OBAAF-JEN-006", agent.line, reason)
                 if account:
                     self.unknown("OBAAF-JEN-006", agent.line,
                                  f"the pod runs as service account '{account}', whose permissions are cluster "
