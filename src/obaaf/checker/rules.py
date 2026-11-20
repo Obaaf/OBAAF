@@ -277,6 +277,211 @@ def _strip_comment_text(line: str) -> str:
 
 # Actions that restore a GitHub Actions cache whatever their inputs, or that hand the cache service's
 # token to the steps after them (flagship slice 2d.2e).
+# Flagship slice 2d.13 (F-278). Names that, given to a bash or sh step, change what its shell runs or what
+# the programs it names run: which program a name finds (`PATH`); bash's start and its reading
+# (`BASH_ENV`, `ENV`, `SHELLOPTS`, whose `noexec` makes bash read the script and run none of it,
+# `BASHOPTS`, `BASH_FUNC_NAME%%`, `BASH_COMPAT`, `PS4`, `EXECIGNORE` and the rest of `BASH...`); the
+# loader's (`LD_...` and `GCONV_PATH` on Linux, `DYLD_...` on macOS, whose `DYLD_INSERT_LIBRARIES` the runner
+# keeps for each step's process there), which load code into every program the step starts, bash included;
+# Python's, which load code into `obaaf` (`PYTHONPATH`, `PYTHONHOME`, `PYTHONWARNINGS`, `PYTHONUSERBASE`
+# and the rest of `PYTHON...`), and `HOME`, under which an interpreter outside a virtual environment
+# finds the user's own packages; and `ACTIONS_ALLOW_UNSECURE_COMMANDS`, with which any line a later step
+# prints can set the others. The checks OBAAF counts are `obaaf` (Python) and `gh`, `cosign` and
+# `slsa-verifier` (Go); Node.js's, Perl's, Ruby's and Java's variables (`NODE_OPTIONS`, `PERL5OPT`,
+# `RUBYOPT`, `JAVA_TOOL_OPTIONS`) change none of them and not bash, so they are not here. What the
+# programs read for their own settings (`GIT_...`, `GH_...`, `SSL_CERT_FILE`) is not read.
+_STEERING_NAMES = frozenset({"PATH", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND", "EXECIGNORE", "GCONV_PATH", "HOME",
+                             "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
+_STEERING_PREFIXES = ("BASH", "LD_", "DYLD_", "PYTHON")
+# Python's variables that load nothing: output buffering, bytecode files, the standard streams' encoding
+# (looked up only among the standard library's `encodings` modules, a name with a dot refused), UTF-8
+# mode, the hash seed, and turning the user's own packages off.
+_PYTHON_PLAIN = frozenset({"PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING", "PYTHONUTF8",
+                           "PYTHONHASHSEED", "PYTHONNOUSERSITE"})
+
+
+def steers(name) -> bool:
+    """Whether a variable's name, read the widest way (space around it trimmed, any letter case), is one
+    that changes what a bash or sh step runs or what the programs it names run (`_STEERING_NAMES`)."""
+    text = str(name).strip().upper()
+    return text in _STEERING_NAMES or (text.startswith(_STEERING_PREFIXES) and text not in _PYTHON_PLAIN)
+
+
+_NAMES_GITHUB_ENV = re.compile(r"GITHUB_ENV", re.I)
+# The runner's file commands. It names a step's files side by side with one suffix
+# (`FileCommandManager.InitializeFiles`, v2.338.2), so the path of any of them leads to GITHUB_ENV's.
+_NAMES_FILE_VAR = re.compile(r"GITHUB_(ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)", re.I)
+_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+
+
+def _squeeze(text: str) -> str:
+    """Text as bash puts a word together, for searching names: a backslash and the line break after it (a
+    continued line) taken out, `$'...'` decoded, `$""` taken out, then quotes, backslashes and the
+    lexer's `\x03` marks. So `$GITHUB_\\<line break>ENV`, `GITHUB_E""NV`, `GITHUB_E\\NV` and
+    `$'GITHUB_\x45NV'` are found (the reviews of slice 2d.13; the lexer reads the first as `$GITHUB_` and
+    `ENV`). It can join what bash keeps apart, which only finds more."""
+    text = re.sub(r"\\\r?\n", "", text)
+
+    def decoded(match):
+        try:
+            return agent_flags._ansi_c(match.group(1))
+        except (AttributeError, ValueError, OverflowError):
+            return match.group(0)
+
+    text = _ANSI_C_RE.sub(decoded, text).replace('$""', "")
+    return re.sub(r"[\"'\\\x03]", "", text)
+
+
+def _names_file_var(text: str) -> bool:
+    return bool(_NAMES_FILE_VAR.search(text) or _NAMES_FILE_VAR.search(_squeeze(text)))
+
+
+# A redirection's target as the lexer gives it, naming one of the files plainly: `$NAME`, `${NAME}`, or
+# `${NAME:-/dev/stdout}` (or stderr, or null), which keeps a script runnable outside Actions.
+_FILE_TARGET_RE = re.compile(r"\x03\$(?:(GITHUB_[A-Z_]+)|\{(GITHUB_[A-Z_]+)(?::-/dev/(?:stdout|stderr|null))?\})\x03\Z")
+_ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Words that may begin a command before its name; the lexer gives `then echo ...` as one command.
+_LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+# The redirections that write to GITHUB_ENV from its end, or from its start after emptying it.
+_WRITE_OPS = frozenset({">>", ">", "&>>", "&>", ">|", ">&"})
+# A continued line beside an operator's character: bash joins the line first, so `<\<line break>>` is
+# `<>`, while the lexer reads `<` and `>` (the fourth review of slice 2d.13).
+_SPLIT_OPERATOR_RE = re.compile(r"[<>&|]\\\r?\n|\\\r?\n[<>&|]")
+# What a write's output may also be sent to beside GITHUB_ENV: a duplicated descriptor (`2>&1`) or nothing.
+_OTHER_TARGETS = frozenset({"/dev/null"})
+# A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
+# most one escape, a line break at its end.
+_PRINTF_FORMAT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=|<<)([^%\\\n\r\x03]|%s)*(\\n)?\Z")
+# An assignment in a command substitution in a written value could print it on a line of its own. Upper
+# case only, as a variable's name is written (`--home=` is an option); anchored, so a long word is cheap.
+_ASSIGNED_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*(=|<<)")
+# `${!PREFIX*}` and `${!PREFIX@}` list the names of variables; with a prefix of a file command's name
+# (or none) they reach its path without naming it (`${!GITHUB_E*}`, the first review of slice 2d.13).
+_NAMES_LISTED_RE = re.compile(r"\$\{!\s*([A-Za-z_][A-Za-z0-9_]*)?\s*[*@]\s*\}")
+# `tee` writing an output, the step summary or the state: its options that change nothing else.
+_TEE_OPTIONS = frozenset({"-a", "--append", "-i", "--ignore-interrupts", "-p"})
+# Ways a script can make `echo` or `printf` something other than bash's own: a function, a builtin
+# loaded or turned off, an alias (which bash expands only after `shopt -s expand_aliases`).
+_ECHO_REPLACED_RE = re.compile(r"(?<![\w./-])(function|enable|alias|shopt)(?![\w./-])|"
+                               r"(?<![\w./-])(echo|printf)\s*\(\s*\)")
+
+
+def _lists_file_vars(text: str) -> bool:
+    for match in _NAMES_LISTED_RE.finditer(text):
+        prefix = (match.group(1) or "").upper()
+        if any(name.startswith(prefix) for name in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                                                       "GITHUB_STEP_SUMMARY")):
+            return True
+    return False
+
+
+def _file_target(word) -> str | None:
+    match = _FILE_TARGET_RE.match(word.text) if word.redirect else None
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _github_env_names(script: str) -> set | None:
+    """The names a bash or sh script writes to GITHUB_ENV, or None when the checker cannot read them all
+    (flagship slice 2d.13). The script is read with the lexer. A file command's variable (`GITHUB_ENV`,
+    `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`, found with `_squeeze`) may
+    appear only as a redirection's target written plainly (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`) of
+    a command other than `exec`, or as a file `tee` writes an output, the summary or the state to, its own
+    output sent to no file command; anywhere else (an argument,
+    an assignment, `set --`, `for`, `read`, `printf -v`, a name reference, a here-document, a command
+    substitution, a parameter expansion that changes it) gives None, because the runner's files sit side
+    by side and any of their paths leads to GITHUB_ENV's (the second review of slice 2d.13), and so does
+    listing names with `${!GITHUB_E*}` and any write to GITHUB_PATH. A write to GITHUB_ENV is read in two
+    forms, redirected with `>>`, `>`, `&>>`, `&>`, `>|` or `>&` (`<>` writes over what is there, and is
+    refused, and so is a script with a continued line beside an operator's character, which bash joins
+    into an operator the lexer reads in two), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word
+    (dash, Ubuntu's sh, does not read it, and its `echo` reads the backslash): `echo` with words and no
+    option, the name
+    before the first `=` (or `<<`, the runner's multi-line form) a plain word written out in the
+    script; and `printf` with a literal format that begins with such a name, has `%s` for its only
+    conversion and no escape but a line break at its end. Any other write gives None, as does a name put
+    together from a variable, an expression, a glob or a brace expansion, a word that can put a line
+    break in what is printed (a backslash, which sh's `echo` reads as an escape, or a line break written
+    inside quotes), a written value with a command substitution, nested or not, whose script assigns a
+    steering name in upper case (it could print it on a line of its own), a script that can replace
+    `echo` or `printf`, and a script the lexer cannot read. A value is otherwise read as one line: a line
+    break that a variable, a file or a command's output puts in it at run time, which would let the write
+    set a second name, is not read (an outsider's text there is also #232). Every line the runner reads
+    begins where a write begins, and the lines of the runner's multi-line form are each read as a name,
+    so this is never fewer names than the runner sets."""
+    if _lists_file_vars(_squeeze(script)):
+        return None
+    commands, problem = agent_flags.lex(script)
+    if problem:
+        return None
+    names: set = set()
+    for command in commands:
+        if any(_names_file_var(text) for _kind, text, _literal in command.stdin):
+            return None             # a here-document or here-string that names one
+        if any(_names_file_var(inner) for word in command.words for inner in word.inner):
+            return None             # a command substitution that names one
+        mentions = [w for w in command.words if _names_file_var(w.text) or _names_file_var(w.shown)]
+        if not mentions:
+            continue
+        words = list(command.words)
+        while words and not words[0].redirect and not words[0].computed and words[0].text in _LEADING_WORDS:
+            words.pop(0)
+        if not words:
+            return None
+        targets = {_file_target(w) for w in mentions}
+        if words[0].text == "tee" and not words[0].computed and all(
+                (w.redirect and not (_names_file_var(w.text) or _names_file_var(w.shown))) or w.text in _TEE_OPTIONS
+                or (not w.redirect and _FILE_TARGET_RE.match(w.text) and
+                    (_FILE_TARGET_RE.match(w.text).group(1) or _FILE_TARGET_RE.match(w.text).group(2))
+                    in ("GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"))
+                for w in words[1:]):
+            continue                # `tee -a "$GITHUB_OUTPUT"`, its own output not sent to a file command
+        if None in targets or "GITHUB_PATH" in targets or not targets <= {
+                "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"}:
+            return None
+        if words[0].text == "exec":
+            return None             # a descriptor left open on a file command, whose path `/proc` then gives
+        if "GITHUB_ENV" not in targets:
+            continue                # a write to an output, the summary or the state
+        if _ECHO_REPLACED_RE.search(script) or _SPLIT_OPERATOR_RE.search(script):
+            return None
+        if words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
+            return None
+        arguments = [w for w in words[1:] if not w.redirect]
+        # Only a redirection that writes from where the file ends, or from its start after emptying it: `<>`
+        # writes over what is there, which can turn an earlier line into another name (the third review).
+        if any(_file_target(w) == "GITHUB_ENV" and w.redirect_op not in _WRITE_OPS for w in words[1:]):
+            return None
+        # sh is dash on Ubuntu, which does not read `$'...'` and passes the backslash to its `echo`.
+        if any("$'" in w.shown or '$"' in w.shown for w in arguments):
+            return None
+        if not arguments or any(_file_target(w) not in (None, "GITHUB_ENV") for w in words[1:] if w.redirect) or any(
+                w.redirect and _file_target(w) is None and w.text not in _OTHER_TARGETS and not w.text.isdigit()
+                for w in words[1:]):
+            return None
+        for word in arguments:
+            shown = _squeeze(word.shown)
+            if ("$(" in word.shown or "`" in word.shown) and any(
+                    steers(m.group(1)) for m in _ASSIGNED_NAME_RE.finditer(shown)):
+                return None
+        if words[0].text == "printf":
+            form = arguments[0]
+            if form.computed or not _PRINTF_FORMAT_RE.match(form.text) or any(
+                    c in w.text for w in arguments[1:] for c in "\\\n\r"):
+                return None
+            line = form.text
+        else:
+            if arguments[0].text.startswith("-") or any(c in w.text for w in arguments for c in "\\\n\r"):
+                return None
+            line = " ".join(w.text for w in arguments)
+        equals, heredoc = line.find("="), line.find("<<")
+        cut = equals if equals >= 0 and (heredoc < 0 or equals < heredoc) else heredoc
+        # The name is a plain word: no unknown expansion (marked `\x03`), glob or brace in it.
+        if cut < 0 or not _ENV_LINE_NAME_RE.match(line[:cut]):
+            return None
+        names.add(line[:cut])
+    return names
+
+
 _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
@@ -4086,26 +4291,142 @@ class WorkflowRules:
             env = scope.get("env") if isinstance(scope, dict) else None
             if isinstance(env, str):
                 return True
-            if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
-                                             or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
+            # Flagship slice 2d.13: every name that changes what the step's shell or the check's program
+            # runs (`steers`), where only `BASH_ENV`, `ENV` and `BASH_FUNC...` counted, and a name written
+            # as an expression, which may be any of them.
+            if isinstance(env, dict) and any(steers(key) or expr_mod.OPEN in str(key) for key in env):
+                return True
+        # A container job's steps run with the container's `env` and its `options` (`-e NAME=...`); the
+        # runner takes the PATH from the container too (the third review of slice 2d.13). What its image
+        # holds, the `obaaf` it ships included, is not read.
+        container = job.raw.get("container")
+        if isinstance(container, dict):
+            env = container.get("env")
+            if (env is not None and not isinstance(env, dict)) or (isinstance(env, dict) and any(
+                    steers(key) or expr_mod.OPEN in str(key) for key in env)):
+                return True
+            options = container.get("options")
+            if options is not None and (not isinstance(options, str) or self._CONTAINER_ENV_RE.search(options)):
                 return True
         return self._first_shell_change(job) < step.index
 
+    # In a container's `options`: an environment variable given to it, by name or from a file.
+    # Short options may be joined (`-ite NAME`) and a value written beside them (`-eNAME=...`).
+    _CONTAINER_ENV_RE = re.compile(r"(?<![\w-])(-[A-Za-z]*e|--env)", re.I)
+
     def _first_shell_change(self, job: Job) -> int:
-        """Where the first step of `job` whose script or `env` names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`
-        is, or the number of its steps when none does, worked out once per job: each check of each upload
-        read every earlier step again, which took a job of 1,000 steps (as slice 2d.4b2's reading of
-        local actions can give one) a minute and a half."""
+        """Where the first step of `job` that may change, for the steps after it, what their shell or the
+        programs they name run is (`_changes_later_steps`), or the number of its steps when none may,
+        worked out once per job: each check of each upload read every earlier step again, which took a
+        job of 1,000 steps (as slice 2d.4b2's reading of local actions can give one) a minute and a half."""
         memo = self.__dict__.setdefault("_shell_changes", {})
         found = memo.get(id(job))
         if found is None or found[0] is not job:
-            first = len(job.steps)
-            for position, earlier in enumerate(job.steps):
-                if re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", earlier.scripts() + " " + str(earlier.raw.get("env", ""))):
+            first = 0 if job.steps and self._job_sets_later_steps(job) else len(job.steps)
+            for position, earlier in enumerate(job.steps[:first]):
+                if self._changes_later_steps(job, earlier):
                     first = position
                     break
             found = memo[id(job)] = (job, first)
         return found[1]
+
+    # What a step's text may use to set variables or the PATH for the steps after it, other than a write
+    # to a file command `_github_env_names` reads: bash's own names, the toolkit's calls (github-script and
+    # JavaScript actions), the workflow commands a runner obeys when `ACTIONS_ALLOW_UNSECURE_COMMANDS` is
+    # true, and the runner's folder that holds the file commands' files. Any letter case.
+    _SETS_LATER_STEPS_RE = re.compile(r"BASH_ENV|BASH_FUNC|GITHUB_PATH|addPath|add-path|set-env|exportVariable|"
+                                      r"_runner_file_commands|ACTIONS_ALLOW_UNSECURE_COMMANDS", re.I)
+    # The runner's own contexts for its files (`github.env`, `github.path` and the others), or the whole
+    # `github` context, which holds them and can be written out as text.
+    _FILE_CONTEXTS = ({"github"}, {"env", "path", "output", "state", "step_summary"})
+
+    def _sets_later_steps_text(self, text: str) -> bool:
+        """Whether text that is not a bash script the checker reads names a way to set variables or the PATH
+        for later steps: one of `_SETS_LATER_STEPS_RE`, a file command's variable, `${!GITHUB_E*}`, or an
+        expression that reaches the runner's contexts for its files."""
+        squeezed = _squeeze(text)
+        if self._SETS_LATER_STEPS_RE.search(squeezed) or _NAMES_FILE_VAR.search(squeezed) \
+                or _lists_file_vars(squeezed):
+            return True
+        try:
+            return any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                       for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
+        except expr_mod.TooComplex:
+            return True
+
+    _VALUES_READ = 20_000
+
+    @classmethod
+    def _values_text(cls, value) -> str:
+        """The keys, strings and other values in a value of lists and mappings, as plain text, each node once
+        (a YAML alias can make one hold itself): a line break stays a line break, which `str()` of a mapping
+        writes as two characters (the second review of slice 2d.13). More than `_VALUES_READ` of them
+        give text that names GITHUB_ENV, so the reading fails closed."""
+        out: list = []
+        stack, seen = [value], set()
+        while stack:
+            if len(out) > cls._VALUES_READ:
+                return "GITHUB_ENV (more values than the checker reads)"
+            node = stack.pop()
+            if isinstance(node, (list, dict)):
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                if isinstance(node, dict):
+                    for key, item in node.items():
+                        out.append(str(key))
+                        stack.append(item)
+                else:
+                    stack.extend(node)
+            elif node is not None:
+                out.append(str(node))
+        return "\n".join(out)
+
+    def _job_sets_later_steps(self, job: Job) -> bool:
+        """Whether the workflow's or the job's `env`, `defaults` or the job's `strategy` hold such text: a
+        step can run it (`eval "$CMD"`, `${{ env.CMD }}`, `${{ matrix.cmd }}`, a default `shell`), so every
+        step of the job may set variables for the steps after it (the second review of slice 2d.13)."""
+        parts = [self.wf.raw.get("env"), self.wf.raw.get("defaults"), job.raw.get("env"), job.raw.get("defaults"),
+                 job.raw.get("strategy")]
+        return self._sets_later_steps_text(self._values_text(parts))
+
+    def _changes_later_steps(self, job: Job, step: Step) -> bool:
+        """Whether a step's text may change, for the steps after it in the job, what their shell or the
+        programs they name run (flagship slices 2d.2e and 2d.13). Before 2d.13 only `BASH_ENV`,
+        `BASH_FUNC` and `GITHUB_PATH` were looked for, so a step that wrote `PATH=...` (or
+        `SHELLOPTS=noexec`, with which bash reads a step's script and runs none of it) to GITHUB_ENV
+        left a later check counted. The runner gives every later step of the job what a step writes to
+        that file, and refuses only `NODE_OPTIONS` (actions/runner v2.338.2, `SetEnvFileCommand` in
+        src/Runner.Worker/FileCommandManager.cs).
+
+        A bash or sh `run` script is read by `_github_env_names`: True when it cannot read the script's
+        writes to the runner's files or a name written to GITHUB_ENV `steers`. Everything else about the
+        step (its `shell`, `env` and inputs, and the whole of a step that is not such a script, as code
+        in another language or an action) is text the checker does not read as bash: True when
+        `_sets_later_steps_text` finds a way to set variables for later steps in it, a file command's
+        variable included. Only the workflow's text is read: a name or a path a script puts together
+        otherwise, and what a program or an action the step runs writes, are not."""
+        shell = step.raw.get("shell")
+        beside = self._values_text([step.raw.get("env"), step.raw.get("with"), shell])
+        bash = isinstance(step.raw.get("run"), str) and bool(step.run) and not step.uses \
+            and self._step_shell(job, step) in ("bash", "sh")
+        if not bash:
+            return self._sets_later_steps_text(step.scripts() + "\n" + beside)
+        if self._sets_later_steps_text(beside):
+            return True
+        squeezed = _squeeze(step.run)
+        if self._SETS_LATER_STEPS_RE.search(squeezed):
+            return True
+        try:
+            if any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                   for body in expr_mod.bodies(step.run) for ref in expr_mod.refs(body)):
+                return True
+        except expr_mod.TooComplex:
+            return True
+        if not _NAMES_FILE_VAR.search(squeezed) and not _lists_file_vars(squeezed):
+            return False
+        names = _github_env_names(step.run)
+        return names is None or any(steers(name) for name in names)
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a

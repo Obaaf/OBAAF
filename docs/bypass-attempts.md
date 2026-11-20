@@ -2471,6 +2471,22 @@ A second Opus 5.5 sub-agent, which wrote none of it either, reviewed the fixed v
 
 Every class is fixed or stated, and each probe is a test case with what is reported now (`tests/agent_code_review_cases.py`, run by `tests/test_agent_code.py`). Differences from what the reviewer wanted, each with its reason in the case file: a value put into a string's quotes is "cannot tell", as the reviewer's own finding A03 showed (two of its probes wanted it quiet); a list held in a name the code does not change is read rather than "cannot tell"; an unquoted PowerShell variable stays "cannot tell" (F-274); PHP's single quotes keep `\x2d` as text (checked with `php -r`), so that probe is not a way past; stated limits for program names given by escapes, pieces or run-time paths, lists in mappings, Perl's `exec { }`, AppleScript, Tcl, and a shell that runs another interpreter.
 
+## 2d.13: what an earlier step writes to GITHUB_ENV
+
+OBAAF-GHA-016 (and OBAAF-GHA-021's checks and OBAAF-GHA-017's provenance commands, which use the same reader) vouched for a check after an earlier step that wrote `PATH=...` to `GITHUB_ENV` (F-278, D-125). The runner's handling was read from actions/runner v2.338.2 and shown on a GitHub-hosted `ubuntu-24.04` runner by CI's job `github-env-premise` (run 44711052227): a stand-in `obaaf` put first on the PATH through the file ran in place of the check, and after `SHELLOPTS=noexec` a step ending in `exit 1` succeeded without running.
+
+One Opus 5.5 sub-agent that wrote none of it attacked five versions, running each bash and dash behaviour it relied on against a mock set of runner files:
+
+| Pass | Attempts | Ways past (root causes) | Found |
+| --- | --- | --- | --- |
+| 1 | about 115 | 4 | `DYLD_...` on macOS; `$GITHUB_\<line break>ENV`; the output file's path changed into the env file's (the runner names a step's files side by side with one suffix); a write in the step's `shell` |
+| 2 | about 92 | 5, and a slow case | other copies of the output file's path (`set --`, `for`, `read`, `printf -v`, a name reference, `sed`); a substitution nested in `${...}`; a continued line in an `env` value; a write in the job's `env` or matrix; `$'GITHUB_\x45NV'`; two quadratic regular expressions |
+| 3 | about 54 | 4 | `tee`'s own output sent to the env file; `$'\0012'` in an `sh` step (dash); `1<>`, which writes over an earlier line; a container's `env` |
+| 4 | about 39 | 1 | a continued line splitting `<>` |
+| 5 | about 21 | 0 | |
+
+The second version searched for listed constructs; from the third on, every file command's variable in a bash script is read with the lexer and accepted only as a plain redirection target or `tee`'s file, which also removed most of the second version's false positives. Each way past is a test in `tests/test_github_env_steering.py`. Stated and not fixed: a name or a path a script assembles otherwise (a glob over the runner's temporary folder, `env | sed`, `/proc` through a group redirected to an output), what a program or action an earlier step runs writes, and a line break that a variable, a file or a command's output puts in a value at run time. Known false positives, by design: Python, PowerShell or an action that names a file command, a tool given the output file's path, `options: -e TZ=UTC` on a container, and `&&\` with no space before the backslash in a script that writes `GITHUB_ENV`.
+
 ## 2d.2j (open): agent stages, attempts recorded, not yet fixed
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for the run that takes 2d.2j: 71 ways past, 14 false positives, 3 slow cases, 23 held. The classes are in [the plan's entry for 2d.2j](flagship.md). None is fixed; the case files themselves were not kept, so each row says what the file did. OBAAF-JEN-002 and 006 have no recorded attempt yet (reviewer A was stopped by a safety classifier before its first case).
