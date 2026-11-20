@@ -139,6 +139,19 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         self.assertEqual(data["todo"], [])
         self.assertTrue(any("cause catalogue is inconsistent" in note for note in data["notes"]))
 
+        for render in (report.to_text, report.to_summary):
+            with self.subTest(render=render.__name__):
+                text = render(result, catalog)
+                self.assertIn("Action list unavailable", text)
+                self.assertNotIn("0 findings, 0 things to do", text)
+
+    def test_text_suggestions_accept_missing_original_options(self):
+        result = CheckResult([Finding("OBAAF-GHA-009", "low", "wf", 1, "Implicit.")], [], [], Config())
+        result.options = None
+        for render in (report.to_text, report.to_summary):
+            with self.subTest(render=render.__name__):
+                self.assertIn("obaaf check . --fail-on", render(result))
+
     def test_acceptance_causes_do_not_share_an_id_with_the_catalogue(self):
         import ast
         from pathlib import Path

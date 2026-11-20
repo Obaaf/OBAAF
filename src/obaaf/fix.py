@@ -44,7 +44,9 @@ def _paths(args):
 def _show_diff(edit):
     before = edit.before.decode("utf-8").splitlines(keepends=True)
     after = edit.after.decode("utf-8").splitlines(keepends=True)
-    for line in difflib.unified_diff(before, after, fromfile=f"a/{edit.path}", tofile=f"b/{edit.path}"):
+    # The path can come from a link the repository names, so it is shown as one escaped line.
+    name = one_line(Path(edit.path).as_posix())
+    for line in difflib.unified_diff(before, after, fromfile=f"a/{name}", tofile=f"b/{name}"):
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         if not line.endswith("\n"):
             print(r"\ No newline at end of file")
