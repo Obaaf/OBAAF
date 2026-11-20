@@ -375,7 +375,8 @@ class ImageBuildsThatDoNotPushTest(unittest.TestCase):
         """The image-output pattern looks at most 8,192 characters into a command, and reads each output's
         pieces up to a bound, so a long line costs about what the older `--push` pattern's does (slow
         patterns older than this slice are #179). The third review's chain of `-o,` took 132 s at 100 KB, and
-        the fourth review's groups of `docker build` and `-o,` chains 12 s a search."""
+        the fourth review's groups of `docker build` and `-o,` chains 12 s a search, and the fifth review's
+        `${{ docker build -o ... }}` blocks 147 s a search."""
         import re
         import time
         from obaaf.catalog import load
@@ -385,7 +386,8 @@ class ImageBuildsThatDoNotPushTest(unittest.TestCase):
                      "docker build" + " -o," * 25000, "docker build" + " --output=," * 3000,
                      "docker build" + " -otype=image," * 2000, "docker build" + " --set=x.output=," * 2000,
                      "docker build -o " + "${{a}}" * 3000, "docker build '" + "a " * 20000,
-                     (" docker build" + " -o," * 200 + ",") * 125, (" docker build" + " -o, x, x, x," * 60 + ",") * 125):
+                     (" docker build" + " -o," * 200 + ",") * 125, (" docker build" + " -o, x, x, x," * 60 + ",") * 125,
+                     "docker build -o a " + ("${{ docker build -o " + "b" * 20 + " }}") * 2500):
             started = time.monotonic()
             rx.search(line)
             self.assertLess(time.monotonic() - started, 10)
