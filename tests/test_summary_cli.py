@@ -1,6 +1,7 @@
 """The summary changes how the checker reports, while preserving its verdict."""
 
 from datetime import date, timedelta
+import json
 import shlex
 import unittest
 
@@ -56,6 +57,11 @@ class SummaryCliTest(unittest.TestCase):
                     self.assertIn("--platform=github", words)
                     self.assertEqual(words[words.index("--fail-on") + 1], "never")
                 self.assertEqual(run_cli(*lane_words[1:])[0], 0)
+            code, output, err = run_cli(*args, "--format", "json")
+            self.assertEqual(code, 0, err)
+            group = next(g for g in json.loads(output)["todo"] if "configured path and target" in g["nextAction"])
+            self.assertIsNone(group["command"])
+            self.assertEqual(shlex.split(group["nextAction"].split("obaaf check ", 1)[1]), lane_words[2:])
             # Fill in only the acceptance decisions and destination in the printed command.
             replacements = {"--write-baseline=NEW_BASELINE_FILE": f"--write-baseline={folder / 'accepted.json'}",
                             "OWNER": "@example/build", "REASON": "Reviewed during local adoption",
@@ -65,6 +71,40 @@ class SummaryCliTest(unittest.TestCase):
             self.assertIn("OBAAF-REPO-001", replay)
             self.assertIn(settings.name, replay)
             self.assertTrue((folder / "accepted.json").is_file())
+
+    def test_lane_advice_replays_from_finding_and_json_without_settings(self):
+        with TempDir() as root:
+            workflow = root / ".github/workflows/build.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            baseline = root / "team baseline.json"
+            baseline.write_text(json.dumps({"format": "obaaf-baseline/v0.2", "findings": []}))
+            for name in ("team config.yml", "team\nconfig.yml"):
+                with self.subTest(name=name):
+                    config = root / name
+                    config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+                    args = ("check", root, "--config", config, "--platform", "github",
+                            "--baseline", baseline, "--fail-on", "never")
+                    code, text, err = run_cli(*args)
+                    self.assertEqual(code, 0, err)
+                    code, output, err = run_cli(*args, "--format", "json")
+                    self.assertEqual(code, 0, err)
+                    data = json.loads(output)
+                    fix = next(line for line in text.splitlines() if "Fix: Correct the declaration" in line)
+                    finding = next(f for f in data["findings"] if f["rule"] == "OBAAF-CFG-001")
+                    group = next(g for g in data["todo"] if "configured path and target" in g["nextAction"])
+                    self.assertIsNone(group["command"])
+                    for advice in (fix, finding["fix"], group["nextAction"]):
+                        if "\n" in name:
+                            self.assertIn("original", advice)
+                            self.assertNotIn("obaaf check", advice)
+                        else:
+                            self.assertEqual(advice.count("obaaf check"), 1)
+                            command = shlex.split(advice[advice.index("obaaf check"):])
+                            self.assertEqual(command, ["obaaf", "check", str(root), f"--config={config}",
+                                                       "--platform=github", f"--baseline={baseline}",
+                                                       "--fail-on", "never", "--lanes"])
+                            self.assertEqual(run_cli(*command[1:])[0], 0)
 
     def test_summary_keeps_scan_errors_visible(self):
         with TempDir() as root:

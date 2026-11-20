@@ -4,6 +4,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+Lane follow-up commands in text findings and JSON reports now retain the original check inputs, including custom configuration and baseline files. [Issue #262, item 6](https://github.com/Obaaf/OBAAF/issues/262)
+
 ### Offline settings evidence
 
 `obaaf check --settings FILE` reads an explicitly named audit snapshot, reports its date and checks its code ownership. Evidence older than 30 days or missing required observations stays uncertain. This first increment reports the evidence separately while OBAAF-GHA-005 keeps its existing verdict.
