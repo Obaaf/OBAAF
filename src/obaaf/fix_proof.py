@@ -17,6 +17,7 @@ import yaml
 from obaaf import checker, yamlutil
 from obaaf.catalog import load
 from obaaf.checker import baseline, workflow
+from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.fix_copy import private_copy
 
@@ -280,16 +281,42 @@ def _source_unchanged(root: Path, edits) -> None:
 
 
 def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
-    """Withhold an edit to a file the checker reads as a Jenkinsfile. `jenkins.files` can name a file
-    with any suffix, `.yml` included, and Groovy that also parses as a YAML mapping (statement labels)
-    would otherwise be compared as YAML (second review of #274)."""
+    """Withhold an edit to a file that is, or that the repository says is, a Jenkinsfile.
+    `jenkins.files` can name a file with any suffix, `.yml` included, and Groovy that also parses as a
+    YAML mapping (statement labels) would otherwise be compared as YAML. Decided from the repository,
+    not only from what this run's platform and path let the checker read, and by file identity, so
+    a link or another spelling of the name is the same file (second and third reviews of #274).
+    It uses the Jenkins reader's own name pattern (without its suffix exclusion) and glob match,
+    which are private to that module, so that the two cannot drift apart."""
     target = root / options.path
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
-    jenkins = {(base / name).resolve() for name in result.jenkins_files}
+    read = set()
+    for name in result.jenkins_files:
+        try:
+            info = (base / name).stat()
+        except OSError:
+            continue
+        read.add((info.st_dev, info.st_ino))
+    globs = [str(g) for g in (result.config.jenkins.get("files") or [])]
+    try:
+        globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
+    except checker.ConfigError as exc:
+        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
     for edit in edits:
         rel = _relative(root, Path(edit.path))
-        if (root / rel).resolve() in jenkins:
-            raise ProofError(f"the checker reads {str(rel)!r} as a Jenkinsfile, which the proof does not compare")
+        path = root / rel
+        info = path.stat()
+        names = {rel.as_posix()}
+        for start in (root, base):
+            try:
+                names.add(path.resolve().relative_to(start.resolve()).as_posix())
+            except ValueError:
+                pass
+        folded = {n.casefold() for n in names}
+        if ((info.st_dev, info.st_ino) in read or jenkins_mod._NAME.match(rel.name)
+                or any(jenkins_mod._glob_match(n, g.casefold()) for n in folded for g in globs)):
+            raise ProofError(f"{str(rel)!r} is a Jenkinsfile, or the repository names it as one, "
+                             "and the proof does not compare Jenkinsfiles")
 
 
 def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: tuple[Promise, ...]):

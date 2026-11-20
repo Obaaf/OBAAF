@@ -152,7 +152,7 @@ class FixProofReviewTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(before)
                 edit = Edit(Path(name), before, after, (("nothing",),))
-                with self.assertRaisesRegex(ProofError, "only YAML or JSON"):
+                with self.assertRaisesRegex(ProofError, "only YAML or JSON|is a Jenkinsfile"):
                     prove(self.root, self.options, (edit,), ())
                 self.assertEqual(path.read_bytes(), before)
                 path.unlink()
@@ -221,6 +221,22 @@ class FixProofReviewTest(unittest.TestCase):
         self.assertIn("ci/pipeline.yml", checker.check(
             self.root, platform="auto", config=checker.Config.load(self.root, None)).jenkins_files)
         edit = Edit(Path("ci/pipeline.yml"), before, after, (("b",),))
-        with self.assertRaisesRegex(ProofError, "as a Jenkinsfile"):
+        with self.assertRaisesRegex(ProofError, "is a Jenkinsfile"):
             prove(self.root, options, (edit,), ())
         self.assertEqual((self.root / "ci/pipeline.yml").read_bytes(), before)
+
+    def test_a_jenkinsfile_the_run_does_not_read_is_still_withheld(self):
+        (self.root / ".github/obaaf.yml").write_text("jenkins:\n  files: ['CI/*.YML']\n")
+        (self.root / "ci").mkdir()
+        before = b"a: node { sh 'make # all' }\nb: echo 'one'\n"
+        after = b"a: node { sh 'make # all' }; node { sh 'make deploy-prod' }\nb: echo 'two'\n"
+        cases = {"ci/pipeline.yml": None, "ci/Jenkinsfile.yml": None}
+        for name in cases:
+            with self.subTest(name=name):
+                (self.root / name).write_bytes(before)
+                edit = Edit(Path(name), before, after, (("b",),))
+                for options in (self.options, dataclasses.replace(self.options, path=Path(".github/workflows")),
+                                CheckOptions(path=Path("."), platform="github", fail_on="high")):
+                    with self.assertRaisesRegex(ProofError, "is a Jenkinsfile"):
+                        prove(self.root, options, (edit,), ())
+                (self.root / name).unlink()
