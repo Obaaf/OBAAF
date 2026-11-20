@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import unicodedata
 from datetime import date
 
@@ -270,6 +271,125 @@ def summary(result: CheckResult) -> dict:
             "notAccepted": len(result.not_accepted())}
 
 
+def _check_args(result: CheckResult) -> list[str]:
+    target = str(result.checked or ".")
+    if target.startswith("-"):
+        target = "./" + target
+    return ["obaaf", "check", target, *map(str, result.options or ())]
+
+
+def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
+    if catalog.causes.problems:
+        return ["Action list unavailable because the cause catalogue is inconsistent. Run obaaf catalog for details."]
+    groups = todo(result, catalog)
+    count = sum(group["count"] for group in groups)
+    lines = [f"What to do next: {count} finding{'s' if count != 1 else ''}, "
+             f"{len(groups)} thing{'s' if len(groups) != 1 else ''} to do"]
+    for index, group in enumerate(groups, 1):
+        lines.append(f"{index}. {group['sentence']} ({_severities(group['bySeverity'])})")
+        if group.get("previousMatches"):
+            matches = group["previousMatches"]
+            entries = "entry shares" if matches == 1 else "entries share"
+            lines.append(f"   {matches} stale baseline {entries} the rule, file and job of findings in this group.")
+        if "pinCandidates" in group:
+            lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
+                         f"{group['byHand']} require manual review.")
+        action = group["nextAction"]
+        command = None
+        if "obaaf check . --lanes" in action:
+            # The command goes on a line of its own, so that copying it takes no full stop with it, and a
+            # path or option that cannot be printed on one line loses only the command, not the advice.
+            args = _check_args(result)
+            if result.baseline_path:
+                args.append("--baseline=" + str(result.baseline_path))
+            args.extend(["--fail-on", result.fail_on, "--lanes"])
+            command = shlex.join(args)
+            action = action.replace("obaaf check . --lanes", "the command below")
+        if group["command"] and result.errors:
+            action, command = "Resolve the scan errors before migrating the baseline.", None
+        if command is not None and command != one_line(command):
+            action, command = action.replace(
+                "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
+                "printed as a one-line command)"), None
+        if action != one_line(action):
+            # The catalogue's own command, such as `obaaf baseline migrate` with the baseline's path.
+            action = "Use the original check paths and options; they cannot be printed as a one-line command."
+        lines.append("   " + action)
+        if command is not None:
+            lines.append("      " + command)
+    if result.errors or not groups or result.baseline_format == baseline_mod.FORMAT_V1:
+        return lines
+    if result.baseline_stale:
+        lines.append("Review stale entries before deciding whether to replace the baseline.")
+        return lines
+
+    # The writer can renew an invalid baseline entry when new acceptance metadata is supplied.
+    # Such a renewal needs its own decision. Never omit it from the count then suggest that write.
+    if any(f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE
+           for f in result.not_accepted()):
+        lines.append("Review invalid baseline acceptances before deciding whether to write the baseline.")
+        return lines
+
+    # plan(None) supplies the writer's eligibility rules. Entries the applied baseline already
+    # accepts will keep their metadata when the same baseline is written again.
+    _, _, candidates = baseline_mod.plan(result, None)
+    fresh = [f for f in candidates if f.state in (NEW, UNDECIDED) and f.acceptance is None]
+    if not fresh:
+        return lines
+    if result.baseline_used and not result.baseline_path:
+        return lines
+    destination = str(result.baseline_path or "NEW_BASELINE_FILE")
+    command = shlex.join([*_check_args(result), "--fail-on", result.fail_on,
+                          "--write-baseline=" + destination, "--owner", "OWNER",
+                          "--reason", "REASON", "--expires", "YYYY-MM-DD"])
+    if command != one_line(command):
+        lines.append("Optional bulk acceptance is not shown: the check's paths or options cannot be printed as a "
+                     "one-line command.")
+        return lines
+    lines.append(f"Optional bulk acceptance: {len(fresh)} eligible outstanding "
+                 f"finding{'s' if len(fresh) != 1 else ''} ({_severities(_by_severity(fresh))}). "
+                 "Review them before supplying the owner, reason and expiry.")
+    if not result.baseline_used:
+        lines.append("Choose an unused path for NEW_BASELINE_FILE.")
+    lines.append("   " + command)
+    return lines
+
+
+def to_summary(result: CheckResult, catalog: Catalog | None = None,
+               expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
+    """The same list as the full text report, after the report's opening lines (the accepted risk first,
+    D-043) and with scan errors, an old-format baseline and stale baseline entries."""
+    catalog = catalog or load()
+    # The opening lines are the full report's; the stale entries they point to are listed only there.
+    lines = [line.replace("; they are listed below.", "; the full report lists them.")
+             for line in _lead_lines(result, accepted_risk(result, expiring_within))]
+    if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
+        lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
+                     "finding until it is converted. The full report gives the command.")
+    lines += [f"error: {one_line(error)}" for error in result.errors]
+    if result.errors:
+        lines.append("The scan is incomplete and fails regardless of its findings.")
+    if result.jenkins_files:
+        unknown = [row for row in result.coverage if row["status"] == "unknown"]
+        if unknown:
+            files = len({row["path"] for row in unknown})
+            lines.append(f"Jenkins coverage is advisory: {len(unknown)} unknown rule results "
+                         f"across {files} Jenkinsfile{'s' if files != 1 else ''}. See the full coverage report.")
+        else:
+            lines.append("Jenkins coverage is advisory. The full report states what the checker could verify.")
+    if result.notes:
+        lines.append(f"The full report contains {len(result.notes)} advisory "
+                     f"note{'s' if len(result.notes) != 1 else ''} about this scan.")
+    if result.baseline_stale:
+        gated = result.stale_gating(result.fail_on, catalog)
+        lines.append(f"Stale baseline entries: {len(result.baseline_stale)}. "
+                     f"The current --fail-on {result.fail_on} gate counts {len(gated)}. "
+                     "The full report lists the entries.")
+    if lines:
+        lines.append("")
+    return "\n".join(lines + _todo_lines(result, catalog)) + "\n"
+
+
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True,
             expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
     """The report a person reads. It leads with the accepted risk. Text that comes from the files
@@ -372,6 +492,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         # A first run (slice 3.2a): say what an unconfigured check cannot know, and what OBAAF does not look for.
         lines.append(FIRST_RUN_CONFIG)
         lines.append(FIRST_RUN_OTHER_TOOLS)
+    lines.extend(_todo_lines(result, catalog))
     lines.append(f"Checked by obaaf {__version__}.")
     return "\n".join(lines).lstrip("\n") + "\n"
 
