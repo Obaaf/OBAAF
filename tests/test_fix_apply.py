@@ -209,6 +209,16 @@ class FixApplyTest(unittest.TestCase):
             self.assertEqual((self.root / edit.path).stat().st_nlink, 1)
         self.assertFalse(list(self.root.rglob(".obaaf-apply-*.new")))
 
+    def test_a_work_tree_elsewhere_is_refused(self):
+        # Review of #282: with core.worktree set, apply wrote a file Git does not track there.
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere)
+        self.git("config", "core.worktree", str(elsewhere))
+        edits = self.edits()
+        with patch.object(fix_apply, "_install") as install, self.assertRaisesRegex(ProofError, "another folder"):
+            self.install(edits)
+        install.assert_not_called()
+
     def test_checkout_transformations_are_refused(self):
         for attribute in ("filter=lfs", "ident", "working-tree-encoding=UTF-16"):
             with self.subTest(attribute=attribute):

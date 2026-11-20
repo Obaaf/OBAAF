@@ -217,6 +217,13 @@ def apply_edits(root, root_fd, edits):
     git = repo.find_git(root)
     if not git or _git(git, root, "rev-parse", "--show-prefix") != b"\n":
         raise ProofError("apply needs the root of a Git working tree")
+    # With core.worktree pointing elsewhere the prefix is empty too, and the names Git tracks are
+    # another folder's (added by the review, review-gpt #282).
+    top = os.fsdecode(_git(git, root, "rev-parse", "--show-toplevel").rstrip(b"\n"))
+    here, there = os.fstat(root_fd), os.stat(top) if top else None
+    if there is None or (there.st_dev, there.st_ino) != (here.st_dev, here.st_ino):
+        raise ProofError("apply needs the root of a Git working tree; Git's work tree for this repository is "
+                         "another folder")
     if len({e.path for e in edits}) != len(edits):
         raise ProofError("multiple apply edits name the same target")
     with ExitStack() as stack:
