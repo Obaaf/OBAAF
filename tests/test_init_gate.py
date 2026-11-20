@@ -88,6 +88,10 @@ class GateTests(unittest.TestCase):
         self.assertNotEqual(code, 0, text)  # untracked
         self.assertEqual(self.workflow.read_bytes(), original)
         commit(self.root)
+        status, refusal = self.gate("--fail-on", "medium", "--apply")
+        self.assertEqual(status, 2, refusal)
+        self.assertIn("omit acceptance metadata and --fail-on", refusal)
+        self.assertEqual(self.workflow.read_bytes(), original)
         status, text = self.gate("--apply")
         self.assertEqual(status, 0, text)
         after = self.workflow.read_text()
