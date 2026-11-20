@@ -2679,10 +2679,8 @@ class Job:
                 out.append(step)
                 continue
             # Flagship slice 2d.2e: an image build that pushes (`push: true`, or a value set when the job
-            # runs) publishes.
-            if (step.uses_action("docker/build-push-action") or step.uses_action("docker/bake-action")) and (
-                    "${{" in as_text(step.with_.get("push", "")) or as_text(step.with_.get("push", "")).strip().lower()
-                    in ("true", "1", "yes")):
+            # runs) publishes; since slice 2d.14, also one whose outputs push.
+            if image_step_pushes(step):
                 out.append(step)
                 continue
             # Everything the step runs as a command line, also with each command continued on the next
@@ -2858,6 +2856,26 @@ def _first_word_forms(segment: str) -> list[str]:
     if "/" in first and not first.startswith("@"):
         return [segment, f"{first.rsplit('/', 1)[-1]} {rest}".rstrip()]
     return [segment]
+
+
+# An image build's output that pushes (flagship slice 2d.14): a registry output, `push=` with any value
+# but false, or a value set when the job runs.
+_PUSHING_OUTPUT = re.compile(r"type\s*=\s*registry|\bpush\s*=\s*(?!(false|0|f)\b)|\$\{\{", re.I)
+
+
+def image_step_pushes(step: "Step") -> bool:
+    """Whether a step that uses `docker/build-push-action` or `docker/bake-action` pushes an image: its
+    `push` is true or set when the job runs (flagship slice 2d.2e), or, since slice 2d.14, build-push-action's
+    `outputs` or bake-action's `set` names a registry output or a push (`type=registry`,
+    `type=image,push=true`, `*.output=type=registry`, `*.push=true`) or is set when the job runs. What a bake
+    file the action reads says is not read."""
+    if not (step.uses_action("docker/build-push-action") or step.uses_action("docker/bake-action")):
+        return False
+    push = as_text(step.with_.get("push", ""))
+    if "${{" in push or push.strip().lower() in ("true", "1", "yes"):
+        return True
+    given = as_text(step.with_.get("outputs", "")) + "\n" + as_text(step.with_.get("set", ""))
+    return bool(_PUSHING_OUTPUT.search(given))
 
 
 def upload_readings(text: str) -> list[str]:

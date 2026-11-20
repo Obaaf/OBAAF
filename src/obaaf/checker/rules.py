@@ -611,6 +611,20 @@ def _forbids_restores(mode) -> bool:
     return mode in ("none", "write-only")
 
 
+def _image_build_only(step: Step) -> bool:
+    """Whether a step that uses `docker/build-push-action` can only build an image (flagship slice 2d.14):
+    its `with`, if written, is a mapping; `push` (in any letter case, as GitHub reads inputs) is not given
+    or is `false` in any case; and `outputs` is not given or names no registry and no push, with no
+    expression in it. Any other value is read as one that may push. `docker/bake-action` reads what it
+    pushes from files the checker does not read, so it is never taken to build only."""
+    raw = step.raw.get("with")
+    if not step.uses_action("docker/build-push-action") or (raw is not None and not isinstance(raw, dict)):
+        return False
+    push = as_text(step.with_.get("push", "")).strip().lower()
+    outputs = as_text(step.with_.get("outputs", "")).lower()
+    return push in ("", "false") and not any(word in outputs for word in ("${{", "registry", "push"))
+
+
 # What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
 # release, any job downloads, any job may restore a cache).
 _NO_PARTS = (CallSummary(), CallSummary(), False, (), False, False)
@@ -3905,18 +3919,21 @@ class WorkflowRules:
         written = job.raw.get("environment")
         return written.get("name") if isinstance(written, dict) else written
 
-    def _publishing_capabilities(self, job: Job) -> list[str]:
+    def _publishing_capabilities(self, job: Job, builds: bool = True) -> list[str]:
         """What a job holds that publishing needs: `packages: write`, a step that uses an action listed
         under `publishing_actions`, a secret whose name says it publishes. `id-token: write` alone is not
         counted: OBAAF's own templates use it to sign and attest, which is what a repository should do,
-        and OBAAF-GHA-004 reports it for an agent job."""
+        and OBAAF-GHA-004 reports it for an agent job. With `builds=False` (OBAAF-GHA-006 on a job that is
+        not a release job, flagship slice 2d.14), a `docker/build-push-action` step that cannot push is not
+        counted: it builds an image, and an image build with a GitHub Actions cache is common in jobs that
+        publish nothing."""
         capabilities = []
         permissions = job.permissions
         if permissions is not None and permissions.level("packages") == "write":
             capabilities.append("packages: write")
         for step in job.steps:
             action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
-            if action:
+            if action and (builds or not _image_build_only(step)):
                 capabilities.append(f"uses {step.action}")
         patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
         capabilities += [f"secret {name}" for name in sorted(job.secret_names())
@@ -3969,6 +3986,7 @@ class WorkflowRules:
         effects = job.call_effects if job.called else None
         if not job.in_lane("release"):
             self.release_capability(job)
+            self.may_publish_caches(job)
             return
         if effects is not None and effects.lane_given:
             # Flagship slice 2d.4b3b: a job in the release lane only because a workflow it calls releases has
@@ -4100,6 +4118,90 @@ class WorkflowRules:
                          "Step '{step}' uploads after a provenance check only; approvals and agent "
                          "records are not checked (use obaaf verify release).", job, partial[0], severity="medium",
                          kind="provenance-only", steps=Fact([self._release_step(s) for s in partial], ""))
+
+    def may_publish_caches(self, job: Job) -> None:
+        """OBAAF-GHA-006 for a job nothing puts in the release lane that holds what publishing needs and
+        restores a cache, directly or through a job it needs and downloads from (flagship slice 2d.14, #289).
+        Release jobs are recognised by lists of actions and commands, which miss many (`uv build publish`
+        in zizmor's test workflow `cache-poisoning.yml`), and code from a poisoned cache entry runs with
+        what the job holds whether or not the job itself publishes: it can publish with it. So such a job is
+        reported at medium, as one the checker cannot tell releases. What it holds is a fact, so an
+        acceptance written for one credential does not cover another one added later. Nothing when the job
+        holds nothing for publishing, or restores nothing its cache-mode lets through; a job with no cache
+        step gets no `no-cache-mode` finding, which is for release jobs. A job that calls a workflow of the
+        repository is read for the jobs it needs, as for a release job (`_jobs_feeding`); a cache restored in
+        the workflow it calls is read there, with the secret names that workflow's jobs use, so a credential
+        the caller passes under another name is not counted."""
+        held = self._may_publish_holds(job)
+        if not held:
+            return
+        mode = job.cache_mode
+        cache_steps = [s for s in job.steps if self._restores_cache(s)]
+        if cache_steps and not _forbids_restores(mode):
+            names = ", ".join(f"'{s.name}'" for s in cache_steps)
+            values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
+                      "mode": Fact(mode or "", mode or "not set")}
+            controls = self._callers_cache_controls()
+            if job.self_hosted:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them. This job also runs on a "
+                         "self-hosted runner, where local caches (such as an engine's derived-data cache) are "
+                         "outside what this check can see.", job, cache_steps[0], severity="medium",
+                         kind="capability-restores-self-hosted", controls=controls, **values)
+            else:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them.", job, cache_steps[0],
+                         severity="medium", kind="capability-restores", controls=controls, **values)
+        feeding = self._jobs_feeding(job)
+        if feeding:
+            self.add("OBAAF-GHA-006", job.line,
+                     "Job '{job}' holds what publishing needs ({capabilities}), downloads artifacts and needs {jobs}, "
+                     "which restore caches and whose cache-mode does not forbid it. The checker cannot tell whether "
+                     "it releases what they built; if it does, a poisoned cache entry can reach what it releases.",
+                     job, severity="medium", kind="capability-needed-job-restores",
+                     controls=self._callers_cache_controls("on the jobs it needs that restore"), capabilities=held,
+                     jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
+
+    def _may_publish_holds(self, job: Job) -> list[str]:
+        """What a job holds that publishing needs, for OBAAF-GHA-006 on a job that is not a release job
+        (flagship slice 2d.14): what OBAAF-GHA-015 counts (`_publishing_capabilities`); a reference that can
+        read every secret (`toJSON(secrets)`, a computed name, `secrets: inherit`), since which secrets
+        exist is not in the workflow (as OBAAF-GHA-018 reads it); and a token with `contents: write`, which
+        can create a GitHub release and upload its assets, in a job that a release event, a tag push or a
+        tag's creation can start. On other events `contents: write` is not counted: it is common in jobs
+        that commit back, which this rule would then take for jobs that may release. Permissions the job
+        does not declare are not counted (OBAAF-GHA-009 reports them)."""
+        held = self._publishing_capabilities(job, builds=False)
+        if any(name.startswith("*") for name in job.secret_names()):
+            held.append("every secret, through a reference that is not one literal name or secrets: inherit")
+        permissions = job.permissions
+        if permissions is not None and permissions.level("contents") == "write":
+            events = self._release_or_tag_events(job)
+            if events:
+                held.append(f"contents: write, on {' or '.join(events)}")
+        return held
+
+    def _release_or_tag_events(self, job: Job) -> list[str]:
+        """The events among those that can start the job that can be for a release or a tag: `release`,
+        `create` (a branch's or a tag's creation), and `push` unless its filters keep tags out. GitHub runs
+        a push workflow for a tag unless it names `branches` or `branches-ignore` and neither `tags` nor
+        `tags-ignore` (path filters are not applied to tags). A filter written as anything but a mapping, or
+        with its keys in another spelling, is read as letting tags through, the wider reading. A push that
+        reaches a called workflow from its callers is read the same way."""
+        triggers = job.triggers()
+        events = [event for event in ("release", "create") if event in triggers]
+        if "push" in triggers:
+            own = self.wf.triggers
+            config = own.get("push")
+            keys = {key for key in config if isinstance(key, str)} if isinstance(config, dict) else set()
+            tags = "push" in own and (keys & {"tags", "tags-ignore"} or not keys & {"branches", "branches-ignore"})
+            if tags or "push" in self.wf.caller_events:
+                events.append("a tag push")
+        return events
 
     def _called_caches(self, job: Job, effects: CallEffects) -> None:
         """OBAAF-GHA-006 for a release job that calls workflows of the repository (flagship slice 2d.4b3b):
