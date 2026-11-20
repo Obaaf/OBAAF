@@ -202,6 +202,15 @@ jobs:
             self.assertIn("outside the checked repository", err)
             self.assertFalse(any("settings.json" in str(f) for f in json.loads(out)["findings"]
                                  if f["rule"] == "OBAAF-REPO-001"))
+            # And the reverse: a link inside the repository to a snapshot outside it. The link has an
+            # owner, but what it leads to does not.
+            inner = self.root / ".github/outside-link.json"
+            inner.symlink_to(outside)
+            status, _, err = run_cli(*args, "--settings", str(inner))
+            self.assertEqual(status, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: cannot tell", err)
+            self.assertIn("outside the checked repository", err)
+            inner.unlink()
         self.path.write_text("{}")
         self.assertEqual(run_cli(*args)[0], 0)
         self.assertEqual(run_cli(*args, "--settings", str(self.path))[0], 2)
