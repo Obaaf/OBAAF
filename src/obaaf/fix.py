@@ -122,8 +122,11 @@ def _verified_plan(source, copy, options, before, metadata, plan):
         pin = metadata.get("pin")
         request = ["--pin", "=".join(pin)] if pin else ["--tighten", "checkout-credentials"]
         command = tightening_command(before, request, candidate=item.id)
-        return (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
-                f"their owner. Retry this step alone with {command}")
+        advice = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries "
+                  "with their owner.")
+        if command != one_line(command):
+            return advice + " The named retry cannot be printed on one line. Use the original paths and options."
+        return f"{advice} Retry this step alone with {command}"
 
     def verify(candidate):
         for edit in candidate.edits:
