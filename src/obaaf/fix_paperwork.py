@@ -61,8 +61,11 @@ def _mapping(node):
 
 
 def _description(path, index, entry):
+    # Keys are made text first: YAML allows `1:` or `true:` beside text keys, and sorting
+    # mixed keys raised TypeError (found by the review of #278).
+    shown = {str(k): v for k, v in entry.items()} if isinstance(entry, dict) else entry
     return (f"{path} entry {index + 1}: "
-            + json.dumps(entry, sort_keys=True, ensure_ascii=True, default=str))
+            + json.dumps(shown, sort_keys=True, ensure_ascii=True, default=str))
 
 
 def _last_content(node):
@@ -88,6 +91,12 @@ def _delete_rows(text, sequence, indices):
                 start, end = rows[index].start_mark.index, rows[last + 1].start_mark.index
             elif index:
                 start, end = rows[index - 1].end_mark.index, rows[last].end_mark.index
+                # Deleting from the end of the entry before would move a comment written beside
+                # the kept entry, or the deleted one, onto the kept entry (review of #278).
+                line_end = text.find("\n", end)
+                if "#" in text[start:end] or "#" in text[end:line_end if line_end >= 0 else len(text)]:
+                    raise ValueError("a comment beside the last entries of a flow-style list would move "
+                                     "to another entry")
             else:
                 start, end = rows[index].start_mark.index, rows[last].end_mark.index
             edits.append((start, end, ""))
@@ -229,6 +238,12 @@ def _config_plan(root, result, owner, full, selected, items, refused):
                    and f.kind == "entry-not-a-lane" and (f.facts or {}).get("entry") == workflow.bounded(key)]
         if not matches:
             continue
+        if not full:
+            # A job's lane can change findings in files a partial check does not read, such as
+            # a workflow that calls it (review of #278).
+            refused.append(f"{path} lane {key!r} ({value!r}): a partial check cannot establish "
+                           "what the correction changes")
+            continue
         targets = sorted(lane for lane in workflow.LANES if isinstance(value, str)
                          and _one_edit(value.strip().lower(), lane))
         if len(targets) != 1 or key not in lanes or not isinstance(lanes[key], yaml.ScalarNode):
@@ -310,7 +325,7 @@ def plan(root: Path, options: CheckOptions, result, *, owner=None, reason=None, 
         generated = []
         try:
             edit = generator(*args, selected, generated, refused)
-        except (ValueError, OSError, yaml.YAMLError, RecursionError) as exc:
+        except (ValueError, OSError, yaml.YAMLError, RecursionError, TypeError) as exc:
             refused.append(f"Could not prepare paperwork: {exc}")
             continue
         if edit is not None:

@@ -33,7 +33,7 @@ The generated workflow pins the development checker to a commit on `flagship`. I
 
 ### Preview the changes to your OBAAF files
 
-In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
+In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check; the configuration and baseline must be inside the repository. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
 
 To see which old acceptances would carry over, supply the owner, reason and expiry you intend to record. For example, replace the values in this command before using it.
 
