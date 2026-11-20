@@ -372,15 +372,18 @@ class ImageBuildsThatDoNotPushTest(unittest.TestCase):
                 self.assertEqual(self.lane(f"      - run: {command}\n"), [])
 
     def test_the_new_command_pattern_costs_what_it_reads(self):
-        """The image-output pattern looks at most 16,384 characters into a command and stops at `;`, `&` and
-        `|`, so a long line of many commands is not quadratic in its length. (The older `--push` pattern
-        is left as it was; slow patterns older than this slice are #179.)"""
+        """The image-output pattern looks at most 8,192 characters into a command, and reads each output's
+        pieces up to a bound, so a long line costs about what the older `--push` pattern's does (slow
+        patterns older than this slice are #179). The third review's chain of `-o,` took 132 s at 100 KB."""
         import re
         import time
         from obaaf.catalog import load
         pattern = next(p for p in load().detection["upload_commands"] if "imagetools" not in p and "--output" in p)
         rx = re.compile(pattern, re.M)
-        for line in ("docker build ; " * 16000, "docker build " * 10000, ("docker build --set a.b=" + "x" * 50 + " ") * 3000):
+        for line in ("docker build ; " * 16000, "docker build " * 10000, ("docker build --set a.b=" + "x" * 50 + " ") * 3000,
+                     "docker build" + " -o," * 25000, "docker build" + " --output=," * 3000,
+                     "docker build" + " -otype=image," * 2000, "docker build" + " --set=x.output=," * 2000,
+                     "docker build -o " + "${{a}}" * 3000, "docker build '" + "a " * 20000):
             started = time.monotonic()
             rx.search(line)
             self.assertLess(time.monotonic() - started, 10)
@@ -422,6 +425,16 @@ class SecondReviewTest(unittest.TestCase):
             with self.subTest(end=end):
                 script = "".join(f"          {line}\n" for line in f"docker buildx build \\\n{labels}  {end}".splitlines())
                 self.assertEqual(self.lane(f"      - run: |\n{script}"), ["unchecked"])
+
+    def test_quoted_separators_and_spaced_expressions_in_commands(self):
+        """The third review: a `;` or `&` in a quoted argument, and an expression with spaces before `type=`."""
+        for command in ("docker buildx build --build-arg 'URL=https://x?a=1&b=2' -o type=registry .",
+                        'docker buildx build --label "d=R&D tools" --output type=image,name=x,push=true .',
+                        "docker buildx build --build-arg 'X=a;b' -o type=registry .",
+                        'docker buildx build -o "name=${{ env.IMAGE }},type=registry" .',
+                        "docker buildx build -o push=true,name=${{ env.IMAGE }},type=image ."):
+            with self.subTest(command=command):
+                self.assertEqual(self.lane(f"      - run: {command}\n"), ["unchecked"])
 
     def test_quoted_fields_and_trimmed_keys(self):
         for extra in ('outputs: type=image,name=x,"push=true"', 'outputs: name=x,"type=registry"',
