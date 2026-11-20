@@ -427,5 +427,144 @@ node('linux') {
         self.assertEqual(findings(text, "OBAAF-JEN-007"), [("low", 4)])
 
 
+
+class ReviewTest(unittest.TestCase):
+    """Ways past and false positives the independent review of slice 2d.2j found (R-numbers are its cases,
+    recorded in docs/bypass-attempts.md)."""
+
+    def test_r003_r005_retry_and_wait_until_run_the_effect_again(self):
+        for wrapper in ("retry(3)", "waitUntil", "timeout(5) { retry(2)"):
+            close = "}" * (2 if "timeout" in wrapper else 1)
+            text = f"node('linux') {{\n  {wrapper} {{\n    sh 'git push'\n    sh 'claude -p fix'\n  {close}\n}}\n"
+            self.assertEqual(findings(text, "OBAAF-JEN-003"), [("high", 3)], wrapper)
+        stage_retry = two_stages(f"{PUSH}\n{AGENT}", "echo ok").replace("steps {", "options { retry(2) }\n      steps {", 1)
+        self.assertEqual(findings(stage_retry, "OBAAF-JEN-003"), [("high", 9)])
+
+    def test_r019_r021_a_pod_workspace_volume_that_outlives_the_pod(self):
+        pvc = ("agent { kubernetes { yaml 'spec: {automountServiceAccountToken: false}'; workspaceVolume "
+               "persistentVolumeClaimWorkspaceVolume(claimName: 'ci-ws', readOnly: false) } }")
+        text = two_stages(AGENT, PUSH, top="agent none", first_agent=pvc, second_agent=pvc)
+        self.assertEqual(status(text, "OBAAF-JEN-003"), "unknown")
+        other = text.replace("'ci-ws'", "'other-ws'", 1)
+        self.assertEqual(status(other, "OBAAF-JEN-003"), "pass")
+        before = two_stages(f"{PUSH}\n{AGENT}", "echo ok", top=pvc)
+        self.assertEqual(findings(before, "OBAAF-JEN-003"), [("medium", 8)])
+        scripted = """
+podTemplate(workspaceVolume: hostPathWorkspaceVolume(hostPath: '/srv/ws')) {
+  node(POD_LABEL) {
+    sh 'git push'
+    sh 'claude -p fix'
+  }
+}
+"""
+        self.assertEqual(findings(scripted, "OBAAF-JEN-003"), [("medium", 4)])
+        ephemeral = scripted.replace("hostPathWorkspaceVolume(hostPath: '/srv/ws')", "emptyDirWorkspaceVolume()")
+        self.assertEqual(findings(ephemeral, "OBAAF-JEN-003"), [])
+
+    def test_r028_archived_artifacts_brought_back_with_unarchive(self):
+        text = StashTest.STASHED.replace("FIRST", AGENT).replace("SECOND", "archiveArtifacts artifacts: '**'") \
+            .replace("unstash 'tree'", "unarchive mapping: ['**': '.']")
+        result = [f for f in analyze(text).findings if f.rule == "OBAAF-JEN-003"]
+        self.assertEqual([(f.severity, f.line) for f in result], [("high", 16)])
+        self.assertIn("artifacts archived", result[0].message)
+        # An archive is not a stash: unstash brings back only stashes.
+        crossed = StashTest.STASHED.replace("FIRST", AGENT).replace("SECOND", "archiveArtifacts artifacts: '**'")
+        self.assertEqual(findings(crossed, "OBAAF-JEN-003"), [])
+
+    def test_r034_r036_a_partial_clean_keeps_git(self):
+        mirror = EarlierEffectTest()
+        for clean in ("cleanWs(patterns: [[pattern: 'build/**', type: 'INCLUDE']])",
+                      "cleanWs(deleteDirs: false, patterns: [[pattern: '.git/**', type: 'EXCLUDE']])",
+                      "cleanWs(cleanWhenSuccess: false)", "cleanWs(externalDelete: 'rm -rf %s')"):
+            self.assertEqual(findings(mirror.case(before=clean), "OBAAF-JEN-003"), [("medium", 8)], clean)
+        self.assertEqual(status(mirror.case(before="cleanWs(notFailBuild: true)"), "OBAAF-JEN-003"), "pass")
+
+    def test_r014_r107_r108_labels_and_paths_that_may_be_one_machine(self):
+        overlap = two_stages(AGENT, PUSH, top="agent none", first_agent="agent { label 'linux && docker' }",
+                             second_agent="agent { label ' (linux) ' }")
+        self.assertEqual(status(overlap, "OBAAF-JEN-003"), "unknown")
+        apart = overlap.replace("' (linux) '", "'windows'")
+        self.assertEqual(status(apart, "OBAAF-JEN-003"), "pass")
+        same_path = """
+node('sandbox') { ws('/srv/ci/shared') { sh 'claude -p fix' } }
+node('trusted') { ws('/srv/ci/shared') { sh 'git push' } }
+"""
+        self.assertEqual(status(same_path, "OBAAF-JEN-003"), "unknown")
+        self.assertEqual(status(same_path.replace("/srv/ci/shared') { sh 'git", "/srv/ci/other') { sh 'git"),
+                                "OBAAF-JEN-003"), "pass")
+
+    def test_r091_r092_labels_that_reach_the_controller(self):
+        self.assertEqual(findings("def where = 'built-in'\nnode(where) { sh 'make' }", "OBAAF-JEN-002"), [("high", 2)])
+        negated = analyze("node('!windows') { sh 'make' }")
+        reasons = [u.reason for u in negated.unknowns if u.rule == "OBAAF-JEN-002"]
+        self.assertTrue(any("requires none" in r for r in reasons), reasons)
+
+    def test_r075_r085_r100_a_stage_with_agent_none_stays_in_the_enclosing_container(self):
+        top = "agent { docker { image 'agent-image'; args 'ARGS' } }"
+        text = two_stages(AGENT, "echo ok", top=top.replace("ARGS", "--network none"), first_agent="agent none")
+        self.assertEqual(status(text, "OBAAF-JEN-007"), "pass")
+        privileged = two_stages(AGENT, "echo ok", top=top.replace("ARGS", "--privileged"), first_agent="agent none")
+        self.assertEqual(findings(privileged, "OBAAF-JEN-006"), [("high", 3)])
+        controller = two_stages(AGENT, "echo ok", top="agent { label 'built-in' }", first_agent="agent none")
+        self.assertEqual(findings(controller, "OBAAF-JEN-002"), [("high", 3)])
+
+    def test_r073_a_step_the_plugin_runs_itself_is_not_in_the_container(self):
+        text = NoNetworkTest().review("--network none").replace("sh 'claude -p review'", "aiAgent(prompt: 'review')")
+        self.assertEqual(status(text, "OBAAF-JEN-007"), "fail")
+
+    def test_r054_r072_docker_options_read_as_docker_reads_them(self):
+        review = NoNetworkTest().review
+        reaching = ("-v /var/run:/var/run", "--mount type=bind,source=/,target=/host", "-v/var/run/docker.sock:/s",
+                    "--cap-add CAP_SYS_ADMIN", "--cap-add=sys_module", "--device /dev/sda", "--volume \"/:/host\"",
+                    "-itv /var/run/docker.sock:/s", "-v /run/containerd/containerd.sock:/c", '--network "host"',
+                    "--privileged=true", "--security-opt label=disable", "--pid=host")
+        for args in reaching:
+            self.assertEqual([s for s, _ in findings(review(args), "OBAAF-JEN-006")], ["high"], args)
+            self.assertEqual(status(review(f"--network none {args}"), "OBAAF-JEN-007"), "fail", args)
+        for args in ("--privileged=false", "-v /home/ci/.m2:/root/.m2", "-e CI=1 -v cache:/cache", "--rm -it"):
+            self.assertEqual(findings(review(args), "OBAAF-JEN-006"), [], args)
+        self.assertEqual(status(review("--volumes-from jenkins"), "OBAAF-JEN-006"), "unknown")
+        self.assertEqual(status(review("--network none --privileged=false"), "OBAAF-JEN-007"), "pass")
+
+    def test_r111_host_paths_under_no_network_are_named(self):
+        result = [f for f in analyze(NoNetworkTest().review("--network none -v /opt/socks5:/socks5")).findings
+                  if f.rule == "OBAAF-JEN-007"]
+        self.assertEqual(len(result), 1)
+        self.assertIn("/opt/socks5", result[0].message)
+        self.assertIn("--network none", result[0].message)
+
+    def test_r083_r090_pod_settings_from_template_arguments_and_json(self):
+        template = """
+podTemplate(ARGS) {
+  node(POD_LABEL) {
+    container('agent') { sh 'claude -p fix' }
+  }
+}
+"""
+        for args, setting in (
+                ("containers: [containerTemplate(name: 'agent', image: 'x')]", "service account token"),
+                ("volumes: [hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/s')]", "Docker socket"),
+                ("containers: [containerTemplate(name: 'agent', image: 'x', privileged: true)]", "privileged")):
+            result = [f for f in analyze(template.replace("ARGS", args)).findings if f.rule == "OBAAF-JEN-006"]
+            self.assertEqual(len(result), 1, args)
+            self.assertIn(setting, result[0].message)
+        json_spec = ('agent { kubernetes { yaml \'{"spec": {"automountServiceAccountToken": false, "containers": '
+                     '[{"name": "a", "image": "x", "securityContext": {"privileged": true}}]}}\' } }')
+        result = [f for f in analyze(two_stages(AGENT, "echo ok", top=json_spec)).findings if f.rule == "OBAAF-JEN-006"]
+        self.assertEqual(len(result), 1)
+        self.assertIn("a privileged container", result[0].message)
+        self.assertNotIn("token", result[0].message)
+        # node(POD_LABEL) is the pod: no "agent selection" unknown for a label computed at run time.
+        self.assertEqual(status(template.replace("ARGS", "yaml: 'spec: {automountServiceAccountToken: false}'"),
+                                "OBAAF-JEN-002"), "pass")
+
+    def test_large_inputs_stay_fast(self):
+        import time
+        steps = "\n".join(f"sh 'git push origin b{i}'\nsh 'claude -p step{i}'" for i in range(400))
+        start = time.monotonic()
+        analyze(f"node('linux') {{\n{steps}\n}}")
+        self.assertLess(time.monotonic() - start, 3.0)
+
+
 if __name__ == "__main__":
     unittest.main()

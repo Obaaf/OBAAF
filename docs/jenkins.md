@@ -143,6 +143,89 @@ repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and
 in the configuration, and stages declared with `OBAAF_LANE = 'agent'`. Not recognizing an agent is
 never evidence that a stage runs none.
 
+**Workspaces and agents** (flagship slice 2d.2j). OBAAF-JEN-003 asks whether what an AI agent wrote
+can reach a push, a `build` step or a publish without review, so the checker records the workspace
+every step runs in:
+
+| In the Jenkinsfile | Workspace |
+| --- | --- |
+| a top-level `agent` | one, for every stage that has no `agent` of its own, the pipeline's `post` and the stages' `post` blocks |
+| a stage's own `agent` (label, node, any, docker, dockerfile, kubernetes), `node()`, a `matrix` agent | a new one |
+| `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
+| a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
+| `ws()` | another directory on the same node, written by the same user: counted as shared |
+| `node(POD_LABEL)` inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export |
+| a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
+| a closure, where it is written | one of its own; where the file calls it, the caller's |
+
+The table follows the Jenkins handbook ([Pipeline Syntax](https://www.jenkins.io/doc/book/pipeline/syntax/):
+the top-level agent "specifies where the entire Pipeline ... will execute", and `reuseNode` runs the
+container "on the node specified at the top-level of the Pipeline, in the same workspace"; [Using
+Docker with Pipeline](https://www.jenkins.io/doc/book/pipeline/docker/); read on 2026-11-20). Where the
+handbook says nothing (that a stage's `post` runs in the stage's workspace, that a nested stage
+without an agent runs in its parent's), the checker takes the reading under which more steps share a
+workspace.
+
+The verdicts:
+
+- an agent and an effect in the same workspace, the effect running after the agent (later in the
+  file, in a sibling parallel branch, or inside a loop, `retry` or `waitUntil` around both): **high**;
+- a `stash` taken after the agent and `unstash`ed before the effect (the same name, or a name the file
+  does not fix), or `archiveArtifacts` brought back with `unarchive`: **high**;
+- the effect before the agent in a workspace Jenkins keeps between builds: **medium**, because what
+  the agent leaves there (a Git hook, `.git/config`, a script the effect runs) is in place for the
+  effect in the next build. A fresh pod, or `deleteDir()` or a full `cleanWs()` that certainly runs
+  before the effect (or in a `post { always }` or `cleanup` block after the agent), clears it;
+  `cleanWs` with `patterns`, `externalDelete` or a `cleanWhen...: false` does not;
+- the agent and the effect in separate allocations that may land on the same machine (the same label,
+  overlapping label expressions such as `linux && docker` and `linux`, any agent, a label the file
+  does not fix, the same `customWorkspace` or `ws()` path, or pods mounting the same workspace claim):
+  **unknown**, because Jenkins keeps a job's workspace directory on an agent between allocations and
+  which agents carry which labels is controller configuration;
+- different labels, or separate pods with their own workspace: no finding.
+
+OBAAF-JEN-002 counts an AI agent's work like a change request's: an agent stage and a stage that
+holds credentials or publishes on the same persistent label is a medium finding. A label expression
+with a term naming the built-in node that no `!` negates (`built-in || linux`) can place work on the
+controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
+`$JENKINS_HOME` (when the controller itself runs in a container, Docker Pipeline also passes it
+`--volumes-from`). A label expression that requires no label (`!windows`) is read like `agent any`.
+
+OBAAF-JEN-006 reads docker run options as docker splits them: grouped short options (`-itv`), values
+written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
+and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
+socket, or system folders (`/var/run`, `/run`, `/proc`, `/sys`, `/dev`, `/etc`, `/root`,
+`/var/lib/docker` and others) reaches the host; an ordinary folder (`/home/ci/.m2`) does not.
+`--volumes-from` is an unknown. Pod specs are read as YAML, which also reads JSON; `podTemplate`'s own
+`privileged: true`, `hostPathVolume` and `hostNetwork` count; a Kubernetes agent with no pod spec at all
+mounts the service account token.
+
+OBAAF-JEN-007 passes a stage whose agent's shell steps run in a container started with exactly one
+network, `none`, and nothing that reaches the host. A host path mounted into that container may hold
+a socket, which is a way out whatever the network, so the finding stays and names the paths. A step
+that Docker Pipeline does not launch in the container (`aiAgent`, which the plugin runs itself) is not
+limited by it.
+
+**What the checker cannot decide here.** Reported as unknown, or left as a finding:
+
+- which machines carry which labels, whether a persistent agent is shared with other jobs, and what a
+  pod template defined on the controller (`inheritFrom`) mounts;
+- `matrix` cells: each cell has its own allocation, but the checker reads the cells as one, so an
+  agent in one cell and a push in another, kept apart only by `when` conditions on the axes, is
+  reported as sharing a workspace;
+- what an agent leaves outside the workspace on a persistent agent (`$HOME/.gitconfig`, tool caches):
+  a clean workspace does not remove it, which is why OBAAF-JEN-002 reports agent work on shared labels;
+- a later step outside the container that runs what an agent with no network wrote into the
+  workspace: OBAAF-JEN-007 judges where the agent runs, not what is done with its output;
+- what reaches an effect through values rather than files: the agent's output read into a variable
+  and passed to `build job:` parameters or a commit message, or `copyArtifacts` of the running build;
+- agent commands and effects the checker does not recognise (a push through `/usr/bin/git`, a
+  quoted option value before `push`, `gh api`, a repository script or Makefile that runs one): the
+  recorded attempts in [bypass-attempts.md](bypass-attempts.md#2d2j-agent-stages-and-workspaces)
+  list them, and #330 tracks them;
+- a closure handed to code outside the file, which is read where it is written, in a workspace of
+  its own.
+
 **Publishing.** The upload commands shared with the workflow checker, plus `mvn deploy`, `gradle
 publish`, JFrog, Helm, crane and skopeo pushes, `curl --upload-file`, `docker.image(...).push()`
 and steps such as `s3Upload`, `nexusArtifactUploader`, `rtUpload`, `androidApkUpload` and

@@ -354,7 +354,7 @@ A credential binding (withCredentials, an environment credentials() entry, sshag
 
 **Why it matters.** Build code on the controller can read the keys that decrypt every stored credential, and on a shared agent it can tamper with later privileged builds.
 
-A stage runs on the built-in node (label `built-in` or `master`), where build code can read $JENKINS_HOME and the keys that decrypt every stored credential; or one persistent agent label serves both work that change requests reach and a stage that holds credentials or publishes, so code from a change request can tamper with the later privileged build. Steps on the controller that change requests or an agent can steer are high; others are medium. `agent any` and computed labels are reported as unknown, because which agents exist is controller configuration.
+A stage runs on the built-in node (label `built-in` or `master`, or a label expression that can select it), where build code can read $JENKINS_HOME and the keys that decrypt every stored credential; or one persistent agent label serves both work that change requests or an AI agent can steer and a stage that holds credentials or publishes, so that work can tamper with the later privileged build. Steps on the controller that change requests or an agent can steer are high; others are medium. `agent any` and computed labels are reported as unknown, because which agents exist is controller configuration.
 
 **Fix.** Set the built-in node's executors to 0 and run builds on agents. Give change-request and agent work ephemeral agents (a Kubernetes pod or a fresh container per build) and keep persistent agents with privileged labels for protected-branch and release work only.
 
@@ -364,7 +364,7 @@ A stage runs on the built-in node (label `built-in` or `master`), where build co
 
 **Why it matters.** What the agent wrote or was told reaches a push, another job or a release without review.
 
-A stage that runs an AI agent also pushes to the repository, starts another job with the build step, or publishes, in the same workspace. What the agent wrote or was told then reaches the effect without review. Builds started with the build step run as SYSTEM unless build authorization is configured, so job permissions shown to people do not limit them.
+A step pushes to the repository, starts another job with the build step, or publishes, after an AI agent ran in the same workspace: the same stage, another stage under the same agent, a post block, a docker agent with reuseNode, ws() on the same node, or a stash or unarchive of what was stashed or archived after the agent. What the agent wrote or was told then reaches the effect without review. An effect that runs before the agent in a workspace Jenkins keeps between builds is medium: what the agent leaves there is in place for it next build. Separate allocations that may be the same machine are reported as unknown. Builds started with the build step run as SYSTEM unless build authorization is configured, so job permissions shown to people do not limit them.
 
 **Fix.** Keep the agent stage inert: let it write a proposal (a patch or bundle) as an artifact, and apply it in a separate job that verifies the agent-run record and the proposal (`obaaf verify agent-run`, `obaaf proposal check`) behind an input step with a named submitter.
 
@@ -406,7 +406,7 @@ A docker or Kubernetes agent runs privileged, mounts the Docker socket or host p
 
 **Why it matters.** An agent steered by text it reads could send code or credentials to any host, and Jenkins has no egress control of its own.
 
-Nothing in the Jenkinsfile limits the network access of a stage that runs an AI agent, and Jenkins has no egress control of its own. A policy declared in `OBAAF_EGRESS` is reported too, so a declaration is not mistaken for enforcement.
+Nothing in the Jenkinsfile limits the network access of a stage that runs an AI agent, and Jenkins has no egress control of its own. A policy declared in `OBAAF_EGRESS` is reported too, so a declaration is not mistaken for enforcement. An agent whose shell steps run in a container started with exactly one network, `none`, and nothing that reaches the host passes; with a host path mounted into that container the finding stays, because a socket there is a way out.
 
 **Fix.** Run the agent in a Kubernetes pod in a namespace whose NetworkPolicy allows only the inference proxy, with no route to the controller, cloud metadata or the cluster API. When the network enforces it outside the Jenkinsfile, record that with an expiring ignore entry.
 

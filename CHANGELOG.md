@@ -12,6 +12,16 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
 
+### Jenkins: which steps share a workspace
+
+Slice 2d.2j (issue #210); decision D-127. **OBAAF-JEN-003 now follows an AI agent's workspace across stages, so a Jenkinsfile that passed can get a new high or medium finding; OBAAF-JEN-002 and 006 can report settings they missed; OBAAF-JEN-007 can pass a stage it reported.** Every case is an inert test input in `tests/test_jenkins_workspaces.py`; [docs/jenkins.md](docs/jenkins.md) has the table and what the checker cannot decide.
+
+- **OBAAF-JEN-003** read an agent and a push, a `build` step or a publish as sharing a workspace only inside one stage. The model now records a workspace for every step. The top-level agent holds one for every stage without its own agent and for the pipeline's `post`; `reuseNode` and `agent none` stay in it; `node()` and stage agents allocate their own; `ws()` is another directory on the same node. An effect after the agent in the same workspace, or after an `unstash` or `unarchive` of what was stashed or archived after it, is high. An effect before the agent in a workspace Jenkins keeps between builds is medium (what the agent leaves there is in place next build), unless it runs in a fresh pod or after a full `deleteDir()` or `cleanWs()`. Separate allocations that may be the same machine are unknown; different labels and separate pods are not findings.
+- **OBAAF-JEN-002** reads label expressions: `built-in || linux` can run on the controller, and `!windows` selects like `agent any`. An AI agent's work on a persistent label shared with a stage that holds credentials or publishes is a medium finding.
+- **OBAAF-JEN-006** reads docker run options as docker splits them: `-v/var/run/docker.sock`, `-itv`, `--mount type=bind,source=/`, `CAP_SYS_ADMIN`, `--device` and system folders are found, and `--privileged=false` is not privileged. Pod specs are parsed as YAML, so a JSON spec is read. `podTemplate`'s own `privileged: true`, `hostPathVolume` and `hostNetwork` count, and the pod a `node(POD_LABEL)` runs in is the template's.
+- **OBAAF-JEN-007** passes a stage whose agent's shell steps run in a container with exactly one network, `none`, and nothing that reaches the host. With a host path mounted into it, the finding stays and names the path.
+- What the agent's output reaches through values, and commands the checker does not recognise as an agent or an effect, are not in this change (#330).
+
 ### Upgrading from 0.3.0
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
