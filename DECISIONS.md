@@ -107,6 +107,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-100 | How init proposes the first agent lanes and secret environments | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 
 ---
@@ -966,6 +967,16 @@ If another supported configuration name already exists, init shows any differenc
 **Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
 
 **Status.** Proposed, 2026-11-19 (slice 3.3, #142).
+
+### D-115 Legacy baseline migration reports current acceptance eligibility
+
+**Decision.** Direct migration matches legacy entries using their existing identities and applies the same eligibility policy used to write new baseline entries. The receipt names prohibited matches and explains the reason. When nothing can be carried over and at least one match is left open (prohibited, or waiting on an ignore entry), a nonempty input is preserved, including when a separate output path was supplied. An entry that names a finding a valid ignore entry accepts is counted and not carried over; when such entries are the only matches, the file is converted with no entries. When it writes a file, the receipt counts every finding outside the old file that the gate will count, and names those no entry can accept and those waiting on an ignore entry (both added by the review, `review-gpt` #313).
+
+**Reason.** In an in-place upgrade from 0.3.0, migration reported that it accepted a missing ownership finding that the next gate kept open. The receipt must count the acceptances the gate honors. An existing ignore decision stays with its configuration owner. Preserving a file whose only matches an ignore entry accepts left the gate asking for a migration that refused, with no reason given; the review found that and converts such a file.
+
+**Consequence.** A 0.3.0 ignore entry names no owner, so a finding both ignored and in the old file is not carried over: once the ignore entry is completed it keeps accepting the finding; once it is removed, migration carries the finding if the old file was kept, and after a conversion the finding is accepted with `obaaf check --write-baseline` like any new one. A preserved file whose matches were prohibited has nothing left to carry over once their files get an owner; migration then finds no match and says to delete it.
+
+**Status.** Proposed, 2026-11-20 (A2d, #312).
 
 ### D-116 Comparing JSON edits in the adoption proof
 

@@ -48,7 +48,7 @@ Read every finding under “You are accepting risk” and every listed removal. 
 
 | What you have | What happens | What to do |
 | --- | --- | --- |
-| A baseline written by 0.2.0 or 0.3.0 (`obaaf-baseline/v0.1`) | It is still read and accepts nothing: every finding it covered counts as new, marked "Not accepted" | `obaaf baseline migrate FILE --owner OWNER --reason REASON --expires YYYY-MM-DD`, once. It carries over the findings the old file covers and accepts nothing new |
+| A baseline written by 0.2.0 or 0.3.0 (`obaaf-baseline/v0.1`) | It is still read and accepts nothing: every finding it covered counts as new, marked "Not accepted" | `obaaf baseline migrate FILE --owner OWNER --reason REASON --expires YYYY-MM-DD`, once. It carries over the findings the old file covers that a new entry may accept, and accepts nothing new |
 | An `ignore` entry with no `owner:` | It ignores nothing, and the finding is reported with "because it names no owner" | Add `owner:` (`@user`, `@org/team` or an e-mail address) |
 | An `ignore` entry whose reason has fewer than four letters or digits, or whose `until` is more than 366 days ahead | It ignores nothing, and the report says which | Give a reason; bring the date within a year |
 | An `ignore` entry whose `until` is a date in another spelling (`20270131`) | A configuration error, exit status 2. (A time of day, `2027-01-31T10:00:00Z`, ended 0.3.0 in a traceback when the entry matched a finding; it is the same error now) | Write `YYYY-MM-DD` |
@@ -183,6 +183,8 @@ Baseline: 0 finding(s) accepted by the baseline, 5 new.
   The baseline is in the old format (obaaf-baseline/v0.1). Its entries name no owner, reason or expiry date, so none of them accepts a finding. Convert it once, saying who accepts these findings, why and until when:
     obaaf baseline migrate .github/obaaf-baseline.json --owner OWNER --reason REASON --expires YYYY-MM-DD
 ```
+
+Migration carries over a legacy match only when a new baseline entry may accept it. Its receipt names each match it leaves open and explains why. A finding no entry can accept is one: when the baseline has no code owner, an entry for the missing ownership would let the file vouch for itself, so give the file an owner. A finding waiting on an ignore entry that has expired or is not valid (a 0.3.0 ignore entry names no owner) is another: renew, complete or remove that ignore entry, where the decision was made. An old entry that names a finding a valid ignore entry accepts is counted and not carried over. When it can carry over no match and leaves at least one open, migration exits 1 and preserves both the input and any separate `--output` file: act on the receipt and run it again. Once the findings the old file named have all gone, it has nothing left to carry over; delete it.
 
 Convert the baseline:
 
