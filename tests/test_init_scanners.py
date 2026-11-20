@@ -104,6 +104,8 @@ class CompanionTests(unittest.TestCase):
                                          capture_output=True, text=True)
                     self.assertEqual(run.returncode, code, run.stderr)
                     self.assertNotIn("forged", run.stdout)
+                    lines = run.stdout.splitlines()
+                    self.assertEqual(lines[-1], "::" + lines[0].removeprefix("::stop-commands::") + "::")
 
     def test_pins_match_the_upgrade_guide_and_no_credential_reaches_a_scanner(self):
         from obaaf.init_scanners import SCANNERS as PINS
@@ -112,8 +114,9 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(code, 0, text)
         for (image, _), step in zip(PINS.values(), self.scanner_steps()):
             name, digest = image.split("@")
-            self.assertIn(f"`{digest}`", guide)
-            self.assertIn(f"`{name}:", guide)
+            # The same row of the guide's table names the image and its digest.
+            self.assertTrue(any(f"`{name}:" in row and f"`{digest}`" in row for row in guide.splitlines()),
+                            image)
             script = step["run"]
             self.assertEqual(script.count(image), 2, script)          # the pull and the run
             for credential in ("GITHUB_TOKEN", "GH_TOKEN", "github.token", "secrets.", "--env-file", "-e ",
