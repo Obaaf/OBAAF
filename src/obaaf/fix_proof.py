@@ -170,15 +170,53 @@ def _raise(exc):
     raise exc
 
 
-def _structure(value, path, allowed):
+# The most values one comparison of a document may visit. Aliases are expanded where they are used,
+# so a small file can stand for millions of values; past this the candidate is withheld (the same
+# limit as the checker's for a workflow file, D-098). Found by the review of #274.
+STRUCTURE_LIMIT = 500_000
+
+# Only these documents are compared by structure. A file of any other kind parsed as YAML loses
+# everything after " #" as a comment, so a changed shell line could compare equal (review of #274).
+DOCUMENT_SUFFIXES = (".yml", ".yaml", ".json")
+
+
+def _structure(value, path, allowed, budget=None):
     """Compare typed contents while omitting only the keys the candidate named."""
+    if budget is None:
+        budget = [STRUCTURE_LIMIT]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise ProofError(f"the document holds more than {STRUCTURE_LIMIT:,} values once its aliases are expanded")
     if isinstance(value, dict):
-        return ("map", frozenset(((type(k), k), _structure(v, path + ((type(k), k),), allowed))
+        return ("map", frozenset(((type(k), k), _structure(v, path + ((type(k), k),), allowed, budget))
                                  for k, v in value.items() if path + ((type(k), k),) not in allowed))
     if isinstance(value, list):
-        return ("sequence", tuple(_structure(v, path + ((int, i),), allowed)
+        return ("sequence", tuple(_structure(v, path + ((int, i),), allowed, budget)
                                   for i, v in enumerate(value) if path + ((int, i),) not in allowed))
+    try:
+        hash(value)
+    except TypeError:
+        raise ProofError(f"the document holds a value of a kind the proof does not compare "
+                         f"({type(value).__name__})") from None
     return type(value), value
+
+
+def _names_node(doc, key) -> bool:
+    """Whether `key`, a path of mapping keys and sequence indexes, names a node of `doc`."""
+    node = doc
+    for part in key:
+        if isinstance(node, dict):
+            match = [k for k in node if type(k) is type(part) and k == part]
+            if not match:
+                return False
+            node = node[match[0]]
+        elif isinstance(node, list) and type(part) is int:
+            if not 0 <= part < len(node):
+                return False
+            node = node[part]
+        else:
+            return False
+    return True
 
 
 def _apply(dest, edits, expected):
@@ -193,16 +231,42 @@ def _apply(dest, edits, expected):
         declared = edit.keys + edit.removed + edit.added
         if edit.before == edit.after or not declared or any(not p for p in declared):
             raise ProofError(f"edit needs changed bytes and named keys at {str(rel)!r}")
+        if rel.suffix.lower() not in DOCUMENT_SUFFIXES:
+            raise ProofError(f"the proof compares only YAML or JSON documents, not {str(rel)!r}")
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
         old = yamlutil.load(edit.before.decode("utf-8"))
         new = yamlutil.load(edit.after.decode("utf-8"))
+        if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
+            raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
+        # A declared key must name something: one that names nothing would let the comparison
+        # vouch for an edit it never looked at (review of #274).
+        if (any(not (_names_node(old, k) or _names_node(new, k)) for k in edit.keys)
+                or any(not _names_node(old, k) for k in edit.removed)
+                or any(not _names_node(new, k) for k in edit.added)):
+            raise ProofError(f"a declared key names nothing in {str(rel)!r}")
         if _structure(old, (), allowed | removed) != _structure(new, (), allowed | added):
             raise ProofError(f"structure changed outside the intended keys in {str(rel)!r}")
         path.write_bytes(edit.after)
         touched.add(rel)
         expected[rel] = expected[rel][0], hashlib.sha256(edit.after).digest()
+
+
+def _source_unchanged(root: Path, edits) -> None:
+    """Read each edited file from the source again, last, without following a link at its name.
+    The copy was compared with `before` when it was made; the source can change while the checker
+    runs, and a change that moves no finding would otherwise go unseen (review of #274)."""
+    for edit in edits:
+        rel = _relative(root, Path(edit.path))
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(root / rel, flags)
+        except OSError as exc:
+            raise ProofError(f"the source of {str(rel)!r} could not be read again after the proof: {exc}") from exc
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or stream.read() != edit.before:
+                raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
 
 
 def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: tuple[Promise, ...]):
@@ -262,6 +326,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                 raise ProofError("a finding newly counts at the selected gate")
             if after.baseline_stale or _stale_ignore(after):
                 raise ProofError("a baseline or ignore entry no longer matches a finding")
+            _source_unchanged(root, edits)
             return after
     except ProofError:
         raise
