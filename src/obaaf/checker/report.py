@@ -20,7 +20,7 @@ from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import baseline as baseline_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.checker.todo import todo
-from obaaf.checker.todo_acceptance import migration_command
+from obaaf.checker.todo_acceptance import migration_command, migration_hint
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -275,7 +275,26 @@ def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options or ())]
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult) -> str:
+    if "obaaf check . --lanes" not in text:
+        return text
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    if command != one_line(command):
+        # Only the command is lost, not the rest of the rule's fix (review-gpt #299: the whole Fix line
+        # was replaced), worded as the action list words it.
+        command = ("obaaf check --lanes with the check's own paths and options (they cannot be printed as a "
+                   "one-line command)")
+    return text.replace("obaaf check . --lanes", command)
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
@@ -355,17 +374,6 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
     return lines
 
 
-def _migration_hint(result: CheckResult, *, summary: bool) -> str:
-    command = migration_command(result)
-    if command != one_line(command):
-        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess it
-        # (review-gpt #308).
-        return ("Run obaaf baseline migrate yourself with the baseline's original path and the check's original "
-                "paths and options, which cannot be printed faithfully as a one-line command, and supply an owner, "
-                "reason and expiry.")
-    return "The full report gives the command." if summary else command
-
-
 def to_summary(result: CheckResult, catalog: Catalog | None = None,
                expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
     """The same list as the full text report, after the report's opening lines (the accepted risk first,
@@ -376,7 +384,7 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None,
              for line in _lead_lines(result, accepted_risk(result, expiring_within))]
     if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
         lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
-                     "finding until it is converted. " + _migration_hint(result, summary=True))
+                     "finding until it is converted. " + migration_hint(migration_command(result), summary=True))
     lines += [f"error: {one_line(error)}" for error in result.errors]
     if result.errors:
         lines.append("The scan is incomplete and fails regardless of its findings.")
@@ -432,7 +440,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + (_lane_advice(fix, result) if result.settings_path else fix))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
@@ -468,7 +477,7 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
                          "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
                          "accepts these findings, why and until when:")
-            lines.append("    " + _migration_hint(result, summary=False))
+            lines.append("    " + migration_hint(migration_command(result)))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "

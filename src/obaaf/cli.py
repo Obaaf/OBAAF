@@ -217,13 +217,22 @@ def cmd_check(args) -> int:
             print(f"error: {exc}. --write-baseline replaces a baseline and does not write over a file that is "
                   "not one; name another file or remove this one.", file=sys.stderr)
             return EXIT_USAGE
+    # What a command the report suggests has to repeat to check the same thing.
+    # One word each, so a value that begins with a hyphen is still read as a value.
+    options = ([f"--config={args.config}"] if args.config else []) \
+        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
     if previous is not None and previous.legacy:
-        import shlex
-        print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with: "
-              f"obaaf baseline migrate {shlex.quote(str(args.write_baseline))} --owner OWNER --reason REASON "
-              "--expires YYYY-MM-DD (it carries over the findings the file covers that a new entry may accept, "
-              "and accepts nothing new), or "
-              "write the new baseline to another file.", file=sys.stderr)
+        from obaaf.checker.todo_acceptance import migration_hint, scoped_migration_command
+        from obaaf.checker.workflow import one_line
+
+        hint = migration_hint(scoped_migration_command(args.write_baseline, args.path, options))
+        # The command converts the file in place, so it is introduced as that, after the other way out
+        # (review-gpt #317: it stood under "To keep this file as it is", which it does not do).
+        print(f"error: {one_line(args.write_baseline)} is an {baseline_mod.FORMAT_V1} baseline, and "
+              "--write-baseline does not write over it. Either convert it in place, which carries over only "
+              "findings the file covers that a new baseline entry may accept and accepts nothing new, or keep "
+              "it as it is and write the new baseline to another file. To convert it, then check again:\n"
+              + hint, file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
     # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
@@ -233,10 +242,8 @@ def cmd_check(args) -> int:
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
-    # What a command the report suggests has to repeat to check the same thing.
-    # One word each, so a value that begins with a hyphen is still read as a value.
-    result.options = ([f"--config={args.config}"] if args.config else []) \
-        + ([f"--platform={args.platform}"] if args.platform != "auto" else [])
+    result.settings_path = args.settings or ""
+    result.options = options
     if applied is not None:
         baseline_mod.apply(result, applied)
     if not result.files and not result.errors:
@@ -876,6 +883,14 @@ def cmd_catalog_check(args) -> int:
 
 
 # ------------------------------------------------------------------ parser
+def _fix_check_options(parser):
+    parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
+    parser.add_argument("--config", help="checker configuration used by the gate")
+    parser.add_argument("--baseline", help="baseline used by the gate")
+    parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
+    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
@@ -896,11 +911,8 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--tighten", choices=["checkout-credentials"], help="preview only this requested workflow tightening")
     parser.add_argument("--candidate", metavar="NAME", help="request one step using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
-    parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
-    parser.add_argument("--config", help="checker configuration used by the gate")
-    parser.add_argument("--baseline", help="baseline used by the gate")
-    parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
-    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+    _fix_check_options(parser)
+    parser.epilog = "Use obaaf fix egress --job NAME [PATH] to preview confinement for one job."
     parser.add_argument("--owner", help="owner taking responsibility for the listed acceptances")
     parser.add_argument("--reason", help="reason for carrying matching legacy acceptances forward")
     parser.add_argument("--expires", help="expiry for migrated acceptances (YYYY-MM-DD)")
@@ -1180,7 +1192,16 @@ def _printable_streams() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:2] == ["fix", "egress"]:
+        from obaaf.fix_egress import run
+        parser = argparse.ArgumentParser(prog="obaaf fix egress", description="Preview confinement for one agent job.")
+        _fix_check_options(parser)
+        parser.add_argument("--job", required=True, help="GitHub Actions job ID")
+        parser.set_defaults(func=run)
+        argv = argv[2:]
+    else:
+        parser = build_parser()
     args = parser.parse_args(argv)
     _printable_streams()
     return int(args.func(args) or 0)

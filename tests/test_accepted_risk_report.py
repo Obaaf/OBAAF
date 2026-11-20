@@ -13,7 +13,7 @@ import unicodedata
 import unittest
 from datetime import date, timedelta
 
-from helpers import TempDir, run_cli
+from helpers import ROOT, TempDir, run_cli
 
 from obaaf import checker, cli
 from obaaf.checker import acceptance, baseline, report
@@ -566,7 +566,8 @@ class CommandLineTest(unittest.TestCase):
             target, old = fixture_repo(tmp)
             config = tmp / "my config.yml"
             config.write_text("lanes: {}\n", encoding="utf-8")
-            _, out, _ = run_cli("check", target, "--baseline", old, "--platform", "github", "--config", config)
+            _, out, _ = run_cli("check", target, "--baseline", old, "--platform", "github", "--config", config,
+                                "--settings", ROOT / ".github/obaaf-settings.json")
             hint = [line for line in out.splitlines() if "obaaf baseline migrate" in line]
             self.assertEqual(len(hint), 2)  # detailed baseline section and final to-do list
             self.assertEqual(hint[0].strip(), hint[1].strip())
