@@ -358,8 +358,11 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
 def _migration_hint(result: CheckResult, *, summary: bool) -> str:
     command = migration_command(result)
     if command != one_line(command):
-        return ("Migrate the baseline manually using its original path and the original check paths and "
-                "options. They cannot be printed faithfully as a one-line command. Supply an owner, reason and expiry.")
+        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess it
+        # (review-gpt #308).
+        return ("Run obaaf baseline migrate yourself with the baseline's original path and the check's original "
+                "paths and options, which cannot be printed faithfully as a one-line command, and supply an owner, "
+                "reason and expiry.")
     return "The full report gives the command." if summary else command
 
 

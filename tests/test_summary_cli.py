@@ -141,7 +141,7 @@ class SummaryCliTest(unittest.TestCase):
                 for display in ((), ("--summary",)):
                     status, report, err = run_cli("check", repo, *options, "--fail-on", "low", *display)
                     self.assertEqual(status, 1, err)
-                    self.assertIn("Migrate the baseline manually using its original path", report)
+                    self.assertIn("Run obaaf baseline migrate yourself with the baseline's original path", report)
                     self.assertNotIn("The full report gives the command", report)
                     self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ")
                                          for line in report.splitlines()))
