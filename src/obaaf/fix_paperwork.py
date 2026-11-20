@@ -76,10 +76,21 @@ def _last_content(node):
     return node.end_mark.index
 
 
-def _delete_rows(text, sequence, indices):
-    """Delete whole adjacent groups, keeping separators needed by the surviving entries."""
+def _comment_at(text, start, end, scalars):
+    """Whether a YAML comment begins in text[start:end]: a `#` outside every scalar token."""
+    return any(text[i] == "#" and not any(a <= i < b for a, b in scalars) for i in range(start, end))
+
+
+def _delete_rows(text, sequence, indices, comments=True):
+    """Delete whole adjacent groups, keeping separators needed by the surviving entries.
+
+    In a flow-style list a deletion runs from one entry to the next, so a comment in it, or
+    beside the last entries, would be lost from a kept entry or moved onto one: such a
+    deletion is refused. `comments=False` is for JSON, which has none."""
     edits = []
     rows = sequence.value
+    scalars = ([(t.start_mark.index, t.end_mark.index) for t in yaml.scan(text, Loader=yaml.SafeLoader)
+                if isinstance(t, yaml.ScalarToken)] if comments and sequence.flow_style else [])
     for index in sorted(indices):
         if index - 1 in indices:
             continue
@@ -91,14 +102,16 @@ def _delete_rows(text, sequence, indices):
                 start, end = rows[index].start_mark.index, rows[last + 1].start_mark.index
             elif index:
                 start, end = rows[index - 1].end_mark.index, rows[last].end_mark.index
-                # Deleting from the end of the entry before would move a comment written beside
-                # the kept entry, or the deleted one, onto the kept entry (review of #278).
-                line_end = text.find("\n", end)
-                if "#" in text[start:end] or "#" in text[end:line_end if line_end >= 0 else len(text)]:
-                    raise ValueError("a comment beside the last entries of a flow-style list would move "
-                                     "to another entry")
             else:
                 start, end = rows[index].start_mark.index, rows[last].end_mark.index
+            line_end = text.find("\n", end)
+            line_end = line_end if line_end >= 0 else len(text)
+            if comments and (_comment_at(text, start, end, scalars)
+                             or (last + 1 == len(rows) and _comment_at(text, end, line_end, scalars))):
+                # Found by the review of #278: a comment above the next entry, or beside the
+                # kept entry before the last ones, was deleted or moved onto another entry.
+                raise ValueError("a comment in or beside the flow-style list entries to remove would "
+                                 "be lost or moved to another entry")
             edits.append((start, end, ""))
         else:
             start = _dash(text, rows[index])
@@ -137,8 +150,10 @@ def _splice(text, spans):
 
 
 def _full_scope(root, options):
-    target = root / options.path
-    return options.platform == "auto" and target.is_dir() and workflow.locate(target)[0] == root
+    # Only a check of the repository's own folder reads its Jenkinsfiles (checker.check's
+    # `jenkins_sought`), so `.github` or `.github/workflows` is a partial check (review of #278).
+    target = (root / options.path).resolve()
+    return options.platform == "auto" and target.is_dir() and target == root
 
 
 def _relative(root, path):
@@ -307,7 +322,7 @@ def _baseline_plan(root, options, result, owner, reason, expires, full, selected
                           removals=(_description(path, i, old.entries[i]),)))
     text = before.decode()
     seq = _mapping(yaml.compose(text, Loader=yaml.SafeLoader))["findings"]
-    after = _splice(text, _delete_rows(text, seq, indices))
+    after = _splice(text, _delete_rows(text, seq, indices, comments=False))
     return Edit(path, before, after.encode(), (), removed=tuple(("findings", i) for i in sorted(indices)))
 
 

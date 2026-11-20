@@ -149,6 +149,48 @@ class FixCliReviewTest(unittest.TestCase):
         self.config.write_text(source)
         code, out, err = run_cli("fix", self.root)
         self.assertEqual(code, 0, err)
-        self.assertIn("a comment beside the last entries of a flow-style list would move", out)
+        self.assertIn("a comment in or beside the flow-style list entries to remove would be lost or moved", out)
         self.assertNotIn("--- a/", out)
         self.assertEqual(self.config.read_text(), source)
+
+    def test_a_comment_above_the_entry_after_a_removed_one_is_not_lost(self):
+        source = ("ignore: [\n"
+                  "  # file is gone\n"
+                  f"  {{rule: OBAAF-GHA-008, path: absent.yml, reason: reviewed, until: '{self.expiry}'}},\n"
+                  "  # reviewed by security\n"
+                  "  {rule: OBAAF-GHA-008, owner: '@prior', path: .github/workflows/build.yml, reason: reviewed, "
+                  f"until: '{self.expiry}'}}\n"
+                  "]\n")
+        self.config.write_text(source)
+        code, out, err = run_cli("fix", self.root)
+        self.assertEqual(code, 0, err)
+        self.assertIn("would be lost or moved to another entry", out)
+        self.assertNotIn("--- a/", out)
+
+    def test_a_hash_inside_a_quoted_value_does_not_block_a_flow_removal(self):
+        self.config.write_text("ignore: [\n"
+                               "  {rule: OBAAF-GHA-008, owner: '@prior', path: .github/workflows/build.yml, "
+                               f"reason: 'see #42', until: '{self.expiry}'}},\n"
+                               f"  {{rule: OBAAF-GHA-008, path: absent.yml, reason: 'see #43', until: '{self.expiry}'}}\n"
+                               "]\n")
+        code, out, err = run_cli("fix", self.root)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Remove unmatched ignore entry 2", out)
+        self.assertIn("--- a/.github/obaaf.yml", out)
+
+    def test_a_check_of_the_workflows_folder_is_partial(self):
+        (self.root / "Jenkinsfile").write_text(
+            "pipeline {\n  agent any\n  environment { TOKEN = credentials('deploy-token') }\n"
+            "  stages { stage('b') { steps { sh 'make' } } }\n}\n")
+        code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
+        import json
+        rules = {f["rule"] for f in json.loads(out)["findings"]}
+        self.assertIn("OBAAF-JEN-001", rules)
+        self.config.write_text("ignore:\n  - rule: OBAAF-JEN-001\n    path: Jenkinsfile\n    owner: '@ci'\n"
+                               f"    reason: reviewed credential\n    until: {self.expiry}\n")
+        for target in (self.root / ".github", self.workflow.parent):
+            with self.subTest(target=target.name):
+                code, out, err = run_cli("fix", target, "--config", self.config, "--fail-on", "low")
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("Remove unmatched ignore entry", out)
+                self.assertIn("a partial check cannot establish that this entry is stale", out)
