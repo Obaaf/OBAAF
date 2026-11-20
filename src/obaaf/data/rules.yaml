@@ -595,23 +595,26 @@ rules:
       `SHELLOPTS`, `PS4`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS`, a `BASH...`,
       `LD_...` or `DYLD_...` name, or a `PYTHON...` one but six that load nothing), or a name written
       as an expression (flagship slice 2d.13). No earlier step of the job may set such a variable for
-      the steps after it: its script, `shell`, `env` and inputs (with continued lines joined and
-      quotes taken out) may not name `BASH_ENV`, `BASH_FUNC`, `GITHUB_PATH`, `addPath`,
-      `exportVariable`, `set-env`, `add-path`, `_runner_file_commands` or
-      `ACTIONS_ALLOW_UNSECURE_COMMANDS`, nor reach `github.env`, `github.path`, the runner's other file
-      contexts or the whole `github` context in an expression, nor reach GITHUB_ENV's file from the
-      path of another file command (`GITHUB_OUTPUT` and the like changed by a parameter expansion,
-      given to `dirname` and the like, copied into a variable, or an indirect expansion), and may name
-      `GITHUB_ENV` only in a bash or sh `run` script, in `echo NAME=value >> "$GITHUB_ENV"` or
-      `printf 'NAME=%s\n' ... >> "$GITHUB_ENV"` with a plain word for a name that is not such a
-      variable (the runner gives every later step what a step writes there, and refuses only
-      `NODE_OPTIONS`; `SHELLOPTS=noexec` makes bash read the check's step and run none of it). A write
-      in any other form, a name put together from a variable or an expression, a word with a backslash
-      or a line break, and a command substitution in the value that assigns such a variable count as
-      such a variable. This is a reading of the workflow's text, not a guarantee: a name or a path a
-      script assembles otherwise, and what a program or action an earlier step runs writes to the
-      runner's files, are not read; nor is a line break that a variable, a file or a command's output
-      puts in such a write's value at run time. Given `--help` or `--version` it is no
+      the steps after it (the runner gives every later step what a step writes to `GITHUB_ENV`, and
+      refuses only `NODE_OPTIONS`; `SHELLOPTS=noexec` makes bash read the check's step and run none of
+      it). A bash or sh `run` script is read with the checker's bash lexer: a file command's variable
+      (`GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`; the runner
+      keeps a step's files side by side, so any of their paths leads to `GITHUB_ENV`'s) may appear only
+      as a plain redirection target (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`) or a file `tee` appends
+      an output or the summary to, and a write to `GITHUB_ENV` only as `echo NAME=value` or
+      `printf 'NAME=%s\n' ...` with a plain word for a name that is not such a variable, no backslash
+      or line break, and no command substitution in the value that assigns such a variable; the script
+      may not name `BASH_ENV`, `BASH_FUNC`, `addPath`, `exportVariable`, `set-env`, `add-path`,
+      `_runner_file_commands` or `ACTIONS_ALLOW_UNSECURE_COMMANDS`, list names with `${!GITHUB_E*}`,
+      or reach the runner's file contexts (`github.env`, `github.path`, the whole `github` context) in
+      an expression. Anything else counts as setting such a variable, and so does any of these names in
+      the step's `shell`, `env` or inputs, in a step that is not such a script (code in another
+      language, an action), or in the workflow's or the job's `env`, `defaults` or `strategy`, which a
+      step can run. Names are searched with continued lines joined, `$'...'` decoded and quotes taken
+      out. This is a reading of the workflow's text, not a guarantee: a name or a path a script
+      assembles otherwise, and what a program or action an earlier step runs writes to the runner's
+      files, are not read; nor is a line break that a variable, a file or a command's output puts in
+      such a write's value at run time. Given `--help` or `--version` it is no
       check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot
       vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own,
       early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://`

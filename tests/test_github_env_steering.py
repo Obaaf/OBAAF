@@ -188,13 +188,97 @@ class WriteTheCheckerCannotReadTest(unittest.TestCase):
 
 
 class OtherFileCommandsTest(unittest.TestCase):
-    """Writing the step's outputs keeps the check; reaching GITHUB_ENV's file from their path does not."""
+    """The runner names a step's file-command files side by side with one suffix, so the path of any of them
+    leads to GITHUB_ENV's (the reviews of slice 2d.13). In bash, writing an output, the summary or the state
+    through a plain redirection keeps the check; their path anywhere else does not. Code in another
+    language is not read as bash, so naming any of them there does not either."""
 
-    def test_an_output_written_in_python_keeps_the_check(self):
+    REACHED = {
+        "set --": 'set -- "$GITHUB_OUTPUT"\necho "PATH=/x" >> "${1/set_output_/set_env_}"',
+        "for": 'for o in "$GITHUB_OUTPUT"; do echo "PATH=/x" >> "${o/set_output_/set_env_}"; done',
+        "read": 'read -r o <<< "$GITHUB_OUTPUT"\necho "PATH=/x" >> "${o/set_output_/set_env_}"',
+        "printf -v": 'printf -v o %s "$GITHUB_OUTPUT"\necho "PATH=/x" >> "${o/set_output_/set_env_}"',
+        "a name reference": 'declare -n o=GITHUB_OUTPUT\necho "PATH=/x" >> "${o/set_output_/set_env_}"',
+        "a function's argument": 'f() { echo "PATH=/x" >> "${1/set_output_/set_env_}"; }\nf "$GITHUB_OUTPUT"',
+        "a substitution": 'o=$(echo "$GITHUB_OUTPUT")\necho "PATH=/x" >> "${o/set_output_/set_env_}"',
+        "a prefix taken off": 'o=x$GITHUB_OUTPUT\no=${o#x}\necho "PATH=/x" >> "${o/set_output_/set_env_}"',
+        "sed": 'e=$(echo "$GITHUB_OUTPUT" | sed s/set_output_/set_env_/)\necho "PATH=/x" >> "$e"',
+        "python in a bash step": "python3 -c \"import os; open(os.environ['GITHUB_OUTPUT'].replace('output', 'env'), 'a')\"",
+        "the summary through sed": 'e=$(echo "$GITHUB_STEP_SUMMARY" | sed s/step_summary_/set_env_/)\necho SHELLOPTS=noexec >> "$e"',
+        "a name in ANSI-C quotes": "f=$(printenv $'GITHUB_\\x45NV')\necho \"PATH=/x\" >> \"$f\"",
+        "a name in octal": "f=$(printenv $'\\107ITHUB_ENV')\necho \"PATH=/x\" >> \"$f\"",
+        "a name reference in ANSI-C quotes": "declare -n f=$'GITHUB_\\x45NV'\necho \"PATH=/x\" >> \"$f\"",
+        "a tool given the output's path": 'tool --github-output="$GITHUB_OUTPUT"',
+        "a nested substitution": 'echo "V=${X:-$(echo; echo PATH=/tmp/x:$PATH)}" >> "$GITHUB_ENV"',
+        "a nested substitution with +": 'echo "V=${HOME:+$(echo; echo SHELLOPTS=noexec)}" >> "$GITHUB_ENV"',
+        "a substitution with a quote-split name": 'echo "V=$(echo; echo P""ATH=/tmp/x)" >> "$GITHUB_ENV"',
+    }
+
+    def test_another_file_commands_path_used_otherwise_makes_it_cannot_tell(self):
+        with TempDir() as tmp:
+            for label, script in self.REACHED.items():
+                with self.subTest(label):
+                    self.assertEqual(kinds(check(tmp, before_check(script)), "OBAAF-GHA-016"), CANNOT_TELL)
+
+    PLAIN = {
+        "a version from the ref": 'echo "version=$(basename "$GITHUB_REF")" >> "$GITHUB_OUTPUT"',
+        "a listing to the summary": 'ls -la dist >> "$GITHUB_STEP_SUMMARY"\ncd dist && ls >> "$GITHUB_STEP_SUMMARY"',
+        "a default for running outside Actions": 'echo "v=1" >> "${GITHUB_OUTPUT:-/dev/stdout}"',
+        "tee to the summary": 'echo "## built" | tee -a "$GITHUB_STEP_SUMMARY"',
+        "a check that secrets are set": 'for v in NPM_TOKEN TWINE_PASSWORD; do [ -z "${!v}" ] && exit 1; done',
+        "an option in a substitution": 'echo "V=$(tool --home=/tmp/t)" >> "$GITHUB_ENV"',
+        "a query in a substitution": "echo \"C=$(gh api 'repos/o/r/contents?path=x')\" >> \"$GITHUB_ENV\"",
+        "names listed with another prefix": 'echo "${!CI_@}"',
+    }
+
+    def test_a_plain_write_to_another_file_command_keeps_the_check(self):
+        with TempDir() as tmp:
+            for label, script in self.PLAIN.items():
+                with self.subTest(label):
+                    self.assertEqual(of(check(tmp, before_check(script)), "OBAAF-GHA-016"), [])
+
+    def test_code_in_another_language_that_names_one_makes_it_cannot_tell(self):
         with TempDir() as tmp:
             step = run("import os\nwith open(os.environ['GITHUB_OUTPUT'], 'a') as f:\n    f.write('v=1\\n')",
                        "Prepare", "        shell: python\n")
-            self.assertEqual(of(check(tmp, release(step + run(VERIFY, "Verify") + UPLOAD)), "OBAAF-GHA-016"), [])
+            self.assertEqual(kinds(check(tmp, release(step + run(VERIFY, "Verify") + UPLOAD)), "OBAAF-GHA-016"),
+                             CANNOT_TELL)
+            plain = run("print('Publishing...')", "Prepare", "        shell: python\n")
+            self.assertEqual(of(check(tmp, release(plain + run(VERIFY, "Verify") + UPLOAD)), "OBAAF-GHA-016"), [])
+
+
+class TheJobsTextTest(unittest.TestCase):
+    """A write held in the workflow's or the job's `env`, `defaults` or `strategy` can be run by any step."""
+
+    def test_a_write_in_the_jobs_text_makes_the_check_cannot_tell(self):
+        with TempDir() as tmp:
+            write = "echo PATH=/tmp/x:$PATH >> $GITHUB_ENV"
+            job_env = release(run('eval "$CMD"', "Prepare") + run(VERIFY, "Verify") + UPLOAD).replace(
+                "      OBAAF_LANE: release\n", f"      OBAAF_LANE: release\n      CMD: '{write}'\n")
+            workflow_env = release(run('bash -c "$CMD"', "Prepare") + run(VERIFY, "Verify") + UPLOAD).replace(
+                "permissions: {}\n", "permissions: {}\nenv:\n  CMD: 'echo SHELLOPTS=noexec >> $GITHUB_ENV'\n", 1)
+            expression = release(run("${{ env.CMD }}", "Prepare") + run(VERIFY, "Verify") + UPLOAD).replace(
+                "      OBAAF_LANE: release\n", f"      OBAAF_LANE: release\n      CMD: '{write}'\n")
+            matrix = release(run("${{ matrix.cmd }}", "Prepare") + run(VERIFY, "Verify") + UPLOAD,
+                             job_extra="    environment: release\n    cache-mode: none\n    strategy:\n"
+                                       f"      matrix:\n        cmd: ['{write}']\n")
+            continued = release(run('eval "$CMD"', "Prepare", "        env:\n          CMD: |\n"
+                                    "            echo PATH=/tmp/x:$PATH >> $GITHUB_\\\n            ENV\n")
+                                + run(VERIFY, "Verify") + UPLOAD)
+            for label, text in (("job env", job_env), ("workflow env", workflow_env), ("expression", expression),
+                                ("matrix", matrix), ("a continued line in a step's env", continued)):
+                with self.subTest(label):
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), CANNOT_TELL)
+
+    def test_a_long_word_is_read_quickly(self):
+        import time
+        with TempDir() as tmp:
+            for script in ("echo " + "a" * 40_000, 'echo "V=$(echo ' + "b" * 40_000 + ')" >> "$GITHUB_ENV"',
+                           "ls " * 16_000 + ">> $GITHUB_OUTPUT"):
+                with self.subTest(len(script)):
+                    started = time.monotonic()
+                    check(tmp, before_check(script))
+                    self.assertLess(time.monotonic() - started, 2.0)
 
 
 class MacLoaderTest(unittest.TestCase):
