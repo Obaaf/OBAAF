@@ -296,7 +296,7 @@ A job applies agent output with write permissions, but neither it nor a job it n
 
 The workflow still contains an OBAAF template placeholder (OBAAF_OWNER or an all-zero commit SHA), so it will not run as intended. Each placeholder in a value GitHub reads is one finding, named by where it is (the job, the step and the key): values are read as YAML gives them, so an escape or a line joined inside double quotes is the placeholder it spells, and a comment is not read. `OBAAF_OWNER` is found in any letter case, and the all-zero SHA as exactly 40 zeros after `@` or as the ref of a `uses`.
 
-**Fix.** Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or replace the placeholders by hand.
+**Fix.** Replace the placeholders in the existing workflow with the OBAAF repository and its full commit SHA. For a new destination, install the pinned workflows with `obaaf templates install --dest DIR --obaaf-repo OWNER/obaaf --obaaf-sha SHA`.
 
 ## OBAAF-GHA-024
 
