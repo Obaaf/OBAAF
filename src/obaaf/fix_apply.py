@@ -259,7 +259,7 @@ def apply_edits(root, root_fd, edits):
                 except OSError as exc:
                     raise ProofError(f"{t.edit.path}: apply needs a filesystem with hard links; edit the file "
                                      f"by hand from the preview ({exc})") from exc
-                os.unlink(probe, dir_fd=t.parent)
+                discard(t, probe)  # a probe it cannot remove is named, like a stage
             for t in targets:
                 if not os.path.samestat((root / t.edit.path.parent).stat(), os.fstat(t.parent)):
                     raise ProofError(f"{t.edit.path}: parent directory changed during apply")

@@ -190,6 +190,20 @@ class FixApplyTest(unittest.TestCase):
             self.assertEqual((self.root / edit.path).read_bytes(), edit.before)
         self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
 
+    def test_a_probe_it_cannot_remove_is_named(self):
+        # Second review pass of #282: a leftover probe was not reported.
+        real = os.unlink
+
+        def unlink(name, *args, **kwargs):
+            if str(name).endswith(".probe"):
+                raise PermissionError("cannot remove")
+            return real(name, *args, **kwargs)
+
+        with apply_lock(self.root) as fd, patch.object(os, "unlink", side_effect=unlink):
+            warnings = apply_edits(self.root, fd, self.edits())
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertTrue(all(".probe" in w and "Remove the temporary file" in w for w in warnings), warnings)
+
     def test_checkout_transformations_are_refused(self):
         for attribute in ("filter=lfs", "ident", "working-tree-encoding=UTF-16"):
             with self.subTest(attribute=attribute):
