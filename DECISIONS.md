@@ -105,6 +105,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 
 ---
 
@@ -929,3 +930,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+### D-116 Comparing JSON edits in the adoption proof
+
+**Decision.** Read both versions of a `.json` file with the JSON decoder. Compare decoded strings and retain each numeric token’s exact spelling. Decline duplicate object member names and nonstandard numeric constants anywhere in either document. Apply D-099’s existing declared-path comparison and traversal budget.
+
+**Reason.** JSON strings can contain characters the YAML reader normalises. Binary floating-point conversion can also erase a change between distinct decimal numbers. A proof must account for each such change outside the proposed fields.
+
+**Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. Equivalent JSON string escapes and object member reordering are accepted.
+
+**Status.** Proposed, 2026-11-20 (A2e, #314 item 7).

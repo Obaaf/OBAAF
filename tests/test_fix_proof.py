@@ -142,6 +142,38 @@ class FixProofReviewTest(unittest.TestCase):
 
     setUp = FixProofTest.setUp
 
+    def test_json_compares_decoded_strings_and_exact_numbers(self):
+        path = Path("metadata.JSON")
+        for before_value, after_value in (
+                ('"line one\u0085line two"', '"line one line two"'),
+                ("1.00000000000000001", "1.00000000000000002"),
+                ('"1e3"', "1e3"), ("-0", "0")):
+            with self.subTest(before_value=before_value):
+                before = ('{"name":"one","keep":' + before_value + '}').encode()
+                after = ('{"name":"two","keep":' + after_value + '}').encode()
+                (self.root / path).write_bytes(before)
+                with self.assertRaisesRegex(ProofError, "structure changed"):
+                    prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+                self.assertEqual((self.root / path).read_bytes(), before)
+
+        # Escaped and literal forms of the same Unicode character denote the same JSON string.
+        before = b'{"name":"one","keep":"caf\\u00e9","quantity":1e600}'
+        after = '{"quantity":1e600,"keep":"café","name":"two"}'.encode()
+        (self.root / path).write_bytes(before)
+        prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+
+    def test_json_rejects_ambiguous_or_invalid_documents_on_either_side(self):
+        path = Path("metadata.json")
+        valid = b'{"name":"one"}'
+        for invalid in (b'{"name":"two","na\\u006de":"three"}', b'{name: two}',
+                        b'{"name":NaN}', b'{"name":Infinity}', b'{"name":-Infinity}'):
+            for before, after in ((valid, invalid), (invalid, valid)):
+                with self.subTest(invalid=invalid, invalid_before=before == invalid):
+                    (self.root / path).write_bytes(before)
+                    with self.assertRaises(ProofError):
+                        prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+                    self.assertEqual((self.root / path).read_bytes(), before)
+
     def test_an_edit_to_a_file_that_is_not_yaml_or_json_is_withheld(self):
         for name, before, after in (
                 ("scripts/build.sh", b'echo "building # step 1"\n',

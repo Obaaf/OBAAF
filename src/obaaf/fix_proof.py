@@ -181,6 +181,23 @@ STRUCTURE_LIMIT = 500_000
 DOCUMENT_SUFFIXES = (".yml", ".yaml", ".json")
 
 
+class _JsonNumber(str):
+    """Keep the numeric token distinct from a JSON string and avoid float rounding."""
+
+
+def _invalid_json_constant(token):
+    raise ValueError(f"{token} is not a JSON number")
+
+
+def _document(data: bytes, suffix: str):
+    text = data.decode("utf-8")
+    if suffix == ".json":
+        return json.loads(text, object_pairs_hook=baseline._no_duplicates,
+                          parse_int=_JsonNumber, parse_float=_JsonNumber,
+                          parse_constant=_invalid_json_constant)
+    return yamlutil.load(text)
+
+
 def _structure(value, path, allowed, budget=None):
     """Compare typed contents while omitting only the keys the candidate named."""
     if budget is None:
@@ -237,8 +254,8 @@ def _apply(dest, edits, expected):
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
-        old = yamlutil.load(edit.before.decode("utf-8"))
-        new = yamlutil.load(edit.after.decode("utf-8"))
+        old = _document(edit.before, rel.suffix.lower())
+        new = _document(edit.after, rel.suffix.lower())
         if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
             raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
         # A declared key must name something: one that names nothing would let the comparison
