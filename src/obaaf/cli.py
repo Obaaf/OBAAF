@@ -853,7 +853,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.set_defaults(func=cmd_init)
 
     # fix
-    parser = sub.add_parser("fix", help="preview proven configuration and baseline corrections")
+    parser = sub.add_parser("fix", help="preview or apply proven configuration and baseline corrections")
+    parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
     parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
     parser.add_argument("--config", help="checker configuration used by the gate")
     parser.add_argument("--baseline", help="baseline used by the gate")

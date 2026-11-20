@@ -106,6 +106,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-100 | How init proposes the first agent lanes and secret environments | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
+| D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -948,6 +949,18 @@ If another supported configuration name already exists, init shows any differenc
 **Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment lies in the text the removal would delete, or after the last removed entry on its line. A comment on a line of its own before or after the removed entries is kept, and then sits beside a kept entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
 **Status.** Proposed, 2026-11-19 (A2b, #275).
+
+### D-103 Applying the paperwork preview
+
+**Decision.** `obaaf fix --apply` runs the preview again with the supplied check and acceptance options, prints the unified diff, flushes it, and reproves those exact edits on a fresh private copy. Before writing any file it checks every target's original bytes and executable mode against HEAD, the index and the proven working file. Each target must be tracked, clean and an existing regular file. Unrelated local changes can remain. The command leaves the Git index alone and makes no commit.
+
+**Reason.** The adoption design asks for a change an adopter can review as its own commit. Using the same preview and proof keeps both invocations on the same rules. A target Git's index marks assume-unchanged or skip-worktree is refused, because Git would then show none of the written change (added by the review, `review-gpt` #282).
+
+**Consequence.** Apply runs only on Linux, where Python has the extended attribute functions it needs to keep access controls; elsewhere it refuses before printing the preview. A directory lock keeps a second OBAAF apply out: it fails at once rather than waiting. All replacement bytes are prepared before installation, and a filesystem without hard links, which install and restore both use, is refused then, before any original is moved (both added by the review, `review-gpt` #282). Each original is retained through validation of the complete set. A recoverable failure restores the originals in reverse order. The replacement must preserve ownership, group, permission bits and every extended attribute visible to the process, including Linux POSIX access ACLs. Inherited attributes that the original lacked are removed. The command verifies this before installation and again before releasing the originals. A filesystem that cannot represent the original metadata, or a file with a capability or integrity signature, requires manual editing. It supports ordinary Git text line-ending conversion and declines targets with external filters, working-tree encodings or ident expansion. Repeating apply when the checker offers no further edit succeeds without writing.
+
+The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
+
+**Status.** Proposed, 2026-11-19 (slice A2c, #279).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
