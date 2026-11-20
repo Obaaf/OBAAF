@@ -890,7 +890,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.set_defaults(func=cmd_init)
 
     # fix
-    parser = sub.add_parser("fix", help="preview or apply proven configuration and baseline corrections")
+    parser = sub.add_parser("fix", help="preview or apply proven paperwork and requested workflow changes")
+    parser.add_argument("--tighten", choices=["checkout-credentials"], help="preview only this requested workflow tightening")
+    parser.add_argument("--candidate", metavar="NAME", help="request one checkout using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
     parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
     parser.add_argument("--config", help="checker configuration used by the gate")

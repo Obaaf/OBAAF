@@ -109,6 +109,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
+| D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -988,6 +989,16 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Evidence.** `tests/test_settings_evidence.py` exercises the audit producer with recorded responses and tests timestamp boundaries, identity, exclusivity, branch policies, partial reads and the public CLI. `TheTemplateStepTest.test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin` exercises the selected snapshot and checker support in the template.
 
 **Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
+
+### D-106 Checkout credential tightening by kind or candidate name
+
+**Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.
+
+**Reason.** Later Git operations may need the checkout credential. The adopter chooses whether to make this workflow change. A disappearing acceptance or a stale entry is a separate decision for its owner.
+
+**Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, a workflow file that is not UTF-8 text, and edits whose precise effect cannot be proven remain for manual review. A refusal from comparing findings or baseline and ignore entries names them, and a workflow refused for its encoding is named. The checker reads the workflow offline.
+
+**Status.** Proposed, 2026-11-19 (slice A5a, #285).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
