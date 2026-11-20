@@ -266,7 +266,8 @@ rules:
       and `contents: write` in a job that a release event, a tag push, a tag's creation or another
       workflow's call can start; a called job that declares no permissions holds what its callers in the
       repository grant. For this case a local action is a cache step only when its steps were not read,
-      and where they make the job a release job the release case replaces it. Not followed: a `docker://`
+      and where they make the job a release job the release case on the same step or job replaces it. Not
+      followed: a `docker://`
       step, a step whose `if:` never lets it run (reported anyway), outputs passed between jobs, actions
       that cache that are not listed (`nix-community/cache-nix-action`, `denoland/setup-deno` and others),
       and, for a job that is not a release job, permissions nobody declares (OBAAF-GHA-009 reports them),

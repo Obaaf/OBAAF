@@ -4154,19 +4154,20 @@ class WorkflowRules:
         mode = job.cache_mode
         # A step that uses a local action is taken to restore unless its steps were read as the job's, which
         # then decide (slice 2d.4b2's second pass): a local action is not a cache step by being local.
-        # In the second pass a local action inside one is followed by its steps, named after it.
+        # In the second pass a local action inside one is followed at once by its steps, named after it.
         read = {id(steps[0].via.raw) for steps in job.local_steps.values() if steps and steps[0].via is not None}
         read |= {id(s.via.raw) for s in job.steps if s.via is not None}
-        inner_names = [s.name for s in job.steps if s.via is not None]
 
-        def restores(step: Step) -> bool:
+        def restores(n: int, step: Step) -> bool:
             if not _local_like(step.uses):
                 return self._restores_cache(step)
             if step.via is None:
                 return id(step.raw) not in read
-            return not any(n.startswith((f"{step.name}: ", f"{step.name} > ")) for n in inner_names)
+            after = job.steps[n + 1] if n + 1 < len(job.steps) else None
+            return not (after is not None and after.via is step.via
+                        and after.name.startswith((f"{step.name}: ", f"{step.name} > ")))
 
-        cache_steps = [s for s in job.steps if restores(s)]
+        cache_steps = [s for n, s in enumerate(job.steps) if restores(n, s)]
         if cache_steps and not _forbids_restores(mode):
             names = ", ".join(f"'{s.name}'" for s in cache_steps)
             values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),

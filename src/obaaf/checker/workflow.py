@@ -2874,9 +2874,11 @@ def image_output_pushes(entry) -> bool:
     text = as_text(entry).strip().strip("'\"")
     fields: dict = {}
     for part in text.split(","):
-        key, sep, value = part.partition("=")
+        # buildx reads each field as CSV, so a field may be quoted whole (`"push=true"`) and its key is
+        # trimmed (`type=image, push=true`).
+        key, sep, value = part.strip().strip("'\"").partition("=")
         if sep:
-            fields.setdefault(key.strip().lower(), []).append(value.strip().strip("'\"").lower())
+            fields.setdefault(key.strip().strip("'\"").lower(), []).append(value.strip().strip("'\"").lower())
     types = fields.get("type", [])
     if not types:
         return "${{" in text
@@ -2896,19 +2898,21 @@ def image_outputs_push(value) -> bool:
 
 def bake_set_pushes(value) -> bool:
     """Whether a `docker/bake-action` step's `set`, one `target.key=value` a line, may push (flagship slice
-    2d.14): a `push` that is not false, an `output` that may push (`image_output_pushes`), or a key set when
-    the job runs. Other keys (`*.platform=${{ matrix.platform }}`, `*.cache-to=type=registry,...`) do not."""
+    2d.14): a `push` that is not false, an `output` that may push (`image_output_pushes`), with `=` or `+=`,
+    or an expression before the `=` (the target or the key set when the job runs). Other keys
+    (`*.platform=${{ matrix.platform }}`, `*.cache-to=type=registry,...`, `*.args.PUSH=true`) do not."""
     if not isinstance(value, (str, int, float, bool)) and value is not None:
         return True
     for line in as_text(value).splitlines():
         target, sep, given = line.strip().strip("'\"").partition("=")
-        if not sep:
-            if "${{" in target:
-                return True
-            continue
-        key = target.rsplit(".", 1)[-1].strip().lower()
-        if "${{" in key:
+        if "${{" in target:
+            # The target or the key is set when the job runs (`*.${{ matrix.key }}=...`).
             return True
+        if not sep:
+            continue
+        # `target.key` or `target.key.subkey`; `+=` appends (`*.output+=type=registry`). A target's name has
+        # no dot, so the key is all after the first one: `*.args.PUSH` is a build argument, not `push`.
+        key = target.strip().strip("'\"").rstrip("+").partition(".")[2].strip().lower()
         if key in ("output", "outputs") and image_output_pushes(given):
             return True
         if key == "push" and ("${{" in given or given.strip().strip("'\"").lower() not in _IMAGE_FALSE):
@@ -2943,8 +2947,11 @@ def image_step_pushes(step: "Step", job: "Job | None" = None) -> bool:
         outputs = through_matrix(step.with_.get("set", ""), job, bake_set_pushes)
     else:
         return False
-    push = as_text(step.with_.get("push", ""))
-    return "${{" in push or push.strip().lower() in ("true", "1", "yes") or outputs
+    def pushes(value) -> bool:
+        text = as_text(value)
+        return "${{" in text or text.strip().lower() in ("true", "1", "yes")
+
+    return outputs or through_matrix(step.with_.get("push", ""), job, pushes)
 
 
 def upload_readings(text: str) -> list[str]:

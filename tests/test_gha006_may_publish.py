@@ -371,14 +371,99 @@ class ImageBuildsThatDoNotPushTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.lane(f"      - run: {command}\n"), [])
 
-    def test_a_long_line_costs_what_it_reads(self):
+    def test_the_new_command_pattern_costs_what_it_reads(self):
+        """The image-output pattern looks at most 16,384 characters into a command and stops at `;`, `&` and
+        `|`, so a long line of many commands is not quadratic in its length. (The older `--push` pattern
+        is left as it was; slow patterns older than this slice are #179.)"""
+        import re
         import time
-        # 120 KB on one line: about 2 s here, where the unbounded patterns took over 30 s.
-        line = "docker build ; " * 8000
-        with TempDir() as tmp:
+        from obaaf.catalog import load
+        pattern = next(p for p in load().detection["upload_commands"] if "imagetools" not in p and "--output" in p)
+        rx = re.compile(pattern, re.M)
+        for line in ("docker build ; " * 16000, "docker build " * 10000, ("docker build --set a.b=" + "x" * 50 + " ") * 3000):
             started = time.monotonic()
-            check(tmp, job(f"      - run: {line}\n", on="push"))
-            self.assertLess(time.monotonic() - started, 20)
+            rx.search(line)
+            self.assertLess(time.monotonic() - started, 10)
+
+
+class SecondReviewTest(unittest.TestCase):
+    """The second review's ways past and false positives."""
+
+    def lane(self, step, matrix=""):
+        with TempDir() as tmp:
+            result = check(tmp, job(step, on="pull_request", job_extra=f"    environment: ci\n{matrix}"))
+            return [f.kind for f in result.findings if f.rule == "OBAAF-GHA-016"]
+
+    def test_expressions_in_commands_are_read_as_in_inputs(self):
+        for command in ("docker buildx build --output ${{ inputs.output }} .",
+                        "docker buildx build -o type=${{ inputs.type }} .",
+                        "docker buildx build -o type=image,name=${{ env.IMG }} .",
+                        "docker buildx bake --set '*.output=${{ inputs.o }}'",
+                        "docker buildx bake --set '*.${{ inputs.key }}=type=registry'"):
+            with self.subTest(command=command):
+                self.assertEqual(self.lane(f"      - run: {command}\n"), ["unchecked"])
+        self.assertEqual(self.lane("      - run: docker buildx build -o type=docker,dest=${{ runner.temp }}/x .\n"), [])
+
+    def test_bake_keys_set_when_the_job_runs_and_appended_outputs(self):
+        for extra in ("set: '*.${{ matrix.k }}=${{ matrix.v }}'", "set: '*.${{ inputs.key }}=type=registry'",
+                      "set: '${{ inputs.target }}.${{ inputs.key }}=true'", "set: '*.output+=type=registry'",
+                      "set: 't.output+=type=image,push=true'"):
+            with self.subTest(set=extra):
+                step = f"      - uses: docker/bake-action@{SHA}\n        with:\n          {extra}\n"
+                self.assertEqual(self.lane(step), ["unchecked"])
+        for command in ("docker buildx bake --set '*.output+=type=registry'",
+                        "docker buildx bake --set 't.output+=type=image,push=true'"):
+            with self.subTest(command=command):
+                self.assertEqual(self.lane(f"      - run: {command}\n"), ["unchecked"])
+
+    def test_a_long_continued_command_still_pushes(self):
+        labels = "".join(f"  --label l{n}=value{n} \\\n" for n in range(70))
+        for end in ("--push .", "--output type=registry ."):
+            with self.subTest(end=end):
+                script = "".join(f"          {line}\n" for line in f"docker buildx build \\\n{labels}  {end}".splitlines())
+                self.assertEqual(self.lane(f"      - run: |\n{script}"), ["unchecked"])
+
+    def test_quoted_fields_and_trimmed_keys(self):
+        for extra in ('outputs: type=image,name=x,"push=true"', 'outputs: name=x,"type=registry"',
+                      "outputs: type=image, push=true"):
+            with self.subTest(outputs=extra):
+                step = f"      - uses: docker/build-push-action@{SHA}\n        with:\n          {extra}\n"
+                self.assertEqual(self.lane(step), ["unchecked"])
+
+    def test_false_positives(self):
+        steps = {
+            "build argument named push": (f"      - uses: docker/bake-action@{SHA}\n        with:\n"
+                                           "          set: '*.args.PUSH=true'\n", ""),
+            "--outputs is not --output": ("      - run: docker buildx build --outputs=type=registry .\n", ""),
+        }
+        for name, (step, matrix) in steps.items():
+            with self.subTest(step=name):
+                self.assertEqual(self.lane(step, matrix), [])
+
+    def test_push_from_the_matrix(self):
+        """`push` is read through the matrix like `outputs`, within `Job._matrix_values`' limits: a value YAML
+        could read as other than text (`false`, quoted or not) is not read, so the step may push."""
+        step = (f"      - uses: docker/build-push-action@{SHA}\n        with:\n          push: ${{{{ matrix.push }}}}\n")
+        for listed in ("[false]", "['false']"):
+            with self.subTest(listed=listed):
+                self.assertEqual(self.lane(step, f"    strategy:\n      matrix:\n        push: {listed}\n"), ["unchecked"])
+
+    def test_more_command_forms(self):
+        for command in ("docker image build -o type=registry .", "docker builder build -o type=registry .",
+                        "docker buildx b -o type=registry ."):
+            with self.subTest(command=command):
+                self.assertEqual(self.lane(f"      - run: {command}\n"), ["unchecked"])
+
+    def test_a_step_named_like_a_read_local_action_is_not_taken_for_it(self):
+        outer = ("runs:\n  using: composite\n  steps:\n    - name: Setup\n      uses: ./.github/actions/inner\n"
+                 "    - name: Setup\n      uses: ./.github/actions/js\n")
+        inner = "runs:\n  using: composite\n  steps:\n    - run: make\n      shell: bash\n"
+        js = "runs:\n  using: node20\n  main: index.js\n"
+        with TempDir() as tmp:
+            extra = {".github/actions/outer/action.yml": outer, ".github/actions/inner/action.yml": inner,
+                     ".github/actions/js/action.yml": js}
+            found = of(check(tmp, job("      - uses: ./.github/actions/outer\n" + PUBLISH), extra=extra))
+            self.assertEqual(sorted({f.kind for f in found}), ["capability-restores"])
 
 
 class CallerGrantsTest(unittest.TestCase):

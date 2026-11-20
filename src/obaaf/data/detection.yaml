@@ -1060,14 +1060,16 @@ upload_commands:
   - '(^|[\s;&|(])gh\s+api\b[^\n]*/releases\b'
   - '(^|[\s;&|(])git\s+push\b[^\n]*\s--(tags|follow-tags)\b'
   - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3\s+(cp|sync|mv)\b'
-  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]{0,4096}?\s--push\b'
-  # Flagship slice 2d.14: an image build whose output pushes: `-o`/`--output` with `type=registry`, or
-  # `type=image` with a `push` or `push-by-digest` that is not false, and bake's `--set` of an `output` or
-  # `push` read the same way; and a multi-platform image's manifest list, which `docker buildx imagetools
-  # create` pushes unless it is given `--dry-run`. Each looks at most 4,096 characters into the command,
-  # so a long line costs what it reads.
-  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]{0,4096}?\s((-o|--output)(\s+|=)?[''"]?(?=[^\s;&|''"]*type=(registry|image)\b)(?=[^\s;&|''"]*(type=registry\b|\bpush(-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)))|--set(\s+|=)[''"]?[^\s;&|''"=]*\.(push=(?!(false|False|FALSE|0|f|F)\b)|outputs?=[''"]?(?=[^\s;&|''"]*type=(registry|image)\b)(?=[^\s;&|''"]*(type=registry\b|\bpush(-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)))))'
-  - '(^|[\s;&|(])docker\s+buildx\s+imagetools\s+create\b(?![^\n;&|#]{0,4096}\s--dry-run(=(true|True|TRUE|1|t|T))?(?=\s|$))'
+  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]*\s--push\b'
+  # Flagship slice 2d.14: an image build whose output pushes, read as `workflow.image_output_pushes` reads
+  # an action's `outputs`: `-o`/`--output` of type `registry`, of type `image` with a `push` or
+  # `push-by-digest` that is not false or an expression in it, or whose type or whole value is an
+  # expression; bake's `--set` of an `output` the same way (also `+=`), of `push` not false, or with an
+  # expression before its `=`. It looks up to 16,384 characters into one command, and stops at `;`, `&`
+  # and `|`. And a multi-platform image's manifest list, which `docker buildx imagetools create` pushes
+  # unless it is given `--dry-run`.
+  - '(^|[\s;&|(])docker\s+(buildx\s+(build|bake|b)|(builder\s+|image\s+)?(build|bake))\b[^\n;&|]{0,16384}?\s((-o(\s+|=)?|--output(\s+|=))[''"]?(?:(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=registry\b)|(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=image\b)(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=\$\{\{)|\$\{\{)|--set(\s+|=)[''"]?(?:[^\s;&|''"=]*\$\{\{|[^\s;&|''"=.]*\.(push\+?=(?!(false|False|FALSE|0|f|F)\b)|outputs?\+?=[''"]?(?:(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=registry\b)|(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=image\b)(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=[^\s;&|''"]*(?:,\s+[^\s;&|''"]*)*type=\$\{\{)|\$\{\{))))'
+  - '(^|[\s;&|(])docker\s+buildx\s+imagetools\s+create\b(?![^\n;&|#]{0,65536}\s--dry-run(=(true|True|TRUE|1|t|T))?(?=\s|$))'
   - '(^|[\s;&|(])docker\s+(image|manifest)\s+push\b'
   - '(^|[\s;&|(])(npm|pnpm|yarn)\s+(-\S+\s+)*(npm\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
   - '(^|[\s;&|(])cargo\s+(\+\S+\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
