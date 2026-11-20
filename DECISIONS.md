@@ -969,7 +969,7 @@ If another supported configuration name already exists, init shows any differenc
 
 ### D-116 Comparing JSON edits in the adoption proof
 
-**Decision.** Read both versions of a `.json` file with the JSON decoder. Compare decoded strings and retain each numeric token’s exact spelling. Decline duplicate object member names and nonstandard numeric constants anywhere in either document. Apply D-099’s existing declared-path comparison and traversal budget.
+**Decision.** Read both versions of a file as the checker reads it: the baseline with the JSON decoder and the checker configuration with the YAML reader, whatever their names, and any other file with the JSON decoder when it is named `.json` (the reader was chosen by suffix alone until the review of #316, which let a configuration named `.json` be compared as JSON). Compare decoded strings and retain each numeric token’s exact spelling. Decline duplicate object member names and nonstandard numeric constants anywhere in either document. Apply D-099’s existing declared-path comparison and traversal budget.
 
 **Reason.** JSON strings can contain characters the YAML reader normalises. Binary floating-point conversion can also erase a change between distinct decimal numbers. A proof must account for each such change outside the proposed fields.
 

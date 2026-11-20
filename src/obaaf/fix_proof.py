@@ -199,9 +199,21 @@ def _invalid_json_constant(token):
     raise ValueError(f"{token} is not a JSON number")
 
 
-def _document(data: bytes, suffix: str):
+def _reader(rel: Path, options) -> str:
+    """Read a file as the checker does: the baseline as JSON and the configuration as YAML,
+    whatever their names, and any other file by its suffix. Choosing by suffix alone let a
+    configuration named `.json`, which the checker reads as YAML, be compared as JSON, where
+    some text decodes differently (review of #316)."""
+    if options is not None and options.baseline is not None and rel == Path(options.baseline):
+        return "json"
+    if options is not None and options.config is not None and rel == Path(options.config):
+        return "yaml"
+    return "json" if rel.suffix.lower() == ".json" else "yaml"
+
+
+def _document(data: bytes, reader: str):
     text = data.decode("utf-8")
-    if suffix == ".json":
+    if reader == "json":
         return json.loads(text, object_pairs_hook=baseline._no_duplicates,
                           parse_int=_JsonNumber, parse_float=_JsonNumber,
                           parse_constant=_invalid_json_constant)
@@ -247,7 +259,7 @@ def _names_node(doc, key) -> bool:
     return True
 
 
-def _apply(dest, edits, expected):
+def _apply(dest, edits, expected, options=None):
     touched = set()
     for edit in edits:
         rel = Path(edit.path)
@@ -264,8 +276,9 @@ def _apply(dest, edits, expected):
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
-        old = _document(edit.before, rel.suffix.lower())
-        new = _document(edit.after, rel.suffix.lower())
+        reader = _reader(_relative(dest, rel), options)
+        old = _document(edit.before, reader)
+        new = _document(edit.after, reader)
         if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
             raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
         # A declared key must name something: one that names nothing would let the comparison
@@ -363,7 +376,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             check_copy_matches(root, original, before)
             expected_files = _manifest(dest)
             _read_as_jenkins(dest, options, before, edits)
-            _apply(dest, edits, expected_files)
+            _apply(dest, edits, expected_files, options)
             after = check_inputs(dest, options, today, catalog)
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")

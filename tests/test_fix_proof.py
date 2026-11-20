@@ -174,6 +174,36 @@ class FixProofReviewTest(unittest.TestCase):
                         prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
                     self.assertEqual((self.root / path).read_bytes(), before)
 
+    def test_a_configuration_named_json_is_compared_as_the_checker_reads_it(self):
+        # From the review of #316: the checker reads a --config of any name as YAML, where
+        # "\ud83d\ude00" is two lone surrogates and a literal emoji is one character.
+        workflow = Path(".github/workflows/build.yml")
+        (self.root / workflow).write_text("name: Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                                          "    steps:\n      - run: echo hi\n")
+        cfg = Path("project.json")
+        before = b'{"agents": {"actions": ["acme/tool-\\ud83d\\ude00"], "commands": ["zzz-one"]}}'
+        after = '{"agents": {"actions": ["acme/tool-\U0001F600"], "commands": ["zzz-two"]}}'.encode()
+        (self.root / cfg).write_bytes(before)
+        options = CheckOptions(path=workflow, config=cfg, platform="github", fail_on="high")
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(cfg, before, after, (("agents", "commands"),)),), ())
+        self.assertEqual((self.root / cfg).read_bytes(), before)
+
+    def test_a_baseline_named_yaml_is_compared_as_json(self):
+        # From the review of #316: baseline.load reads any name as JSON, where a raw NEL and a
+        # space differ; the YAML reader turns the NEL into a space.
+        f = self.finding
+        valid = baseline.entry_for(f, "@prior", "prior review", (date.today() + timedelta(days=30)).isoformat())
+        stale = dict(valid, path="missing")
+        before = json.dumps({"format": baseline.FORMAT, "tool": "x y", "findings": [valid, stale]}).encode()
+        after = json.dumps({"format": baseline.FORMAT, "tool": "x\u0085y", "findings": [valid]},
+                           ensure_ascii=False).encode()
+        path = Path("accepted.yaml")
+        (self.root / path).write_bytes(before)
+        options = dataclasses.replace(self.options, baseline=path)
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(path, before, after, (), removed=(("findings", 1),)),), ())
+
     def test_an_edit_to_a_file_that_is_not_yaml_or_json_is_withheld(self):
         for name, before, after in (
                 ("scripts/build.sh", b'echo "building # step 1"\n',

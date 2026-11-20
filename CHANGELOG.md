@@ -10,7 +10,7 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 ### Checking edits to JSON files
 
-The adoption edit proof reads `.json` files as JSON. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. YAML files continue to use the workflow YAML reader.
+The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whatever their names, and any other `.json` file as JSON. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. YAML files continue to use the workflow YAML reader.
 
 ### Upgrading from 0.3.0
 
