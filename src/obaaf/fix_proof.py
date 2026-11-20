@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 
 import yaml
@@ -84,6 +85,28 @@ def _relative(root: Path, path: Path) -> Path:
 def check_inputs(root, options, today, catalog):
     """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
+    if not target.exists():
+        raise ProofError(f"check path does not exist: {options.path}")
+    try:
+        return _read_inputs(root, target, options, today, catalog)
+    except (baseline.BaselineError, checker.ConfigError, ProofError) as exc:
+        raise ProofError(_input_message(root, exc)) from exc
+
+
+def _input_message(root, error):
+    # Both the source and the temporary tree have the same repository-relative paths, so a path
+    # under either is shown from the repository's top folder ("./..."). The top folder itself is
+    # ".", wherever the message names it and not only at its start: a config error for two
+    # competing configs, and a directory given as --config or --baseline (`--baseline .`) whose
+    # error names the copy's folder (added by the review, review-gpt #320). The root counts only
+    # where no path character (a letter, digit, `.`, `-` or `~`) touches it, so a longer name that
+    # begins or ends with its text is left alone; a `.` that ends a sentence does not touch it.
+    pattern = (r"(?<![\w.~-])" + re.escape(str(root))
+               + "(?:(" + re.escape(os.sep) + r")|(?![\w~-]|\.\w))")
+    return re.sub(pattern, lambda m: "./" if m.group(1) else ".", str(error))
+
+
+def _read_inputs(root, target, options, today, catalog):
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
     config = checker.Config.load(base, str(root / options.config) if options.config is not None else None)
@@ -349,7 +372,7 @@ def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
     try:
         globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
     except checker.ConfigError as exc:
-        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
+        raise ProofError(f"the repository's own configuration could not be read: {_input_message(root, exc)}") from exc
     for edit in edits:
         rel = _relative(root, Path(edit.path))
         path = root / rel
@@ -388,7 +411,12 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             _apply(dest, edits, expected_files,
                    dest / options.baseline if options.baseline is not None else None,
                    before.config.path)
-            after = check_inputs(dest, options, today, catalog)
+            try:
+                after = check_inputs(dest, options, today, catalog)
+            except ProofError as exc:
+                # The edit made the file unusable; the user's own file is still as it was
+                # (added by the review, review-gpt #320).
+                raise ProofError(f"after the proposed edit: {exc}") from exc
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
             if expected_files != _manifest(dest):

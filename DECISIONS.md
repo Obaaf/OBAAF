@@ -109,6 +109,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
+| D-119 | Identify the repository input when a preview refuses it | Proposed |
 
 ---
 
@@ -987,3 +988,13 @@ If another supported configuration name already exists, init shows any differenc
 **Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. In a file read as JSON, equivalent string escapes and object member reordering are accepted.
 
 **Status.** Proposed, 2026-11-20 (A2e, #314 item 7).
+
+### D-119 Identify the repository input when a preview refuses it
+
+**Decision.** In a proof or paperwork preview, show paths in checker input diagnostics relative to the repository being examined. If the requested check path is missing, identify it before running the checker.
+
+**Reason.** The private working copy is removed when the preview exits. The user needs the matching path in their own tree and the reason the checker refused the input.
+
+**Consequence.** A baseline or configuration the check reads and cannot use still refuses the preview (exit 2). The repository's own configuration, which is read beside an explicit `--config` only to find Jenkins files, holds back each candidate instead, and the preview lists it among the changes it could not make automatically (exit 0). The top folder is shown as `.`, also when a folder is given as `--config` or `--baseline`, and a refusal that the proposed edit itself causes begins "after the proposed edit:", because the user's file is unchanged (both added by the review, `review-gpt` #320). Findings, edits and gate decisions keep their existing meanings.
+
+**Status.** Proposed, 2026-11-20 (slice A2f, #314 item 9).
