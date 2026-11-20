@@ -84,10 +84,19 @@ jobs:
       - name: Build and smoke-test the wheel
         run: |
           python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
-          python -m pip wheel --no-deps --no-build-isolation --wheel-dir wheelhouse .
+          python -c 'from setuptools.build_meta import build_sdist; build_sdist("dist")'
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir wheelhouse dist/obaaf-*.tar.gz
           python -m venv "$RUNNER_TEMP/clean"
           "$RUNNER_TEMP/clean/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt wheelhouse/obaaf-*.whl
           cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/clean/bin/obaaf" templates install --dest studio --obaaf-repo Obaaf/OBAAF --obaaf-sha "$GITHUB_SHA"
+          for workflow in "$GITHUB_WORKSPACE"/templates/github-actions/workflows/*.yml; do
+            test -s "studio/.github/workflows/$(basename "$workflow")"
+          done
+          test -s studio/.github/obaaf.yml
+          test -s studio/.github/obaaf-policy.yaml
+          test -s studio/obaaf-sources.yaml
+          test -x studio/.github/obaaf/agent.sh
           "$RUNNER_TEMP/clean/bin/obaaf" catalog
           "$RUNNER_TEMP/clean/bin/obaaf" assess form --output form.html
           "$RUNNER_TEMP/clean/bin/obaaf" check "$GITHUB_WORKSPACE/tests/fixtures/workflows/risky/pwn-request.yml" --fail-on never
