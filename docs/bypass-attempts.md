@@ -22,10 +22,10 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2h** | **The repository and instruction-file rules: OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001** | **2026-11-15** | `tests/test_repo_instruction_bypasses.py` |
 | **2d.2i** | **Jenkins files and credentials: which Jenkinsfiles are read, OBAAF-JEN-001, 013, 014, 015** | **2026-11-15** | `tests/test_jenkins_files_credentials.py` |
 | **2d.2k** | **Pipeline code and pins: OBAAF-JEN-004, 008** | **2026-11-17** | `tests/test_jenkins_code_pins.py` |
-| 2d.2j (open) | Where pipeline code runs and agent stages: OBAAF-JEN-002, 003, 006, 007; [attempts recorded, not yet fixed](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed) | 2026-11-17 | |
+| **2d.2j** | **Agent stages and workspaces: OBAAF-JEN-002, 003, 006, 007** ([below](#2d2j-agent-stages-and-workspaces)) | **2026-11-17, 2026-11-20** | `tests/test_jenkins_workspaces.py` |
 | Still open | The rest of 2d.2: OBAAF-JEN-005, 009 to 012; see [the plan](flagship.md) | | |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and the open [2d.2j](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and [2d.2j](#2d2j-agent-stages-and-workspaces).
 
 ## 2d.2b: what a job can reach
 
@@ -2501,9 +2501,259 @@ OBAAF-GHA-006 was silent on a job outside the release lane that restores a cache
 
 Each way past and false positive is a test in `tests/test_gha006_may_publish.py`, except the name collision. Stated and not fixed: an unreadable local action inside a composite action followed at once by a step named after it (`<name>: ...`), which is then taken as read; options written before `buildx` or `imagetools`; an output option more than 8,192 characters into its command or after an unquoted `;`, `&` or `|` in it; what a bake file says; a credential passed under another name to a called workflow that restores a cache; `contents: write` on other events; permissions nobody declares; a `$/` action whose file cannot be read is not a cache step for a release job (older than this slice); an expression in a `docker` output that a comma could turn into another type; image pushes by other tools.
 
-## 2d.2j (open): agent stages, attempts recorded, not yet fixed
+## 2d.2j: agent stages and workspaces
 
-Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for the run that takes 2d.2j: 71 ways past, 14 false positives, 3 slow cases, 23 held. The classes are in [the plan's entry for 2d.2j](flagship.md). None is fixed; the case files themselves were not kept, so each row says what the file did. OBAAF-JEN-002 and 006 have no recorded attempt yet (reviewer A was stopped by a safety classifier before its first case).
+Run `tern`, 2026-11-20, from `flagship` at `1261b92`. Two sets of attempts: reviewer B's 111 on OBAAF-JEN-003 and 007 at `9b806db` (run `brant`, 2026-11-17, kept below as they were recorded), and 115 by a new Opus 5.5 reviewer on OBAAF-JEN-002, 003, 006 and 007 at `d9e268d`, the first commit of this slice.
+
+**What changed.** The classes behind most of reviewer B's ways past were that OBAAF-JEN-003 read an agent and an effect as sharing a workspace only inside one stage (C1), and that it cannot follow what a script's values are (A1). This slice builds C1: the model records a workspace for every step, and the rule follows a workspace across stages, post blocks, `reuseNode`, `ws()`, `stash` and `unarchive`; the table is in [jenkins.md](jenkins.md). A1, and commands the checker does not recognise as an agent or an effect, are not this slice's: they are tracked in #330.
+
+Of reviewer B's rows, these are fixed and tested in `tests/test_jenkins_workspaces.py`:
+- ways past B002 to B010 and B107: high (B006 through the stash);
+- false positives B073 to B075 and B102: no finding;
+- false positive B103 (a push before the agent): medium, not no finding. Jenkins keeps the workspace between builds, so what the agent leaves there (a Git hook, `.git/config`) is in place for the push in the next build. It clears in a fresh pod or after a full clean;
+- B080 still holds (a `ws()` on the same node is written by the same user);
+- B077 and B078 (a container with `--network none`, `unshare --net`) are not cleared. A socket mounted into the container is a way out whatever the network. Whether `unshare` can be undone depends on what the user may run (`sudo`, a setuid helper), which the file does not show;
+- B076 (a helper method's parameter) is #330's class.
+
+The other rows are commands and values the checker does not recognise (#330).
+
+The new review: 43 ways past, 7 false positives, 2 slow, 3 unsure and 60 held. The review-driven commit fixed 34 of the ways past, 2 of the false positives and both slow cases, each by class:
+- **Docker run options** are read as docker splits them (grouped short options, attached values, `--mount`, `CAP_` names, `--device`, `--privileged=false`), not by a list of patterns.
+- **Pod specs** are parsed as YAML, which also reads JSON. `podTemplate`'s own arguments count.
+- **`agent none` on a stage** keeps the agent the steps run on.
+- **`node(POD_LABEL)`** is the pod itself.
+- **`retry` and `waitUntil`** repeat their body.
+- **Persistent pod workspace volumes** are kept between pods and builds.
+- **A partial `cleanWs`** is not a clean.
+- **Label expressions** are compared by the labels they require.
+- **Indexes** replace the scans that made a 1.4 KB file take 12.5 s.
+
+Not fixed and listed in jenkins.md: matrix cells (R104), values that carry an agent's output (R029 to R031), `copyArtifacts` of the running build (R027), a later step on the host running what a no-network agent wrote (R076), what an agent leaves outside the workspace (R106), options in a variable (R078, R079), and a matrix axis as a label (R093). The case files are not kept in the repository; the tests hold the cases that were fixed.
+
+| Id | Rule | What the file does | Result at `d9e268d` | Verdict | After the fixes (statuses of 002, 003, 006, 007) |
+| --- | --- | --- | --- | --- | --- |
+| R001 | 003 | top agent; Fix then Push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R002 | 003 | `agent{node{label}}` | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R003 | 003 | `retry{push; claude}` | M | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R004 | 003 | `for{push; claude}` | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R005 | 003 | `waitUntil{push; claude}` | M | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R006 | 003 | matrix, no agent, then Push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R007 | 003 | matrix agent, Fix+Push per cell | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R008 | 003 | stage docker, no reuseNode | U | held | 2:unknown 3:unknown 6:pass 7:fail |
+| R009 | 003 | `reuseNode(true)` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R010 | 003 | `reuseNode 'true'` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R011 | 003 | `docker image:, reuseNode: true` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R012 | 003 | `reuseNode false` | U | held | 2:unknown 3:unknown 6:pass 7:fail |
+| R013 | 003 | same customWorkspace, different labels | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R014 | 003 | same `ws('/srv/ci/shared')`, different labels | P | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R015 | 003 | node in node, same label | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R016 | 003 | `.inside` agent, push on host | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R017 | 003 | withDockerContainer, then publish | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R018 | 003 | podTemplate, two `container()` | H | held | 2:pass 3:fail 6:pass 7:fail |
+| R019 | 003 | 2 pods, same PVC workspaceVolume | P | way past | fixed: unknown; 2:pass 3:unknown 6:pass 7:fail |
+| R020 | 003 | k8s PVC workspace, push before agent | P | way past | fixed: medium; 2:pass 3:fail 6:pass 7:fail |
+| R021 | 003 | podTemplate PVC, push before agent | P | way past | fixed: medium; 2:pass 3:fail 6:pass 7:fail |
+| R022 | 003 | stage `agent none`, post push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R023 | 003 | parallel own agents, failFast | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R024 | 003 | `node` inside `script` | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R025 | 003 | stash/unstash map forms | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R026 | 003 | stash name from a variable | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R027 | 003 | archiveArtifacts then copyArtifacts (same build) | P | way past (unsure) | not fixed: listed as a limit (copyArtifacts of the running build); 2:unknown 3:pass 6:n/a 7:fail |
+| R028 | 003 | archiveArtifacts then `unarchive` | P | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R029 | 003 | `env.NOTES=readFile` into a build job parameter | P | way past | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R030 | 003 | file text into a commit message, then push | P | way past (minor) | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R031 | 003 | claude stdout into a build job parameter | P | way past | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R032 | 003 | stash tree-a / unstash tree-b | P | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R033 | 003 | stash in a later parallel branch | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R034 | 003 | cleanWs INCLUDE pattern | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R035 | 003 | post always `cleanWs(cleanWhenSuccess:false)` | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R036 | 003 | cleanWs EXCLUDE `.git/**` | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R037 | 003 | deleteDir under `if` | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R038 | 003 | deleteDir in catchError | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R039 | 003 | `dir('build'){deleteDir}` | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R040 | 003 | post always `cleanWs()` | P | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R041 | 003 | cleanWs notFailBuild | P | held (unsure) | 2:unknown 3:pass 6:n/a 7:fail |
+| R042 | 003 | cleanWs in a `when` stage | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R043 | 003 | publish; agent in post failure | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R044 | 003 | docker agent, push before agent | M | held | 2:pass 3:fail 6:pass 7:fail |
+| R045 | 003 | method parameter carries the command | not applicable | way past (B057's class) | not fixed: #330; 2:unknown 3:n/a 6:n/a 7:n/a |
+| R046 | 003 | two closures in one node | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R047 | 003 | two unknown-step bodies | U | held | 2:unknown 3:unknown 6:unknown 7:fail |
+| R048 | 003 | closure variable in two nodes | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R049 | 003 | library step body inside node | M | held | 2:unknown 3:fail 6:unknown 7:fail |
+| R050 | 003 | two methods nothing calls | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R051 | 003 | dir+timeout+retry after agent | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R052 | 003 | scripted parallel map | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R053 | 003 | effect closure called after agent | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R054 | 006/007 | `-v /var/run:/var/run` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R055 | 006/007 | `--mount type=bind,source=/` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R056 | 006/007 | `-v/var/run/docker.sock` (no space) | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R057 | 006/007 | `--volumes-from` | P/P | way past (unsure) | fixed: JEN-006 unknown, JEN-007 not cleared; 2:pass 3:pass 6:unknown 7:fail |
+| R058 | 006/007 | `--cap-add CAP_SYS_ADMIN` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R059 | 006/007 | `--cap-add SYS_MODULE` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R060 | 006/007 | `--device /dev/sda` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R061 | 006/007 | `label=disable`, `systempaths=unconfined` | P/P | unsure | fixed: JEN-006 high; 2:pass 3:pass 6:fail 7:fail |
+| R062 | 006/007 | `--volume "/:/host"` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R063 | 006 | containerd.sock mount | 006 P, 007 F | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R064 | 007 | `-v /tmp:/tmp` | P | unsure | JEN-007 not cleared; the finding names the mounted path; 2:pass 3:pass 6:pass 7:fail |
+| R065 | 006/007 | `--userns host` | H/F | held | 2:pass 3:pass 6:fail 7:fail |
+| R066 | 006 | `--privileged=false` | H | false positive | fixed: no finding; 2:pass 3:pass 6:pass 7:pass |
+| R067 | 007 | `--net=none` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R068 | 007 | `--network-alias` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R069 | 007 | `--network container:x` | F | held | 2:pass 3:pass 6:pass 7:fail |
+| R070 | 007 | `--add-host` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R071 | 006/007 | `-itv docker.sock` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R072 | 006 | `--network "host"` | 006 P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R073 | 007 | `aiAgent` step under `--network none` | P | way past | fixed: JEN-007 not cleared; 2:pass 3:pass 6:pass 7:fail |
+| R074 | 007 | `sandbox.inside` (library object) | U | held | 2:unknown 3:unknown 6:unknown 7:unknown |
+| R075 | 007 | stage `agent none` under top-level docker `--network none` | F | false positive | fixed: pass; 2:pass 3:pass 6:pass 7:pass |
+| R076 | 007 | gradlew on the host runs files the no-network agent wrote | P | way past (design) | not fixed: listed as a limit; 2:unknown 3:pass 6:pass 7:pass |
+| R077 | 007 | AI step in stage post | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R078 | 007 | args variable holding `'--network none'` | F | false positive (minor) | not fixed: computed options stay a finding; 2:pass 3:pass 6:unknown 7:fail |
+| R079 | 007 | `"--network ${NET}"`, `NET='none'` | F | false positive (minor) | not fixed: computed options stay a finding; 2:pass 3:pass 6:unknown 7:fail |
+| R080 | 007 | build `--network host`, run `none` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R081 | 007 | withDockerContainer `args:` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R082 | 007 | `withRun` (body runs on host) | F | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R083 | 006 | podTemplate+node(POD_LABEL), token mounted | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R084 | 006 | declarative k8s token (control) | H | held | 2:pass 3:pass 6:fail 7:fail |
+| R085 | 006 | privileged; AI in `agent none` stage | M | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R086 | 006 | R085 without `agent none` | H | held | 2:pass 3:pass 6:fail 7:fail |
+| R087 | 006 | `hostPathVolume` docker.sock | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R088 | 006 | `containerTemplate(privileged:true)` | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R089 | 006 | JSON spec: privileged, automount false | H for the token | way past | fixed: privileged found, token not; 2:pass 3:pass 6:fail 7:fail |
+| R090 | 006 | JSON spec privileged, mvn build | P | way past | fixed: high; 2:pass 3:n/a 6:fail 7:n/a |
+| R091 | 002 | `node('!windows')` | label U | way past | fixed: the unknown says the expression requires no label; 2:unknown 3:pass 6:n/a 7:fail |
+| R092 | 002 | `def where='built-in'; node(where)` | floating U | way past | fixed: high; 2:fail 3:pass 6:n/a 7:fail |
+| R093 | 002 | matrix axis value `built-in` | floating U | way past | not fixed: matrix axis values stay an unknown; 2:unknown 3:pass 6:n/a 7:fail |
+| R094 | 002 | `linux -> built-in` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R095 | 002 | `Built-In` | H | false positive (unsure) | unchanged (labels compared without case, as before); 2:fail 3:n/a 6:n/a 7:n/a |
+| R096 | 002 | `linux \ | \ | !linux` | not fixed: a tautology reads as the label linux; 2:unknown 3:pass 6:n/a 7:fail |
+| R097 | 002 | `!(!master)` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R098 | 002 | `built-in&&linux` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R099 | 002 | `'built-in'` in single quotes | U | held (unsure) | 2:unknown 3:n/a 6:n/a 7:n/a |
+| R100 | 002 | built-in top agent; AI in `agent none` stage | M | way past | fixed: high; 2:fail 3:pass 6:n/a 7:fail |
+| R101 | 002 | `linux` vs `(linux)` | U | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R102 | 002 | release stage without `when` | U (+ JEN-001 medium) | unsure (design) | unchanged; 2:unknown 3:unknown 6:n/a 7:fail |
+| R103 | 002 | scripted shared label | M | held | 2:fail 3:unknown 6:n/a 7:fail |
+| R104 | 003 | matrix agent: Fix cell a, Push cell b | H | false positive | not fixed: listed as a limit; 2:unknown 3:fail 6:n/a 7:fail |
+| R105 | 003 | per-build `ws()` path | M | held (unsure) | 2:unknown 3:fail 6:n/a 7:fail |
+| R106 | 003 | post always `cleanWs`; agent writes `$HOME` | P | way past (design) | not fixed: listed as a limit; 2:unknown 3:pass 6:n/a 7:fail |
+| R107 | 003 | `linux && docker` vs `linux` | P | way past | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R108 | 003 | `linux` vs `' linux '` | P | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R109 | 003 | dockerfile reuseNode stage post publish | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R110 | 003 | labels from variables | U | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R111 | 007 | mount path containing "socks5" | F | false positive (minor) | JEN-007 not cleared; the finding names the mounted path; 2:pass 3:pass 6:pass 7:fail |
+| R112 | 007 | nested stages+post in a no-network container | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R113 | 003 | 150 pushes + 150 agent steps | M, 0.27 s | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R114 | 003 | 400+400 steps, 30 KB | 3.99 s | slow | fixed: 0.22 s; 2:unknown 3:fail 6:n/a 7:fail |
+| R115 | 003 | 1.4 KB file, methods expanded 60 times | 12.5 s | slow | fixed: 0.34 s; 2:unknown 3:fail 6:n/a 7:fail |
+
+### Second pass, on `3d797e0`
+
+The same reviewer re-ran R001 to R115 on the fixes and wrote 62 more. No earlier case got worse. It confirmed every claimed fix but one: R019, two pods on one named workspace claim, share its directory for certain, so it is now high, not unknown. It also asked for R101 to pair in OBAAF-JEN-002, which it now does. The new attempts: 26 ways past (15 of them blocking, 5 of those resting on behaviour the reviewer was not sure of), 9 false positives, 1 slow, 25 held. The third commit of #331 fixes 24 of the ways past, 8 of the false positives and the slow case, by class. Each is a test in `SecondReviewTest`. The options are read both as a shell and as blanks split them. Docker's booleans, path cleaning and `--mount` CSV are followed. System folders count whole and not their subfolders. Pod specs read string booleans and projected tokens and report what they cannot read. A computed label in a pod template is the pod. Label expressions are parsed with Jenkins's operators. `WsCleanup` and `WipeWorkspace` clean.
+
+| Id | Rule | What the file does | Result at `3d797e0` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R116 | 006/007 | `--network none --privileged=t` | P/P | blocking way past | fixed: docker's booleans |
+| R117 | 006 | `-v //var/run://var/run` | 006 P | blocking way past | fixed: paths cleaned |
+| R118 | 006/007 | `--mount type=bind,Source=/var/run` | P/P | blocking way past | fixed: keys in any case |
+| R119 | 006/007 | `--mount 'type=bind,"src=/var/run",…'` | P/P | blocking way past | fixed: CSV fields |
+| R120 | 006 | `--mount …,src=../../../../../..` | 006 P | blocking way past (unsure) | fixed: a relative source with `..` counts |
+| R121 | 006/007 | `--use-api-socket` | P/P | blocking way past | fixed |
+| R122 | 006/007 | `--device-cgroup-rule='b *:* rwm'` | P/P | blocking way past | fixed |
+| R123 | 006/007 | `-e 'A\' -e 'B --privileged -e 'C=1` | P/P | blocking way past (unsure) | fixed: both readings count, a backslash is an unknown |
+| R124 | 006/007 | `-e X=\ --privileged` | P/P | way past (unsure) | fixed: same |
+| R125 | 006/007 | `-v \\.\pipe\docker_engine:…` | P/P | way past | fixed |
+| R126 | 006/007 | `-v C:\:C:\host` | P/P | way past | fixed |
+| R127 | 006 | `-v /var/run/docker.sock` (one field) | high | false positive | fixed: an anonymous volume |
+| R128–R130, R132, R133 | 006 | `/run/`, `type=BIND`, `cap_dac_read_search`, `-v=`, `/run/../` | high | held | held |
+| R131 | 006 | `--security-opt label:type:spc_t` | P | unsure | now high (`label=type…` counts) |
+| R134 | 006 | `-v /root/.m2:/root/.m2` (Jenkins's Maven tutorial) | high | blocking false positive | fixed: a folder inside a system folder is not host access |
+| R135 | 006 | read-only `/etc/localtime`, `/etc/passwd`, `/etc/group` | high | blocking false positive | fixed |
+| R136 | 006 | `$HOME/.m2`, `/home/jenkins/.gradle` | P | held | held |
+| R137 | 006 | `-v /dev/shm:/dev/shm` | high | false positive | fixed |
+| R138 | 003 | `step([$class:'WsCleanup'])` before push | medium | false positive (earlier) | fixed |
+| R139 | 003 | checkout with `WipeWorkspace` | medium | false positive (earlier) | fixed |
+| R140, R142 | 003 | `cleanWs([cleanWhenSuccess:false])`; all `cleanWhen*` true | M / P | held | held |
+| R141 | 003 | `cleanWs(patterns: [])` | medium | false positive (minor) | not fixed: any `patterns` is read as partial |
+| R143 | 006 | `privileged: "true"` (string) | P | way past (unsure) | fixed: string booleans count |
+| R144 | 006 | privileged pod past a 20,000-node walk (aliases) | P | blocking way past | fixed: aliases are walked within a larger cap, and a spec too large is an unknown |
+| R145 | 006 | `hostUsers: false` | high | blocking false positive | fixed: `hostUsers` is not read |
+| R146 | 006 | automount false, projected `serviceAccountToken` | P | way past | fixed |
+| R147 | 006 | a second YAML document sets automount false | P | way past (unsure) | fixed: only the first document counts for the token, and more than one is an unknown |
+| R148 | 006 | custom tag forces the fallback; JSON-form privileged | wrong reason | way past (unsure) | fixed: the fallback reads JSON forms and says the spec was not read |
+| R149, R150 | 006 | merge key; privileged initContainer | high | held | held |
+| R151 | 006 | an env value that mentions `docker.sock` | high | false positive | fixed: only a hostPath's path counts |
+| R152 | 006 | capabilities `add:` as one string | P | held | held |
+| R153 | 002 | `docker -> linux` | label unknown | way past | fixed: an expression that requires no label selects like `agent any` |
+| R154 | 003 | `sandbox -> gpu` vs `trusted` | P | way past | fixed: unknown |
+| R155 | 003 | `linux <-> sandbox` vs `trusted` | P | way past (minor) | fixed: unknown |
+| R156 | 002 | quoted `"built-in && x"` | unknown | held | held |
+| R157 | 006 | `podTemplate(label: label) { node(label) }` | P | blocking way past | fixed: a computed label in a pod template is the pod |
+| R158 | 006 | `node("${POD_LABEL}")` | P | blocking way past | fixed |
+| R159 | 006 | `hostPathWorkspaceVolume(hostPath: '/')` | P | blocking way past | fixed |
+| R160 | 003 | YAML volume named `workspace-volume` on a claim | P | way past (unsure) | not fixed: listed in jenkins.md |
+| R161, R162 | 003 | `$class` map form; `dynamicPVC` | M / P | held | held |
+| R163 | 006 | `containerTemplate(privileged: 'true')` | P | way past (unsure) | fixed |
+| R164 | 006 | `volumes:` list held in a variable | unknown | held | held |
+| R165–R168 | 003 | `options { retry }` at pipeline and stage level; retry in a method; with conditions | H, M, H, H | held | held |
+| R169 | 002 | `environment { RUN_ON = 'built-in' }` + `label "${env.RUN_ON}"` | floating unknown | way past (unsure) | not fixed: listed in jenkins.md |
+| R170 | 002 | `@Field final String WHERE='master'` | high | held | held |
+| R171 | 002 | AI on `linux && docker`, publish on `linux` | unknown | way past (minor) | fixed: labels that require a common one pair |
+| R172–R174 | all | ordinary podTemplate; default pod; `ws()` paths on different labels | clean | held | held |
+| R175, R176 | 006/007 | 3,000-deep YAML; 4,000 `-v` | — | held | held |
+| R177 | 006 | six 1,200-deep pod specs, 15 KB | 5.0 s | slow | fixed: 0.01 s, an unknown |
+
+### Third pass, on `0521213`
+
+The reviewer re-ran R001 to R177; no case got worse, and it confirmed the second pass's fixes. 35 new attempts: 11 ways past, 5 false positives, 19 held. The fourth commit of #331 fixes these:
+
+| Id | Rule | What the file does | Result at `0521213` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R180 | 006 | `--label description='mounts -v /var/run:/var/run …'` | high | false positive (contrived) | not fixed: the blank-split reading, listed in jenkins.md |
+| R183 | 006 | `/sys/fs/cgroup:ro` | high | false positive (unsure) | fixed: read-only cgroups are ordinary |
+| R184 | 006 | `/var/lib/jenkins/.m2:/root/.m2` | high | false positive | fixed: only the controller's secrets, jobs, nodes, users and workspaces count inside its home |
+| R185 | 006 | `-v /home/jenkins:/home/jenkins` with an agent | pass | way past | fixed: a user's whole home counts |
+| R186 | 006/007 | `--network none -v /run/user/1000:…` | 006 pass | way past | fixed: rootless Docker's socket folder |
+| R187 | 006 | `/root/.ssh:ro` | pass | way past (unsure of scope) | fixed: a home's credential folders count |
+| R188 | 006 | `/etc:/host/etc:ro` | pass | way past (minor) | fixed: read-only is ordinary only for program folders |
+| R191 | 002 | `node('built-in && !master')`, agent step | unknown | blocking way past | fixed: the built-in node carries one of its two labels |
+| R192 | 002 | 200 nested brackets around `built-in` | floating unknown | way past (minor) | not fixed: an expression too deep to read is an unknown |
+| R200 | 003 | same claim, mounted read-only by the agent's pod | high | false positive (minor) | not fixed: listed in jenkins.md |
+| R201 | 003 | NFS `/exports/ws` and `/exports/ws/`, one server | pass | way past (minor) | fixed: paths cleaned |
+| R202 | 003 | the same NFS path on two servers | high | false positive | fixed: the server is part of the key |
+| R204 | 003 | `hostPathWorkspaceVolume` `/srv/ws` and `/srv/ws/` | pass | way past (minor) | fixed: unknown |
+| R205 | 002/003 | `node(params.STATIC_AGENT)` inside a pod template | 003 pass | way past | fixed: only `POD_LABEL` or the template's label variable is the pod |
+| R206 | 002 | `node(params.TARGET ?: 'built-in')` inside a pod template | pass | blocking way past | fixed: the floating unknown is back |
+| R208 | 006 | `privileged: 1` | pass | way past (unsure) | fixed: 1 counts as true |
+
+### Fourth pass, on `6614662`
+
+The reviewer re-ran R001 to R212: only the cases the third commit names changed, as intended. 18 new attempts on that commit's diff: 6 ways past (3 blocking), 1 false positive, 1 unsure, 10 held. The fifth commit of #331 fixes these:
+
+| Id | What the file does | Result at `6614662` | Verdict | Now |
+| --- | --- | --- | --- | --- |
+| R217 | `podTemplate(label: "ci-${env.BUILD_NUMBER}")` and `node("ci-${env.BUILD_NUMBER}")` | 006 pass | blocking way past | fixed: the same label text is the pod |
+| R218 | `def label = 'ci-pod'; podTemplate(label: label)` and `node('ci-pod')` | 006 pass | way past | fixed: the literal the variable holds |
+| R222 | `/var/lib/jenkins/init.groovy.d`, `/plugins`, read-write | pass | blocking way past | fixed: the controller's home counts but its caches |
+| R223 | `-v /var/jenkins_home:/jh` | pass | blocking way past | fixed |
+| R224 | `/home/jenkins/agent` | pass | way past | fixed |
+| R225 | `/home/jenkins/.ssh/known_hosts:ro` | high | false positive | fixed |
+| R226 | `~/.netrc`, `~/.git-credentials` | pass | way past | fixed: credential files |
+| R227 | `/var/lib/jenkins/secret.key:ro` | pass | way past (minor) | fixed |
+| R229 | NFS servers `nfs1.example` and `NFS1.example` | pass | way past (minor) | fixed: server names without case |
+| R230 | `privileged: 2` | pass | unsure | now high: any number but 0 counts |
+| R213–R216, R219–R221, R228 | `master`, `!built-in \|\| master`, `master && !built-in`, `!(built-in -> linux)`, dotted homes, a credential folder at depth, `secrets/../.m2`, NFS without a server | as expected | held | held |
+
+### Fifth pass, on `5f44ddc`
+
+The reviewer re-ran R001 to R230: only the cases the fourth commit names changed. Of 8 new attempts, 6 held. One was a way past: R234, the Git plugin's mirrors under `/var/lib/jenkins/caches`, which the controller fetches into, were taken for a build cache. One was a false positive: R235, read-only `/home/jenkins/agent/tools`. Both are fixed in the sixth commit of #331: `caches` no longer counts as a build cache, and an agent's root is read like the controller's home. Not changed: R232, a read-only `~/.npmrc`, is reported as the host's credentials, because the token in it is exposed. R238, a `node('linux')` inside `podTemplate(label: 'linux')`, is read as the pod and is listed in jenkins.md. The reviewer re-ran R001 to R238 on the sixth commit: only R234 and R235 changed, and it found nothing blocking. Its two remaining points are listed in jenkins.md: writable `tools`, and a job named `tools`.
+
+CI then caught what the review had not timed: OBAAF-JEN-002's shared-label pairing compared every allocation with every other, so 4,000 `node()` blocks on one label took 4.9 s here (0.46 s on `flagship`), past CI's 10 s limit on Python 3.10. The pairing is now indexed, the machine question asks one agent step per workspace within a budget, and label requirements are cached. The reviewer re-ran R001 to R245 on each change. R239 to R243 check that the indexed pairing finds what the old loop found, and they all held. R244 and R245, 4,000-allocation files, now take under 2 s.
+
+### Reviewer B's attempts (2026-11-17)
+
+Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.
 
 | ID | Rule | Case | At `9b806db` | Verdict |
 | --- | --- | --- | --- | --- |
