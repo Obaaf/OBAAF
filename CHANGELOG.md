@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Installing the GitHub Actions templates from a wheel
+
+The wheel includes the templates used by `obaaf templates install`. Give it the repository and full OBAAF commit for the generated workflows. Use `--source` to select your own template directory. The closing instructions identify the CODEOWNERS example for the templates you selected. Release 0.3.0 users can still use the clone instructions in the README. [Issue #142](https://github.com/Obaaf/OBAAF/issues/142)
+
 ### Upgrading from 0.3.0
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
