@@ -107,6 +107,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-100 | How init proposes the first agent lanes and secret environments | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 
 ---
 
@@ -965,3 +966,13 @@ If another supported configuration name already exists, init shows any differenc
 **Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
 
 **Status.** Proposed, 2026-11-19 (slice 3.3, #142).
+
+### D-116 Comparing JSON edits in the adoption proof
+
+**Decision.** Read both versions of a file as the checker reads it: the baseline with the JSON decoder and the configuration the run's checker read with the YAML reader, whether named `.json`, `.yml` or `.yaml` and through any link (the file is matched by identity; a file with another suffix is still withheld, and a partial check that reads no configuration compares one by its suffix, though the planner proposes no configuration edit then), and any other file with the JSON decoder when it is named `.json` (the reader was chosen by suffix alone until the review of #316, which let a configuration named `.json` be compared as JSON). Compare decoded strings and retain each numeric token’s exact spelling. Decline duplicate object member names and nonstandard numeric constants anywhere in either document. Apply D-099’s existing declared-path comparison and traversal budget.
+
+**Reason.** JSON strings can contain characters the YAML reader normalises. Binary floating-point conversion can also erase a change between distinct decimal numbers. A proof must account for each such change outside the proposed fields.
+
+**Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. In a file read as JSON, equivalent string escapes and object member reordering are accepted.
+
+**Status.** Proposed, 2026-11-20 (A2e, #314 item 7).
