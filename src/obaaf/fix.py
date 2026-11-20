@@ -113,7 +113,7 @@ def _render(proposal, before, after, reasons, paths, threshold, catalog):
             _show_diff(edit)
 
 
-def _verified_plan(source, copy, options, before, metadata, plan):
+def _verified_plan(source, copy, options, before, metadata, plan, prerequisite=""):
     from obaaf.fix_proof import ProofError, prove
 
     def rejection(item, error):
@@ -126,7 +126,7 @@ def _verified_plan(source, copy, options, before, metadata, plan):
         text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
                 "their owner.")
         # A named request run again unchanged fails the same way: say so, and keep its options for after.
-        if metadata.get("candidate"):
+        if metadata.get("candidate") or prerequisite:
             return f"{text} After resolving it, preview the same request again with: {command}"
         return f"{text} Retry this step alone with {command}"
 
@@ -170,6 +170,7 @@ def _verified_plan(source, copy, options, before, metadata, plan):
 def run(args):
     from obaaf import checker
     from obaaf.catalog import load
+    from obaaf.checker.todo import tightening_prerequisite
     from obaaf.fix_apply import apply_edits, apply_lock
     from obaaf.fix_copy import private_copy
     from obaaf.fix_proof import ProofError, check_copy_matches, check_inputs, prove
@@ -207,7 +208,8 @@ def run(args):
             before.baseline_path = args.baseline or ""
             before.fail_on = args.fail_on
             paths = _owner_paths(copy, options, before, today, catalog)
-            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan)
+            prerequisite = tightening_prerequisite(before) if args.tighten or pin else ""
+            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan, prerequisite)
             if args.tighten:
                 print("Checkout tightening can affect later steps that use Git credentials.")
             _render(proposal, source, after, reasons, paths, options.fail_on, catalog)
@@ -215,11 +217,11 @@ def run(args):
                 if proposal.already_satisfied:
                     print(one_line(proposal.already_satisfied))
                     return 0
-                print("No proven pin to apply. Review the reported install and its original workflow by hand.")
+                print(prerequisite or "No proven pin to apply. Review the reported install and its original workflow by hand.")
                 return 1
             if args.candidate is not None and not proposal.edits:
-                print("Named checkout withheld. Review its original workflow and resolve the reported condition "
-                      "before running this named request again.")
+                print(prerequisite or "Named checkout withheld. Review its original workflow and resolve the reported "
+                      "condition before running this named request again.")
                 return 1
             if args.apply:
                 sys.stdout.flush()

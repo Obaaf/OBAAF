@@ -2336,6 +2336,13 @@ class CheckResult:
         threshold = SEVERITY_ORDER[severity]
         return [f for f in self.active() if SEVERITY_ORDER[f.severity] >= threshold]
 
+    def unmatched_ignores(self):
+        for entry in self.config.ignore:
+            if not any(f.rule == entry["rule"] and f.rule != IDLE_DECLARATION
+                       and fnmatch.fnmatch(f.path, str(entry["path"]))
+                       and (not entry.get("job") or entry["job"] == f.job) for f in self.findings):
+                yield entry
+
     def stale_gating(self, spec: str, catalog: Catalog) -> list[dict]:
         """Baseline entries no finding matched that make `--fail-on spec` fail: the same threshold and
         category as findings, so a vanished low finding does not fail `--fail-on high`."""

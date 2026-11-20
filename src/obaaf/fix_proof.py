@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
-import fnmatch
 import hashlib
 import json
 import os
@@ -180,14 +179,6 @@ def _changed_occurrences(difference):
     for (row, _, _), count in difference.items():
         counts[row] += count
     return counts
-
-
-def _stale_ignores(result):
-    for entry in result.config.ignore:
-        if not any(f.rule == entry["rule"] and f.rule != checker.IDLE_DECLARATION
-                   and fnmatch.fnmatch(f.path, str(entry["path"]))
-                   and (not entry.get("job") or entry["job"] == f.job) for f in result.findings):
-            yield entry
 
 
 def _manifest(root: Path) -> dict:
@@ -483,7 +474,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
             newly = _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog))
             if newly:
                 raise ProofError(f"a finding newly counts at the selected gate: {_named(newly)}")
-            stale = [("baseline", e) for e in after.baseline_stale] + [("ignore", e) for e in _stale_ignores(after)]
+            stale = [("baseline", e) for e in after.baseline_stale] + [("ignore", e) for e in after.unmatched_ignores()]
             if stale:
                 names = [f"{kind} {entry['rule']} in {entry['path']} {entry.get('job', '')}".rstrip()
                          for kind, entry in stale]

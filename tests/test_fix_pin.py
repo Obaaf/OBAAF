@@ -165,6 +165,73 @@ class PinTest(unittest.TestCase):
         self.assertEqual(policy.read_bytes(), original)
         self.assertEqual((target / self.rel).read_bytes(), workflow)
 
+    def test_first_command_migrates_scoped_legacy_baseline_before_workflow_edits(self):
+        self.write(f"- run: {self.install}\n- run: {self.install}\n- uses: actions/checkout@v4\n")
+        other = self.path.with_name("previous.yml")
+        other.write_text(agent_job(f"- run: {self.install}\n"))
+        finding, = [f for f in checker.check(self.root).findings
+                    if f.path.endswith("previous.yml") and f.rule == "OBAAF-GHA-025"]
+        entry = {key: getattr(finding, key) or "" for key in ("rule", "severity", "path", "job", "step", "scope")}
+        entry.update(message=finding.legacy or finding.message, fingerprint=baseline.fingerprint(finding))
+        policy = self.root / "team's baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": [entry]}))
+        config = self.root / "team config.yml"
+        config.write_text("{}")
+        opts = ["--baseline", policy, "--config", config, "--platform", "github", "--fail-on", "never"]
+        code, out, err = run_cli("check", self.root, "--format", "json", *opts)
+        self.assertEqual(code, 0, err)
+        groups = json.loads(out)["todo"]
+        self.assertEqual(groups[0]["id"], "acceptance-old-baseline")
+        commands = {g["id"]: g["command"] for g in groups}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            self.assertIsNone(commands[cause])
+        args = shlex.split(groups[0]["command"])
+        self.assertEqual(args[:5], ["obaaf", "baseline", "migrate", str(policy), str(self.root)])
+        self.assertIn(f"--config={config}", args)
+        self.assertIn("--platform=github", args)
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        decisions = {"OWNER": "@team", "REASON": "previous review", "YYYY-MM-DD": expiry}
+        code, out, err = run_cli(*(decisions.get(arg, arg) for arg in args[1:]))
+        self.assertEqual(code, 0, err or out)
+        migrated = json.loads(policy.read_text())
+        self.assertEqual(migrated["format"], baseline.FORMAT)
+        accepted, = migrated["findings"]
+        self.assertEqual(accepted, baseline.entry_for(finding, "@team", "previous review", expiry))
+        code, out, err = run_cli("check", self.root, "--format", "json", *opts)
+        self.assertEqual(code, 0, err)
+        commands = {g["id"]: g["command"] for g in json.loads(out)["todo"]}
+        self.assertIn("--pin", shlex.split(commands["agent-tool-version"]))
+        self.assertIn("--tighten", shlex.split(commands["checkout-credentials"]))
+
+    def test_preexisting_unmatched_entries_withhold_commands_and_explain_pin_refusal(self):
+        self.write(f"- run: {self.install}\n- run: {self.install}\n- uses: actions/checkout@v4\n")
+        finding = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-025")
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        missing = ".github/workflows/removed.yml"
+        entry = baseline.entry_for(finding, "@team", "previous review", expiry)
+        entry["path"] = missing
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [entry]}))
+        config = self.root / "ignore.yml"
+        config.write_text(json.dumps({"ignore": [{"rule": finding.rule, "path": missing, "owner": "@team",
+                                                 "reason": "previous review", "until": expiry}]}))
+        original = self.path.read_bytes()
+        for source, opts in (("baseline", ["--baseline", policy]), ("ignore", ["--config", config])):
+            with self.subTest(source=source):
+                code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never", *opts)
+                self.assertEqual(code, 0, err or out)
+                groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                for cause in ("agent-tool-version", "checkout-credentials"):
+                    self.assertIsNone(groups[cause]["command"])
+                    self.assertIn("unmatched " + source, groups[cause]["nextAction"].lower())
+                code, out, err = self.fix("--pin", self.pin, *opts)
+                self.assertEqual(code, 1, err or out)
+                self.assertIn("unmatched", out.strip().splitlines()[-1].lower())
+                self.assertNotIn("Retry this step alone", out)
+                self.assertNotIn("Review the reported install", out)
+                self.assertNotIn("--- a/", out)
+                self.assertEqual(self.path.read_bytes(), original)
+
     def test_all_manual_group_has_no_pin_command(self):
         self.write(f"- run: npx {self.package}\n")
         code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
@@ -247,3 +314,4 @@ class PinTest(unittest.TestCase):
                 self.assertEqual(code, 1, err or out)
                 self.assertNotIn("Nothing to apply", out)
                 self.assertNotIn("--- a/", out)
+

@@ -67,7 +67,7 @@ Read every finding under “You are accepting risk” and every listed removal. 
 
 ### Pin a directly installed agent tool
 
-OBAAF-GHA-025 keeps one to-do group for tool installs. The counts show how many direct install occurrences are candidates and how many findings need manual review. The preview's final proof determines which candidates can change. Select the exact version your team has reviewed and use the same path, configuration, baseline, platform and threshold as the check. For example, if your team has selected version `1.2.3`:
+OBAAF-GHA-025 keeps one to-do group for tool installs. The counts show how many direct install occurrences are candidates and how many findings need manual review. The preview's final proof determines which candidates can change. With a legacy baseline, migrate it first. Resolve unmatched baseline and ignore entries with their owners, then rerun the check to get checkout and pin commands. Select the exact version your team has reviewed and use the same path, configuration, baseline, platform and threshold as the check. For example, if your team has selected version `1.2.3`:
 
 ```sh
 obaaf fix . --pin @openai/codex=1.2.3 --baseline .github/obaaf-baseline.json --fail-on low
