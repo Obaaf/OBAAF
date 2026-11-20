@@ -67,6 +67,26 @@ class SummaryCliTest(unittest.TestCase):
             self.assertIn(settings.name, replay)
             self.assertTrue((folder / "accepted.json").is_file())
 
+    def test_an_unprintable_scope_loses_only_the_command_in_a_fix(self):
+        """Review of #299: with a selected snapshot whose path cannot be printed on one line, the rule's
+        whole Fix text was replaced by the fallback sentence; only its command may be."""
+        with TempDir() as root:
+            folder = root / ".github"
+            (folder / "workflows").mkdir(parents=True)
+            (folder / "workflows/build.yml").write_text(
+                "on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            config = folder / "obaaf.yml"
+            config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+            settings = root / "line\nbreak.json"
+            settings.write_bytes((ROOT / ".github/obaaf-settings.json").read_bytes())
+            code, text, err = run_cli("check", root, "--settings", settings, "--platform", "github",
+                                      "--fail-on", "never")
+            self.assertEqual(code, 0, err)
+            fix, = [line for line in text.splitlines() if line.strip().startswith("Fix: ") and "--lanes" in line]
+            self.assertIn("Correct the declaration or delete it", fix)
+            self.assertIn("obaaf check --lanes with the check's own paths and options", fix)
+            self.assertNotIn("line\nbreak", fix)
+
     def test_summary_keeps_scan_errors_visible(self):
         with TempDir() as root:
             path = root / ".github/workflows/bad.yml"

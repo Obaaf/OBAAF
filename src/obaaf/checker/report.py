@@ -290,7 +290,10 @@ def _lane_advice(text: str, result: CheckResult) -> str:
     args.extend(["--fail-on", result.fail_on, "--lanes"])
     command = shlex.join(args)
     if command != one_line(command):
-        return "Use the original check paths and options; they cannot be printed as a one-line command."
+        # Only the command is lost, not the rest of the rule's fix (review-gpt #299: the whole Fix line
+        # was replaced), worded as the action list words it.
+        command = ("obaaf check --lanes with the check's own paths and options (they cannot be printed as a "
+                   "one-line command)")
     return text.replace("obaaf check . --lanes", command)
 
 
