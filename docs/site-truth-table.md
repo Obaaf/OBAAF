@@ -33,6 +33,8 @@ The three predicate pages now attribute signing to configured GitHub reference j
 
 On 2026-11-19, the development rules page and upgrade guidance were also checked against the GHA-026 implementation and catalogue added in #244. A matching literal cites the source. A computed input yields a medium finding without a quotation and fails the default gate unless accepted. An empty `allowed_non_write_users` has no match. The source warning about `allowed_bots: "*"` concerns public repositories, while the checker reads the workflow without checking its visibility.
 
+At development commit `149cf41`, the two example files again exited 1 and 0. Immediately before the version line, the unpinned example lists pinning guidance and the optional bulk-acceptance command for one low finding. The pinned example lists zero findings and zero things to do.
+
 The local site build validated internal links. The site-claims, assessment and predicate-namespace tests passed. This check did not publish the site, rerun the historical 0.3.0 measurement or perform hosted signing.
 
 ## 1. Current claims

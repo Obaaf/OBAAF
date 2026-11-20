@@ -72,6 +72,20 @@ class TheTwoExampleFiles(unittest.TestCase):
         "Checked by obaaf ": "the version that checked",
     }
 
+    TODO = {
+        "unpinned": [
+            "What to do next: 1 finding, 1 thing to do",
+            "1. An action, reusable workflow or container image lacks a verifiable immutable pin. (1 low)",
+            "   Pin remote actions and workflows to full reviewed commit SHAs and images to SHA-256 digests.",
+            "Optional bulk acceptance: 1 eligible outstanding finding (1 low). Review them before supplying "
+            "the owner, reason and expiry.",
+            "Choose an unused path for NEW_BASELINE_FILE.",
+            "   obaaf check unpinned.yml --fail-on low --write-baseline=NEW_BASELINE_FILE --owner OWNER "
+            "--reason REASON --expires YYYY-MM-DD",
+        ],
+        "pinned": ["What to do next: 0 findings, 0 things to do"],
+    }
+
     def test_both_pages_show_the_same_files_and_report(self):
         self.assertEqual(example_files("index.html"), example_files("quickstart.html"))
         report = [block for block in blocks("index.html") if block.startswith("unpinned.yml\n")]
@@ -108,7 +122,10 @@ class TheTwoExampleFiles(unittest.TestCase):
         before = next(block for block in blocks("index.html") if block.startswith("unpinned.yml\n"))
         after = next(block for block in blocks("index.html") if block.startswith("1 workflow file(s) checked.\n"))
         for name, shown in (("unpinned", before), ("pinned", after)):
-            kept, seen = self._without_added(reports[name][1])
+            lines = reports[name][1].splitlines()
+            closing = self.TODO[name] + [f"Checked by obaaf {__version__}."]
+            self.assertEqual(lines[-len(closing):], closing)
+            kept, seen = self._without_added("\n".join(lines[:-len(closing)] + lines[-1:]))
             self.assertEqual(kept, [line for line in shown.splitlines() if line.strip()],
                              f"the development report of {name}.yml has lines the pages do not account for")
             expected = set(self.ADDED) if name == "unpinned" else set(self.ADDED) - {"        Why: "}
@@ -116,7 +133,7 @@ class TheTwoExampleFiles(unittest.TestCase):
 
     def test_the_added_lines_are_where_the_pages_say(self):
         """At the top "Accepted risk: none" and the count; the "Why:" line under the finding, before its
-        requirement; at the end the three closing lines, the last naming the version the banner names."""
+        requirement; at the end the unconfigured-run guidance, to-do list and checker version."""
         lines = self._development_reports()["unpinned"][1].splitlines()
 
         def where(start: str) -> int:
@@ -141,7 +158,10 @@ class TheTwoExampleFiles(unittest.TestCase):
             words = text(name)
             for placed in ("a count of other findings at the top",
                            "a \"Why:\" line under the finding, saying why it matters",
-                           "and, at the end, what a check with no configuration file leaves out"):
+                           "and, at the end, what a check with no configuration file leaves out",
+                           "a to-do list immediately before the version that checked",
+                           "pinning guidance and an optional command to accept the one low finding",
+                           "zero findings and zero things to do"):
                 self.assertIn(placed, words, f"{name} no longer says where the added lines are")
 
 

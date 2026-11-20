@@ -4,15 +4,28 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-### Upgrading from 0.3.0
+### Installing the GitHub Actions templates from a wheel
 
-- **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
-- **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git. The command preserves its permissions and leaves the changes unstaged for review.
+The wheel includes the templates used by `obaaf templates install`. Give it the repository and full OBAAF commit for the generated workflows. Use `--source` to select your own template directory. The closing instructions identify the CODEOWNERS example for the templates you selected. Release 0.3.0 users can still use the clone instructions in the README. [Issue #142](https://github.com/Obaaf/OBAAF/issues/142)
+
+### Checking edits to JSON files
+
+The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
+
+### Upgrading from 0.3.0
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`.
+- **Preview paperwork changes before accepting risk.** `obaaf fix` can propose a correction to a lane name, where it changes no other finding, and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
+- **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git. The command preserves its permissions and leaves the changes unstaged for review.
+- A refused paperwork preview identifies an invalid baseline or configuration by its path in your repository. The diagnostic retains the reason the checker could not use the file.
+- **`ignore: 5` is an error, not a traceback.** A number, `true`, text or a mapping as the checker configuration's `ignore` ended `obaaf check` with a Python traceback or a misleading message. It now ends with an error naming the file and exit status 2. A value that reads as nothing (no value, `null`, `false`, `0`, `''`, `{}`) still means no entries.
+- **Old-baseline migration hints preserve the selected paths.** If a path or option cannot be printed faithfully on one line, the full text report and `--summary` give manual guidance. Printable paths, including spaces and leading dashes, keep a copyable migration command.
+- **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
 - **The suggested `obaaf baseline migrate` command works for a path that begins with `-`.** It is written `./-name`, which the command reads as a path rather than an option.
+- **Legacy migration counts only eligible acceptances.** It does not carry over a match no entry can accept, or one waiting on an ignore entry that has expired or is not valid (a 0.3.0 ignore entry names no owner), and its receipt says why for each; entries naming findings a valid ignore entry accepts are counted. When it can carry over no match and leaves one open, it preserves a nonempty legacy baseline and exits 1.
 - **Review existing acceptances.** A 0.3.0 baseline accepts nothing until migrated. Each acceptance needs an owner, a reason with at least four letters or digits, and an expiry date within 366 days. The report opens with the risk still accepted and lists entries that no longer match.
 - **Review newly checked jobs.** The checker follows local composite actions and calls to local reusable workflows, recognises 23 named agent tools, reports agent jobs that install tools at a version that can change (OBAAF-GHA-025), and reports agent actions given a setting their own documentation warns about (OBAAF-GHA-026). Ineffective lane declarations, checkout and permission handling, ownership of CI files, and revised egress checks can also change a gate's result.
 - **Check repository settings separately.** The new `obaaf audit` command compares settings with workflow files and distinguishes findings, settings it could not read, and questions the rules could not answer. The workflow checker and the settings audit each have their own gate.

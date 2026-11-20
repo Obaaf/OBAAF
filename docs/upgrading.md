@@ -23,9 +23,17 @@ Move the pin in a pull request of its own, so that the gate runs once with the n
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
+### Set up a first GitHub Actions check
+
+From the repository root, run `obaaf init` (run in a folder inside a Git repository, it names the repository's top folder). Review the proposed agent lanes, the secret names it lists for review, and the diff for both files. Run `obaaf init --apply` to create `.github/obaaf.yml` and `.github/workflows/obaaf-pipeline-check.yml`. If either file differs from the proposal, init prints the differences and stops before creating either file. A repository using another supported configuration path must reconcile that file first.
+
+Init reads GitHub workflow files locally. It proposes agent lanes for catalogued tools it recognizes in workflows and local composite actions, and for jobs with recognized model-provider key names. A job that makes a single provider health check or calls a perception model can hold such a key, so review each proposed lane. It proposes a secret’s required environment when all observed uses identify the same literal environment. Check where the secret is actually stored in GitHub before accepting the proposal. A computed environment, multiple environments or a reusable workflow parameter leaves the name for review. Check repository scripts for agents the workflow and local action references miss.
+
+The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
+
 ### Preview the changes to your OBAAF files
 
-In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
+In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check; the configuration and baseline must be inside the repository. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
 
 To see which old acceptances would carry over, supply the owner, reason and expiry you intend to record. For example, replace the values in this command before using it.
 
@@ -40,7 +48,7 @@ Read every finding under “You are accepting risk” and every listed removal. 
 
 | What you have | What happens | What to do |
 | --- | --- | --- |
-| A baseline written by 0.2.0 or 0.3.0 (`obaaf-baseline/v0.1`) | It is still read and accepts nothing: every finding it covered counts as new, marked "Not accepted" | `obaaf baseline migrate FILE --owner OWNER --reason REASON --expires YYYY-MM-DD`, once. It carries over the findings the old file covers and accepts nothing new |
+| A baseline written by 0.2.0 or 0.3.0 (`obaaf-baseline/v0.1`) | It is still read and accepts nothing: every finding it covered counts as new, marked "Not accepted" | `obaaf baseline migrate FILE --owner OWNER --reason REASON --expires YYYY-MM-DD`, once. It carries over the findings the old file covers that a new entry may accept, and accepts nothing new |
 | An `ignore` entry with no `owner:` | It ignores nothing, and the finding is reported with "because it names no owner" | Add `owner:` (`@user`, `@org/team` or an e-mail address) |
 | An `ignore` entry whose reason has fewer than four letters or digits, or whose `until` is more than 366 days ahead | It ignores nothing, and the report says which | Give a reason; bring the date within a year |
 | An `ignore` entry whose `until` is a date in another spelling (`20270131`) | A configuration error, exit status 2. (A time of day, `2027-01-31T10:00:00Z`, ended 0.3.0 in a traceback when the entry matched a finding; it is the same error now) | Write `YYYY-MM-DD` |
@@ -154,7 +162,7 @@ The details of each are in the [changelog](../CHANGELOG.md), under "The lifecycl
 
 ### What a script that reads the output will notice
 
-- **The text report begins differently**: `Accepted risk: ...` and `Other findings: ...` come first. **It also ends differently**: the last line is `Checked by obaaf VERSION.`, and with no configuration file two lines before it say what an unconfigured run leaves out. The line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged.
+- **The text report begins differently**: `Accepted risk: ...` and `Other findings: ...` come first. **It also ends differently**: the last line is `Checked by obaaf VERSION.`, with an action list just above it. An unconfigured check explains its limits before that list. Add `--summary` to a text gate command (it refuses `--format json` or `sarif`, `--lanes` and `--write-baseline`) for a shorter view with the same exit status. It opens with the accepted risk and includes scan errors, an old-format baseline and stale baseline warnings. The line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged.
 - **`obaaf check --lanes` can end with 1 or 2**: 1 when `obaaf check` would report an error for a workflow or Jenkinsfile (it could not be read or parsed, an input is given twice, an expression is too deep to read), each an `error:` line on standard error, with the jobs of a file that could not be read or parsed left out of the list; 2 when the path has no workflow or Jenkinsfile, or is not there. A Jenkinsfile part of whose pipeline was not analyzed is a `note:` and does not change the status, as for `obaaf check`. It ended with 0 in every case before.
 - **The `ignored:` lines** read `ignored: RULE path:line - accepted by OWNER until DATE: REASON`.
 - **A path is printed in quotes** where it heads its findings, unless it is made of visible ASCII characters with no space.
@@ -175,6 +183,8 @@ Baseline: 0 finding(s) accepted by the baseline, 5 new.
   The baseline is in the old format (obaaf-baseline/v0.1). Its entries name no owner, reason or expiry date, so none of them accepts a finding. Convert it once, saying who accepts these findings, why and until when:
     obaaf baseline migrate .github/obaaf-baseline.json --owner OWNER --reason REASON --expires YYYY-MM-DD
 ```
+
+Migration carries over a legacy match only when a new baseline entry may accept it. Its receipt names each match it leaves open and explains why. A finding no entry can accept is one: when the baseline has no code owner, an entry for the missing ownership would let the file vouch for itself, so give the file an owner. A finding waiting on an ignore entry that has expired or is not valid (a 0.3.0 ignore entry names no owner) is another: renew, complete or remove that ignore entry, where the decision was made. An old entry that names a finding a valid ignore entry accepts is counted and not carried over. When it can carry over no match and leaves at least one open, migration exits 1 and preserves both the input and any separate `--output` file: act on the receipt and run it again. Once the findings the old file named have all gone, it has nothing left to carry over; delete it.
 
 Convert the baseline:
 

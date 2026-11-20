@@ -40,6 +40,12 @@ def _github_output(pairs: dict[str, str]) -> None:
                     handle.write(f"{key}={value}\n")
 
 
+# ------------------------------------------------------------------ init
+def cmd_init(args) -> int:
+    from obaaf.init import run
+    return run(args)
+
+
 # ------------------------------------------------------------------ fix
 def cmd_fix(args) -> int:
     from obaaf.fix import run
@@ -97,6 +103,9 @@ def cmd_check(args) -> int:
     from obaaf.catalog import load
     from obaaf.checker import report
 
+    if args.summary and (args.format != "text" or args.lanes or args.write_baseline):
+        print("error: --summary requires a text check without --lanes or --write-baseline", file=sys.stderr)
+        return EXIT_USAGE
     target = Path(args.path)
     base = target.parent if target.is_file() else target
     if target.is_dir():
@@ -178,7 +187,8 @@ def cmd_check(args) -> int:
         import shlex
         print(f"error: {args.write_baseline} is an {baseline_mod.FORMAT_V1} baseline. Convert it with: "
               f"obaaf baseline migrate {shlex.quote(str(args.write_baseline))} --owner OWNER --reason REASON "
-              "--expires YYYY-MM-DD (it carries over the findings the file covers and accepts nothing new), or "
+              "--expires YYYY-MM-DD (it carries over the findings the file covers that a new entry may accept, "
+              "and accepts nothing new), or "
               "write the new baseline to another file.", file=sys.stderr)
         return EXIT_USAGE
     # A baseline or configuration given by path decides what the check accepts, so it needs an owner
@@ -188,6 +198,7 @@ def cmd_check(args) -> int:
     gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
     result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     result.checked = str(args.path)
+    result.fail_on = args.fail_on
     # What a command the report suggests has to repeat to check the same thing.
     # One word each, so a value that begins with a hyphen is still read as a value.
     result.options = ([f"--config={args.config}"] if args.config else []) \
@@ -198,7 +209,9 @@ def cmd_check(args) -> int:
         # Checking nothing must not look like a pass (an empty or mistyped path).
         print(_nothing_checked(target, args.platform), file=sys.stderr)
         return EXIT_USAGE
-    if args.format == "json":
+    if args.summary:
+        text = report.to_summary(result, expiring_within=args.expiry_warning)
+    elif args.format == "json":
         text = report.to_json(result, expiring_within=args.expiry_warning)
     elif args.format == "sarif":
         text = report.to_sarif(result, expiring_within=args.expiry_warning)
@@ -281,8 +294,8 @@ def cmd_check(args) -> int:
 
 def cmd_baseline_migrate(args) -> int:
     """Turn an obaaf-baseline/v0.1 file into the current format. It carries over the findings the old
-    file covers that are still found, with the owner, reason and expiry date given here, and accepts
-    nothing the old file did not cover."""
+    file covers that are still found and that a new baseline entry may accept (D-115), with the owner,
+    reason and expiry date given here, and accepts nothing the old file did not cover."""
     from datetime import date
 
     from obaaf import checker
@@ -303,7 +316,8 @@ def cmd_baseline_migrate(args) -> int:
     if not target.exists():
         print(f"error: {target} not found", file=sys.stderr)
         return EXIT_USAGE
-    wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, date.today())
+    today = date.today()
+    wrong = acceptance_mod.problems(args.owner, args.reason, args.expires, today)
     if wrong:
         print("error: say who accepts the findings, why and until when: --owner OWNER --reason REASON "
               f"--expires YYYY-MM-DD. As given, the acceptance would not count, because {'; '.join(wrong)}.",
@@ -315,7 +329,9 @@ def cmd_baseline_migrate(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    result = checker.check(target, config=config, platform=args.platform)
+    out = Path(args.output or args.file)
+    gate_files = [out, Path(args.config)] if args.config else [out]
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files, today=today)
     if not result.files and not result.errors:
         print(f"error: no CI definitions found under {target}: nothing was checked, so nothing of {args.file} "
               "can be carried over. Give the path the baseline was written for after the file name.",
@@ -326,25 +342,62 @@ def cmd_baseline_migrate(args) -> int:
             print(f"error: {one_line(error)}", file=sys.stderr)
         print("error: not converting the baseline while some CI definitions could not be read", file=sys.stderr)
         return EXIT_FAIL
+    # Applying a legacy match replaces an invalid ignore acceptance on the finding.
+    # Decide eligibility first, using the same policy as a newly written baseline.
+    candidates, _, _ = baseline_mod.plan(result, None)
+    eligible = {id(f) for f in candidates}
+    ignore_problems = {id(f): f.acceptance.problems for f in result.findings
+                       if f.acceptance and baseline_mod.waiting_on_ignore(f)}
     baseline_mod.apply(result, old)
-    covered = [f for f in result.findings
+    matched = [f for f in result.findings
                if f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE]
+    covered = [f for f in matched if id(f) in eligible]
     gone = result.baseline_stale
-    if old.entries and not covered:
+    # Each entry a finding used up is either on that finding (matched) or was used up by a finding an
+    # ignore entry accepts (only ignore entries suppress a finding): the configuration accepts those
+    # already, so they are carried nowhere (added by the review, review-gpt #313).
+    by_ignore = len(old.entries) - len(gone) - len(matched)
+    if old.entries and len(gone) == len(old.entries):
         print(f"error: none of the {len(old.entries)} entries of {args.file} matches a finding in {target}. An "
               "old-format entry matches on the exact wording of its finding, so check that this is the "
-              "repository the baseline was written for, with the configuration it was written with. Nothing "
-              "was written.", file=sys.stderr)
+              "repository the baseline was written for, with the configuration it was written with. If the "
+              "findings it named have all gone, it has nothing left to carry over: delete it. Nothing was "
+              "written.", file=sys.stderr)
         return EXIT_FAIL
-    made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
-    out = Path(args.output or args.file)
+    held = [f for f in matched if id(f) not in eligible]
+    for f in held:
+        why = acceptance_mod.UNACCEPTABLE_PROBLEM
+        if acceptance_mod.acceptable(f):
+            problems = ignore_problems.get(id(f), [])
+            why = "renew, complete or remove the ignore entry in the configuration"
+            if problems:
+                why += ": " + "; ".join(problems)
+        print(one_line(f"  matched but not carried over: {f.rule} {f.path}:{f.line} - {f.message} ({why})."),
+              file=sys.stderr)
+    if by_ignore:
+        print(f"  {by_ignore} old entr{'y names a finding' if by_ignore == 1 else 'ies name findings'} that an "
+              "ignore entry in the configuration accepts, so "
+              f"{'it is' if by_ignore == 1 else 'they are'} not carried over.", file=sys.stderr)
+    if old.entries and not covered and held:
+        print(f"No matched finding can be newly accepted by this baseline. Nothing was written: {args.file} is "
+              "kept as it is, and accepts nothing in this version. Act on the lines above and run this again.",
+              file=sys.stderr)
+        if gone:
+            print(f"{len(gone)} old entr{'y also matches' if len(gone) == 1 else 'ies also match'} no current "
+                  "finding.", file=sys.stderr)
+        return EXIT_FAIL
+    made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, result.today)
     try:
         out.write_text(baseline_mod.build(covered, None, made.owner, made.reason, made.expires), encoding="utf-8")
     except OSError as exc:
         print(f"error: cannot write the baseline to {out}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    carried = {id(f) for f in covered}
-    others = [f for f in baseline_mod.acceptable(result) if id(f) not in carried]
+    # Every finding no entry of the old file named that counts when the check runs; one no entry can
+    # accept, or one waiting on an ignore entry, is named with what to do (added by the review,
+    # review-gpt #313: before, both could go unmentioned while the gate failed on them).
+    named = {id(f) for f in matched}
+    others = [f for f in result.findings
+              if not f.suppressed and f.state != baseline_mod.FIXED and id(f) not in named]
     print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
           file=sys.stderr)
     if gone:
@@ -357,6 +410,16 @@ def cmd_baseline_migrate(args) -> int:
     if others:
         print(f"{len(others)} finding(s) were not in the old baseline and are not accepted by the new one; "
               "they count when the check runs.", file=sys.stderr)
+        for f in others:
+            if not acceptance_mod.acceptable(f):
+                why = acceptance_mod.UNACCEPTABLE_PROBLEM
+            elif id(f) in ignore_problems or baseline_mod.waiting_on_ignore(f):
+                why = "renew, complete or remove the ignore entry in the configuration"
+                if ignore_problems.get(id(f)):
+                    why += ": " + "; ".join(ignore_problems[id(f)])
+            else:
+                continue
+            print(one_line(f"  among them: {f.rule} {f.path}:{f.line} - {f.message} ({why})."), file=sys.stderr)
     return EXIT_OK
 
 
@@ -682,9 +745,15 @@ def cmd_verify_agent_run(args) -> int:
 def cmd_templates_install(args) -> int:
     import re
 
-    source = Path(args.source) if args.source else _repo_root() / "templates" / "github-actions"
+    package_dir = Path(__file__).resolve().parent
+    source = package_dir / "_github_templates"
+    bundled = args.source is None and source.is_dir()
+    if args.source is not None:
+        source = Path(args.source)
+    elif not source.is_dir() and package_dir.parent.name == "src":
+        source = _repo_root() / "templates" / "github-actions"
     if not (source / "workflows").is_dir():
-        print(f"error: templates not found in {source}; run from a clone of the OBAAF repository or pass --source",
+        print(f"error: templates not found in {source}; pass --source with a GitHub Actions template directory",
               file=sys.stderr)
         return EXIT_USAGE
     if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", args.obaaf_repo or ""):
@@ -726,8 +795,18 @@ def cmd_templates_install(args) -> int:
             written.append(target)
     for path in written:
         print(f"wrote {path}")
-    print("Next: copy templates/github-actions/CODEOWNERS.example into .github/CODEOWNERS, edit the build and "
-          "publish steps, set up the environments in docs/github-settings.md, then run 'obaaf check'.")
+    example = source / "CODEOWNERS.example"
+    if example.is_file():
+        print(f"Review {example.resolve()} when setting up {dest_root / '.github' / 'CODEOWNERS'}.")
+    else:
+        print(f"Set up code ownership in {dest_root / '.github' / 'CODEOWNERS'}.")
+    if bundled:
+        # The templates are this version's; a clone checked out at the pinned commit matched it by
+        # construction, the wheel does not (review-gpt #309).
+        print(f"These templates came with obaaf {__version__}. Give --obaaf-sha the commit this package was built "
+              "from (for a release, its tag's commit), or the workflows may use inputs the pinned commit's actions "
+              "do not have.")
+    print("Next: edit the build and publish steps, set up the GitHub environments, then run 'obaaf check'.")
     return EXIT_OK
 
 
@@ -767,6 +846,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
+
+    x = sub.add_parser("init", help="preview a GitHub Actions configuration and report-only workflow")
+    x.add_argument("path", nargs="?", default=".", help="repository directory (default: current directory)")
+    x.add_argument("--apply", action="store_true", help="create both files after reviewing the preview")
+    x.set_defaults(func=cmd_init)
 
     # fix
     parser = sub.add_parser("fix", help="preview or apply proven configuration and baseline corrections")
@@ -808,6 +892,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto",
                    help="which CI definitions to check: auto (GitHub Actions workflows and Jenkinsfiles), github "
                         "or jenkins. Jenkins results are advisory (see docs/jenkins.md).")
+    x.add_argument("--summary", action="store_true", help="show the accepted risk and the to-do list with scan, coverage and baseline warnings "
+                        "(a text check only: not with --format json or sarif, --lanes or --write-baseline)")
     x.add_argument("--format", choices=("text", "json", "sarif"), default="text")
     x.add_argument("--output", "-o")
     x.add_argument("--fail-on", default="medium",
@@ -1023,7 +1109,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--obaaf-repo", required=True, help="OWNER/REPO of the OBAAF repository to pin")
     x.add_argument("--obaaf-sha", required=True, help="full commit SHA of the OBAAF release to pin")
     x.add_argument("--repository", help="OWNER/REPO of the repository being set up (fills in the policy file)")
-    x.add_argument("--source", help="templates directory (default: this repository's)")
+    x.add_argument("--source", help="GitHub Actions template directory (default: the templates supplied with this build)")
     x.add_argument("--force", action="store_true")
     x.set_defaults(func=cmd_templates_install)
     d = sub.add_parser("docs", help="maintainer tasks").add_subparsers(dest="sub", required=True)
