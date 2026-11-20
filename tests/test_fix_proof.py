@@ -39,6 +39,12 @@ class FixProofTest(unittest.TestCase):
         self.assertNotIn(self.finding.rule, [f.rule for f in result.findings])
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
+    def test_missing_check_target_names_the_selected_path(self):
+        options = dataclasses.replace(self.options, path=Path("missing/CI.yml"))
+        with self.assertRaisesRegex(ProofError, "^check path does not exist: missing/CI[.]yml$"):
+            prove(self.root, options, (self.edit,), (self.promise,))
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
     def test_withholds_unpromised_and_duplicate_promises(self):
         for promises in ((), (self.promise, self.promise)):
             with self.subTest(promises=promises), self.assertRaises(ProofError):

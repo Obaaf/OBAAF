@@ -6,6 +6,8 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Upgrading from 0.3.0
 
+- A refused paperwork preview identifies an invalid baseline or configuration by its path in your repository. The diagnostic retains the reason the checker could not use the file.
+
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.

@@ -940,3 +940,13 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+### D-119 Identify the repository input when a preview refuses it
+
+**Decision.** In a proof or paperwork preview, show paths in checker input diagnostics relative to the repository being examined. If the requested check path is missing, identify it before running the checker.
+
+**Reason.** The private working copy is removed when the preview exits. The user needs the matching path in their own tree and the reason the checker refused the input.
+
+**Consequence.** A malformed baseline or configuration still refuses the preview. Findings, edits and gate decisions keep their existing meanings.
+
+**Status.** Proposed, 2026-11-20 (slice A2f, #314 item 9).

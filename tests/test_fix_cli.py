@@ -39,6 +39,19 @@ class FixCliTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("inside the repository", err)
 
+    def test_invalid_preview_inputs_name_the_repository_files(self):
+        for flag, path, data in (("--baseline", self.root / "team baseline.json", b"["),
+                                 ("--config", self.config, b"[one]")):
+            with self.subTest(flag=flag):
+                path.write_bytes(data)
+                code, out, err = run_cli("fix", self.root, flag, path)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("./" + path.relative_to(self.root).as_posix(), err)
+                self.assertNotIn("obaaf-proof-", err)
+                self.assertEqual(path.read_bytes(), data)
+                path.unlink()
+
     def test_manual_owner_guidance_makes_no_files(self):
         code, out, err = run_cli("fix", self.root)
         self.assertEqual(code, 0, err)

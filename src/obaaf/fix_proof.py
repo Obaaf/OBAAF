@@ -84,6 +84,20 @@ def _relative(root: Path, path: Path) -> Path:
 def check_inputs(root, options, today, catalog):
     """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
+    if not target.exists():
+        raise ProofError(f"check path does not exist: {options.path}")
+    try:
+        return _read_inputs(root, target, options, today, catalog)
+    except (baseline.BaselineError, checker.ConfigError, ProofError) as exc:
+        # Both the source and the temporary tree have the same repository-relative paths.
+        # A config error may also name the root itself, e.g. for two competing configs.
+        message = str(exc).replace(str(root) + os.sep, "./")
+        if message.startswith(f"{root}:"):
+            message = "." + message[len(str(root)):]
+        raise ProofError(message) from exc
+
+
+def _read_inputs(root, target, options, today, catalog):
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
     config = checker.Config.load(base, str(root / options.config) if options.config is not None else None)
