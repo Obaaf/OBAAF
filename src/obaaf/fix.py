@@ -121,8 +121,12 @@ def _verified_plan(source, copy, options, before, metadata, plan):
             return f"{item.description}: {error}"
         from obaaf.checker.todo import checkout_command
         command = checkout_command(before, candidate=item.id)
-        return (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
-                f"their owner. Retry this step alone with {command}")
+        text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
+                "their owner.")
+        # A named request run again unchanged fails the same way: say so, and keep its options for after.
+        if metadata.get("candidate"):
+            return f"{text} After resolving it, run the same request again: {command}"
+        return f"{text} Retry this step alone with {command}"
 
     def verify(candidate):
         for edit in candidate.edits:

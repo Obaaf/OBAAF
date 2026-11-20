@@ -145,6 +145,18 @@ def _rows(findings):
     return Counter((baseline.key(f), f.severity, f.state) for f in findings)
 
 
+def _named(rows, limit: int = 5) -> str:
+    """Rule, file, job and step of each finding in a Counter of rows, for a refusal to name."""
+    names = []
+    for (identity, severity, state), count in sorted(rows.items()):
+        fields = json.loads(identity)
+        where = " ".join(str(fields.get(k) or "") for k in ("job", "step")).strip()
+        names.append(f"{count} × {fields['rule']} in {fields['path']}{' ' + where if where else ''} "
+                     f"({severity}, {state})")
+    more = len(names) - limit
+    return ", ".join(names[:limit]) + (f" and {more} more" if more > 0 else "")
+
+
 def _evidence(findings):
     rows = Counter()
     for f in findings:
@@ -449,19 +461,27 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                                  f"{fields.get('job', '')} {fields.get('step', '')}".rstrip())
                 raise ProofError(f"{sum(unpromised.values())} previously accepted finding(s) would lose "
                                  f"their acceptance: {', '.join(names)}")
-            if _rows(after.findings) != +expected:
-                raise ProofError("finding changes differ from the promised identities, severities or states")
+            actual = _rows(after.findings)
+            if actual != +expected:
+                # Name what differs, so a withheld edit says which finding stopped it (review of #287).
+                parts = [f"{label}: {_named(rows)}" for label, rows in
+                         (("unexpected after the edit", actual - expected),
+                          ("expected and absent", +expected - actual)) if rows]
+                raise ProofError("finding changes differ from the promised identities, severities or states ("
+                                 + "; ".join(parts) + ")")
             if _approvals(after.findings) - _approvals(before.findings) != approved:
                 raise ProofError("changed acceptance differs from its promised source, owner, reason or expiry")
             before_detail = _evidence(before.findings)
             after_detail = _evidence(after.findings)
             permitted_old = _rows(before.findings) - previous_rows
             permitted_new = +expected - previous_rows
-            if (_changed_occurrences(before_detail - after_detail) - permitted_old
-                    or _changed_occurrences(after_detail - before_detail) - permitted_new):
-                raise ProofError("an unrelated finding changed its acceptance or control evidence")
-            if _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog)):
-                raise ProofError("a finding newly counts at the selected gate")
+            changed = (_changed_occurrences(before_detail - after_detail) - permitted_old
+                       + (_changed_occurrences(after_detail - before_detail) - permitted_new))
+            if changed:
+                raise ProofError(f"an unrelated finding changed its acceptance or control evidence: {_named(changed)}")
+            newly = _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog))
+            if newly:
+                raise ProofError(f"a finding newly counts at the selected gate: {_named(newly)}")
             stale = [("baseline", e) for e in after.baseline_stale] + [("ignore", e) for e in _stale_ignores(after)]
             if stale:
                 names = [f"{kind} {entry['rule']} in {entry['path']} {entry.get('job', '')}".rstrip()

@@ -76,6 +76,56 @@ class CheckoutTighteningTest(unittest.TestCase):
         self.assertIn("fetch-depth: 1, persist-credentials: false", out)
         self.assertIn("+          persist-credentials: false", out)
 
+    def test_a_withheld_named_request_names_the_finding_and_offers_no_identical_retry(self):
+        # Review of #287: the edit also clears OBAAF-GHA-023 (the input is an expression), so the proof
+        # withholds it. The refusal must say which finding, and not suggest the request that just failed.
+        self.write("      - uses: actions/checkout@v4\n        with:\n"
+                   "          persist-credentials: ${{ inputs.OBAAF_OWNER }}\n")
+        found = {f.rule for f in checker.check(self.root).findings}
+        self.assertIn("OBAAF-GHA-011", found)
+        code, out, err = self.run_fix(*self.options, "--candidate", self.name)
+        self.assertEqual(code, 1, err or out)
+        refusal = next(line for line in out.splitlines() if "finding changes differ" in line)
+        self.assertRegex(refusal, r"OBAAF-GHA-\d{3} in \.github/workflows/ci\.yml test")
+        self.assertNotIn("Retry this step alone", out)
+        self.assertIn("After resolving it, run the same request again: obaaf fix", refusal)
+        code, out, err = self.run_fix(*self.options)
+        self.assertIn("Retry this step alone with", out)
+
+    def test_every_proof_refusal_names_findings_in_the_rows_it_compares(self):
+        # The gate and evidence refusals have no fixture that reaches them here; check the naming they share
+        # on the rows the proof compares, including the evidence rows' reduction to findings.
+        from collections import Counter
+        from obaaf import fix_proof
+        findings = checker.check(self.root).findings
+        rows = fix_proof._rows(findings)
+        text = fix_proof._named(rows)
+        self.assertIn("× OBAAF-GHA-011 in .github/workflows/ci.yml test", text)
+        evidence = fix_proof._changed_occurrences(fix_proof._evidence(findings))
+        self.assertEqual(fix_proof._named(evidence), text)
+        many = Counter({(key, severity, f"state{i}"): 1 for i, ((key, severity, _), _) in
+                        enumerate(list(rows.items()) * 7)})
+        self.assertTrue(fix_proof._named(many).endswith(f" and {len(many) - 5} more"))
+
+    def test_a_workflow_that_is_not_utf8_is_named_and_does_not_block_another_file(self):
+        # Review of #287: one Latin-1 workflow made every request exit 2 with a bare decode error.
+        other = self.root / ".github/workflows/b.yml"
+        other.write_text(self.header + "      - uses: actions/checkout@v4\n")
+        self.path.write_bytes((self.header + "      - name: caf\xe9\n        uses: actions/checkout@v4\n")
+                              .encode("latin-1"))
+        self.assertTrue(any(f.rule == "OBAAF-GHA-011" and f.path.endswith("ci.yml")
+                            for f in checker.check(self.root).findings))
+        code, out, err = self.run_fix(*self.options, "--candidate", ".github/workflows/b.yml#test/step-1")
+        self.assertEqual(code, 0, err or out)
+        self.assertIn("+        with: {persist-credentials: false}", out)
+        code, out, err = self.run_fix(*self.options, "--candidate", self.name)
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(f"{self.rel}: review its checkouts by hand; the file is not UTF-8 text", out)
+        code, out, err = self.run_fix(*self.options)
+        self.assertEqual(code, 0, err or out)
+        self.assertIn(f"{self.rel}: review its checkouts by hand", out)
+        self.assertIn("b.yml#test/step-1", out)
+
     def test_named_request_explains_stale_target_then_succeeds_after_review(self):
         found = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-011")
         path = self.accepted(found)
@@ -177,8 +227,8 @@ class CheckoutTighteningTest(unittest.TestCase):
         code, out, error = self.run_fix(*self.options, "--candidate", self.name, "--config", config,
                                         "--baseline", policy, "--platform", "github", "--fail-on", "high")
         self.assertEqual(code, 1, error)
-        line = next(line for line in out.splitlines() if "Retry this step alone with " in line)
-        args = shlex.split(line.split("Retry this step alone with ", 1)[1])
+        line = next(line for line in out.splitlines() if "run the same request again: " in line)
+        args = shlex.split(line.split("run the same request again: ", 1)[1])
         self.assertEqual(args, ["obaaf", "fix", str(self.root), "--tighten", "checkout-credentials",
                                 f"--config={config}", "--platform=github", f"--baseline={policy}",
                                 "--fail-on=high", "--candidate=" + self.name])

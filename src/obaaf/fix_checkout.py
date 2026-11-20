@@ -111,7 +111,17 @@ def plan(root, options, result, *, candidate=None, selected=None):
     for name, findings in grouped.items():
         path = (base / name).relative_to(root)
         before = (root / path).read_bytes()
-        text = before.decode()
+        try:
+            text = before.decode()
+        except UnicodeDecodeError:
+            # The checker reads such a file; an edit to it is not offered. Name it, and keep the other files'
+            # checkouts available (review of #287: one Latin-1 workflow made every request exit 2).
+            named = candidate is not None and candidate.startswith(quote(path.as_posix(), safe="/") + "#")
+            seen = seen or named
+            if named or candidate is None:
+                refused.append(f"{path}: review its checkouts by hand; the file is not UTF-8 text, so no edit "
+                               "is offered")
+            continue
         try:
             steps = _steps(text, path)
         except (ValueError, yaml.YAMLError):
