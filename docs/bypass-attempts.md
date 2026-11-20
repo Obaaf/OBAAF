@@ -2731,6 +2731,10 @@ The reviewer re-ran R001 to R212: only the cases the third commit names changed,
 | R230 | `privileged: 2` | pass | unsure | now high: any number but 0 counts |
 | R213–R216, R219–R221, R228 | `master`, `!built-in \|\| master`, `master && !built-in`, `!(built-in -> linux)`, dotted homes, a credential folder at depth, `secrets/../.m2`, NFS without a server | as expected | held | held |
 
+### Fifth pass, on `5f44ddc`
+
+The reviewer re-ran R001 to R230: only the cases the fourth commit names changed. Of 8 new attempts, 6 held. One was a way past: R234, the Git plugin's mirrors under `/var/lib/jenkins/caches`, which the controller fetches into, were taken for a build cache. One was a false positive: R235, read-only `/home/jenkins/agent/tools`. Both are fixed in the sixth commit of #331: `caches` no longer counts as a build cache, and an agent's root is read like the controller's home. Not changed: R232, a read-only `~/.npmrc`, is reported as the host's credentials, because the token in it is exposed. R238, a `node('linux')` inside `podTemplate(label: 'linux')`, is read as the pod and is listed in jenkins.md.
+
 ### Reviewer B's attempts (2026-11-17)
 
 Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.

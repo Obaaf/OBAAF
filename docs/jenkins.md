@@ -202,8 +202,8 @@ written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`
 and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
 socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
 rootless Docker's socket folder (`/run/user/...`), the controller's home (`/var/lib/jenkins`,
-`/var/jenkins_home`) and anything in it but a build's caches (`.m2`, `.gradle`, `.cache`, `tools` and
-others), an agent's root (`/home/jenkins/agent`), a user's whole home (`/home/jenkins`), a home's
+`/var/jenkins_home`) and an agent's root (`/home/jenkins/agent`), whole or any part but a build's caches
+(`.m2`, `.gradle`, `.cache`, `tools` and others; the Git plugin's mirrors under `caches` count), a user's whole home (`/home/jenkins`), a home's
 credential folders (`.ssh` but its `known_hosts`, `.docker`, `.kube`, `.aws`, `.gnupg`) and credential
 files (`.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
 read-only too; only the folders that hold programs, such as `/usr` and
@@ -249,6 +249,8 @@ limited by it.
   `environment` value (read as a label the file does not fix);
 - labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
   compares labels with case;
+- a `node()` whose literal label is a pod template's literal label is read as that pod, though a static
+  agent with the same label may take the build (only `POD_LABEL` is certain);
 - option-like text inside a quoted `--label` or `-e` value can be read as an option, because the
   options are also read split between blanks; a workspace claim mounted read-only by the agent's pod
   still counts as shared.

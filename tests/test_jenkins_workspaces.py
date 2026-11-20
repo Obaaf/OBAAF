@@ -725,8 +725,11 @@ class FourthReviewTest(unittest.TestCase):
                      "-v /var/lib/jenkins/secret.key:/k:ro", "-v /home/jenkins/agent:/a", "-v /home/ci/.netrc:/root/.netrc",
                      "-v /home/ci/.git-credentials:/g:ro"):
             self.assertEqual([s for s, _ in findings(review(args), "OBAAF-JEN-006")], ["high"], args)
-        for args in ("-v /var/jenkins_home/.m2:/root/.m2", "-v /home/jenkins/.ssh/known_hosts:/root/.ssh/known_hosts:ro"):
+        for args in ("-v /var/jenkins_home/.m2:/root/.m2", "-v /home/jenkins/.ssh/known_hosts:/root/.ssh/known_hosts:ro",
+                     "-v /home/jenkins/agent/tools:/tools:ro", "-v /var/jenkins_home/tools:/t:ro"):
             self.assertEqual(findings(review(args), "OBAAF-JEN-006"), [], args)
+        # The fifth pass: the Git plugin's mirrors under the controller's `caches` are fetched into by the controller.
+        self.assertEqual([s for s, _ in findings(review("-v /var/lib/jenkins/caches:/c"), "OBAAF-JEN-006")], ["high"])
 
 if __name__ == "__main__":
     unittest.main()

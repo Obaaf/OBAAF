@@ -72,11 +72,12 @@ _HOST_CAPS = {"ALL", "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "DAC_READ_SEARCH", 
 # the container runtimes' state and sockets (rootless Docker's under /run/user). Their subfolders count too.
 _HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/run/containerd",
                "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio", "/var/run/crio",
-               "/run/user", "/var/run/user", "/home/jenkins/agent", "/home/jenkins/workspace")
-# The controller's home in the Debian and Red Hat packages and in the official image: secrets, jobs, plugins and
-# init scripts (code run at the next start) all count; only the caches a build keeps there do not.
-_JENKINS_HOMES = ("/var/lib/jenkins", "/var/jenkins_home")
-_CACHE_DIRS = (".m2", ".gradle", ".cache", ".npm", ".ivy2", ".sbt", ".pip", ".yarn", ".pnpm-store", "caches", "tools")
+               "/run/user", "/var/run/user")
+# The controller's home in the Debian and Red Hat packages and in the official image (secrets, jobs, plugins,
+# init scripts run at the next start, the Git plugin's mirrors under `caches`), and an agent's root (every job's
+# workspace): each counts whole and in every part but the caches and tools a build keeps there.
+_JENKINS_HOMES = ("/var/lib/jenkins", "/var/jenkins_home", "/home/jenkins/agent", "/home/jenkins/workspace")
+_CACHE_DIRS = (".m2", ".gradle", ".cache", ".npm", ".ivy2", ".sbt", ".pip", ".yarn", ".pnpm-store", "tools")
 # Files that hold credentials for other hosts and registries, wherever they are.
 _CREDENTIAL_FILES = (".netrc", ".git-credentials", ".npmrc", ".pypirc", ".dockercfg")
 # Folders whose whole mount does, but whose subfolders are ordinary (`/etc/localtime`, `/root/.m2`, `/dev/shm`):
@@ -132,7 +133,8 @@ def _host_path(source: str, readonly: bool = False) -> str | None:
         return f"a mount of the host's {norm}"
     for home in _JENKINS_HOMES:
         if norm == home or (norm.startswith(home + "/") and norm[len(home) + 1:].split("/")[0] not in _CACHE_DIRS):
-            return f"a mount of the controller's home ({norm})"
+            return (f"a mount of the controller's home ({norm})" if home.startswith(("/var/lib", "/var/jenkins"))
+                    else f"a mount of the agent's workspaces ({norm})")
     name = norm.rsplit("/", 1)[-1]
     if name in _CREDENTIAL_FILES:
         return f"a mount of the host's credentials ({norm})"
