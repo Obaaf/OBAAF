@@ -148,6 +148,23 @@ class TemplateSourceSelection(unittest.TestCase):
                 self.assertEqual(installed.read_text(encoding="utf-8"), expected.replace("0" * 40, TEST_SHA))
             self.assertIn("repository: studio/app", (dest / ".github/obaaf-policy.yaml").read_text(encoding="utf-8"))
             self.assertFalse((dest / ".github/CODEOWNERS").exists())
+            # From a checkout the templates are the repository's, not a bundled version's.
+            self.assertNotIn("These templates came with obaaf", out)
+
+    def test_bundled_templates_name_their_version(self):
+        from unittest import mock
+        import obaaf.cli as cli
+        with TempDir() as tmp:
+            package = tmp / "site-packages" / "obaaf"
+            bundled = package / "_github_templates"
+            (bundled / "workflows").mkdir(parents=True)
+            (bundled / "workflows/x.yml").write_text("name: X\n", encoding="utf-8")
+            with mock.patch.object(cli, "__file__", str(package / "cli.py")):
+                code, out, err = run_cli("templates", "install", "--dest", tmp / "studio", "--obaaf-repo",
+                                         "example/obaaf", "--obaaf-sha", TEST_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"These templates came with obaaf {cli.__version__}.", out)
+            self.assertTrue((tmp / "studio/.github/workflows/x.yml").is_file())
 
     def test_explicit_source_wins_and_force_is_required_for_existing_files(self):
         with TempDir() as tmp:

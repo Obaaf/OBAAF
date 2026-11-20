@@ -938,4 +938,6 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Reason.** A build engineer who installs OBAAF from a wheel can set up a repository offline without acquiring a second checkout. Keeping the tracked templates as the single source ties their contents to the package build.
 
+**Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
+
 **Status.** Proposed, 2026-11-19 (slice 3.3, #142).

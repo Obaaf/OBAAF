@@ -684,6 +684,7 @@ def cmd_templates_install(args) -> int:
 
     package_dir = Path(__file__).resolve().parent
     source = package_dir / "_github_templates"
+    bundled = args.source is None and source.is_dir()
     if args.source is not None:
         source = Path(args.source)
     elif not source.is_dir() and package_dir.parent.name == "src":
@@ -736,6 +737,11 @@ def cmd_templates_install(args) -> int:
         print(f"Review {example.resolve()} when setting up {dest_root / '.github' / 'CODEOWNERS'}.")
     else:
         print(f"Set up code ownership in {dest_root / '.github' / 'CODEOWNERS'}.")
+    if bundled:
+        # The templates are this version's; a clone checked out at the pinned commit matched it by
+        # construction, the wheel does not (review-gpt #309).
+        print(f"These templates came with obaaf {__version__}. Pin the commit of that version with --obaaf-sha, "
+              "or the workflows may use inputs the pinned commit's actions do not have.")
     print("Next: edit the build and publish steps, set up the GitHub environments, then run 'obaaf check'.")
     return EXIT_OK
 
