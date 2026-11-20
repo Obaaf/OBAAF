@@ -191,7 +191,8 @@ class FixApplyTest(unittest.TestCase):
         self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
 
     def test_a_probe_it_cannot_remove_is_named(self):
-        # Second review pass of #282: a leftover probe was not reported.
+        # Second and third review passes of #282: a leftover probe was not reported, and it is a
+        # second name for the installed file, so apply stops before installing anything.
         real = os.unlink
 
         def unlink(name, *args, **kwargs):
@@ -199,10 +200,14 @@ class FixApplyTest(unittest.TestCase):
                 raise PermissionError("cannot remove")
             return real(name, *args, **kwargs)
 
-        with apply_lock(self.root) as fd, patch.object(os, "unlink", side_effect=unlink):
-            warnings = apply_edits(self.root, fd, self.edits())
-        self.assertEqual(len(warnings), 2, warnings)
-        self.assertTrue(all(".probe" in w and "Remove the temporary file" in w for w in warnings), warnings)
+        edits = self.edits()
+        with apply_lock(self.root) as fd, patch.object(os, "unlink", side_effect=unlink), \
+             self.assertRaisesRegex(ProofError, r"probe could not be removed.*Remove the temporary file .*[.]probe"):
+            apply_edits(self.root, fd, edits)
+        for edit in edits:
+            self.assertEqual((self.root / edit.path).read_bytes(), edit.before)
+            self.assertEqual((self.root / edit.path).stat().st_nlink, 1)
+        self.assertFalse(list(self.root.rglob(".obaaf-apply-*.new")))
 
     def test_checkout_transformations_are_refused(self):
         for attribute in ("filter=lfs", "ident", "working-tree-encoding=UTF-16"):

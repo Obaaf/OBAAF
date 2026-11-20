@@ -259,7 +259,12 @@ def apply_edits(root, root_fd, edits):
                 except OSError as exc:
                     raise ProofError(f"{t.edit.path}: apply needs a filesystem with hard links; edit the file "
                                      f"by hand from the preview ({exc})") from exc
-                discard(t, probe)  # a probe it cannot remove is named, like a stage
+                left = len(cleanup_warnings)
+                discard(t, probe)
+                if len(cleanup_warnings) > left:
+                    # A leftover probe is a second name for the file about to be installed.
+                    raise ProofError(f"{t.edit.path}: the hard-link probe could not be removed, so nothing "
+                                     "was installed")
             for t in targets:
                 if not os.path.samestat((root / t.edit.path.parent).stat(), os.fstat(t.parent)):
                     raise ProofError(f"{t.edit.path}: parent directory changed during apply")
