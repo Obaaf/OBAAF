@@ -23,6 +23,14 @@ Move the pin in a pull request of its own, so that the gate runs once with the n
 
 Nobody is affected until they move: a repository pinned to 0.3.0 or to a commit sees no change. This section becomes the note for 0.4.0 when that is released, and may gain entries until then.
 
+### Set up a first GitHub Actions check
+
+From the repository root, run `obaaf init` (run in a folder inside a Git repository, it names the repository's top folder). Review the proposed agent lanes, the secret names it lists for review, and the diff for both files. Run `obaaf init --apply` to create `.github/obaaf.yml` and `.github/workflows/obaaf-pipeline-check.yml`. If either file differs from the proposal, init prints the differences and stops before creating either file. A repository using another supported configuration path must reconcile that file first.
+
+Init reads GitHub workflow files locally. It proposes agent lanes for catalogued tools it recognizes in workflows and local composite actions, and for jobs with recognized model-provider key names. A job that makes a single provider health check or calls a perception model can hold such a key, so review each proposed lane. It proposes a secret’s required environment when all observed uses identify the same literal environment. Check where the secret is actually stored in GitHub before accepting the proposal. A computed environment, multiple environments or a reusable workflow parameter leaves the name for review. Check repository scripts for agents the workflow and local action references miss.
+
+The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
+
 ### Preview the changes to your OBAAF files
 
 In the development build, start with `obaaf fix .`. Pass the same configuration, baseline, platform and threshold as your check. The preview groups the proposed changes and runs the check on a private copy. It shows the diff it could verify and gives a reason for each change it withheld.
