@@ -108,6 +108,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -975,6 +976,18 @@ If another supported configuration name already exists, init shows any differenc
 The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
 
 **Status.** Proposed, 2026-11-19 (slice A2c, #279).
+
+### D-104 What a saved settings snapshot establishes
+
+**Decision.** The approved adoption design sets a 30-day lifetime. Measure elapsed UTC time from the audit producer’s `taken_at`. Exactly 30 days is eligible. A future timestamp or an older observation supplies no proof. Read a snapshot only from an explicit `--settings FILE`, with the audit command’s existing strict format reader. Match the observed GitHub API host and repository to the checked clone’s github.com origin. An unestablished or different identity leaves the result uncertain.
+
+An assessment concerns a literal secret and its required literal environment. Require a complete environment list and complete secret-name inventories for all environments, the repository, and the organisation. A recorded observation that the owner is a user can establish that organisation secrets do not apply. An unread or partial setting carries its recorded reason forward. A matching name must appear only in the required environment. For selected branches, all allowed names must be literal branches read as protected. For the protected-branches-only setting, require an observed classic branch protection rule, because the absence of rules permits all branches. See [GitHub deployment branches and tags](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags).
+
+**Consequence.** On a repository scan the explicit evidence path is checked for a code owner, and OBAAF-REPO-001 reports a snapshot without one. The assessment this slice prints does not depend on that finding: it can say verified beside OBAAF-REPO-001, which fails a medium gate unless accepted. A single-file scan, a lane listing, or an external snapshot (including a link from outside the repository to a file in it) cannot verify the evidence because the repository ownership check does not cover the snapshot in those cases. The optional CI template setting reads a pull request’s snapshot from its target branch, where it reads the checker configuration. This slice reports the assessment separately and leaves finding verdicts to A4b.
+
+**Evidence.** `tests/test_settings_evidence.py` exercises the audit producer with recorded responses and tests timestamp boundaries, identity, exclusivity, branch policies, partial reads and the public CLI. `TheTemplateStepTest.test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin` exercises the selected snapshot and checker support in the template.
+
+**Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 

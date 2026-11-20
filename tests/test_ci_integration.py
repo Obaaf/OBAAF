@@ -169,7 +169,8 @@ class TheTemplateStepTest(unittest.TestCase):
     """The template's check step, run with bash and a stand-in for obaaf that keeps what it is given."""
 
     def run_step(self, event: str, base: dict, workspace: dict | None = None, links: dict | None = None,
-                 status: int = 0) -> tuple[list, str | None, bool]:
+                 status: int = 0, use_settings: bool = False, supported: bool = True,
+                 expected_settings: str | None = None) -> tuple[list, str | None, bool]:
         workflow = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
         script = next(s["run"] for s in workflow["jobs"]["check"]["steps"] if "obaaf check" in s.get("run", ""))
         with TempDir() as directory:
@@ -184,15 +185,20 @@ class TheTemplateStepTest(unittest.TestCase):
                 (work / ".obaaf-base" / name).symlink_to(target)
             log = directory / "calls"
             stub = bin_ / "obaaf"
-            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$OBAAF_CALLS"\n'
+            stub.write_text('#!/bin/sh\nif [ "$2" = --help ]; then echo "$CHECK_HELP"; exit; fi\n'
+                            'for a; do if [ "$prev" = --settings ]; then cat "$a" > "$OBAAF_CALLS.settings"; fi; prev="$a"; done\n'
+                            'printf "%s\\n" "$*" >> "$OBAAF_CALLS"\n'
                             'for a; do if [ "$prev" = --config ]; then cat "$a" > "$OBAAF_CALLS.config"; fi; prev="$a"; done\n',
                             encoding="utf-8")
             stub.chmod(0o755)
             env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
-                   "GITHUB_EVENT_NAME": event, "OBAAF_CALLS": str(log)}
+                   "GITHUB_EVENT_NAME": event, "OBAAF_CALLS": str(log), "USE_SETTINGS": str(use_settings).lower(),
+                   "CHECK_HELP": "--settings FILE" if supported else ""}
             done = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
             self.assertEqual(done.returncode, status, done.stdout + done.stderr)
             calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+            settings = Path(f"{log}.settings")
+            self.assertEqual(settings.read_text() if settings.exists() else None, expected_settings)
             config = Path(f"{log}.config")
             return calls, config.read_text(encoding="utf-8") if config.exists() else None, (work / ".obaaf-base").exists()
 
@@ -206,6 +212,17 @@ class TheTemplateStepTest(unittest.TestCase):
                 self.assertTrue(calls[1].endswith("--fail-on medium"), calls)
                 self.assertEqual(config, f"# from {name}\n")
                 self.assertFalse(left)
+
+    def test_selected_snapshot_comes_from_pr_base_or_push_and_requires_a_supporting_pin(self):
+        name = ".github/obaaf-settings.json"
+        base = {name: "target branch"}
+        workspace = {name: "source branch"}
+        calls, _, _ = self.run_step("pull_request", base, workspace, use_settings=True,
+                                    expected_settings="target branch")
+        self.assertTrue(all(f"--settings {name}" in call for call in calls))
+        self.run_step("push", base, workspace, use_settings=True, expected_settings="source branch")
+        self.run_step("pull_request", {}, workspace, use_settings=True, status=1)
+        self.run_step("pull_request", base, workspace, use_settings=True, supported=False, status=1)
 
     def test_the_first_name_wins_as_in_the_checker(self):
         base = {name: f"# from {name}\n" for name in CONFIG_LOCATIONS}
@@ -243,7 +260,11 @@ class TheTemplateStepTest(unittest.TestCase):
         on = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))[True]   # YAML 1.1 reads `on:` as true
         self.assertIn("edited", on["pull_request"]["types"])
         patterns = steps[checkout]["with"]["sparse-checkout"].split()
-        self.assertEqual(patterns, ["/" + name for name in CONFIG_LOCATIONS])
+        self.assertEqual(patterns, ["/" + name for name in CONFIG_LOCATIONS] + ["/.github/obaaf-settings.json"])
+        # The target branch as it is when the run starts, not the event's recorded base commit: a re-run
+        # reuses its event, so `pull_request.base.sha` can name a commit from before the configuration
+        # or the snapshot was tightened (review of #284).
+        self.assertEqual(steps[checkout]["with"]["ref"], "${{ github.base_ref }}")
 
 if __name__ == "__main__":
     unittest.main()
