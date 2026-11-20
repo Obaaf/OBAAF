@@ -38,7 +38,8 @@ def _paths(args):
             raise ProofError(f"check input must be inside the repository: {value}")
         return path.relative_to(root)
 
-    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform, args.fail_on)
+    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform,
+                              "medium" if args.fail_on is None else args.fail_on)
 
 
 def _show_diff(edit):
@@ -165,6 +166,14 @@ def _verified_plan(source, copy, options, before, metadata, plan):
     return verified, verdict, reasons
 
 
+def apply_preview_guidance():
+    from obaaf.fix_apply import XATTR_FUNCTIONS
+
+    if all(hasattr(os, name) for name in XATTR_FUNCTIONS):
+        return "Run again with --apply to write these changes."
+    return "Make the displayed changes by hand on this host."
+
+
 def run(args):
     from obaaf import checker
     from obaaf.catalog import load
@@ -173,6 +182,13 @@ def run(args):
     from obaaf.fix_proof import ProofError, check_copy_matches, check_inputs, prove
 
     try:
+        if args.gate is not None:
+            if args.tighten is not None or args.candidate is not None:
+                raise ValueError("--gate is a separate operation; omit --tighten and --candidate")
+            from obaaf.fix_gate import run as run_gate
+            root, options = _paths(args)
+            with (apply_lock(root) if args.apply else nullcontext()) as lock:
+                return run_gate(args, root, options, lock, _show_diff)
         if (args.reason is not None or args.expires is not None) and not all((args.owner, args.reason, args.expires, args.baseline)):
             raise ValueError("baseline migration needs --baseline, --owner, --reason and --expires together")
         if args.candidate is not None and not args.candidate.strip():
@@ -197,7 +213,7 @@ def run(args):
             before.checked = str(args.path)
             before.options = ([f"--config={args.config}"] if args.config else []) + [f"--platform={args.platform}"]
             before.baseline_path = args.baseline or ""
-            before.fail_on = args.fail_on
+            before.fail_on = options.fail_on
             paths = _owner_paths(copy, options, before, today, catalog)
             proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan)
             if args.tighten:
@@ -222,7 +238,7 @@ def run(args):
                 else:
                     print("No proven changes to apply.")
             elif proposal.edits:
-                print("Run again with --apply to write these changes.")
+                print(apply_preview_guidance())
         return 0
     except (ValueError, OSError) as error:
         print("error: " + one_line(error), file=sys.stderr)

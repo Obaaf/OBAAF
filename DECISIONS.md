@@ -112,6 +112,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
@@ -1023,6 +1024,18 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+### D-109 The handoff from init to a gate
+
+**Decision.** A successful first init preview shows the checker’s to-do list with the proposed setup on a private copy. If copying is unavailable, label the current repository’s list and give the reason. Apply checks the actual files. Both end with the corresponding fix-preview command.
+
+Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing at a threshold. Match the complete workflow that init generated, including the exact generated companion steps. Recognize the earlier report-only workflow by its content digest. Show manual instructions for a custom workflow. Prove the precise edit with zero promised finding or acceptance changes and use the existing clean-file writer on apply.
+
+**Consequence.** Select the conventional `.github/obaaf-baseline.json` or name an existing baseline explicitly. On a pull request, read both committed baselines and keep only identical entries, including all acceptance metadata, up to the count in both commits. A fix can retire its acceptance in the same pull request. A new or altered entry cannot grant an acceptance on that run. A missing baseline on either side gives zero acceptances. A baseline that cannot be read stops the job. Pushes validate their own baseline, including unmatched entries. Protect changes to the workflow itself with required code-owner review of `.github/`. The preview reports how many findings currently count, and creating or changing any acceptance remains an independent decision.
+
+**Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
+
+**Status.** Proposed, 2026-11-19 (A7a, #292).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 

@@ -31,6 +31,8 @@ Init reads GitHub workflow files locally. It proposes agent lanes for catalogued
 
 The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
 
+Init ends with the checker’s to-do list and the command to preview fixes. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
+
 #### Optional companion checks
 
 Add `--with-scanner` once for each companion you want in the preview. Supply the same options when applying it. For example:
@@ -85,6 +87,19 @@ Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs`
 Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
 
 Because `obaaf fix egress` selects this command, write a repository folder named `egress` as `./egress` in other `obaaf fix` commands. The commands OBAAF prints already do.
+
+### Enable the generated workflow’s gate
+
+After reviewing outstanding findings and any acceptances, commit the generated workflow. Run the preview from the repository root and review its diff and count. On Linux with extended-attribute support, the second command applies that edit. On other hosts, make the displayed change by hand.
+
+```sh
+obaaf fix --gate medium
+obaaf fix --gate medium --apply
+```
+
+Choose `low`, `medium`, or `high`. The proof checks the current repository with that threshold and leaves existing acceptances alone. The gate uses `.github/obaaf-baseline.json` when present. Supply `--baseline FILE` on both invocations to use another existing baseline. Without a baseline, each outstanding finding at the threshold counts. Creating acceptances remains a separate, explicit decision.
+
+On a pull request, the checker uses configuration from the exact target commit. It honors a baseline entry only when both commits contain the same entry, including its owner, reason and expiry. Fix a finding and remove its entry in the same pull request. Removing an entry while the finding persists makes the finding count again. A new or changed entry cannot grant an acceptance on that pull request. If either commit lacks the baseline, every outstanding finding at the threshold counts. On pushes, the checker uses the pushed repository’s own policy and reports stale entries. A policy read failure stops the job. The preview can upgrade an earlier, unedited init workflow and preserves the generated companion steps. For a custom workflow it prints the threshold and target-branch policy instructions for a manual edit. Apply requires a clean tracked workflow.
 
 ### What can turn a passing gate red
 

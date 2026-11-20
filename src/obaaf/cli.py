@@ -888,7 +888,7 @@ def _fix_check_options(parser):
     parser.add_argument("--config", help="checker configuration used by the gate")
     parser.add_argument("--baseline", help="baseline used by the gate")
     parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
-    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof (default: medium)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -910,6 +910,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate", metavar="NAME", help="request one checkout using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
     _fix_check_options(parser)
+    parser.set_defaults(fail_on=None)
+    parser.add_argument("--gate", choices=("high", "medium", "low"), help="enable a blocking threshold on the generated init workflow")
     parser.epilog = "Use obaaf fix egress --job NAME [PATH] to preview confinement for one job."
     parser.add_argument("--owner", help="owner taking responsibility for the listed acceptances")
     parser.add_argument("--reason", help="reason for carrying matching legacy acceptances forward")
