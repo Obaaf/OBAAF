@@ -876,6 +876,14 @@ def cmd_catalog_check(args) -> int:
 
 
 # ------------------------------------------------------------------ parser
+def _fix_check_options(parser):
+    parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
+    parser.add_argument("--config", help="checker configuration used by the gate")
+    parser.add_argument("--baseline", help="baseline used by the gate")
+    parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
+    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
@@ -894,11 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tighten", choices=["checkout-credentials"], help="preview only this requested workflow tightening")
     parser.add_argument("--candidate", metavar="NAME", help="request one checkout using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
-    parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
-    parser.add_argument("--config", help="checker configuration used by the gate")
-    parser.add_argument("--baseline", help="baseline used by the gate")
-    parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
-    parser.add_argument("--fail-on", default="medium", help="the gate threshold used for the proof")
+    _fix_check_options(parser)
+    parser.epilog = "Use obaaf fix egress --job NAME [PATH] to preview confinement for one job."
     parser.add_argument("--owner", help="owner taking responsibility for the listed acceptances")
     parser.add_argument("--reason", help="reason for carrying matching legacy acceptances forward")
     parser.add_argument("--expires", help="expiry for migrated acceptances (YYYY-MM-DD)")
@@ -1178,7 +1183,16 @@ def _printable_streams() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:2] == ["fix", "egress"]:
+        from obaaf.fix_egress import run
+        parser = argparse.ArgumentParser(prog="obaaf fix egress", description="Preview confinement for one agent job.")
+        _fix_check_options(parser)
+        parser.add_argument("--job", required=True, help="GitHub Actions job ID")
+        parser.set_defaults(func=run)
+        argv = argv[2:]
+    else:
+        parser = build_parser()
     args = parser.parse_args(argv)
     _printable_streams()
     return int(args.func(args) or 0)
