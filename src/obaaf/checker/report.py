@@ -275,7 +275,26 @@ def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
     if target.startswith("-"):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options or ())]
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult) -> str:
+    if "obaaf check . --lanes" not in text:
+        return text
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    if command != one_line(command):
+        # Only the command is lost, not the rest of the rule's fix (review-gpt #299: the whole Fix line
+        # was replaced), worded as the action list words it.
+        command = ("obaaf check --lanes with the check's own paths and options (they cannot be printed as a "
+                   "one-line command)")
+    return text.replace("obaaf check . --lanes", command)
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
@@ -421,7 +440,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + (_lane_advice(fix, result) if result.settings_path else fix))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
