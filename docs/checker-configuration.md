@@ -348,6 +348,10 @@ protected_secrets:
 
 A plain list (`protected_secrets: [PYPI_TOKEN]`) accepts any declared environment. Names are case-insensitive and may use `*` and `?` globs, with at least three letters or digits (`*_API_KEY`, not `*_*`). When several entries match a secret, every one applies. OBAAF-GHA-024 is reported, at high severity, for every job that uses a listed secret without the named environment, including jobs that can take every secret (`toJSON(secrets)`, or `secrets[...]` with a computed index). Environment names compare case-insensitively, as GitHub does. An environment named by an expression is reported at medium, because the checker cannot tell which environment it will be.
 
+Run `obaaf check . --settings path/to/settings.json` to inspect the evidence in a file saved by `obaaf audit --snapshot-out`. The checker makes no network request. It prints the snapshot’s UTC timestamp and an assessment of each `protected_secrets` entry on standard error; only a literal secret name with a literal environment can be verified, and a glob or a plain-list entry is “cannot tell”. JSON and SARIF reports retain their existing finding verdicts. A repository scan checks the snapshot path for code ownership alongside configuration and baseline files. On a full repository scan, a snapshot with no matching code owner raises OBAAF-REPO-001 separately (medium, so a gate at medium fails unless it is accepted). The settings evidence can still report verified: this first increment does not make the assessment depend on that finding. A single-file scan, a lane listing, or a snapshot outside the checked repository (including a link from outside to a file inside it) leaves the assessment at “cannot tell” because those cases omit that ownership check.
+
+Evidence must come from the checked github.com repository and be at most 30 days old. A missing identity, future date, incomplete inventory or unread policy leaves the answer unknown. For selected branches, every policy must name a literal branch observed as protected. For GitHub’s “protected branches only” mode, the snapshot must also show that a classic branch protection rule exists, because without any rules GitHub permits all branches to deploy. [GitHub deployment branches and tags](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags)
+
 A job that calls a reusable workflow (`uses:` at job level) cannot declare an environment. Passing it a protected secret is reported, with the advice to declare the environment in the called workflow's job instead. `secrets: inherit` is not reported, because it passes repository and organization secrets only, never an environment's.
 
 The checker refuses a configuration with a setting it does not know, so a misspelt key such as `protected-secrets` cannot turn a rule off silently.
@@ -470,11 +474,13 @@ What the lines mean:
 - **Other findings** gives the other three states in one line: new, cannot tell, and fixed.
 - **Baseline entries that no longer match a finding** and **Errors**, when there are any, are each counted in one more line, because both can fail a check whose findings are all accepted. The entries are listed further down and the errors straight after these lines. Something the checker could not read fails the check whatever `--fail-on` says.
 
-These lines do not say whether the check passed. The exit status does: the report is not given `--fail-on`, and never has been.
+These counts cover all severities. Use the exit status to see whether the check passed at your chosen threshold.
 
 The days are counted from the day the check ran (`asOf` in JSON), and every acceptance in a report is judged on that one day, also when the check crosses midnight. The lines the report had before are still there, below these, with four differences. A finding ignored by configuration is listed with its owner (`ignored: RULE path:line - accepted by OWNER until DATE: REASON`). The `obaaf baseline migrate` command printed for an old baseline repeats the options the check was given, where a line told the reader to add them. Where a file's path heads its findings, a character that does not print (a line break, a tab, a no-break space) is written as an escape, as everywhere in the report; the path is then printed without quotes only if what is left is made of visible ASCII characters and nothing else (letters, digits and punctuation, no space), and in quotes otherwise. Every line of text that the checker writes in its own words has a space in it and none begins with a quotation mark, so a directory named like a line of the report cannot pass for one, whether it is written with spaces or with characters that only look blank. And the Jenkins coverage lines show a line break or another character that does not print as an escape, as the rest of the report already did. The older line `Baseline: N finding(s) accepted by the baseline, M new.` is unchanged, and its "new" is every finding the baseline does not accept, the ones the checker cannot tell about included, so M can be larger than the count of new findings in the first lines.
 
 **JSON** has the same numbers in `acceptedRisk`, before the findings: `asOf`, `total`, `bySeverity`, `bySource` (`baseline` and `ignore`), `owners` (each with `owner`, `total`, `bySeverity` and `nearestExpiry`), `nearestExpiry`, `daysToNearestExpiry`, and `expiringSoon` (`withinDays`, `total`, and `findings`, each with its rule, severity, path, line, job, owner, expiry date, `daysLeft` and source). The `acceptance` of a finding has `daysLeft` when it is valid. Every field earlier versions wrote is still there under the same name.
+
+The full text report ends with an action list before its version line. Run `obaaf check . --summary` for the accepted risk and the list, with any scan errors, an old-format baseline and stale-entry warnings. It is a text view: it refuses `--format json` or `sarif`, `--lanes` and `--write-baseline`. Use the same configuration, baseline, platform and gate threshold as the original check.
 
 The JSON report also has a `todo` list. Each outstanding finding counts once. An invalid acceptance groups under its reason, and other findings group by the action they need. Each entry gives the cause ID, kind, sentence, count, `bySeverity`, `fixKind` and `nextAction`. The `command` contains the suggested invocation when the CLI supports that operation. A manual step has a null command. A `previousMatches` count means stale entries share the rule, path and job of findings in this group. Those entries accept nothing. For changeable tool versions, `pinCandidates` counts recognizable package installs and `byHand` counts the rest. A candidate still needs an explicit version and a proven patch before it can be applied. An install written once under a YAML anchor and reached through aliases is by hand, because one edit changes every step that reaches it. The list holds findings only: a baseline entry that no longer matches and a file the checker could not read can fail the gate with an empty list, and they are listed elsewhere in the report.
 
@@ -544,7 +550,7 @@ obaaf baseline migrate .github/obaaf-baseline.json \
   --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 ```
 
-`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
+`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found and that a new baseline entry may accept, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It names each match it does not carry over and why: a finding no entry can accept (OBAAF-REPO-001 for a file that decides what the check accepts and has no code owner), a finding waiting on an ignore entry that has expired or is not valid, and, as a count, findings a valid ignore entry accepts. Among the findings outside the baseline it names those no entry can accept and those waiting on an ignore entry. When it can carry over no match and leaves at least one open, it writes nothing and exits 1. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
 
 <a id="ignore"></a>
 ## When a finding does not apply
@@ -580,11 +586,10 @@ Do not use an ignore entry merely to obtain a green check.
 
 ## Trying unreleased checker changes
 
-A release on PyPI does not contain changes merged after it; the changelog's
-"Unreleased" section lists them. Everything described on this page is in version
-0.3.0, except the states of a finding, the owner, reason and expiry date that an
-acceptance needs, and `obaaf baseline migrate`, which are not released yet. Use a separate environment and install a reviewed, full Git commit SHA
-when piloting unreleased code:
+If you installed OBAAF 0.3.0 from PyPI, use the [checker guide for v0.3.0](https://github.com/Obaaf/OBAAF/blob/v0.3.0/docs/checker-configuration.md).
+The [unreleased changelog](../CHANGELOG.md#unreleased) lists changes since that release,
+including the finding lifecycle, acceptance metadata and legacy baseline migration.
+To try those changes, install a reviewed commit in a separate environment:
 
 ```bash
 python -m pip install "obaaf @ git+https://github.com/Obaaf/OBAAF.git@<reviewed-full-commit-sha>"
@@ -593,9 +598,10 @@ obaaf check . --fail-on never
 obaaf check . --fail-on authority:medium
 ```
 
-Replace the placeholder with an actual reviewed commit. A source install reports
-the version of the last release until the version is changed, so record the source
-SHA as well as the version.
+Replace the placeholder with the full SHA of the reviewed commit. Record that SHA
+and the output of `obaaf --version`. Several commits can report the same development
+version, such as `0.4.0.dev0`. When using templates bundled with a development
+build, pass the commit you installed to `obaaf templates install --obaaf-sha`.
 For GitHub Actions, `Obaaf/OBAAF/actions/setup-obaaf@<reviewed-full-commit-sha>`
 installs that exact checkout using its dependency constraints. A new PyPI release
 is a separate maintainer action after validation.

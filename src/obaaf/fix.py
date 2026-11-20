@@ -44,7 +44,9 @@ def _paths(args):
 def _show_diff(edit):
     before = edit.before.decode("utf-8").splitlines(keepends=True)
     after = edit.after.decode("utf-8").splitlines(keepends=True)
-    for line in difflib.unified_diff(before, after, fromfile=f"a/{edit.path}", tofile=f"b/{edit.path}"):
+    # The path can come from a link the repository names, so it is shown as one escaped line.
+    name = one_line(Path(edit.path).as_posix())
+    for line in difflib.unified_diff(before, after, fromfile=f"a/{name}", tofile=f"b/{name}"):
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         if not line.endswith("\n"):
             print(r"\ No newline at end of file")
@@ -121,8 +123,12 @@ def _verified_plan(source, copy, options, before, metadata, plan):
         pin = metadata.get("pin")
         request = ["--pin", "=".join(pin)] if pin else ["--tighten", "checkout-credentials"]
         command = tightening_command(before, request, candidate=item.id)
-        return (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
-                f"their owner. Retry this step alone with {command}")
+        text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
+                "their owner.")
+        # A named request run again unchanged fails the same way: say so, and keep its options for after.
+        if metadata.get("candidate"):
+            return f"{text} After resolving it, preview the same request again with: {command}"
+        return f"{text} Retry this step alone with {command}"
 
     def verify(candidate):
         for edit in candidate.edits:

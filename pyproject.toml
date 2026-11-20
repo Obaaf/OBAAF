@@ -43,9 +43,12 @@ obaaf = "obaaf.cli:main"
 [tool.setuptools.dynamic]
 version = { attr = "obaaf.__version__" }
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# Keep the checkout examples and the installed resources on the same source tree.
+[tool.setuptools.package-dir]
+obaaf = "src/obaaf"
+"obaaf._github_templates" = "templates/github-actions"
 
 [tool.setuptools.package-data]
 obaaf = ["form_template.html"]
 "obaaf.data" = ["*.yaml", "schemas/*.json", "public_suffix_list.dat"]
+"obaaf._github_templates" = ["*.example", "*.example.yaml", "agent/*.sh", "workflows/*.yml"]

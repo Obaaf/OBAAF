@@ -235,7 +235,6 @@ def plan(root, options, result, *, candidate=None, pin=None, selected=None):
     for name, findings in grouped.items():
         path = (base / name).relative_to(root)
         before = (root / path).read_bytes()
-        text = before.decode()
         try:
             steps, _ = _steps(text, path, pin)
         except (ValueError, yaml.YAMLError):

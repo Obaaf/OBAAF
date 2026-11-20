@@ -35,6 +35,18 @@ class PinTest(unittest.TestCase):
     def fix(self, *args):
         return run_cli("fix", self.root, *args)
 
+    def test_non_utf8_install_refusal_leaves_other_files_available(self):
+        other = self.path.with_name("other.yml")
+        other.write_text(agent_job(f"- run: {self.install}\n"))
+        self.path.write_bytes(agent_job(f"- name: caf\xe9\n  run: {self.install}\n").encode("latin-1"))
+        code, out, err = self.fix("--pin", self.pin, "--candidate", self.name)
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(f"{self.rel}: review its installs by hand; the file is not UTF-8 text", out)
+        code, out, err = self.fix("--pin", self.pin)
+        self.assertEqual(code, 0, err or out)
+        self.assertIn("other.yml#a/step-1", out)
+        self.assertIn(f"{self.rel}: review its installs by hand", out)
+
     def test_explicit_pin_previews_only_the_requested_token_and_package(self):
         self.write(f"- name: first\n  run: {self.install} # keep\n"
                    f"- run: |\n    sudo {self.install}\n    claude --version\n"

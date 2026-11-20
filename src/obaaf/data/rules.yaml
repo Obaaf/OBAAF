@@ -235,8 +235,8 @@ rules:
     agent_controls: [R7]
     supports: [FR4]
     why: >-
-      Caches can be written by other workflows on the same branch or the default branch, so a release job left free
-      to restore one can ship a poisoned entry.
+      Other workflows can write the caches a job restores, so a release job can ship a poisoned entry, and a job
+      holding what publishing needs runs it with that.
     description: >-
       A release job restores a GitHub Actions cache, directly or through a setup action that caches by
       default, and its `cache-mode` does not forbid it. Caches can be written by other workflows on the
@@ -255,10 +255,25 @@ rules:
       its caller (a called release job's restores are its own finding); `needed-job-restores` reads a
       download in a called job and a needed job that calls a workflow; and in a workflow whose `on` names
       only `workflow_call` and whose every caller in the repository forbids restoring, the job's finding
-      has a control that cannot be told, because a caller in another repository is not seen. Not followed: a
-      `docker://` step, a step whose `if:` never lets it run (reported anyway), outputs passed between
-      jobs, and actions that cache that are not listed (`nix-community/cache-nix-action`,
-      `denoland/setup-deno` and others).
+      has a control that cannot be told, because a caller in another repository is not seen. Since slice
+      2d.14: a job nothing puts in the release lane is reported at medium, as one the checker cannot tell
+      releases, when it holds what publishing needs and restores a cache that its cache-mode lets through
+      (kind `capability-restores`) or downloads artifacts from a job it needs that restores one (kind
+      `capability-needed-job-restores`), because code from a poisoned cache entry runs with what it holds
+      whether or not the job publishes. What it holds, a fact of the finding, is what OBAAF-GHA-015 counts
+      (`packages: write`, an action under `publishing_actions` other than a `docker/build-push-action` step
+      that cannot push, a secret whose name says it publishes), a reference that can read every secret,
+      and `contents: write` in a job that a release event, a tag push, a tag's creation or another
+      workflow's call can start; a called job that declares no permissions holds what its callers in the
+      repository grant. For this case a local action is a cache step only when its steps were not read,
+      and where they make the job a release job the release case on the same step or job replaces it. Not
+      followed: a `docker://`
+      step, a step whose `if:` never lets it run (reported anyway), outputs passed between jobs, actions
+      that cache that are not listed (`nix-community/cache-nix-action`, `denoland/setup-deno` and others),
+      and, for a job that is not a release job, permissions nobody declares (OBAAF-GHA-009 reports them),
+      `contents: write` on other events, a credential whose name matches no pattern, and a cache restored
+      in a workflow the job calls, which is read in that workflow with the secret names its jobs use (a
+      credential passed to it under another name is not counted).
     fix: >-
       Set `cache-mode: none` on release jobs and remove cache restore steps, or regenerate derived data
       inside the release lane.
@@ -590,8 +605,34 @@ rules:
       special parameter, a `$(...)` (a subshell), or `${NAME}` with nothing but `[@]`, `[*]`, a length,
       a default (`-`, `:-`, `+`, `:+`) or a pattern removed (`#`, `%`), since any other form (a
       subscript, an offset, `${!...}`, `$((`, `[[`) can evaluate a value as arithmetic that assigns; the
-      check's own words are held to the same; and no earlier step may name `BASH_ENV`, `BASH_FUNC` or
-      `GITHUB_PATH` (a search of its text, not a guarantee). Given `--help` or `--version` it is no
+      check's own words are held to the same. No `env` of the step, its job or its workflow may name a
+      variable that changes what the shell or the check's program runs (`PATH`, `HOME`, `ENV`,
+      `SHELLOPTS`, `PS4`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS`, a `BASH...`,
+      `LD_...` or `DYLD_...` name, or a `PYTHON...` one but six that load nothing), or a name written
+      as an expression (flagship slice 2d.13). No earlier step of the job may set such a variable for
+      the steps after it (the runner gives every later step what a step writes to `GITHUB_ENV`, and
+      refuses only `NODE_OPTIONS`; `SHELLOPTS=noexec` makes bash read the check's step and run none of
+      it). A bash or sh `run` script is read with the checker's bash lexer: a file command's variable
+      (`GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`; the runner
+      keeps a step's files side by side, so any of their paths leads to `GITHUB_ENV`'s) may appear only
+      as a plain redirection target (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`), not of `exec`, or a
+      file `tee` writes an output or the summary to with its own output sent to no file command; a write
+      to `GITHUB_ENV` only as `echo NAME=value` or `printf 'NAME=%s\n' ...` redirected with `>>`, `>`,
+      `&>>`, `&>`, `>|` or `>&` (not `<>`, which writes over what is there), with a plain word for a
+      name that is not such a variable, no backslash, line break or `$'...'` (which dash, Ubuntu's sh,
+      does not read), and no command substitution in the value that assigns such a variable; the script
+      may not name `BASH_ENV`, `BASH_FUNC`, `addPath`, `exportVariable`, `set-env`, `add-path`,
+      `_runner_file_commands` or `ACTIONS_ALLOW_UNSECURE_COMMANDS`, list names with `${!GITHUB_E*}`,
+      or reach the runner's file contexts (`github.env`, `github.path`, the whole `github` context) in
+      an expression. Anything else counts as setting such a variable, and so does any of these names in
+      the step's `shell`, `env` or inputs, in a step that is not such a script (code in another
+      language, an action), or in the workflow's or the job's `env`, `defaults` or `strategy`, which a
+      step can run, and a container job's `env` when it names such a variable, or any `-e`, `--env` or
+      `--env-file` in its `options` (what its image holds is not read). Names are searched with continued
+      lines joined, `$'...'` decoded and quotes taken out. This is a reading of the workflow's text, not a guarantee: a name or a path a script
+      assembles otherwise, and what a program or action an earlier step runs writes to the runner's
+      files, are not read; nor is a line break that a variable, a file or a command's output puts in
+      such a write's value at run time. Given `--help` or `--version` it is no
       check; with `--pre-approval` it is a provenance check. When a step names a check the reader cannot
       vouch for, the finding is kind `cannot-tell` (still high): write the check on a line of its own,
       early in a bash step. A check in PowerShell, cmd, Python, `actions/github-script`, a `docker://`
@@ -829,8 +870,9 @@ rules:
       `OBAAF_OWNER` is found in any letter case, and the all-zero SHA as exactly 40 zeros after `@` or as
       the ref of a `uses`.
     fix: >-
-      Install the templates with `obaaf templates install --obaaf-repo OWNER/obaaf --obaaf-sha SHA`, or
-      replace the placeholders by hand.
+      Replace the placeholders in the existing workflow with the OBAAF repository and its full commit SHA.
+      For a new destination, install the pinned workflows with
+      `obaaf templates install --dest DIR --obaaf-repo OWNER/obaaf --obaaf-sha SHA`.
 
   - id: OBAAF-GHA-024
     title: Protected secret used outside its environment
@@ -1167,10 +1209,11 @@ rules:
       Build code on the controller can read the keys that decrypt every stored credential, and on a shared agent
       it can tamper with later privileged builds.
     description: >-
-      A stage runs on the built-in node (label `built-in` or `master`), where build code can read
-      $JENKINS_HOME and the keys that decrypt every stored credential; or one persistent agent label
-      serves both work that change requests reach and a stage that holds credentials or publishes, so
-      code from a change request can tamper with the later privileged build. Steps on the controller
+      A stage runs on the built-in node (label `built-in` or `master`, or a label expression that can
+      select it), where build code can read $JENKINS_HOME and the keys that decrypt every stored
+      credential; or one persistent agent label serves both work that change requests or an AI agent
+      can steer and a stage that holds credentials or publishes, so that work can tamper with the later
+      privileged build. Steps on the controller
       that change requests or an agent can steer are high; others are medium. `agent any` and computed
       labels are reported as unknown, because which agents exist is controller configuration.
     fix: >-
@@ -1190,10 +1233,15 @@ rules:
     why: >-
       What the agent wrote or was told reaches a push, another job or a release without review.
     description: >-
-      A stage that runs an AI agent also pushes to the repository, starts another job with the build
-      step, or publishes, in the same workspace. What the agent wrote or was told then reaches the
-      effect without review. Builds started with the build step run as SYSTEM unless build
-      authorization is configured, so job permissions shown to people do not limit them.
+      A step pushes to the repository, starts another job with the build step, or publishes, after an
+      AI agent ran in the same workspace: the same stage, another stage under the same agent, a post
+      block, a docker agent with reuseNode, ws() on the same node, or a stash or unarchive of what was
+      stashed or archived after the agent. What the agent wrote or was told then reaches the effect
+      without review. An effect that runs before the agent in a workspace Jenkins keeps between builds
+      is medium: what the agent leaves there is in place for it next build. Separate allocations that
+      may be the same machine are reported as unknown. Builds started with the build step run as
+      SYSTEM unless build authorization is configured, so job permissions shown to people do not limit
+      them.
     fix: >-
       Keep the agent stage inert: let it write a proposal (a patch or bundle) as an artifact, and apply
       it in a separate job that verifies the agent-run record and the proposal (`obaaf verify
@@ -1287,7 +1335,9 @@ rules:
     description: >-
       Nothing in the Jenkinsfile limits the network access of a stage that runs an AI agent, and Jenkins
       has no egress control of its own. A policy declared in `OBAAF_EGRESS` is reported too, so a
-      declaration is not mistaken for enforcement.
+      declaration is not mistaken for enforcement. An agent whose shell steps run in a container
+      started with exactly one network, `none`, and nothing that reaches the host passes; with a host
+      path mounted into that container the finding stays, because a socket there is a way out.
     fix: >-
       Run the agent in a Kubernetes pod in a namespace whose NetworkPolicy allows only the inference
       proxy, with no route to the controller, cloud metadata or the cluster API. When the network
