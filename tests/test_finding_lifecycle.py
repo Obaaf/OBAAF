@@ -514,15 +514,15 @@ class OldFormatTest(unittest.TestCase):
 class MigrateTest(unittest.TestCase):
     """`obaaf baseline migrate`: from the old format to the new, with somebody's name on it."""
 
-    def test_it_carries_over_what_the_old_file_covered_and_the_check_passes_again(self):
+    def test_it_carries_over_only_matches_the_gate_can_accept(self):
         with TempDir() as tmp:
             repo, old = fixture_repo(tmp)
             code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
             self.assertEqual(code, 0, err)
-            self.assertIn(f"16 finding(s) carried over, accepted by {OWNER} until {SOON}.", err)
+            self.assertIn(f"15 finding(s) carried over, accepted by {OWNER} until {SOON}.", err)
             data = json.loads(old.read_text())
             self.assertEqual(data["format"], baseline.FORMAT)
-            self.assertEqual(len(data["findings"]), 16)
+            self.assertEqual(len(data["findings"]), 15)
             for item in data["findings"]:
                 self.assertEqual((item["owner"], item["reason"], item["expires"]), (OWNER, REASON, SOON))
                 self.assertNotIn("fingerprint", item)
@@ -532,7 +532,42 @@ class MigrateTest(unittest.TestCase):
             # the baseline included); the other 15 pass as before.
             self.assertEqual(code, 1, out)
             self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
-            self.assertIn("vouching for itself", out)
+            self.assertIn("matched but not carried over: OBAAF-REPO-001", err)
+            self.assertIn("vouching for itself", err)
+            self.assertFalse(any(e["rule"] == "OBAAF-REPO-001" for e in data["findings"]))
+
+    def test_a_prohibited_match_alone_preserves_input_and_output(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] == "OBAAF-REPO-001"]
+            self.assertEqual(len(data["findings"]), 1)
+            old.write_text(json.dumps(data))
+            before = old.read_bytes()
+            output = tmp / "destination.json"
+            output.write_bytes(b"existing output")
+            for options in ((), ("--output", output), ("--output", tmp / "absent.json")):
+                code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT, *options)
+                self.assertEqual(code, 1, err)
+                self.assertIn("vouching for itself", err)
+                self.assertIn("Nothing was written", err)
+                self.assertNotIn("none of the", err)
+                self.assertEqual(old.read_bytes(), before)
+                self.assertEqual(output.read_bytes(), b"existing output")
+                self.assertFalse((tmp / "absent.json").exists())
+
+    def test_a_matched_invalid_ignore_stays_with_its_original_owner(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
+                f"    reason: {REASON}\n    until: {SOON}\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("matched but not carried over: OBAAF-GHA-001", err)
+            self.assertIn("it names no owner", err)
+            self.assertFalse(any(e["rule"] == "OBAAF-GHA-001" and e["path"] == ".github/workflows/ci.yml"
+                                 for e in json.loads(old.read_text())["findings"]))
 
     def test_it_needs_an_owner_a_reason_and_a_date_that_count(self):
         with TempDir() as tmp:
@@ -555,7 +590,7 @@ class MigrateTest(unittest.TestCase):
             new = tmp / "new.json"
             code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT, "--output", new)
             self.assertEqual(code, 0, err)
-            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("14 finding(s) carried over", err)
             self.assertIn("1 old entry matches no finding any more and was dropped:", err)
             self.assertIn("Job 'test' receives CODECOV_TOKEN", err)
             self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)

@@ -163,6 +163,8 @@ Baseline: 0 finding(s) accepted by the baseline, 5 new.
     obaaf baseline migrate .github/obaaf-baseline.json --owner OWNER --reason REASON --expires YYYY-MM-DD
 ```
 
+Migration writes the legacy matches the current checker can accept. Its receipt names each match left open and explains why. For example, when the baseline has no code owner, an entry for the missing ownership would let the file vouch for itself. Fix the ownership and run the gate again. When a nonempty legacy baseline has no eligible matches, migration exits 1 and preserves both the input and any separate `--output` file.
+
 Convert the baseline:
 
 ```bash

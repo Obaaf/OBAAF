@@ -103,6 +103,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-095 | Code in another language that runs an agent tool is read by its tokens: an argument list or a command line the checker cannot read is "cannot tell", literal pieces and names given literals are read as their text, and one value in one place of a list is one word | Proposed |
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
+| D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 
 ---
 
@@ -917,3 +918,12 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+
+### D-115 Legacy baseline migration reports current acceptance eligibility
+
+**Decision.** Direct migration matches legacy entries using their existing identities and applies the same eligibility policy used to write new baseline entries. The receipt names prohibited matches and explains the reason. A nonempty input with no eligible matches is preserved, including when a separate output path was supplied.
+
+**Reason.** In an in-place upgrade from 0.3.0, migration reported that it accepted a missing ownership finding that the next gate kept open. The receipt must count the acceptances the gate honors. An existing ignore decision stays with its configuration owner.
+
+**Status.** Proposed, 2026-11-20 (A2d, #312).

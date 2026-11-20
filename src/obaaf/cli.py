@@ -315,7 +315,9 @@ def cmd_baseline_migrate(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    result = checker.check(target, config=config, platform=args.platform)
+    out = Path(args.output or args.file)
+    gate_files = [out, Path(args.config)] if args.config else [out]
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
     if not result.files and not result.errors:
         print(f"error: no CI definitions found under {target}: nothing was checked, so nothing of {args.file} "
               "can be carried over. Give the path the baseline was written for after the file name.",
@@ -326,25 +328,47 @@ def cmd_baseline_migrate(args) -> int:
             print(f"error: {one_line(error)}", file=sys.stderr)
         print("error: not converting the baseline while some CI definitions could not be read", file=sys.stderr)
         return EXIT_FAIL
+    # Applying a legacy match replaces an invalid ignore acceptance on the finding.
+    # Decide eligibility first, using the same policy as a newly written baseline.
+    candidates, _, _ = baseline_mod.plan(result, None)
+    eligible = {id(f) for f in candidates}
+    ignore_problems = {id(f): f.acceptance.problems for f in result.findings
+                       if f.acceptance and baseline_mod.waiting_on_ignore(f)}
     baseline_mod.apply(result, old)
-    covered = [f for f in result.findings
+    matched = [f for f in result.findings
                if f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE]
+    covered = [f for f in matched if id(f) in eligible]
     gone = result.baseline_stale
-    if old.entries and not covered:
+    if old.entries and len(gone) == len(old.entries):
         print(f"error: none of the {len(old.entries)} entries of {args.file} matches a finding in {target}. An "
               "old-format entry matches on the exact wording of its finding, so check that this is the "
               "repository the baseline was written for, with the configuration it was written with. Nothing "
               "was written.", file=sys.stderr)
         return EXIT_FAIL
-    made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, date.today())
-    out = Path(args.output or args.file)
+    for f in matched:
+        if id(f) in eligible:
+            continue
+        why = acceptance_mod.UNACCEPTABLE_PROBLEM
+        if acceptance_mod.acceptable(f):
+            problems = ignore_problems.get(id(f), [])
+            why = "renew, complete or remove the ignore entry in the configuration"
+            if problems:
+                why += " (" + "; ".join(problems) + ")"
+        print(one_line(f"  matched but not carried over: {f.rule} {f.path}:{f.line} - {f.message} ({why})."),
+              file=sys.stderr)
+    if old.entries and not covered:
+        print("No matched finding can be newly accepted by this baseline. Nothing was written.", file=sys.stderr)
+        if gone:
+            print(f"{len(gone)} old entry or entries also matched no current finding.", file=sys.stderr)
+        return EXIT_FAIL
+    made = acceptance_mod.make(acceptance_mod.BASELINE, args.owner, args.reason, args.expires, result.today)
     try:
         out.write_text(baseline_mod.build(covered, None, made.owner, made.reason, made.expires), encoding="utf-8")
     except OSError as exc:
         print(f"error: cannot write the baseline to {out}: {exc}", file=sys.stderr)
         return EXIT_USAGE
     carried = {id(f) for f in covered}
-    others = [f for f in baseline_mod.acceptable(result) if id(f) not in carried]
+    others = [f for f in candidates if id(f) not in carried]
     print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
           file=sys.stderr)
     if gone:
