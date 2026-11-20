@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field, replace
 
 from obaaf.checker.workflow import is_lane_variable_spelling
+from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.parser import (
     Annotated, Assign, Binary, Block, Call, Closure, Decl, ExprStmt, If, Import, Index, ListLit, Loop, MapLit,
     MethodDef, ClassDef, Name, Opaque, Prop, Return, Str, Switch, Ternary, Try, Unary, callee_name, path_of,
@@ -62,6 +63,32 @@ class Agent:
     dockerfile: str | None = None
     images_unknown: bool = False
     build_args: str | None = None  # additionalBuildArgs, as text ("${computed}" when not a literal)
+    # Flagship slice 2d.2j: `reuseNode` of a docker or dockerfile agent ("true", or "?" when computed; None when
+    # absent or false), and a node's `customWorkspace` ("?" when computed).
+    reuse: str | None = None
+    custom_workspace: str | None = None
+    # A Kubernetes agent's workspaceVolume when it outlives the pod (a claim, a host path or an NFS export; "?"
+    # when the file does not fix which), None for the default emptyDir and the other per-pod volumes.
+    pod_workspace: str | None = None
+    # What podTemplate's own arguments give the pod that reaches the host (flagship slice 2d.2j): a privileged
+    # containerTemplate, a hostPathVolume, hostNetwork.
+    pod_settings: list = field(default_factory=list)
+    label_ref: str | None = None   # the variable a podTemplate's `label:` names, when it is not a literal
+    label_text: str | None = None  # its text, interpolations shown as ${...}
+
+
+@dataclass
+class Workspace:
+    """One allocation of a workspace (flagship slice 2d.2j). Steps whose context carries the same id run in
+    the same directory; `machine` is the allocation of the node it is on, so `ws()` inside a `node` is
+    another directory on the same machine, written by the same user."""
+    id: int
+    machine: int
+    kind: str             # label, node, any, docker, dockerfile, kubernetes, unknown, ws, context
+    line: int
+    label: str | None = None      # the literal label; "${dynamic}" when computed; None for any agent
+    custom: str | None = None     # customWorkspace or the path given to ws() ("?" when computed)
+    how: str = ""                 # what allocated it, for messages
 
 
 @dataclass(frozen=True)
@@ -82,6 +109,8 @@ class Ctx:
     branch: tuple = ()            # ((parallel line, branch name), ...): steps in sibling branches run concurrently
     guards: tuple = ()            # conditions (as text) that must hold for the step to run
     dir: str = ""                 # the folder dir() moved into, relative to the workspace; "?" when computed
+    ws: int = 0                   # the Workspace the step runs in (flagship slice 2d.2j); 0 when none is known
+    repeats: tuple = ()           # retry and waitUntil blocks around the step, which may run it again (2d.2j)
 
 
 @dataclass
@@ -167,6 +196,7 @@ class Pipeline:
     self_scm_vars: set = field(default_factory=set)     # assigned legacySCM(scm)
     script_vars: set = field(default_factory=set)       # variables and parameters given `this` or `steps`
     literal_values: dict = field(default_factory=dict)  # name -> every literal assigned to it, environment included
+    workspaces: dict = field(default_factory=dict)      # id -> Workspace (flagship slice 2d.2j)
 
 
 # ----------------------------------------------------------------------- helpers
@@ -957,8 +987,11 @@ def agent_from_closure(block: Block) -> Agent:
             if expr.closure is not None:
                 inner = agent_from_closure(expr.closure)
                 a.label = inner.label
+                a.custom_workspace = inner.custom_workspace
             else:
                 a.label = literal(arg)
+        elif name == "customWorkspace":
+            a.custom_workspace = literal(arg) or "?"
         elif name == "docker":
             a.kind = "docker"
             if expr.closure is not None:
@@ -967,6 +1000,7 @@ def agent_from_closure(block: Block) -> Agent:
                 _set_image(a, arg)
                 args = named_arg(expr, "args")
                 a.args = _args_text(args)
+                _reuse(a, named_arg(expr, "reuseNode"))
         elif name == "dockerfile":
             a.kind = "dockerfile"
             if expr.closure is not None:
@@ -974,6 +1008,7 @@ def agent_from_closure(block: Block) -> Agent:
             else:
                 # `dockerfile true` builds ./Dockerfile; any other value is not read.
                 a.dockerfile = "Dockerfile" if path_of(arg) == "true" else "?"
+                _reuse(a, named_arg(expr, "reuseNode"))
         elif name == "kubernetes":
             a.kind = "kubernetes"
             if expr.closure is not None:
@@ -983,6 +1018,15 @@ def agent_from_closure(block: Block) -> Agent:
         elif name in ("any", "none"):
             a.kind = name
     return a
+
+
+def _reuse(a: Agent, node) -> None:
+    """reuseNode of a docker or dockerfile agent: "true", "?" when the file does not fix it, None for false
+    (flagship slice 2d.2j)."""
+    if node is None:
+        return
+    value = path_of(node) or literal(node)
+    a.reuse = "true" if value == "true" else None if value == "false" else "?"
 
 
 def _args_text(node) -> str:
@@ -1017,6 +1061,10 @@ def _docker_details(a: Agent, block: Block) -> None:
                 a.args = _args_text(first_arg(expr))
             elif name == "label":
                 a.label = literal(first_arg(expr))
+            elif name == "reuseNode":
+                _reuse(a, first_arg(expr))
+            elif name == "customWorkspace":
+                a.custom_workspace = literal(first_arg(expr)) or "?"
             elif name == "filename":
                 filename = literal(first_arg(expr)) or "?"
             elif name == "dir":
@@ -1048,6 +1096,8 @@ def _k8s_key(a: Agent, key: str, value) -> None:
         a.inherit = literal(value) or ("?" if value is not None else None)
     elif key == "label":
         a.label = literal(value)
+        a.label_ref = path_of(value) if a.label is None else None
+        a.label_text = text_of(value)
     elif key == "containers" and isinstance(value, ListLit):
         for item in value.items:
             if isinstance(item, Call) and callee_name(item) == "containerTemplate":
@@ -1056,11 +1106,43 @@ def _k8s_key(a: Agent, key: str, value) -> None:
                 a.images_unknown = True
     elif key == "containers" and value is not None:
         a.images_unknown = True       # a list the file builds or changes elsewhere (flagship slice 2d.2k)
+    elif key == "volumes" and isinstance(value, ListLit):
+        for item in value.items:
+            if isinstance(item, Call) and callee_name(item) == "hostPathVolume":
+                path = literal(named_arg(item, "hostPath")) or "?"
+                a.pod_settings.append("a mount of the Docker socket" if "docker.sock" in path else "a hostPath volume")
+    elif key == "hostNetwork" and (path_of(value) == "true" or (literal(value) or "").lower() == "true"):
+        a.pod_settings.append("host networking")
+    elif key == "workspaceVolume" and value is not None:
+        # The Kubernetes plugin's workspace volumes: emptyDir, a per-pod dynamic claim and a generic ephemeral
+        # volume die with the pod; a named claim, a host path and an NFS export are kept (flagship slice 2d.2j).
+        kind = callee_name(value) if isinstance(value, Call) else None
+        if kind in ("emptyDirWorkspaceVolume", "dynamicPVC", "genericEphemeralVolume"):
+            a.pod_workspace = None
+        else:
+            # "claim:NAME" and "nfs:PATH" are one directory wherever the pod runs; "host:PATH" is the node's.
+            which = None
+            for key, tag in (("claimName", "claim"), ("serverPath", "nfs"), ("hostPath", "host")):
+                if isinstance(value, Call) and named_arg(value, key) is not None:
+                    found = literal(named_arg(value, key))
+                    if found is not None and tag != "claim":
+                        found = re.sub(r"/+", "/", found).rstrip("/") or "/"
+                    if found is not None and tag == "nfs":
+                        server = (literal(named_arg(value, "serverAddress")) or "").lower() or None
+                        found = f"{server}:{found}" if server is not None else None
+                    which = f"{tag}:{found}" if found is not None else None
+                    break
+            a.pod_workspace = which or "?"
+            if kind == "hostPathWorkspaceVolume":
+                path = (which or "host:?")[5:]
+                a.pod_settings.append("a mount of the host root file system" if path == "/" else "a hostPath volume")
 
 
 def _container_image(a: Agent, item: Call) -> None:
     """The image of a containerTemplate: a named argument, or `image '...'` in its closure (flagship
-    slice 2d.2k: the closure form was reported as "Image '?'")."""
+    slice 2d.2k: the closure form was reported as "Image '?'"); and `privileged: true` (slice 2d.2j)."""
+    if path_of(named_arg(item, "privileged")) == "true" or (literal(named_arg(item, "privileged")) or "").lower() == "true":
+        a.pod_settings.append("a privileged container")
     img = named_arg(item, "image")
     if img is None and item.closure is not None:
         for stmt in item.closure.stmts:
@@ -1082,7 +1164,7 @@ def _k8s_details(a: Agent, block: Block) -> None:
         expr = stmt.expr if isinstance(stmt, ExprStmt) else None
         if isinstance(expr, Call):
             name = callee_name(expr)
-            if name in ("yaml", "yamlFile", "inheritFrom", "label"):
+            if name in ("yaml", "yamlFile", "inheritFrom", "label", "workspaceVolume"):
                 _k8s_key(a, name, first_arg(expr))
             elif name == "containerTemplate":
                 _container_image(a, expr)
@@ -1198,6 +1280,37 @@ class Builder:
         # Variables the file changes other than by assigning them (`b << x`, `b.add(x)`, `b += x`): a list
         # held in one is not taken for the list first assigned (the review of slice 2d.2i).
         self.changed_lists: set[str] = set()
+
+    # -- workspaces (flagship slice 2d.2j) -------------------------------------------------
+    def new_ws(self, kind: str, line: int, label: str | None = None, custom: str | None = None,
+               machine: int | None = None, how: str = "") -> int:
+        """A new workspace allocation. `machine` is the node it is on (a new one when None)."""
+        wid = len(self.p.workspaces) + 1
+        self.p.workspaces[wid] = Workspace(wid, machine if machine else wid, kind, line, label, custom, how)
+        return wid
+
+    def agent_ws(self, agent: Agent, ctx: Ctx) -> int:
+        """The workspace the steps under a Declarative agent directive run in. The top-level agent holds one
+        workspace for every stage without an agent of its own ("where the entire Pipeline ... will execute");
+        `agent none` allocates nothing; a docker or dockerfile agent with `reuseNode true` runs "on the node
+        specified at the top-level of the Pipeline, in the same workspace" (the Jenkins handbook, Pipeline
+        Syntax). Any other agent allocates its own. A reuseNode the file does not fix is read as reused, the
+        reading under which more steps share a workspace."""
+        if agent.kind == "none":
+            return ctx.ws
+        if agent.kind in ("docker", "dockerfile") and agent.reuse and ctx.ws:
+            return ctx.ws
+        label = agent.label if agent.kind in ("label", "node", "docker", "dockerfile", "kubernetes") else None
+        custom = agent.pod_workspace if agent.kind == "kubernetes" else agent.custom_workspace
+        return self.new_ws(agent.kind, agent.line, label, custom, how=f"the agent directive at line {agent.line}")
+
+    def context_ws(self, ctx: Ctx, line: int, how: str, kind: str = "context") -> Ctx:
+        """Code whose workspace is the caller's and the caller is not in this file (a method nothing here calls,
+        a closure where it is written, the body of a step whose code the checker does not have): one workspace
+        of its own, shared by everything in it. Inside a known workspace it stays there."""
+        if ctx.ws:
+            return ctx
+        return replace(ctx, ws=self.new_ws(kind, line, how=how))
 
     def build(self, tree: Block) -> Pipeline:
         # Methods may be defined below their first use; collect the top-level ones first. A method the
@@ -1403,12 +1516,15 @@ class Builder:
             self.p.nonliteral_names.update(p for p in stmt.params if isinstance(p, str))
             # A method nothing in this file calls (a shared-library step, `call()` in vars/) can be
             # called from any stage, so whether change requests reach it is unknown.
-            self.block(stmt.body, replace(ctx, in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line,
+            self.block(stmt.body, replace(self.context_ws(ctx, stmt.line, f"method {stmt.name}() at line {stmt.line}, "
+                                                          "which nothing in this file calls"),
+                                          in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line,
                                           stage=ctx.stage + (f"{stmt.name}()",)))
         elif isinstance(stmt, ClassDef):
             self.p.local_names.add(stmt.name)
             self.p.opaque.append((stmt.line, f"class {stmt.name}"))
-            self.block(stmt.body, replace(ctx, in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line))
+            self.block(stmt.body, replace(self.context_ws(ctx, stmt.line, f"class {stmt.name} at line {stmt.line}"),
+                                          in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line))
         elif isinstance(stmt, Annotated):
             if stmt.annotation in ("Library", "groovy.lang.Library"):
                 self.annotation_libraries(stmt)
@@ -1523,7 +1639,9 @@ class Builder:
             elif isinstance(n, Closure):
                 self.p.local_names.update(p for p in n.params if isinstance(p, str))
                 self.p.nonliteral_names.update(p for p in n.params if isinstance(p, str))
-                self.block(n.body, ctx)
+                # Where a closure is written is not where it runs: outside a workspace it gets one of its own
+                # (flagship slice 2d.2j); where it is called it is walked again in the caller's.
+                self.block(n.body, self.context_ws(ctx, n.line, f"the closure at line {n.line}", "closure"))
             elif isinstance(n, ListLit):
                 stack += reversed(n.items)
             elif isinstance(n, MapLit):
@@ -1715,12 +1833,52 @@ class Builder:
             self.stage(call, ctx)
             return
         if name == "node" and call.closure is not None:
-            label = literal(first_arg(call)) or literal(named_arg(call, "label"))
-            dynamic = first_arg(call) is not None and label is None
+            arg = first_arg(call) if call.args else named_arg(call, "label")
+            label = literal(arg) if not (isinstance(arg, Str) and arg.interpolated) else None
+            if label is None and isinstance(arg, Name) and arg.name in self.p.literals and \
+                    arg.name not in self.p.nonliteral_names:
+                label = self.p.literals[arg.name].text()     # def where = 'built-in'; node(where) (2d.2j)
+            dynamic = arg is not None and label is None
+            # node(POD_LABEL) inside podTemplate is the pod itself (flagship slice 2d.2j): its steps run in the
+            # pod the template describes, so they stay under it, in a workspace of that pod.
+            # Any label the file does not fix there is read as the pod's (`POD_LABEL`, "${POD_LABEL}", the
+            # template's own label variable); a literal is the pod's only when it is the template's label.
+            pod_label = path_of(arg) in ("POD_LABEL", "env.POD_LABEL") or (
+                isinstance(arg, Str) and arg.interpolated and arg.text().strip() in (
+                    "${POD_LABEL}", "${env.POD_LABEL}", "$POD_LABEL"))
+            template = ctx.agent if ctx.agent is not None and ctx.agent.kind == "kubernetes" else None
+            same = False
+            if template is not None:
+                # The template's label, as the file writes it: the same text ("ci-${env.BUILD_NUMBER}" in both),
+                # the same variable, or the literal that variable holds (the fourth review of 2d.2j).
+                held = (self.p.literals[template.label_ref].text() if template.label_ref in self.p.literals
+                        and template.label_ref not in self.p.nonliteral_names else None)
+                same = bool((label and label in (template.label, held)) or (
+                    template.label_ref and path_of(arg) == template.label_ref) or (
+                    template.label_text and text_of(arg) == template.label_text))
+            pod = template if template is not None and (pod_label or same) else None
+            if pod is not None:
+                wid = self.new_ws("kubernetes", call.line, pod.label, pod.pod_workspace,
+                                  how=f"node() at line {call.line}, in the pod of podTemplate at line {pod.line}")
+                self.block(call.closure, replace(ctx, ws=wid))
+                return
             agent = Agent(kind="node" if (label or dynamic) else "any", label=label or (
                 "${dynamic}" if dynamic else None), line=call.line)
             self.p.agents.append((agent, ctx))
-            self.block(call.closure, replace(ctx, agent=agent))
+            wid = self.new_ws(agent.kind, call.line, agent.label, how=f"node() at line {call.line}")
+            self.block(call.closure, replace(ctx, agent=agent, ws=wid))
+            return
+        if name == "ws" and call.closure is not None and name not in self.defs:
+            # ws() is another directory on the node the step is on (flagship slice 2d.2j).
+            path = first_arg(call) if call.args else named_arg(call, "dir")
+            machine = self.p.workspaces[ctx.ws].machine if ctx.ws else None
+            wid = self.new_ws("ws", call.line, custom=literal(path) or "?", machine=machine,
+                              how=f"ws() at line {call.line}")
+            self.record_step(name, call, ctx)
+            for arg in list(call.args) + [v for _, v in call.named]:
+                if isinstance(arg, (Call, Closure, ListLit, MapLit)):
+                    self.expr(arg, ctx)
+            self.block(call.closure, replace(ctx, ws=wid))
             return
         if name in ("podTemplate",):
             agent = Agent(kind="kubernetes", line=call.line)
@@ -1824,11 +1982,17 @@ class Builder:
                 self.expr(value, ctx)
         if call.closure is not None:
             inner = ctx
+            if not ctx.ws and name not in known.KNOWN_STEPS and name.split(".")[0] not in known.KNOWN_OBJECTS:
+                # A step whose code is not in this file may allocate a node for its body (flagship slice 2d.2j).
+                inner = self.context_ws(inner, call.line, f"the body of {name or 'a call'}() at line {call.line}, "
+                                        "whose code is not in this file")
             new = bindings_of(call, name, ctx_origin=f"{name}()")
             if new:
                 inner = replace(inner, creds=inner.creds + tuple(new))
             if name in ("catchError", "warnError"):
                 inner = replace(inner, swallowed=f"{name} (line {call.line})")
+            if name in ("retry", "waitUntil"):
+                inner = replace(inner, repeats=inner.repeats + (f"{name} {call.line}",))
             if name == "withEnv":
                 for arg in call.args:
                     for s in all_strings(arg):
@@ -2018,7 +2182,11 @@ class Builder:
             agent = self.agent(agent_call)
             if agent is not None:
                 self.p.agents.append((agent, ctx))
-                ctx = replace(ctx, agent=agent)
+                # `agent none` on a stage allocates nothing: its steps stay on the enclosing agent, in its
+                # container and workspace (flagship slice 2d.2j; before, they lost the agent they run on).
+                if agent.kind != "none" or ctx.agent is None:
+                    ctx = replace(ctx, agent=agent)
+                ctx = replace(ctx, ws=self.agent_ws(agent, ctx))
         for w in secs.get("when", []):
             if w.closure is not None:
                 ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line,
@@ -2033,6 +2201,8 @@ class Builder:
                     new = bindings_of(e, oname, ctx_origin=f"{origin} options")
                     if new:
                         ctx = replace(ctx, creds=ctx.creds + tuple(new))
+                    if oname == "retry":       # options { retry(3) } runs the whole stage again (2d.2j)
+                        ctx = replace(ctx, repeats=ctx.repeats + (f"retry {e.line}",))
         for inp in secs.get("input", []):
             sub = None
             if inp.closure is not None:

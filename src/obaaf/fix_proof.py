@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 
 import yaml
@@ -81,8 +82,31 @@ def _relative(root: Path, path: Path) -> Path:
     return relative
 
 
-def _run(root, options, today, catalog):
+def check_inputs(root, options, today, catalog):
+    """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
+    if not target.exists():
+        raise ProofError(f"check path does not exist: {options.path}")
+    try:
+        return _read_inputs(root, target, options, today, catalog)
+    except (baseline.BaselineError, checker.ConfigError, ProofError) as exc:
+        raise ProofError(_input_message(root, exc)) from exc
+
+
+def _input_message(root, error):
+    # Both the source and the temporary tree have the same repository-relative paths, so a path
+    # under either is shown from the repository's top folder ("./..."). The top folder itself is
+    # ".", wherever the message names it and not only at its start: a config error for two
+    # competing configs, and a directory given as --config or --baseline (`--baseline .`) whose
+    # error names the copy's folder (added by the review, review-gpt #320). The root counts only
+    # where no path character (a letter, digit, `.`, `-` or `~`) touches it, so a longer name that
+    # begins or ends with its text is left alone; a `.` that ends a sentence does not touch it.
+    pattern = (r"(?<![\w.~-])" + re.escape(str(root))
+               + "(?:(" + re.escape(os.sep) + r")|(?![\w~-]|\.\w))")
+    return re.sub(pattern, lambda m: "./" if m.group(1) else ".", str(error))
+
+
+def _read_inputs(root, target, options, today, catalog):
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
     config = checker.Config.load(base, str(root / options.config) if options.config is not None else None)
@@ -106,6 +130,15 @@ def _equivalent_notes(source, copy, git):
               "was not used (it is not the top of a git work tree); these folders were not entered: ")
     advisory = [n for n in copy if n.startswith(prefix) and n.endswith(". A Jenkinsfile in them was not read.")]
     return git and len(advisory) == 1 and source == [n for n in copy if n != advisory[0]]
+
+
+def check_copy_matches(root, original, before):
+    """Before planning or proving, make sure the copy sees the same input and results."""
+    if (original.files != before.files or original.findings != before.findings
+            or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
+            or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
+            or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
+        raise ProofError("checker results on the source and unedited copy differ")
 
 
 def _rows(findings):
@@ -181,6 +214,43 @@ STRUCTURE_LIMIT = 500_000
 DOCUMENT_SUFFIXES = (".yml", ".yaml", ".json")
 
 
+class _JsonNumber(str):
+    """Keep the numeric token distinct from a JSON string and avoid float rounding."""
+
+
+def _invalid_json_constant(token):
+    raise ValueError(f"{token} is not a JSON number")
+
+
+def _same_file(a, b) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _reader(path: Path, baseline_file, config_file) -> str:
+    """Read a file as the checker does: the baseline as JSON and the configuration it read as
+    YAML, whatever their names and through any link, and any other file by its suffix.
+    Choosing by suffix alone let a configuration named `.json`, which the checker reads as
+    YAML, be compared as JSON, where some text decodes differently; comparing names alone
+    missed a configuration or baseline reached through a link (review of #316)."""
+    if baseline_file is not None and _same_file(path, baseline_file):
+        return "json"
+    if config_file is not None and _same_file(path, config_file):
+        return "yaml"
+    return "json" if path.suffix.lower() == ".json" else "yaml"
+
+
+def _document(data: bytes, reader: str):
+    text = data.decode("utf-8")
+    if reader == "json":
+        return json.loads(text, object_pairs_hook=baseline._no_duplicates,
+                          parse_int=_JsonNumber, parse_float=_JsonNumber,
+                          parse_constant=_invalid_json_constant)
+    return yamlutil.load(text)
+
+
 def _structure(value, path, allowed, budget=None):
     """Compare typed contents while omitting only the keys the candidate named."""
     if budget is None:
@@ -220,7 +290,7 @@ def _names_node(doc, key) -> bool:
     return True
 
 
-def _apply(dest, edits, expected):
+def _apply(dest, edits, expected, baseline_file=None, config_file=None):
     touched = set()
     for edit in edits:
         rel = Path(edit.path)
@@ -237,8 +307,9 @@ def _apply(dest, edits, expected):
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
-        old = yamlutil.load(edit.before.decode("utf-8"))
-        new = yamlutil.load(edit.after.decode("utf-8"))
+        reader = _reader(path, baseline_file, config_file)
+        old = _document(edit.before, reader)
+        new = _document(edit.after, reader)
         if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
             raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
         # A declared key must name something: one that names nothing would let the comparison
@@ -301,7 +372,7 @@ def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
     try:
         globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
     except checker.ConfigError as exc:
-        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
+        raise ProofError(f"the repository's own configuration could not be read: {_input_message(root, exc)}") from exc
     for edit in edits:
         rel = _relative(root, Path(edit.path))
         path = root / rel
@@ -331,17 +402,21 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
         today = date.today()
         catalog = load()
         with private_copy(root) as dest:
-            before = _run(dest, options, today, catalog)
-            original = _run(root, options, today, catalog)
-            if (original.files != before.files or original.findings != before.findings
-                    or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
-                    or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
-                    or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
-                raise ProofError("checker results on the source and unedited copy differ")
+            before = check_inputs(dest, options, today, catalog)
+            original = check_inputs(root, options, today, catalog)
+            check_copy_matches(root, original, before)
             expected_files = _manifest(dest)
             _read_as_jenkins(dest, options, before, edits)
-            _apply(dest, edits, expected_files)
-            after = _run(dest, options, today, catalog)
+            # The files the checker read in each role on the copy, before any edit is written.
+            _apply(dest, edits, expected_files,
+                   dest / options.baseline if options.baseline is not None else None,
+                   before.config.path)
+            try:
+                after = check_inputs(dest, options, today, catalog)
+            except ProofError as exc:
+                # The edit made the file unusable; the user's own file is still as it was
+                # (added by the review, review-gpt #320).
+                raise ProofError(f"after the proposed edit: {exc}") from exc
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
             if expected_files != _manifest(dest):
@@ -362,6 +437,13 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                     expected[promise.identity, promise.severity, ACCEPTED] += 1
                 elif promise.outcome != "gone" or promise.approval is not None:
                     raise ProofError("unknown or invalid promised finding transition")
+            losses = (_rows(f for f in before.findings if f.state == ACCEPTED)
+                      - _rows(f for f in after.findings if f.state == ACCEPTED))
+            promised_gone = Counter((p.identity, p.severity, p.previous) for p in promises
+                                    if p.outcome == "gone" and p.previous == ACCEPTED)
+            missing = sum((losses - promised_gone).values())
+            if missing:
+                raise ProofError(f"{missing} previously accepted finding(s) would lose their acceptance")
             if _rows(after.findings) != +expected:
                 raise ProofError("finding changes differ from the promised identities, severities or states")
             if _approvals(after.findings) - _approvals(before.findings) != approved:

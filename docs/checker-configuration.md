@@ -551,7 +551,7 @@ obaaf baseline migrate .github/obaaf-baseline.json \
   --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 ```
 
-`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
+`migrate` runs the check on the path you give after the file name (the current directory if you give none; use the path the baseline was written for), carries over the findings the old file covers that are still found and that a new baseline entry may accept, and gives them the owner, reason and date you state. It accepts nothing the old file did not cover, and tells you which old entries no longer match and how many findings are outside the baseline. It names each match it does not carry over and why: a finding no entry can accept (OBAAF-REPO-001 for a file that decides what the check accepts and has no code owner), a finding waiting on an ignore entry that has expired or is not valid, and, as a count, findings a valid ignore entry accepts. Among the findings outside the baseline it names those no entry can accept and those waiting on an ignore entry. When it can carry over no match and leaves at least one open, it writes nothing and exits 1. It replaces the file in place unless you give `--output`. Convert with the first version that has this command: an old entry matches on the exact wording of its finding, and later versions may word messages differently.
 
 <a id="ignore"></a>
 ## When a finding does not apply
@@ -587,11 +587,10 @@ Do not use an ignore entry merely to obtain a green check.
 
 ## Trying unreleased checker changes
 
-A release on PyPI does not contain changes merged after it; the changelog's
-"Unreleased" section lists them. Everything described on this page is in version
-0.3.0, except the states of a finding, the owner, reason and expiry date that an
-acceptance needs, and `obaaf baseline migrate`, which are not released yet. Use a separate environment and install a reviewed, full Git commit SHA
-when piloting unreleased code:
+If you installed OBAAF 0.3.0 from PyPI, use the [checker guide for v0.3.0](https://github.com/Obaaf/OBAAF/blob/v0.3.0/docs/checker-configuration.md).
+The [unreleased changelog](../CHANGELOG.md#unreleased) lists changes since that release,
+including the finding lifecycle, acceptance metadata and legacy baseline migration.
+To try those changes, install a reviewed commit in a separate environment:
 
 ```bash
 python -m pip install "obaaf @ git+https://github.com/Obaaf/OBAAF.git@<reviewed-full-commit-sha>"
@@ -600,9 +599,10 @@ obaaf check . --fail-on never
 obaaf check . --fail-on authority:medium
 ```
 
-Replace the placeholder with an actual reviewed commit. A source install reports
-the version of the last release until the version is changed, so record the source
-SHA as well as the version.
+Replace the placeholder with the full SHA of the reviewed commit. Record that SHA
+and the output of `obaaf --version`. Several commits can report the same development
+version, such as `0.4.0.dev0`. When using templates bundled with a development
+build, pass the commit you installed to `obaaf templates install --obaaf-sha`.
 For GitHub Actions, `Obaaf/OBAAF/actions/setup-obaaf@<reviewed-full-commit-sha>`
 installs that exact checkout using its dependency constraints. A new PyPI release
 is a separate maintainer action after validation.

@@ -39,6 +39,39 @@ class FixProofTest(unittest.TestCase):
         self.assertNotIn(self.finding.rule, [f.rule for f in result.findings])
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
+    def test_missing_check_target_names_the_selected_path(self):
+        options = dataclasses.replace(self.options, path=Path("missing/CI.yml"))
+        with self.assertRaisesRegex(ProofError, "^check path does not exist: missing/CI[.]yml$"):
+            prove(self.root, options, (self.edit,), (self.promise,))
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
+    def test_unreadable_default_config_names_its_source_with_an_explicit_config(self):
+        default = self.root / ".github/obaaf.yml"
+        default.write_text("[one]")
+        (self.root / "team.yml").write_text("{}")
+        options = dataclasses.replace(self.options, config=Path("team.yml"))
+        with self.assertRaises(ProofError) as refused:
+            prove(self.root, options, (self.edit,), (self.promise,))
+        self.assertIn("./.github/obaaf.yml: expected a mapping", str(refused.exception))
+        self.assertNotIn("obaaf-proof-", str(refused.exception))
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
+    def test_a_refusal_the_edit_causes_says_so_and_names_the_repository_file(self):
+        # Review of #320: the edit, not the user's file, made the configuration unusable.
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        config = Path("policy.json")
+        text = (f"ignore:\n  - rule: {self.finding.rule}\n    path: '{self.finding.path}'\n"
+                f"    reason: reviewed\n    until: '{expiry}'\n").encode()
+        (self.root / config).write_bytes(text)
+        options = dataclasses.replace(self.options, config=config)
+        edit = Edit(config, text, text.replace(expiry.encode(), b"soon"), (("ignore", 0, "until"),))
+        with self.assertRaises(ProofError) as refused:
+            prove(self.root, options, (edit,), (self.promise,))
+        message = str(refused.exception)
+        self.assertTrue(message.startswith("after the proposed edit: ./policy.json: "), message)
+        self.assertNotIn("obaaf-proof-", message)
+        self.assertEqual((self.root / config).read_bytes(), text)
+
     def test_withholds_unpromised_and_duplicate_promises(self):
         for promises in ((), (self.promise, self.promise)):
             with self.subTest(promises=promises), self.assertRaises(ProofError):
@@ -52,13 +85,13 @@ class FixProofTest(unittest.TestCase):
         self.assertEqual((self.root / self.file).read_bytes(), self.old)
 
     def test_unexpected_file_change_during_check_is_detected(self):
-        run = fix_proof._run
+        run = fix_proof.check_inputs
         def recording(root, *args):
             result = run(root, *args)
             if root != self.root and (root / self.file).read_bytes() != self.old:
                 (root / "unexpected").write_bytes(b"some other writer")
             return result
-        with patch.object(fix_proof, "_run", recording), self.assertRaisesRegex(ProofError, "outside"):
+        with patch.object(fix_proof, "check_inputs", recording), self.assertRaisesRegex(ProofError, "outside"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
 
     def test_explicit_config_baseline_and_gate_are_used_for_acceptance(self):
@@ -142,6 +175,92 @@ class FixProofReviewTest(unittest.TestCase):
 
     setUp = FixProofTest.setUp
 
+    def test_json_compares_decoded_strings_and_exact_numbers(self):
+        path = Path("metadata.JSON")
+        for before_value, after_value in (
+                ('"line one\u0085line two"', '"line one line two"'),
+                ("1.00000000000000001", "1.00000000000000002"),
+                ('"1e3"', "1e3"), ("-0", "0")):
+            with self.subTest(before_value=before_value):
+                before = ('{"name":"one","keep":' + before_value + '}').encode()
+                after = ('{"name":"two","keep":' + after_value + '}').encode()
+                (self.root / path).write_bytes(before)
+                with self.assertRaisesRegex(ProofError, "structure changed"):
+                    prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+                self.assertEqual((self.root / path).read_bytes(), before)
+
+        # Escaped and literal forms of the same Unicode character denote the same JSON string.
+        before = b'{"name":"one","keep":"caf\\u00e9","quantity":1e600}'
+        after = '{"quantity":1e600,"keep":"café","name":"two"}'.encode()
+        (self.root / path).write_bytes(before)
+        prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+
+    def test_json_rejects_ambiguous_or_invalid_documents_on_either_side(self):
+        path = Path("metadata.json")
+        valid = b'{"name":"one"}'
+        for invalid in (b'{"name":"two","na\\u006de":"three"}', b'{name: two}',
+                        b'{"name":NaN}', b'{"name":Infinity}', b'{"name":-Infinity}'):
+            for before, after in ((valid, invalid), (invalid, valid)):
+                with self.subTest(invalid=invalid, invalid_before=before == invalid):
+                    (self.root / path).write_bytes(before)
+                    with self.assertRaises(ProofError):
+                        prove(self.root, self.options, (Edit(path, before, after, (("name",),)),), ())
+                    self.assertEqual((self.root / path).read_bytes(), before)
+
+    def test_a_configuration_named_json_is_compared_as_the_checker_reads_it(self):
+        # From the review of #316: the checker reads a --config of any name as YAML, where
+        # "\ud83d\ude00" is two lone surrogates and a literal emoji is one character.
+        workflow = Path(".github/workflows/build.yml")
+        (self.root / workflow).write_text("name: Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                                          "    steps:\n      - run: echo hi\n")
+        cfg = Path("project.json")
+        before = b'{"agents": {"actions": ["acme/tool-\\ud83d\\ude00"], "commands": ["zzz-one"]}}'
+        after = '{"agents": {"actions": ["acme/tool-\U0001F600"], "commands": ["zzz-two"]}}'.encode()
+        (self.root / cfg).write_bytes(before)
+        options = CheckOptions(path=workflow, config=cfg, platform="github", fail_on="high")
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(cfg, before, after, (("agents", "commands"),)),), ())
+        self.assertEqual((self.root / cfg).read_bytes(), before)
+
+    def test_a_linked_configuration_or_baseline_keeps_its_role(self):
+        # From the second pass of the review of #316: an edit names a link's target, so the role
+        # is found by file identity, not by the name given on the command line.
+        import os
+        workflow = Path(".github/workflows/build.yml")
+        (self.root / workflow).write_text("name: Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                                          "    steps:\n      - run: echo hi\n")
+        cfg = Path("conf.json")
+        before = b'{"agents": {"actions": ["acme/tool-\\ud83d\\ude00"], "commands": ["zzz-one"]}}'
+        after = '{"agents": {"actions": ["acme/tool-\U0001F600"], "commands": ["zzz-two"]}}'.encode()
+        (self.root / cfg).write_bytes(before)
+        os.symlink("conf.json", self.root / "gate.yml")
+        os.symlink("../conf.json", self.root / ".github/obaaf.yml")
+        for config in (Path("gate.yml"), None):
+            with self.subTest(config=config):
+                options = CheckOptions(path=Path("."), config=config, platform="github", fail_on="high")
+                with self.assertRaisesRegex(ProofError, "structure changed"):
+                    prove(self.root, options, (Edit(cfg, before, after, (("agents", "commands"),)),), ())
+
+    def test_a_baseline_named_yaml_is_compared_as_json(self):
+        # From the review of #316: baseline.load reads any name as JSON, where a raw NEL and a
+        # space differ; the YAML reader turns the NEL into a space.
+        f = self.finding
+        valid = baseline.entry_for(f, "@prior", "prior review", (date.today() + timedelta(days=30)).isoformat())
+        stale = dict(valid, path="missing")
+        before = json.dumps({"format": baseline.FORMAT, "tool": "x y", "findings": [valid, stale]}).encode()
+        after = json.dumps({"format": baseline.FORMAT, "tool": "x\u0085y", "findings": [valid]},
+                           ensure_ascii=False).encode()
+        path = Path("accepted.yaml")
+        (self.root / path).write_bytes(before)
+        options = dataclasses.replace(self.options, baseline=path)
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(path, before, after, (), removed=(("findings", 1),)),), ())
+        import os
+        os.symlink("accepted.yaml", self.root / "linked.json")
+        options = dataclasses.replace(self.options, baseline=Path("linked.json"))
+        with self.assertRaisesRegex(ProofError, "structure changed"):
+            prove(self.root, options, (Edit(path, before, after, (), removed=(("findings", 1),)),), ())
+
     def test_an_edit_to_a_file_that_is_not_yaml_or_json_is_withheld(self):
         for name, before, after in (
                 ("scripts/build.sh", b'echo "building # step 1"\n',
@@ -199,7 +318,7 @@ class FixProofReviewTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30)
 
     def test_a_source_change_while_the_proof_runs_is_withheld(self):
-        run = fix_proof._run
+        run = fix_proof.check_inputs
         source = self.root / self.file
 
         def changing(root, *args):
@@ -208,7 +327,7 @@ class FixProofReviewTest(unittest.TestCase):
                 source.write_bytes(self.old + b"# changed while the proof ran\n")
             return result
 
-        with patch.object(fix_proof, "_run", changing), self.assertRaisesRegex(ProofError, "changed while"):
+        with patch.object(fix_proof, "check_inputs", changing), self.assertRaisesRegex(ProofError, "changed while"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
 
     def test_a_jenkinsfile_named_like_yaml_is_withheld(self):
