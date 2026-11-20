@@ -109,6 +109,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
+| D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
@@ -991,6 +992,16 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
 
 **Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
+
+### D-105 Draft confinement for one agent job
+
+**Decision.** Preview one recognisable run step with the egress action at a listed release commit. Check the draft on a private copy and report the target job's control verdicts, including unmet conditions. Leave host selection, job splits and unsupported credential placement to the team.
+
+**Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
+
+**Status.** Proposed, 2026-11-19 (A3a, #281). On 2026-11-19 the shipped catalogue listed no release commit. #248 tracks the proposed listing.
+
+**Amended by the review (review-gpt #283, run `jacksnipe`, 2026-11-20).** The draft names the `env` names the action refuses as the action matches them: exactly, with its reserved names, prefixes and suffixes (`PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest). The checker now reads those reserved names too, at a commit OBAAF lists: the egress control and OBAAF-GHA-005's fifth control are *not met*, because the action refuses to run. Before, the draft printed a verified control for a step the action refuses, and `docs/checker-configuration.md` said reserved names were not read (D-052). No commit is listed, so no verdict changes today. The step is written into the private copy as YAML, so text outside the Basic Multilingual Plane and dates are kept, and the command works out everything before it prints, so a refusal prints only itself. It also names an `env` value written with a line break or NUL, which the action refuses (the checker does not read values), and prints the job with escapes when any text in it holds a character Python does not count as printable.
 
 ### D-106 Checkout credential tightening by kind or candidate name
 

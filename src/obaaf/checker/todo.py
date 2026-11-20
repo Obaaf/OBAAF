@@ -20,7 +20,7 @@ _LEVELS = ("high", "medium", "low", "info")
 def checkout_command(result, candidate=None):
     """Reproduce this check's scope without enabling apply or modifying acceptances."""
     target = str(result.checked or ".")
-    if target.startswith("-"):
+    if target.startswith("-") or target == "egress":
         target = "./" + target
     options = list(map(str, result.options or ()))
     args = ["obaaf", "fix", target, "--tighten", "checkout-credentials", *options]
