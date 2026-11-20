@@ -105,6 +105,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
 | D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
 | D-100 | How init proposes the first agent lanes and secret environments | Proposed |
+| D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
 | D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
 | D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
@@ -944,6 +945,16 @@ If another supported configuration name already exists, init shows any differenc
 **Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs; the review of #273 reproduced that at `6bc5dce` and at `665f15e` (38 proposed, all 19 declared among them). The review added `test_an_environment_on_a_calling_job_is_not_proposed` and `test_a_name_github_refuses_or_a_short_name_says_why`. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
 
 **Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
+### D-101 Companion checks in the first workflow
+
+**Decision.** With `obaaf init --with-scanner NAME` the user can select zizmor, actionlint or poutine, repeating the option for multiple tools. Selection order does not affect the preview. There are no companion steps by default. The existing conflict check applies if the repository already has a different workflow.
+
+**Reason.** Teams can start with one report and add the tools whose checks they want. Pinning the Linux image manifests makes the selected tools identifiable. Reading the checkout with a read-only mount and container networking disabled keeps the scans local after the runner fetches the images.
+
+**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow; each step pulls its image before running it, so a failure to reach Docker or fetch the image fails the step rather than passing as actionlint's finding status. A pull request can change what a scanner reports, because the scanners read its files. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
+
+**Status.** Proposed, 2026-11-19 (3.3b, #84).
 
 ### D-102 Paperwork changes in the fix preview
 
