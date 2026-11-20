@@ -392,10 +392,12 @@ def cmd_baseline_migrate(args) -> int:
     except OSError as exc:
         print(f"error: cannot write the baseline to {out}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    # The findings no entry of the old file named that still count when the check runs, as before this
-    # slice; a finding no entry can accept is among them and named (added by the review, review-gpt #313).
+    # Every finding no entry of the old file named that counts when the check runs; one no entry can
+    # accept, or one waiting on an ignore entry, is named with what to do (added by the review,
+    # review-gpt #313: before, both could go unmentioned while the gate failed on them).
     named = {id(f) for f in matched}
-    others = [f for f in baseline_mod.acceptable(result) if id(f) not in named]
+    others = [f for f in result.findings
+              if not f.suppressed and f.state != baseline_mod.FIXED and id(f) not in named]
     print(f"{out}: {len(covered)} finding(s) carried over, accepted by {made.owner} until {made.expires}.",
           file=sys.stderr)
     if gone:
@@ -410,8 +412,14 @@ def cmd_baseline_migrate(args) -> int:
               "they count when the check runs.", file=sys.stderr)
         for f in others:
             if not acceptance_mod.acceptable(f):
-                print(one_line(f"  among them: {f.rule} {f.path}:{f.line} - {f.message} "
-                               f"({acceptance_mod.UNACCEPTABLE_PROBLEM})."), file=sys.stderr)
+                why = acceptance_mod.UNACCEPTABLE_PROBLEM
+            elif id(f) in ignore_problems or baseline_mod.waiting_on_ignore(f):
+                why = "renew, complete or remove the ignore entry in the configuration"
+                if ignore_problems.get(id(f)):
+                    why += ": " + "; ".join(ignore_problems[id(f)])
+            else:
+                continue
+            print(one_line(f"  among them: {f.rule} {f.path}:{f.line} - {f.message} ({why})."), file=sys.stderr)
     return EXIT_OK
 
 

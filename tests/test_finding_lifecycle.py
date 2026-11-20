@@ -584,6 +584,28 @@ class MigrateTest(unittest.TestCase):
             self.assertEqual(code, 1, out)
             self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
 
+    def test_findings_outside_the_old_file_waiting_on_an_ignore_entry_are_counted_and_named(self):
+        # Second review pass of #313: a finding outside the old file whose ignore entry is not valid
+        # counts at the gate, and the receipt left it out (it did before #313 too).
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            (repo / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-006\n    path: .github/workflows/release.yml\n"
+                f"    reason: {REASON}\n    until: {SOON}\n")
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] not in ("OBAAF-GHA-006", "OBAAF-REPO-001")]
+            old.write_text(json.dumps(data))
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("14 finding(s) carried over", err)
+            self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)
+            self.assertIn("among them: OBAAF-GHA-006", err)
+            self.assertIn("renew, complete or remove the ignore entry in the configuration: it names no owner", err)
+            code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 14 finding(s) accepted by the baseline, 1 new.", out)
+
     def test_entries_an_ignore_entry_accepts_are_counted_and_the_file_converted(self):
         # Review of #313: completing an ignore entry, as the receipt advises, used to leave a file
         # that migration refused ("Nothing was written", no reason) and the gate still asked to convert.
