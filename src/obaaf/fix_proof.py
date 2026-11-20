@@ -264,9 +264,32 @@ def _source_unchanged(root: Path, edits) -> None:
             fd = os.open(root / rel, flags)
         except OSError as exc:
             raise ProofError(f"the source of {str(rel)!r} could not be read again after the proof: {exc}") from exc
-        with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or stream.read() != edit.before:
-                raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
+        try:
+            regular = stat.S_ISREG(os.fstat(fd).st_mode)
+            # One byte more than expected is enough to see a change; never read a grown file whole.
+            now = os.read(fd, len(edit.before) + 1) if regular else b""
+            while regular and len(now) <= len(edit.before):
+                more = os.read(fd, len(edit.before) + 1 - len(now))
+                if not more:
+                    break
+                now += more
+        finally:
+            os.close(fd)
+        if not regular or now != edit.before:
+            raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
+
+
+def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
+    """Withhold an edit to a file the checker reads as a Jenkinsfile. `jenkins.files` can name a file
+    with any suffix, `.yml` included, and Groovy that also parses as a YAML mapping (statement labels)
+    would otherwise be compared as YAML (second review of #274)."""
+    target = root / options.path
+    base = workflow.locate(target)[0] if target.is_dir() else target.parent
+    jenkins = {(base / name).resolve() for name in result.jenkins_files}
+    for edit in edits:
+        rel = _relative(root, Path(edit.path))
+        if (root / rel).resolve() in jenkins:
+            raise ProofError(f"the checker reads {str(rel)!r} as a Jenkinsfile, which the proof does not compare")
 
 
 def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: tuple[Promise, ...]):
@@ -289,6 +312,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                     or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
                 raise ProofError("checker results on the source and unedited copy differ")
             expected_files = _manifest(dest)
+            _read_as_jenkins(dest, options, before, edits)
             _apply(dest, edits, expected_files)
             after = _run(dest, options, today, catalog)
             if before.config.jenkins != after.config.jenkins or after.files != before.files:

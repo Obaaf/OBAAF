@@ -210,3 +210,17 @@ class FixProofReviewTest(unittest.TestCase):
 
         with patch.object(fix_proof, "_run", changing), self.assertRaisesRegex(ProofError, "changed while"):
             prove(self.root, self.options, (self.edit,), (self.promise,))
+
+    def test_a_jenkinsfile_named_like_yaml_is_withheld(self):
+        (self.root / ".github/obaaf.yml").write_text("jenkins:\n  files: [ci/pipeline.yml]\n")
+        (self.root / "ci").mkdir()
+        before = b"a: node { sh 'make # all' }\nb: echo 'one'\n"
+        after = b"a: node { sh 'make # all' }; node { sh 'make deploy-prod' }\nb: echo 'two'\n"
+        (self.root / "ci/pipeline.yml").write_bytes(before)
+        options = CheckOptions(path=Path("."), platform="auto", fail_on="high")
+        self.assertIn("ci/pipeline.yml", checker.check(
+            self.root, platform="auto", config=checker.Config.load(self.root, None)).jenkins_files)
+        edit = Edit(Path("ci/pipeline.yml"), before, after, (("b",),))
+        with self.assertRaisesRegex(ProofError, "as a Jenkinsfile"):
+            prove(self.root, options, (edit,), ())
+        self.assertEqual((self.root / "ci/pipeline.yml").read_bytes(), before)
