@@ -10,7 +10,7 @@ from obaaf.catalog import Catalog
 from obaaf.causes import Cause
 from obaaf.checker import CheckResult, baseline
 from obaaf.checker.rules import ACCEPTED, FIXED
-from obaaf.checker.todo_acceptance import acceptance_cause
+from obaaf.checker.todo_acceptance import acceptance_cause, migration_command, migration_hint
 from obaaf.checker.todo_upgrade import previous_acceptances
 
 
@@ -121,6 +121,9 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
     pins = groups.get("agent-tool-version")
     has_tightening = "checkout-credentials" in groups or (pins and pins.pin_packages)
     prerequisites = tightening_prerequisite(result) if has_tightening else ""
+    if has_tightening and result.baseline_format == baseline.FORMAT_V1 and "acceptance-old-baseline" not in groups:
+        # With no matching old entries there is no migration row to carry the scoped command.
+        prerequisites += " " + migration_hint(migration_command(result))
 
     def priority(group: _Group) -> tuple:
         has_preview = group.cause.id == "checkout-credentials" or bool(group.pin_packages)

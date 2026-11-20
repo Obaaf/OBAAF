@@ -203,6 +203,22 @@ class PinTest(unittest.TestCase):
         self.assertIn("--pin", shlex.split(commands["agent-tool-version"]))
         self.assertIn("--tighten", shlex.split(commands["checkout-credentials"]))
 
+    def test_empty_legacy_baseline_keeps_scoped_migration_guidance_in_json(self):
+        policy = self.root / "former baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": []}))
+        code, out, err = run_cli("check", self.root, "--format", "json", "--baseline", policy,
+                                 "--platform", "github", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        groups = {group["id"]: group for group in json.loads(out)["todo"]}
+        self.assertNotIn("acceptance-old-baseline", groups)
+        pin = groups["agent-tool-version"]
+        self.assertIsNone(pin["command"])
+        command = "obaaf baseline migrate"
+        self.assertIn(command, pin["nextAction"])
+        args = shlex.split(pin["nextAction"][pin["nextAction"].index(command):])
+        self.assertEqual(args[:5], ["obaaf", "baseline", "migrate", str(policy), str(self.root)])
+        self.assertIn("--platform=github", args)
+
     def test_preexisting_unmatched_entries_withhold_commands_and_explain_pin_refusal(self):
         self.write(f"- run: {self.install}\n- run: {self.install}\n- uses: actions/checkout@v4\n")
         finding = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-025")
