@@ -4,10 +4,18 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Init handoff and explicit gate activation
+
+`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and `--apply` writes the proven edit. Pull requests use the target commit’s baseline and configuration. A missing target baseline accepts zero findings.
+
 ### Upgrading from 0.3.0
+
+- **Preview paperwork changes before accepting risk.** `obaaf fix` can propose corrections to lane names and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
+- **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git. The command preserves its permissions and leaves the changes unstaged for review.
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
+- **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
 - **Read the action list in the terminal.** The full text report groups outstanding findings just before its version line. Add `--summary` to a text check (not with `--format json` or `sarif`, `--lanes` or `--write-baseline`) to see the accepted risk and those actions, with any scan, coverage or baseline warnings. The gate uses the same threshold and exit status in either view.
 - **Read the action list in JSON.** The new `todo` array groups outstanding findings and counts the old baseline entries that share a rule, file and job with current work.
 - **The suggested `obaaf baseline migrate` command works for a path that begins with `-`.** It is written `./-name`, which the command reads as a path rather than an option.

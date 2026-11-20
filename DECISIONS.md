@@ -103,6 +103,13 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-095 | Code in another language that runs an agent tool is read by its tokens: an argument list or a command line the checker cannot read is "cannot tell", literal pieces and names given literals are read as their text, and one value in one place of a list is one word | Proposed |
 | D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
 | D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
+| D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
+| D-100 | How init chooses candidate agent jobs and secret environments, and handles existing configuration | Proposed |
+| D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
+| D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
+| D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
+| D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
+| D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 
 ---
 
@@ -908,6 +915,59 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3a, #79).
 
+### D-099 Proving an adoption edit before offering it
+
+**Decision.** Slice A2a (#261) checks the working files against an unedited private copy, applies the candidate to the copy, and reruns the checker for the selected path, configuration, baseline, platform and threshold. Only the promised findings may disappear or become accepted. Each new acceptance must agree with the proposed source, owner, reason and expiry. Other findings retain their severity, state, controls and acceptance. Every remaining baseline and ignore entry must match a finding. The proof compares parsed structures outside the named YAML or JSON keys and checks every copied file's bytes, type and mode against the proposed edit.
+
+**Reason.** A preview promises a specific change to the adopter's gate. The same finding count can hide a lost acceptance, an unrelated finding or a different set of working files.
+
+**Consequence.** A2b will call this proof for its paperwork preview. The preview lists each refused candidate under “Could not be made automatically”, together with the proof's single-line reason. It offers only candidates that pass. A proof needs working directory-descriptor and no-follow support and a writable temporary directory outside Git working trees and the source. The first implementation declines external check inputs, external or absolute links, nested repositories and filesystems, submodules, hard-linked files, special files and a Git index whose instruction list differs from the private copy. It edits existing regular files. A malformed document, unexpected file change, failed check read, missing CI input, changed source bytes, or difference between the original and unedited-copy results also withholds the candidate. For Git working trees, an advisory about folder pruning may appear only on the private copy. The proof checks that the actual CI and Jenkins files, Jenkins coverage and all other notes agree. It declines edits that change Jenkins file selection.
+
+**Status.** Proposed, 2026-11-19 (slice A2a, #261).
+
+### D-100 How init proposes the first agent lanes and secret environments
+
+**Decision.** Slice 3.3 proposes an agent lane when a workflow or its local composite action names a catalogued tool, or a job references a recognized model-provider key. A recognized environment variable bound to a differently named secret also counts. The preview gives the matching tool or key so a team can judge each candidate. A provider health check or perception job can hold the same key as an agent.
+
+For D-089, init proposes a required environment for a secret when every observed use identifies the same literal environment. A missing, computed or differing environment sends the name for review, as does a use in a reusable workflow whose secret might be a caller's parameter. Unnamed or inherited secret access could include any named secret, so its environment also counts when deciding whether each name has one literal environment. GitHub storage and access settings require separate verification.
+
+If another supported configuration name already exists, init shows any differences and stops before creating a second configuration, even when their contents match. A target that already contains the proposed bytes is left in place. Both new files are prepared before either is installed. If installation of the second fails, init removes the first file it just created.
+
+**Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
+
+**Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+
+### D-101 Companion checks in the first workflow
+
+**Decision.** With `obaaf init --with-scanner NAME` the user can select zizmor, actionlint or poutine, repeating the option for multiple tools. Selection order does not affect the preview. There are no companion steps by default. The existing conflict check applies if the repository already has a different workflow.
+
+**Reason.** Teams can start with one report and add the tools whose checks they want. Pinning the Linux image manifests makes the selected tools identifiable. Reading the checkout with a read-only mount and container networking disabled keeps the scans local after the runner fetches the images.
+
+**Consequence.** Ordinary scanner findings are visible in the workflow log. An inability to run a selected tool can fail the workflow. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
+
+**Status.** Proposed, 2026-11-19 (3.3b, #84).
+### D-102 Paperwork changes in the fix preview
+
+**Decision.** `obaaf fix` previews changes to OBAAF’s configuration and an explicitly selected baseline. Completing an ownerless ignore requires an explicit owner. Migrating an old baseline also requires an explicit reason and expiry. The preview names each finding the user would accept and lists each stale entry it would remove. A lane correction needs exactly one matching lane one insertion, deletion, substitution or adjacent transposition away. With a partial check the preview withholds changes whose scope it cannot establish.
+
+**Reason.** An acceptance changes which risk counts at the gate. The user needs to see its owner, reason and expiry before deciding whether to take it. A unique spelling correction can be checked on a copy. Plausible alternatives need a human decision.
+
+**Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
+
+**Status.** Proposed, 2026-11-19 (A2b, #275).
+
+### D-103 Applying the paperwork preview
+
+**Decision.** `obaaf fix --apply` runs the preview again with the supplied check and acceptance options, prints the unified diff, flushes it, and reproves those exact edits on a fresh private copy. Before writing any file it checks every target's original bytes and executable mode against HEAD, the index and the proven working file. Each target must be tracked, clean and an existing regular file. Unrelated local changes can remain. The command leaves the Git index alone and makes no commit.
+
+**Reason.** The adoption design asks for a change an adopter can review as its own commit. Using the same preview and proof keeps both invocations on the same rules. Checking actual contents also covers files on which Git's index has an assume-unchanged flag.
+
+**Consequence.** A directory lock serializes concurrent OBAAF applies. All replacement bytes are prepared before installation. Each original is retained through validation of the complete set. A recoverable failure restores the originals in reverse order. The replacement must preserve ownership, group, permission bits and every extended attribute visible to the process, including Linux POSIX access ACLs. Inherited attributes that the original lacked are removed. The command verifies this before installation and again before releasing the originals. A filesystem that cannot represent the original metadata, or a file with a capability or integrity signature, requires manual editing. It supports ordinary Git text line-ending conversion and declines targets with external filters, working-tree encodings or ident expansion. Repeating apply when the checker offers no further edit succeeds without writing.
+
+The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
+
+**Status.** Proposed, 2026-11-19 (slice A2c, #279).
+
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
 **Decision.** From flagship slice 2d.3b (issue #79), under F-19. (1) `tests/parity/zizmor.yaml` pairs zizmor audits with the OBAAF rules that answer them: `template-injection` with OBAAF-GHA-010, `unpinned-uses` with 008, `excessive-permissions` with 009, `artipacked` with 011, and `cache-poisoning` with 006 and 007 (zizmor 1.32.0's audit also reports `cache-mode: write` on a job a dangerous trigger starts, which is 007's subject). (2) CI's advisory job `zizmor-parity` installs zizmor 1.32.0 with `--require-hashes --only-binary=:all: --no-deps` from `tests/parity/zizmor-requirements.txt`, which holds PyPI's SHA-256 for each of its 12 files and is checked against PyPI on every run; runs it offline, with no configuration, strict collection and the default persona, on two sets: OBAAF's risky workflows, and zizmor's own test workflows for the five audits at its release commit `21bd300`, checked out and never copied into this repository. A case is one file, job and audit zizmor reports, with the steps it names. It is answered when OBAAF reports a mapped rule, in any state but `fixed`, on the same job (anywhere in the file, for a case zizmor puts on no job), and for each step zizmor names, on that step, matched by its place in the job's `steps` (a `parallel` group's steps included) to the step OBAAF's own reader made of the same YAML node; OBAAF-GHA-006's one `restores` finding counts for every step that rule takes to restore a cache, and a finding on the job as a whole answers the job, never a step. The job fails when a case is neither answered nor named under `silent` with a kind (`narrower`, or `gap` with its issue) and a reason; when a `silent` entry names no case, one OBAAF answers, or, for a case OBAAF answers in part, places (`steps`) other than those OBAAF leaves unanswered; when OBAAF could not read a file the comparison needs; when OBAAF-GHA-002, 013 or 019 is not reported on a file where poutine or CodeQL reported their counterpart in landscape.md; and when zizmor's cases, or the SHA-256 of any file they were read from, differ from `tests/parity/zizmor-cases.json`. (3) The ordinary test suite runs the same comparison against the recorded cases for every set whose files are in this repository (today the risky workflows), and fails when one of those files has changed since the cases were recorded. (4) `mikefarah/yq` `cmd` and `Amadevus/pwsh-script` `script` join `script_inputs`, so an outsider's text expanded in either gets OBAAF-GHA-010.
@@ -917,3 +977,15 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
 **Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+
+### D-109 The handoff from init to a gate
+
+**Decision.** A successful first init preview shows the checker’s to-do list with the proposed setup on a private copy. If copying is unavailable, label the current repository’s list and give the reason. Apply checks the actual files. Both end with the corresponding fix-preview command.
+
+Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing at a threshold. Match the complete workflow that init generated, including the exact generated companion steps. Recognize the earlier report-only workflow by its content digest. Show manual instructions for a custom workflow. Prove the precise edit with zero promised finding or acceptance changes and use the existing clean-file writer on apply.
+
+**Consequence.** Select the conventional `.github/obaaf-baseline.json` or name an existing baseline explicitly. If the PR’s target commit lacks that baseline, count every outstanding finding at the threshold. A target policy that cannot be read stops the job. The preview reports how many findings currently count, and creating or changing any acceptance remains an independent decision.
+
+**Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
+
+**Status.** Proposed, 2026-11-19 (A7a, #292).

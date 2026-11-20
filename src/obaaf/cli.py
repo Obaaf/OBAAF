@@ -40,6 +40,18 @@ def _github_output(pairs: dict[str, str]) -> None:
                     handle.write(f"{key}={value}\n")
 
 
+# ------------------------------------------------------------------ fix
+def cmd_fix(args) -> int:
+    from obaaf.fix import run
+    return run(args)
+
+
+# ------------------------------------------------------------------ init
+def cmd_init(args) -> int:
+    from obaaf.init import run
+    return run(args)
+
+
 # ------------------------------------------------------------------ assess
 def cmd_assess_init(args) -> int:
     from obaaf import assess
@@ -767,6 +779,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="obaaf", description="Open Build and Agent Assurance Framework tools.")
     p.add_argument("--version", action="version", version=f"obaaf {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
+
+    # fix
+    parser = sub.add_parser("fix", help="preview or apply proven configuration and baseline corrections")
+    parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
+    parser.add_argument("path", nargs="?", default=".", help="the repository, workflows directory or file to check")
+    parser.add_argument("--config", help="checker configuration used by the gate")
+    parser.add_argument("--baseline", help="baseline used by the gate")
+    parser.add_argument("--platform", choices=("auto", "github", "jenkins"), default="auto")
+    parser.add_argument("--fail-on", help="the gate threshold used for the paperwork proof (default: medium)")
+    parser.add_argument("--gate", choices=("high", "medium", "low"), help="enable a blocking threshold on the generated init workflow")
+    parser.add_argument("--owner", help="owner taking responsibility for the listed acceptances")
+    parser.add_argument("--reason", help="reason for carrying matching legacy acceptances forward")
+    parser.add_argument("--expires", help="expiry for migrated acceptances (YYYY-MM-DD)")
+    parser.set_defaults(func=cmd_fix)
+
+    x = sub.add_parser("init", help="preview a GitHub Actions configuration and report-only workflow")
+    x.add_argument("path", nargs="?", default=".", help="repository directory (default: current directory)")
+    x.add_argument("--apply", action="store_true", help="create both files after reviewing the preview")
+    from obaaf.init_scanners import SCANNERS
+    x.add_argument("--with-scanner", action="append", choices=tuple(SCANNERS), default=[],
+                   help="add a report-only companion scanner (repeat for more than one)")
+    x.set_defaults(func=cmd_init)
 
     # assess
     a = sub.add_parser("assess", help="the self-assessment").add_subparsers(dest="sub", required=True)

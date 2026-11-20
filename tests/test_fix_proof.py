@@ -1,0 +1,137 @@
+"""Offline proof through the real checker with a small ordinary CI workflow."""
+
+import dataclasses
+import json
+from datetime import date, timedelta
+from pathlib import Path
+import subprocess
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from obaaf import checker, fix_proof
+from obaaf.catalog import load
+from obaaf.checker import baseline
+from obaaf.fix_proof import Approval, CheckOptions, Edit, Promise, ProofError, prove
+
+
+class FixProofTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.file = Path(".github/workflows/build.yml")
+        path = self.root / self.file
+        path.parent.mkdir(parents=True)
+        path.write_text("name: Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                        "    steps:\n      - uses: actions/checkout@v4\n")
+        self.old = path.read_bytes()
+        self.edit = Edit(self.file, self.old, self.old.replace(b"@v4", b"@" + b"1" * 40),
+                         (("jobs", "build", "steps", 0, "uses"),))
+        self.options = CheckOptions(path=self.file, platform="github", fail_on="high")
+        result = checker.check(path, platform="github")
+        self.finding = next(f for f in result.findings if f.rule == "OBAAF-GHA-008")
+        self.promise = Promise(baseline.key(self.finding), self.finding.severity, self.finding.state, "gone")
+
+    def test_proves_exact_removal_without_writing_source(self):
+        result = prove(self.root, self.options, (self.edit,), (self.promise,))
+        self.assertNotIn(self.finding.rule, [f.rule for f in result.findings])
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
+    def test_withholds_unpromised_and_duplicate_promises(self):
+        for promises in ((), (self.promise, self.promise)):
+            with self.subTest(promises=promises), self.assertRaises(ProofError):
+                prove(self.root, self.options, (self.edit,), promises)
+
+    def test_withholds_changed_unrelated_key_and_wrong_source_bytes(self):
+        for edit in (dataclasses.replace(self.edit, after=self.edit.after.replace(b"Build", b"other")),
+                     dataclasses.replace(self.edit, before=b"outdated")):
+            with self.subTest(edit=edit), self.assertRaises(ProofError):
+                prove(self.root, self.options, (edit,), (self.promise,))
+        self.assertEqual((self.root / self.file).read_bytes(), self.old)
+
+    def test_unexpected_file_change_during_check_is_detected(self):
+        run = fix_proof.check_inputs
+        def recording(root, *args):
+            result = run(root, *args)
+            if root != self.root and (root / self.file).read_bytes() != self.old:
+                (root / "unexpected").write_bytes(b"some other writer")
+            return result
+        with patch.object(fix_proof, "check_inputs", recording), self.assertRaisesRegex(ProofError, "outside"):
+            prove(self.root, self.options, (self.edit,), (self.promise,))
+
+    def test_explicit_config_baseline_and_gate_are_used_for_acceptance(self):
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        config = Path("project.yml")
+        text = (f"ignore:\n  - rule: {self.finding.rule}\n    path: '{self.finding.path}'\n"
+                f"    reason: reviewed\n    until: '{expiry}'\n").encode()
+        (self.root / config).write_bytes(text)
+        base = Path("accepted.json")
+        (self.root / base).write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        options = dataclasses.replace(self.options, config=config, baseline=base, fail_on="low")
+        edit = Edit(config, text, text + b"    owner: '@team'\n", (("ignore", 0, "owner"),))
+        promise = dataclasses.replace(self.promise, outcome="accepted",
+                                      approval=Approval("ignore", "@team", "reviewed", expiry))
+        result = prove(self.root, options, (edit,), (promise,))
+        for field in ("source", "owner", "reason", "expires"):
+            with self.subTest(field=field), self.assertRaisesRegex(ProofError, "promised"):
+                wrong = dataclasses.replace(promise.approval, **{field: "other"})
+                prove(self.root, options, (edit,), (dataclasses.replace(promise, approval=wrong),))
+        self.assertTrue(result.baseline_used)
+        self.assertNotIn(self.finding.rule, [f.rule for f in result.gating(options.fail_on, load())])
+        self.assertEqual((self.root / config).read_bytes(), text)
+        (self.root / config).write_bytes(edit.after)
+        owner_change = Edit(config, edit.after, edit.after.replace(b"@team", b"@other"),
+                            (("ignore", 0, "owner"),))
+        with self.assertRaisesRegex(ProofError, "acceptance"):
+            prove(self.root, options, (owner_change,), ())
+
+    def test_stale_baseline_or_ignore_withholds_even_at_never_threshold(self):
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        entry = baseline.entry_for(self.finding, "@team", "reviewed", expiry)
+        base = Path("accepted.json")
+        (self.root / base).write_text(json.dumps({"format": baseline.FORMAT, "findings": [entry]}))
+        options = dataclasses.replace(self.options, fail_on="never", baseline=base)
+        promised = dataclasses.replace(self.promise, previous="accepted")
+        with self.assertRaisesRegex(ProofError, "no longer matches"):
+            prove(self.root, options, (self.edit,), (promised,))
+        config = Path("unused.yml")
+        (self.root / config).write_text(f"ignore:\n  - rule: {self.finding.rule}\n    path: absent.yml\n"
+                                       f"    reason: reviewed\n    until: '{expiry}'\n")
+        with self.assertRaisesRegex(ProofError, "no longer matches"):
+            prove(self.root, dataclasses.replace(options, baseline=None, config=config),
+                  (self.edit,), (self.promise,))
+
+    def test_sequence_removal_and_insertion_preserve_every_other_member(self):
+        doc = Path("records.yml")
+        for index in range(3):
+            entries = ["alpha", "beta", "gamma"]
+            original = json.dumps(entries).encode()
+            entries.pop(index)
+            shorter = json.dumps(entries).encode()
+            for before, after, keys in ((original, shorter, {"removed": ((index,),)}),
+                                        (shorter, original, {"added": ((index,),)})):
+                with self.subTest(index=index, keys=keys):
+                    (self.root / doc).write_bytes(before)
+                    edit = Edit(doc, before, after, (), **keys)
+                    prove(self.root, self.options, (edit,), ())
+                    wrong = dataclasses.replace(edit, after=after.replace(b"alpha", b"omega")
+                                                if index != 0 else after.replace(b"beta", b"omega"))
+                    with self.assertRaisesRegex(ProofError, "structure changed"):
+                        prove(self.root, self.options, (wrong,), ())
+
+    @unittest.skipUnless(shutil.which("git"), "requires Git")
+    def test_repository_default_platform_compares_the_actual_jenkins_files(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / "build").mkdir()
+        (self.root / "build/cache").write_text("ordinary build output")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        options = CheckOptions()
+        result = checker.check(self.root)
+        finding = next(f for f in result.findings if f.rule == "OBAAF-GHA-008")
+        promise = Promise(baseline.key(finding), finding.severity, finding.state, "gone")
+        prove(self.root, options, (self.edit,), (promise,))
+        (self.root / "build/Jenkinsfile").write_text("pipeline { agent any }")
+        with self.assertRaises(ProofError):
+            prove(self.root, options, (self.edit,), (promise,))
