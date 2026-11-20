@@ -17,6 +17,7 @@ import yaml
 from obaaf import checker, yamlutil
 from obaaf.catalog import load
 from obaaf.checker import baseline, workflow
+from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.fix_copy import private_copy
 
@@ -170,15 +171,53 @@ def _raise(exc):
     raise exc
 
 
-def _structure(value, path, allowed):
+# The most values one comparison of a document may visit. Aliases are expanded where they are used,
+# so a small file can stand for millions of values; past this the candidate is withheld (the same
+# limit as the checker's for a workflow file, D-098). Found by the review of #274.
+STRUCTURE_LIMIT = 500_000
+
+# Only these documents are compared by structure. A file of any other kind parsed as YAML loses
+# everything after " #" as a comment, so a changed shell line could compare equal (review of #274).
+DOCUMENT_SUFFIXES = (".yml", ".yaml", ".json")
+
+
+def _structure(value, path, allowed, budget=None):
     """Compare typed contents while omitting only the keys the candidate named."""
+    if budget is None:
+        budget = [STRUCTURE_LIMIT]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise ProofError(f"the document holds more than {STRUCTURE_LIMIT:,} values once its aliases are expanded")
     if isinstance(value, dict):
-        return ("map", frozenset(((type(k), k), _structure(v, path + ((type(k), k),), allowed))
+        return ("map", frozenset(((type(k), k), _structure(v, path + ((type(k), k),), allowed, budget))
                                  for k, v in value.items() if path + ((type(k), k),) not in allowed))
     if isinstance(value, list):
-        return ("sequence", tuple(_structure(v, path + ((int, i),), allowed)
+        return ("sequence", tuple(_structure(v, path + ((int, i),), allowed, budget)
                                   for i, v in enumerate(value) if path + ((int, i),) not in allowed))
+    try:
+        hash(value)
+    except TypeError:
+        raise ProofError(f"the document holds a value of a kind the proof does not compare "
+                         f"({type(value).__name__})") from None
     return type(value), value
+
+
+def _names_node(doc, key) -> bool:
+    """Whether `key`, a path of mapping keys and sequence indexes, names a node of `doc`."""
+    node = doc
+    for part in key:
+        if isinstance(node, dict):
+            match = [k for k in node if type(k) is type(part) and k == part]
+            if not match:
+                return False
+            node = node[match[0]]
+        elif isinstance(node, list) and type(part) is int:
+            if not 0 <= part < len(node):
+                return False
+            node = node[part]
+        else:
+            return False
+    return True
 
 
 def _apply(dest, edits, expected):
@@ -193,16 +232,91 @@ def _apply(dest, edits, expected):
         declared = edit.keys + edit.removed + edit.added
         if edit.before == edit.after or not declared or any(not p for p in declared):
             raise ProofError(f"edit needs changed bytes and named keys at {str(rel)!r}")
+        if rel.suffix.lower() not in DOCUMENT_SUFFIXES:
+            raise ProofError(f"the proof compares only YAML or JSON documents, not {str(rel)!r}")
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
         old = yamlutil.load(edit.before.decode("utf-8"))
         new = yamlutil.load(edit.after.decode("utf-8"))
+        if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
+            raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
+        # A declared key must name something: one that names nothing would let the comparison
+        # vouch for an edit it never looked at (review of #274).
+        if (any(not (_names_node(old, k) or _names_node(new, k)) for k in edit.keys)
+                or any(not _names_node(old, k) for k in edit.removed)
+                or any(not _names_node(new, k) for k in edit.added)):
+            raise ProofError(f"a declared key names nothing in {str(rel)!r}")
         if _structure(old, (), allowed | removed) != _structure(new, (), allowed | added):
             raise ProofError(f"structure changed outside the intended keys in {str(rel)!r}")
         path.write_bytes(edit.after)
         touched.add(rel)
         expected[rel] = expected[rel][0], hashlib.sha256(edit.after).digest()
+
+
+def _source_unchanged(root: Path, edits) -> None:
+    """Read each edited file from the source again, last, without following a link at its name.
+    The copy was compared with `before` when it was made; the source can change while the checker
+    runs, and a change that moves no finding would otherwise go unseen (review of #274)."""
+    for edit in edits:
+        rel = _relative(root, Path(edit.path))
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(root / rel, flags)
+        except OSError as exc:
+            raise ProofError(f"the source of {str(rel)!r} could not be read again after the proof: {exc}") from exc
+        try:
+            regular = stat.S_ISREG(os.fstat(fd).st_mode)
+            # One byte more than expected is enough to see a change; never read a grown file whole.
+            now = os.read(fd, len(edit.before) + 1) if regular else b""
+            while regular and len(now) <= len(edit.before):
+                more = os.read(fd, len(edit.before) + 1 - len(now))
+                if not more:
+                    break
+                now += more
+        finally:
+            os.close(fd)
+        if not regular or now != edit.before:
+            raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
+
+
+def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
+    """Withhold an edit to a file that is, or that the repository says is, a Jenkinsfile.
+    `jenkins.files` can name a file with any suffix, `.yml` included, and Groovy that also parses as a
+    YAML mapping (statement labels) would otherwise be compared as YAML. Decided from the repository,
+    not only from what this run's platform and path let the checker read, and by file identity, so
+    a link or another spelling of the name is the same file (second and third reviews of #274).
+    It uses the Jenkins reader's own name pattern (without its suffix exclusion) and glob match,
+    which are private to that module, so that the two cannot drift apart."""
+    target = root / options.path
+    base = workflow.locate(target)[0] if target.is_dir() else target.parent
+    read = set()
+    for name in result.jenkins_files:
+        try:
+            info = (base / name).stat()
+        except OSError:
+            continue
+        read.add((info.st_dev, info.st_ino))
+    globs = [str(g) for g in (result.config.jenkins.get("files") or [])]
+    try:
+        globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
+    except checker.ConfigError as exc:
+        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
+    for edit in edits:
+        rel = _relative(root, Path(edit.path))
+        path = root / rel
+        info = path.stat()
+        names = {rel.as_posix()}
+        for start in (root, base):
+            try:
+                names.add(path.resolve().relative_to(start.resolve()).as_posix())
+            except ValueError:
+                pass
+        folded = {n.casefold() for n in names}
+        if ((info.st_dev, info.st_ino) in read or jenkins_mod._NAME.match(rel.name)
+                or any(jenkins_mod._glob_match(n, g.casefold()) for n in folded for g in globs)):
+            raise ProofError(f"{str(rel)!r} is a Jenkinsfile, or the repository names it as one, "
+                             "and the proof does not compare Jenkinsfiles")
 
 
 def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: tuple[Promise, ...]):
@@ -225,6 +339,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                     or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
                 raise ProofError("checker results on the source and unedited copy differ")
             expected_files = _manifest(dest)
+            _read_as_jenkins(dest, options, before, edits)
             _apply(dest, edits, expected_files)
             after = _run(dest, options, today, catalog)
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
@@ -262,6 +377,7 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                 raise ProofError("a finding newly counts at the selected gate")
             if after.baseline_stale or _stale_ignore(after):
                 raise ProofError("a baseline or ignore entry no longer matches a finding")
+            _source_unchanged(root, edits)
             return after
     except ProofError:
         raise
