@@ -2996,6 +2996,11 @@ class WorkflowRules:
                 place.problems.append(f"{where} names {name} under env, and the action at a listed commit removes "
                                       "every OPENSSL_ variable from its own steps before it reads env (slice 2c.11a), "
                                       "so it finds the name unset and refuses to run (issue #197)")
+            elif listed and egress_mod.reserved_under_env(name):
+                # Known only for a listed commit, as above (added by the review of A3a, review-gpt #283).
+                place.problems.append(f"{where} names {name} under env, a name the action at a listed commit "
+                                      "sets, withholds or reads as AWF's own configuration, so the action "
+                                      "refuses to run")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]

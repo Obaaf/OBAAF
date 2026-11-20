@@ -84,6 +84,8 @@ Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs`
 
 Once a release commit is listed, the command can draft a recognised agent run step and show the control verdicts from a private copy. If multiple workflows use the same job ID, supply the workflow file as the path. The draft requires manual review. Replace the reserved host placeholder with the hosts the command needs, taking into account that each host also permits its subdomains. After adopting the draft, the action’s `denied` output identifies other hosts the command tried to reach.
 
+Because `obaaf fix egress` selects this command, write a repository folder named `egress` as `./egress` in other `obaaf fix` commands. The commands OBAAF prints already do.
+
 ### What can turn a passing gate red
 
 | What you have | What happens | What to do |

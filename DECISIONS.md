@@ -999,6 +999,8 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Status.** Proposed, 2026-11-19 (A3a, #281). On 2026-11-19 the shipped catalogue listed no release commit. #248 tracks the proposed listing.
 
+**Amended by the review (review-gpt #283, run `jacksnipe`, 2026-11-20).** The draft names the `env` names the action refuses as the action matches them: exactly, with its reserved names, prefixes and suffixes (`PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest). The checker now reads those reserved names too, at a commit OBAAF lists: the egress control and OBAAF-GHA-005's fifth control are *not met*, because the action refuses to run. Before, the draft printed a verified control for a step the action refuses, and `docs/checker-configuration.md` said reserved names were not read (D-052). No commit is listed, so no verdict changes today. The step is written into the private copy as YAML, so text outside the Basic Multilingual Plane and dates are kept, and the command works out everything before it prints, so a refusal prints only itself.
+
 ### D-106 Checkout credential tightening by kind or candidate name
 
 **Decision.** Slice A5a (#285) adds `--tighten checkout-credentials` to `obaaf fix`. The checker must report OBAAF-GHA-011 on a uniquely identifiable checkout step written in the workflow. The proposed edit sets the action input to the YAML boolean `false`. The preview names each occurrence with its repository-relative workflow path, job and one-based index in the job's steps. `--candidate NAME` requests just that occurrence. An explicit tightening request leaves paperwork and its acceptance metadata out of the plan.

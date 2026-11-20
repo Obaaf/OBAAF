@@ -57,6 +57,32 @@ WITHHELD_BY_AWF = frozenset({
     "GITHUB_API_TOKEN", "GITHUB_PAT", "GH_ACCESS_TOKEN",
 })
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# RESERVED_NAMES, RESERVED_PREFIXES and RESERVED_SUFFIXES: names the action refuses under `env` because
+# it sets or withholds them on purpose, or because AWF reads them as its own configuration (egress.py's
+# `parse_env_names`, at the floor). Matched exactly, as the action matches them. Added by the review of
+# A3a (review-gpt #283): before it, the checker verified a step that the action refuses to run.
+RESERVED_NAMES = frozenset({
+    "PATH", "HOME", "TMPDIR", "SHELL", "BASH_ENV", "ENV", "IFS", "CDPATH",
+    "LC_ALL", "TZ",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP",
+    "PYTHONHOME", "NODE_OPTIONS", "PERL5LIB", "PERL5OPT", "RUBYOPT",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH",
+    "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT",
+    "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY", "GITHUB_WORKSPACE", "RUNNER_TEMP",
+})
+RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_", "OTEL_", "FOUNDRY_")
+RESERVED_SUFFIXES = ("_API_TARGET", "_API_BASE_PATH", "_BASE_URL", "_ENDPOINT_OVERRIDE")
+
+
+def reserved_under_env(name: str) -> bool:
+    """Whether the action refuses `name` under its `env` input as a name it sets, withholds or reads as
+    AWF's configuration (`PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest above)."""
+    name = str(name)
+    return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES)
 
 
 def removed_before_inputs(name: str) -> bool:
