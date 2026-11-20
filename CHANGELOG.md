@@ -8,6 +8,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 The wheel includes the templates used by `obaaf templates install`. Give it the repository and full OBAAF commit for the generated workflows. Use `--source` to select your own template directory. The closing instructions identify the CODEOWNERS example for the templates you selected. Release 0.3.0 users can still use the clone instructions in the README. [Issue #142](https://github.com/Obaaf/OBAAF/issues/142)
 
+### Offline settings evidence
+
+`obaaf check --settings FILE` reads an explicitly named audit snapshot and reports its date; a repository scan also checks the snapshot file's code ownership (OBAAF-REPO-001). Evidence older than 30 days or missing required observations stays uncertain. This first increment reports the evidence separately while OBAAF-GHA-005 keeps its existing verdict. The `obaaf-pipeline-check.yml` template passes `.github/obaaf-settings.json` when the repository variable `OBAAF_USE_SETTINGS` is `true`, read from the target branch on a pull request.
+
 ### Checking edits to JSON files
 
 The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
