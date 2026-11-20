@@ -248,6 +248,7 @@ class Word:
     brace: bool = False         # an unquoted `{a,b}` or `{a..b}`
     expr: bool = False          # a `${{ }}` expression
     redirect: bool = False      # the target of a redirection, not an argument
+    redirect_op: str = ""        # that redirection's operator (`>>`, `<>`, ...), for a target
     candidates: list = field(default_factory=list)   # what the word could start with or be, where unknown
     inner: list = field(default_factory=list)        # the scripts of its command substitutions
 
@@ -403,10 +404,11 @@ class _Lexer:
         word: Word | None = None
         start = 0
         redirect_next = False
+        redirect_op = ""
         here_string_next = False
 
         def finish(end: int) -> None:
-            nonlocal word, redirect_next, here_string_next
+            nonlocal word, redirect_next, redirect_op, here_string_next
             if word is not None:
                 word.shown = text[start:end]
                 if here_string_next:
@@ -415,6 +417,7 @@ class _Lexer:
                     redirect_next = False
                 else:
                     word.redirect = redirect_next
+                    word.redirect_op = redirect_op if redirect_next else ""
                     redirect_next = False
                     tokens.append(word)
             word = None
@@ -517,6 +520,7 @@ class _Lexer:
                     continue
                 if op in _REDIRECTS:
                     redirect_next = True
+                    redirect_op = op
                     continue
                 tokens.append(op)
                 continue

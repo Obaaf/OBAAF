@@ -247,6 +247,53 @@ class OtherFileCommandsTest(unittest.TestCase):
             self.assertEqual(of(check(tmp, release(plain + run(VERIFY, "Verify") + UPLOAD)), "OBAAF-GHA-016"), [])
 
 
+class TheThirdReviewTest(unittest.TestCase):
+    """Ways past the third version: `tee`'s own output sent to GITHUB_ENV, `$'...'` in an sh step (dash does
+    not read it and its `echo` reads the backslash), a read-write redirection that writes over an earlier
+    line, a descriptor left open on an output, and a container's `env` and `options`."""
+
+    WAYS = {
+        "tee's output to the env file": 'echo "PATH=/tmp/x:$PATH" | tee -a "$GITHUB_OUTPUT" >> "$GITHUB_ENV"',
+        "tee from a here-string": 'tee "$GITHUB_STEP_SUMMARY" >> "$GITHUB_ENV" <<< "SHELLOPTS=noexec"',
+        "tee with 1>>": 'echo "PATH=/x" | tee -a "$GITHUB_STATE" 1>>"$GITHUB_ENV"',
+        "ANSI-C quotes": "echo V=$'\\0012'PATH=/tmp/x:/usr/bin:/bin >> \"$GITHUB_ENV\"",
+        "ANSI-C quotes between strings": 'echo "V=1"$\'\\0012\'"PATH=/tmp/x" >> "$GITHUB_ENV"',
+        "a read-write redirection": 'echo "VVVVPATH=/tmp/x:/usr/bin:/bin" >> "$GITHUB_ENV"\necho "V=1" 1<> "$GITHUB_ENV"',
+        "printf with a read-write redirection": "printf 'V=%s\\n' 1 1<>\"$GITHUB_ENV\"",
+        "a descriptor left open on an output": 'exec 3>>"$GITHUB_OUTPUT"\nf=$(readlink /proc/self/fd/3)',
+    }
+
+    def test_each_way_past_is_cannot_tell(self):
+        with TempDir() as tmp:
+            for label, script in self.WAYS.items():
+                with self.subTest(label):
+                    self.assertEqual(kinds(check(tmp, before_check(script)), "OBAAF-GHA-016"), CANNOT_TELL)
+            sh = before_check("echo V=$'\\0012'PATH=/x >> \"$GITHUB_ENV\"", extra="        shell: sh\n")
+            self.assertEqual(kinds(check(tmp, sh), "OBAAF-GHA-016"), CANNOT_TELL)
+
+    def test_a_containers_env_or_options_can_change_what_the_check_runs(self):
+        with TempDir() as tmp:
+            for container in ("    container:\n      image: ubuntu:24.04\n      env:\n        PATH: /tmp/evil:/usr/bin\n",
+                              "    container:\n      image: ubuntu:24.04\n      options: -e LD_PRELOAD=/tmp/x.so\n",
+                              "    container:\n      image: ubuntu:24.04\n      options: --env-file x.env\n",
+                              "    container:\n      image: ubuntu:24.04\n      env: ${{ fromJSON(vars.E) }}\n"):
+                with self.subTest(container):
+                    text = release(run(VERIFY, "Verify") + UPLOAD,
+                                   job_extra="    environment: release\n    cache-mode: none\n" + container)
+                    self.assertEqual(kinds(check(tmp, text), "OBAAF-GHA-016"), CANNOT_TELL)
+            plain = release(run(VERIFY, "Verify") + UPLOAD, job_extra="    environment: release\n    cache-mode: none\n"
+                            "    container:\n      image: ubuntu:24.04\n      env:\n        VERSION: '1'\n"
+                            "      options: --cpus 2\n")
+            self.assertEqual(of(check(tmp, plain), "OBAAF-GHA-016"), [])
+
+    def test_tee_and_plain_redirections_that_stay_harmless(self):
+        with TempDir() as tmp:
+            for script in ('echo "## notes" | tee -a "$GITHUB_STEP_SUMMARY" > /dev/null',
+                           'echo "V=1" > "$GITHUB_ENV"', 'echo "V=1" &>> "$GITHUB_ENV"'):
+                with self.subTest(script):
+                    self.assertEqual(of(check(tmp, before_check(script)), "OBAAF-GHA-016"), [])
+
+
 class TheJobsTextTest(unittest.TestCase):
     """A write held in the workflow's or the job's `env`, `defaults` or `strategy` can be run by any step."""
 

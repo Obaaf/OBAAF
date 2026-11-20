@@ -342,6 +342,8 @@ _FILE_TARGET_RE = re.compile(r"\x03\$(?:(GITHUB_[A-Z_]+)|\{(GITHUB_[A-Z_]+)(?::-
 _ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # Words that may begin a command before its name; the lexer gives `then echo ...` as one command.
 _LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+# The redirections that write to GITHUB_ENV from its end, or from its start after emptying it.
+_WRITE_OPS = frozenset({">>", ">", "&>>", "&>", ">|", ">&"})
 # What a write's output may also be sent to beside GITHUB_ENV: a duplicated descriptor (`2>&1`) or nothing.
 _OTHER_TARGETS = frozenset({"/dev/null"})
 # A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
@@ -379,13 +381,16 @@ def _github_env_names(script: str) -> set | None:
     """The names a bash or sh script writes to GITHUB_ENV, or None when the checker cannot read them all
     (flagship slice 2d.13). The script is read with the lexer. A file command's variable (`GITHUB_ENV`,
     `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`, found with `_squeeze`) may
-    appear only as a redirection's target written plainly (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`),
-    or as a file `tee` appends to for an output, the summary or the state; anywhere else (an argument,
+    appear only as a redirection's target written plainly (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`) of
+    a command other than `exec`, or as a file `tee` writes an output, the summary or the state to, its own
+    output sent to no file command; anywhere else (an argument,
     an assignment, `set --`, `for`, `read`, `printf -v`, a name reference, a here-document, a command
     substitution, a parameter expansion that changes it) gives None, because the runner's files sit side
     by side and any of their paths leads to GITHUB_ENV's (the second review of slice 2d.13), and so does
     listing names with `${!GITHUB_E*}` and any write to GITHUB_PATH. A write to GITHUB_ENV is read in two
-    forms (`2>&1` or `/dev/null` may be beside its target): `echo` with words and no option, the name
+    forms, redirected with `>>`, `>`, `&>>`, `&>`, `>|` or `>&` (`<>` writes over what is there, and is
+    refused), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word (dash, Ubuntu's sh, does not read
+    it, and its `echo` reads the backslash): `echo` with words and no option, the name
     before the first `=` (or `<<`, the runner's multi-line form) a plain word written out in the
     script; and `printf` with a literal format that begins with such a name, has `%s` for its only
     conversion and no escape but a line break at its end. Any other write gives None, as does a name put
@@ -419,15 +424,17 @@ def _github_env_names(script: str) -> set | None:
             return None
         targets = {_file_target(w) for w in mentions}
         if words[0].text == "tee" and not words[0].computed and all(
-                w.redirect or w.text in _TEE_OPTIONS or (
-                    not w.redirect and _FILE_TARGET_RE.match(w.text) and
+                (w.redirect and not (_names_file_var(w.text) or _names_file_var(w.shown))) or w.text in _TEE_OPTIONS
+                or (not w.redirect and _FILE_TARGET_RE.match(w.text) and
                     (_FILE_TARGET_RE.match(w.text).group(1) or _FILE_TARGET_RE.match(w.text).group(2))
                     in ("GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"))
                 for w in words[1:]):
-            continue                # `tee -a "$GITHUB_OUTPUT"`
+            continue                # `tee -a "$GITHUB_OUTPUT"`, its own output not sent to a file command
         if None in targets or "GITHUB_PATH" in targets or not targets <= {
                 "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"}:
             return None
+        if words[0].text == "exec":
+            return None             # a descriptor left open on a file command, whose path `/proc` then gives
         if "GITHUB_ENV" not in targets:
             continue                # a write to an output, the summary or the state
         if _ECHO_REPLACED_RE.search(script):
@@ -435,6 +442,13 @@ def _github_env_names(script: str) -> set | None:
         if words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
             return None
         arguments = [w for w in words[1:] if not w.redirect]
+        # Only a redirection that writes from where the file ends, or from its start after emptying it: `<>`
+        # writes over what is there, which can turn an earlier line into another name (the third review).
+        if any(_file_target(w) == "GITHUB_ENV" and w.redirect_op not in _WRITE_OPS for w in words[1:]):
+            return None
+        # sh is dash on Ubuntu, which does not read `$'...'` and passes the backslash to its `echo`.
+        if any("$'" in w.shown or '$"' in w.shown for w in arguments):
+            return None
         if not arguments or any(_file_target(w) not in (None, "GITHUB_ENV") for w in words[1:] if w.redirect) or any(
                 w.redirect and _file_target(w) is None and w.text not in _OTHER_TARGETS and not w.text.isdigit()
                 for w in words[1:]):
@@ -4277,7 +4291,23 @@ class WorkflowRules:
             # as an expression, which may be any of them.
             if isinstance(env, dict) and any(steers(key) or expr_mod.OPEN in str(key) for key in env):
                 return True
+        # A container job's steps run with the container's `env` and its `options` (`-e NAME=...`); the
+        # runner takes the PATH from the container too (the third review of slice 2d.13). What its image
+        # holds, the `obaaf` it ships included, is not read.
+        container = job.raw.get("container")
+        if isinstance(container, dict):
+            env = container.get("env")
+            if (env is not None and not isinstance(env, dict)) or (isinstance(env, dict) and any(
+                    steers(key) or expr_mod.OPEN in str(key) for key in env)):
+                return True
+            options = container.get("options")
+            if options is not None and (not isinstance(options, str) or self._CONTAINER_ENV_RE.search(options)):
+                return True
         return self._first_shell_change(job) < step.index
+
+    # In a container's `options`: an environment variable given to it, by name or from a file.
+    # Short options may be joined (`-ite NAME`) and a value written beside them (`-eNAME=...`).
+    _CONTAINER_ENV_RE = re.compile(r"(?<![\w-])(-[A-Za-z]*e|--env)", re.I)
 
     def _first_shell_change(self, job: Job) -> int:
         """Where the first step of `job` that may change, for the steps after it, what their shell or the
