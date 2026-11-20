@@ -63,7 +63,7 @@ obaaf assess score answers.yaml           # your tier and what to fix first
 
 Your answers never leave your machine. Then follow [the adoption guide](docs/adoption-guide.md).
 
-**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles, then install the templates (GitHub Actions; for Jenkins, see [Jenkins](docs/jenkins.md)):
+**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles. A development build installed from a commit ([how](docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the GitHub Actions templates. With it, skip the clone and checkout below, omit the `--source` option, and set `--obaaf-sha` to the same full commit you installed. For release 0.3.0, use the full example below. [Jenkins instructions](docs/jenkins.md)
 
 ```bash
 obaaf check path/to/your/repository
@@ -73,7 +73,7 @@ obaaf templates install --source obaaf-src/templates/github-actions \
   --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
 ```
 
-The package from PyPI does not include the templates, so they are copied from a clone of OBAAF. Keep the clone
+Release 0.3.0 reads the templates from a clone of OBAAF. Keep the clone
 outside the repository you are setting up, and check out `<commit>`, the full commit SHA the installed workflows
 will pin: for release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints it. `OWNER/obaaf` is the
 repository those workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it, keeping its name. `obaaf` does not look for the

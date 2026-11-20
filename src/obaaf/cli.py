@@ -688,9 +688,15 @@ def cmd_verify_agent_run(args) -> int:
 def cmd_templates_install(args) -> int:
     import re
 
-    source = Path(args.source) if args.source else _repo_root() / "templates" / "github-actions"
+    package_dir = Path(__file__).resolve().parent
+    source = package_dir / "_github_templates"
+    bundled = args.source is None and source.is_dir()
+    if args.source is not None:
+        source = Path(args.source)
+    elif not source.is_dir() and package_dir.parent.name == "src":
+        source = _repo_root() / "templates" / "github-actions"
     if not (source / "workflows").is_dir():
-        print(f"error: templates not found in {source}; run from a clone of the OBAAF repository or pass --source",
+        print(f"error: templates not found in {source}; pass --source with a GitHub Actions template directory",
               file=sys.stderr)
         return EXIT_USAGE
     if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", args.obaaf_repo or ""):
@@ -732,8 +738,18 @@ def cmd_templates_install(args) -> int:
             written.append(target)
     for path in written:
         print(f"wrote {path}")
-    print("Next: copy templates/github-actions/CODEOWNERS.example into .github/CODEOWNERS, edit the build and "
-          "publish steps, set up the environments in docs/github-settings.md, then run 'obaaf check'.")
+    example = source / "CODEOWNERS.example"
+    if example.is_file():
+        print(f"Review {example.resolve()} when setting up {dest_root / '.github' / 'CODEOWNERS'}.")
+    else:
+        print(f"Set up code ownership in {dest_root / '.github' / 'CODEOWNERS'}.")
+    if bundled:
+        # The templates are this version's; a clone checked out at the pinned commit matched it by
+        # construction, the wheel does not (review-gpt #309).
+        print(f"These templates came with obaaf {__version__}. Give --obaaf-sha the commit this package was built "
+              "from (for a release, its tag's commit), or the workflows may use inputs the pinned commit's actions "
+              "do not have.")
+    print("Next: edit the build and publish steps, set up the GitHub environments, then run 'obaaf check'.")
     return EXIT_OK
 
 
@@ -1030,7 +1046,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--obaaf-repo", required=True, help="OWNER/REPO of the OBAAF repository to pin")
     x.add_argument("--obaaf-sha", required=True, help="full commit SHA of the OBAAF release to pin")
     x.add_argument("--repository", help="OWNER/REPO of the repository being set up (fills in the policy file)")
-    x.add_argument("--source", help="templates directory (default: this repository's)")
+    x.add_argument("--source", help="GitHub Actions template directory (default: the templates supplied with this build)")
     x.add_argument("--force", action="store_true")
     x.set_defaults(func=cmd_templates_install)
     d = sub.add_parser("docs", help="maintainer tasks").add_subparsers(dest="sub", required=True)
