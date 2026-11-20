@@ -14,12 +14,20 @@ from obaaf.checker import repo
 from obaaf.fix_proof import Edit, ProofError
 
 
+XATTR_FUNCTIONS = ("listxattr", "getxattr", "setxattr", "removexattr")
+
+
 @contextmanager
 def apply_lock(root):
     try:
         import fcntl
     except ImportError as exc:
         raise ProofError("applying edits needs POSIX directory locking") from exc
+    # Python has these only on Linux; without them the access controls cannot be kept, so refuse
+    # before the preview rather than after it (added by the review, review-gpt #282).
+    if not all(hasattr(os, fn) for fn in XATTR_FUNCTIONS):
+        raise ProofError("applying edits is supported only on Linux: it needs Python's extended attribute "
+                         "functions to keep each file's access controls; edit the files by hand from the preview")
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         try:
@@ -60,6 +68,11 @@ def _git_entry(git, root, path):
     if (kind != b"blob" or mode not in (b"100644", b"100755") or tail != name + b"\0"
             or staged != mode + b" " + oid + b" 0\t" + name + b"\0"):
         raise ProofError(f"{path}: staged changes or unsupported Git entry; no clean target")
+    # `H` is a plain tracked entry. Lower case is assume-unchanged and `S` skip-worktree: Git would
+    # not show the written change in `git status` or `git diff` (added by the review, review-gpt #282).
+    if _git(git, root, "ls-files", "-v", "-z", "--", str(path)) != b"H " + name + b"\0":
+        raise ProofError(f"{path}: Git's index marks it assume-unchanged or skip-worktree, so Git would not "
+                         "show the change; clear the flag with git update-index before applying")
     return mode, oid
 
 
@@ -77,7 +90,7 @@ def _clean(git, root, path, content, mode):
 
     if blob(content) != oid:
         # Git reports the effective text/eol attributes and both line-ending styles without
-        # invoking external filters. Compare every canonical byte even for assume-unchanged files.
+        # invoking external filters. Compare every canonical byte.
         info = _git(git, root, "ls-files", "--eol", "-z", "--", str(path)).partition(b"\t")[0].split()
         attrs = b" ".join(info[2:])
         autocrlf = _git(git, root, "config", "--get", "core.autocrlf", optional=True)
@@ -100,8 +113,9 @@ def _parent(stack, root_fd, path):
 
 
 def _attrs(fd):
-    if not all(hasattr(os, fn) for fn in ("listxattr", "getxattr", "setxattr", "removexattr")):
-        raise ProofError("apply needs filesystem extended attribute support to preserve access controls")
+    if not all(hasattr(os, fn) for fn in XATTR_FUNCTIONS):
+        raise ProofError("applying edits is supported only on Linux: it needs Python's extended attribute "
+                         "functions to keep each file's access controls")
     return {name: os.getxattr(fd, name) for name in os.listxattr(fd)}
 
 
@@ -236,6 +250,16 @@ def apply_edits(root, root_fd, edits):
                     stage.flush()
                     _set_metadata(stage.fileno(), t)
                     os.fsync(stage.fileno())
+                # Install and rollback both link into a vacant name. A filesystem without hard links
+                # must refuse here, before any original is moved aside (added by the review,
+                # review-gpt #282).
+                probe = t.stage[:-len(".new")] + ".probe"
+                try:
+                    os.link(t.stage, probe, src_dir_fd=t.parent, dst_dir_fd=t.parent, follow_symlinks=False)
+                except OSError as exc:
+                    raise ProofError(f"{t.edit.path}: apply needs a filesystem with hard links; edit the file "
+                                     f"by hand from the preview ({exc})") from exc
+                os.unlink(probe, dir_fd=t.parent)
             for t in targets:
                 if not os.path.samestat((root / t.edit.path.parent).stat(), os.fstat(t.parent)):
                     raise ProofError(f"{t.edit.path}: parent directory changed during apply")

@@ -153,9 +153,93 @@ class FixApplyTest(unittest.TestCase):
     def test_ignored_worktree_stat_flags_do_not_obscure_dirty_bytes(self):
         self.git("update-index", "--assume-unchanged", self.other)
         (self.root / self.other).write_bytes(b"independent edit")
-        with self.assertRaisesRegex(ProofError, "unstaged"):
+        with self.assertRaisesRegex(ProofError, "assume-unchanged"):
             self.install(self.edits())
         self.assertEqual((self.root / self.other).read_bytes(), b"independent edit")
+
+    def test_a_target_git_would_hide_is_refused_even_when_clean(self):
+        # Review of #282: a clean target flagged assume-unchanged or skip-worktree was written,
+        # and `git status` and `git diff` then showed nothing to review.
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(flag=flag):
+                self.git("update-index", flag, self.config)
+                before = (self.root / self.config).read_bytes()
+                code, out, err = run_cli("fix", self.root, "--apply")
+                self.assertEqual(code, 2, out)
+                self.assertIn("assume-unchanged or skip-worktree", err)
+                self.assertEqual((self.root / self.config).read_bytes(), before)
+                self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
+                self.git("update-index", "--no-" + flag[2:], self.config)
+
+    def test_without_the_xattr_functions_apply_refuses_before_the_preview(self):
+        # Review of #282: Python has them only on Linux, and apply failed after printing the preview.
+        with patch.object(fix_apply, "XATTR_FUNCTIONS", ("listxattr", "no_such_function")):
+            code, out, err = run_cli("fix", self.root, "--apply")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("supported only on Linux", err)
+
+    def test_a_filesystem_without_hard_links_refuses_before_moving_any_target(self):
+        # Review of #282: the original was renamed aside, then the link failed and rollback,
+        # which also links, could not put it back.
+        edits = self.edits()
+        with patch.object(os, "link", side_effect=PermissionError("hard links unsupported")), \
+             self.assertRaisesRegex(ProofError, "needs a filesystem with hard links"):
+            self.install(edits)
+        for edit in edits:
+            self.assertEqual((self.root / edit.path).read_bytes(), edit.before)
+        self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
+
+    def test_checkout_transformations_are_refused(self):
+        for attribute in ("filter=lfs", "ident", "working-tree-encoding=UTF-16"):
+            with self.subTest(attribute=attribute):
+                (self.root / ".gitattributes").write_text(f"policy.json {attribute}\n")
+                with patch.object(fix_apply, "_install") as install, \
+                     self.assertRaisesRegex(ProofError, "checkout transformations"):
+                    self.install(self.edits())
+                install.assert_not_called()
+
+    def test_an_unstaged_executable_bit_is_refused(self):
+        (self.root / self.other).chmod(0o755)
+        with patch.object(fix_apply, "_install") as install, \
+             self.assertRaisesRegex(ProofError, "executable mode"):
+            self.install(self.edits())
+        install.assert_not_called()
+
+    def test_capabilities_and_signatures_are_refused(self):
+        real = fix_apply._attrs
+        for name in ("security.capability", "security.ima", "security.evm"):
+            with self.subTest(name=name), \
+                 patch.object(fix_apply, "_attrs", side_effect=lambda fd, n=name: {**real(fd), n: b"x"}), \
+                 patch.object(fix_apply, "_install") as install, \
+                 self.assertRaisesRegex(ProofError, "capabilities or signatures"):
+                self.install(self.edits())
+            install.assert_not_called()
+
+    def test_a_linked_or_special_target_is_refused(self):
+        edits = self.edits()
+        os.link(self.root / self.other, self.root / "second-name.json")
+        with patch.object(fix_apply, "_install") as install, \
+             self.assertRaisesRegex(ProofError, "changed since the preview"):
+            self.install(edits)
+        install.assert_not_called()
+        os.unlink(self.root / "second-name.json")
+        target = self.root / self.other
+        target.rename(self.root / "real.json")
+        target.symlink_to("real.json")
+        with patch.object(fix_apply, "_install") as install, self.assertRaises((ProofError, OSError)):
+            self.install(edits)
+        install.assert_not_called()
+        self.assertTrue(target.is_symlink())
+
+    def test_a_parent_directory_changed_during_apply_is_refused_and_nothing_moves(self):
+        edits = self.edits()
+        with patch.object(fix_apply.os.path, "samestat", return_value=False), \
+             self.assertRaisesRegex(ProofError, "parent directory changed"):
+            self.install(edits)
+        for edit in edits:
+            self.assertEqual((self.root / edit.path).read_bytes(), edit.before)
+        self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
 
     def annotated(self):
         if not hasattr(os, "setxattr"):
@@ -189,6 +273,26 @@ class FixApplyTest(unittest.TestCase):
         code, _, err = run_cli("fix", self.root, "--apply")
         self.assertEqual(code, 0, err)
         self.assertEqual(os.getxattr(path, key), acl)
+
+    def test_raw_access_acl_is_kept_without_the_acl_utility(self):
+        # Review of #282: the ACL test above is skipped where setfacl is missing. This one writes
+        # the kernel's own POSIX ACL bytes: version 2, then (tag, permissions, id) entries.
+        import struct
+        path = self.root / self.config
+        undefined = 0xFFFFFFFF
+        # The fixture's mode is 0750: owner rwx, group (the mask) r-x, others nothing.
+        entries = ((0x01, 7, undefined), (0x02, 4, os.getuid()), (0x04, 5, undefined),
+                   (0x10, 5, undefined), (0x20, 0, undefined))
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+        try:
+            os.setxattr(path, "system.posix_acl_access", acl)
+        except (AttributeError, OSError) as exc:
+            self.skipTest(f"filesystem ACLs unavailable: {exc}")
+        stored = os.getxattr(path, "system.posix_acl_access")
+        code, _, err = run_cli("fix", self.root, "--apply")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.getxattr(path, "system.posix_acl_access"), stored)
+        self.assertFalse(list(self.root.rglob(".obaaf-apply-*")))
 
     def test_unrepresentable_attribute_refuses_before_moving_any_target(self):
         self.annotated()
