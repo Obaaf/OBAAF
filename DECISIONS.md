@@ -115,6 +115,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
@@ -1058,6 +1059,16 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review. The proof refuses while any baseline or ignore entry matches no finding, even one that matched nothing before the edit, so while an old-format baseline or such an entry exists the to-do list withholds the checkout and pin commands and names what to settle first: migration, then the paperwork preview that names each unmatched entry and proposes its removal. A check of one file, the `.github` or `.github/workflows` folder or one platform cannot tell an entry for a finding elsewhere from an unmatched one; there the to-do asks for a check of the whole repository instead (added by the review, review-gpt #294).
 
 **Status.** Proposed, 2026-11-19 (slice A5b, #291).
+
+### D-111 Apply settings evidence to OBAAF-GHA-005
+
+**Decision.** For each concrete secret a job reads, assess the environment named by its configuration and declared in the workflow against the explicitly selected D-104 snapshot. Record the timestamp and reasons on the environment control. Caller-supplied secrets, unresolved names and ambiguous environments cannot establish exclusive storage.
+
+**Consequence.** All five controls must verify for the finding to count as fixed. A missing code owner remains a separate medium-severity OBAAF-REPO-001 finding. It can fail a medium gate even when all five controls verify and the high-severity job finding clears. Under D-104, explicitly selecting a regular snapshot within the repository permits local use of an untracked file. The local checker does not authenticate the file or compare it with the Git index or pull request head. CI reads the snapshot at the policy path on the target branch. Snapshots do not change the identity of an acceptance. The production catalogue currently lists no egress action release for credential isolation. Each secret name a job reads is assessed, in the environment the job declares, when `protected_secrets` names that environment for it; a glob entry counts, so `*_API_KEY: main-only` can verify `OPENAI_API_KEY`, while a plain-list entry alone, which names no environment, cannot (review of #301). The snapshot reads Actions secrets only: Dependabot secrets are not read, so a Dependabot secret of the same name is not ruled out.
+
+**Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
+
+**Status.** Proposed, 2026-11-19 (A4b, #300).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,6 +23,7 @@ class Assessment:
 class SettingsEvidence:
     data: dict
     limitations: tuple[str, ...]
+    source: Path
 
     @property
     def taken_at(self) -> str:
@@ -30,7 +31,11 @@ class SettingsEvidence:
 
     @classmethod
     def load(cls, path: Path, repository: str | None, now: datetime | None = None) -> SettingsEvidence:
-        if not path.is_file():
+        try:
+            regular = path.is_file()
+        except OSError as exc:      # a name too long for the file system, for one
+            raise snapshot.SnapshotError(f"the settings path cannot be read: {exc.strerror or exc}") from exc
+        if not regular:
             raise snapshot.SnapshotError("the settings path must name a regular snapshot file")
         data = snapshot.load(path)
         try:
@@ -50,10 +55,26 @@ class SettingsEvidence:
         repo = data["settings"]["repository"]
         if repo["status"] == "read" and repo["value"]["full_name"].lower() != data["repository"].lower():
             issues.append("the repository named by the snapshot differs from its observed repository identity")
-        evidence = cls(data, tuple(issues))
+        evidence = cls(data, tuple(issues), path.absolute())
         if repo["status"] != "read":
             evidence.limitations += (evidence._unread("repository"),)
         return evidence
+
+    def for_scan(self, root: Path, repository_scan: bool) -> SettingsEvidence:
+        """Restrict evidence to scans that can check its source file for code ownership."""
+        from obaaf.checker import _as_found
+
+        if not repository_scan:
+            reason = ("this scan does not check snapshot code ownership; run obaaf check "
+                      "on the repository directory without --lanes")
+        elif not (self.source.resolve().is_relative_to(root.resolve())
+                  and _as_found(self.source, root.resolve(), strict=True)):
+            # A link outside the repository may point inside without being checked for ownership.
+            reason = ("the snapshot is outside the checked repository; use a repository snapshot "
+                      "so its code ownership can be checked")
+        else:
+            return self
+        return replace(self, limitations=(*self.limitations, reason))
 
     def _unread(self, key: str) -> str:
         entry = self.data["settings"][key]

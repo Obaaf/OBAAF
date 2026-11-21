@@ -299,9 +299,9 @@ jobs:
 
 
 class OBAAFGHA005(unittest.TestCase):
-    def test_five_controls_one_a_setting_check_does_not_read(self):
+    def test_five_controls_without_a_settings_snapshot(self):
         """The rules page: with named secrets the finding lists five controls and clears only when all
-        five are verified; one is a setting `obaaf check` does not read, so it is never cleared; a job
+        five are verified; the environment control needs a selected settings snapshot; a job
         that only declares an environment gets the finding with no controls."""
         words = text("rules.html")
         self.assertIn("lists five controls on the finding and clears it only when it has verified all five", words)
