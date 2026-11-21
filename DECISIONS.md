@@ -956,7 +956,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs; the review of #273 reproduced that at `6bc5dce` and at `665f15e` (38 proposed, all 19 declared among them). The review added `test_an_environment_on_a_calling_job_is_not_proposed` and `test_a_name_github_refuses_or_a_short_name_says_why`. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
 
-**Status.** Accepted, 2026-11-21. With it, the maintainer asked that `obaaf init` stop writing a lane for a job the checker already recognises unaided (#321, item 1); jobs found only by a model provider's key stay in the proposal. Proposed 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+**Status.** Accepted, 2026-11-21. With it, the maintainer asked that `obaaf init` stop writing a lane for a job the checker already recognises unaided (#321, item 1). Proposed 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
 
 ### D-101 Companion checks in the first workflow
 
@@ -1206,4 +1206,4 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A pipeline that passed can now get "cannot tell" (most often: Groovy values in the script, `set -Eeuo pipefail` or `export PATH=` before the check, a wrapper, a Windows step) or a finding (a check in a closure nothing calls, `--pre-approval` alone, a publish in the pipeline's post block). A finding can become "cannot tell". OBAAF's own Jenkins release template is "cannot tell" until #344 is decided. The reader's limits are #347.
 
-**Status.** Accepted, 2026-11-21. With D-129 and this entry, the maintainer made #344 a launch item: OBAAF's own Jenkins release template must not be "cannot tell" under OBAAF-JEN-010 and OBAAF-JEN-012 when the build goes to its first users. Proposed 2026-11-21 (slice 2d.2n).
+**Status.** Accepted, 2026-11-21. With D-129 and this entry, the maintainer made #344 a launch item: OBAAF's own Jenkins release template, which is "cannot tell" under OBAAF-JEN-010 and OBAAF-JEN-012, is fixed before the build goes to its first users. Proposed 2026-11-21 (slice 2d.2n).
