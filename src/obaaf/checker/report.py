@@ -329,8 +329,14 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
         if group["command"] and result.errors:
             action, command = "Resolve the scan errors before migrating the baseline.", None
         if action != one_line(action):
-            # The catalogue's own command, such as `obaaf baseline migrate` with the baseline's path.
-            action = "Use the original check paths and options; they cannot be printed as a one-line command."
+            if group["id"] in ("checkout-credentials", "agent-tool-version") and group["command"]:
+                request = ("--tighten checkout-credentials" if group["id"] == "checkout-credentials"
+                           else "--pin PACKAGE=VERSION")
+                fallback = (f"obaaf fix with {request} and the original check paths and options, including "
+                            "any --settings snapshot (the full invocation cannot be printed as a one-line command).")
+                action = action.replace(group["command"], fallback)
+            else:
+                action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)
         if command is not None:
             lines.append("      " + command)

@@ -144,6 +144,48 @@ jobs:
                         self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
             os.chdir(self.root)
 
+    def test_repository_inputs_through_a_linked_parent(self):
+        policy = Path("baseline.json")
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        with tempfile.TemporaryDirectory() as parent:
+            alias = Path(parent) / "project"
+            alias.symlink_to(self.root, target_is_directory=True)
+            options = [f"--settings={alias / self.settings}", f"--config={alias / self.config}",
+                       f"--baseline={alias / policy}"]
+            code, out, err = run_cli("check", ".", "--format=json", "--fail-on=never", *options)
+            self.assertEqual(code, 0, err)
+            row = next(g for g in json.loads(out)["todo"] if g["id"] == "checkout-credentials")
+            args = shlex.split(row["command"])
+            for option in options:
+                self.assertIn(option, args)
+            code, out, err = run_cli(*args[1:])
+            self.assertEqual(code, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+            self.assertIn("persist-credentials: false", out)
+
+    def test_check_guidance_for_settings_outside_reviewable_repository_files(self):
+        with tempfile.TemporaryDirectory() as parent:
+            for path in (Path(parent) / "settings.json", Path(".git/settings.json")):
+                with self.subTest(path=path):
+                    shutil.copyfile(self.settings, path)
+                    args = ("check", ".", f"--settings={path}", "--fail-on=never")
+                    code, out, err = run_cli(*args, "--format=json")
+                    self.assertEqual(code, 0, err)
+                    groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                    code, report, err = run_cli(*args, "--summary")
+                    self.assertEqual(code, 0, err)
+                    for cause in ("checkout-credentials", "agent-tool-version"):
+                        row = groups[cause]
+                        self.assertIsNone(row["command"])
+                        self.assertIn("--settings", row["nextAction"])
+                        self.assertIn(row["nextAction"], report)
+                    code, _, err = run_cli("fix", ".", "--tighten", "checkout-credentials", f"--settings={path}")
+                    self.assertEqual(code, 2, err)
+                    if path.parent == Path(".git"):
+                        self.assertIn(".git", err.split(str(path))[0])
+                    else:
+                        self.assertIn("inside the repository", err)
+
     def test_explicit_egress_job_still_previews_confinement(self):
         before = self.path.read_bytes()
         catalog = load()
@@ -170,9 +212,22 @@ jobs:
         for args in [("fix", "--gate", "medium"), ("fix", "egress", "--job", "assistant")]:
             self.assertEqual(run_cli(*args, self.option)[0], 2)
 
-    def test_withheld_checkout_and_pin_omit_retry_for_multiline_settings_path(self):
+    def test_withheld_checkout_and_pin_preserve_retry_for_multiline_settings_path(self):
         settings = Path("team\nsettings.json")
         self.settings.rename(settings)
+        args = ("check", ".", f"--settings={settings}", "--fail-on=never")
+        code, out, err = run_cli(*args, "--format=json")
+        self.assertEqual(code, 0, err)
+        groups = {g["id"]: g for g in json.loads(out)["todo"]}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            self.assertIn(f"--settings={settings}", shlex.split(groups[cause]["command"]))
+        for flags in ((), ("--summary",)):
+            code, out, err = run_cli(*args, *flags)
+            self.assertEqual(code, 0, err)
+            self.assertIn("Review later steps that need Git credentials", out)
+            self.assertIn("Choose an exact npm version for @openai/codex", out)
+            self.assertNotIn(str(settings), out)
+
         findings = checker.check(self.root).findings
         for rule, step, selection in [("OBAAF-GHA-011", 1, ["--tighten", "checkout-credentials"]),
                                       ("OBAAF-GHA-025", 2, ["--pin", "@openai/codex=1.2.3"])]:
@@ -183,13 +238,20 @@ jobs:
                 policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [
                     baseline.entry_for(finding, "@example/build", "previous review", expires)]}))
                 candidate = f"{self.path}#assistant/step-{step}"
-                code, out, err = run_cli("fix", ".", *selection, "--baseline", policy, f"--settings={settings}",
-                                         "--candidate", candidate)
-                self.assertEqual(code, 1, err or out)
-                self.assertIn("Review the reported findings", out)
-                self.assertIn("named retry cannot be printed on one line", out)
-                self.assertNotIn("obaaf fix", out)
-                self.assertNotIn("--- a/", out)
+                for named in (False, True):
+                    with self.subTest(named=named):
+                        extra = ["--candidate", candidate] if named else []
+                        code, out, err = run_cli("fix", ".", *selection, "--baseline", policy,
+                                                 f"--settings={settings}", *extra)
+                        expected_code = 1 if named or selection[0] == "--pin" else 0
+                        self.assertEqual(code, expected_code, err or out)
+                        self.assertIn("Review the reported findings", out)
+                        self.assertIn("After resolving it" if named else "Retry this step alone", out)
+                        self.assertIn("obaaf fix", out)
+                        self.assertIn(" ".join(selection), out)
+                        self.assertIn("--candidate", out)
+                        self.assertNotIn(str(settings), out)
+                        self.assertNotIn("--- a/", out)
 
     def test_changed_snapshot_refused_before_write(self):
         display = fix._render

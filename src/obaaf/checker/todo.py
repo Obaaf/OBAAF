@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from obaaf.catalog import Catalog
 from obaaf.causes import Cause
@@ -13,6 +14,7 @@ from obaaf.checker.rules import ACCEPTED, FIXED
 from obaaf.checker.todo_acceptance import acceptance_cause, migration_command, migration_hint
 from obaaf.checker.todo_upgrade import previous_acceptances
 from obaaf.checker.workflow import one_line
+from obaaf.settings_evidence import fix_input_relative, fix_input_root
 
 
 _LEVELS = ("high", "medium", "low", "info")
@@ -41,6 +43,13 @@ def tightening_command(result, request, candidate=None):
 def tightening_prerequisite(result: CheckResult) -> str:
     """What must be settled before a workflow edit can be proven: the proof refuses while any baseline or
     ignore entry matches no finding (fix_proof.prove), even one that matched nothing before the edit."""
+    if result.settings_path:
+        try:
+            root = fix_input_root(Path(result.checked or "."))
+            fix_input_relative(result.settings_path, root, settings=True)
+        except (OSError, RuntimeError, ValueError):
+            return ("Rerun the check with --settings pointing to a reviewable snapshot inside the repository "
+                    "and outside .git before previewing workflow edits.")
     steps = []
     legacy = result.baseline_format == baseline.FORMAT_V1
     if legacy:
@@ -65,11 +74,11 @@ def tightening_prerequisite(result: CheckResult) -> str:
             # goes into the to-do. With an old-format baseline the migration comes first, and the check
             # after it gives this command.
             command = tightening_command(result, [])
+            inputs = "path, options, settings snapshot and baseline" if result.settings_path else "path, options and baseline"
             removal = (f" To see each unmatched entry and preview its removal, run {command}"
                        if command == one_line(command) else
                        " To see each unmatched entry and preview its removal, run obaaf fix with this check's "
-                       "original path, options and baseline, which cannot be printed faithfully as a one-line "
-                       "command.")
+                       f"original {inputs}, which cannot be printed faithfully as a one-line command.")
     if steps:
         steps.append("Then rerun the check before previewing workflow edits.")
     return " ".join(steps) + removal

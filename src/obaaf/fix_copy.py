@@ -6,7 +6,7 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -92,32 +92,37 @@ def _copy_tree(fd: int, dest: Path, relative: Path, links: dict[Path, str], devi
     _unchanged(directory, os.fstat(fd), relative)
 
 
-def _check_links(links: dict[Path, str]) -> None:
+def check_link(name: Path, lookup: Callable[[Path], str | Path | None]) -> None:
     # Check components in filesystem order, including links in intermediate directories.
     # Resolving or statting a target before checking its boundary would access the outside tree.
+    pos = name.parent
+    pending = [name.name]
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part == "..":
+            if pos == Path("."):
+                raise PrivateCopyError(f"link {str(name)!r} leads outside the source")
+            pos = pos.parent
+            continue
+        pos /= part
+        if part.casefold() == ".git":
+            raise PrivateCopyError(f"link {str(name)!r} refers to excluded Git metadata")
+        link = lookup(pos)
+        if link is not None:
+            target = Path(link)
+            if target.is_absolute():
+                raise PrivateCopyError(f"absolute link at {str(pos)!r} cannot be relocated")
+            hops += 1
+            if hops > 40:
+                raise PrivateCopyError(f"unresolved link chain at {str(name)!r}")
+            pos = pos.parent
+            pending.extend(reversed(target.parts))
+
+
+def _check_links(links: dict[Path, str]) -> None:
     for name in links:
-        pos = name.parent
-        pending = [name.name]
-        hops = 0
-        while pending:
-            part = pending.pop()
-            if part == "..":
-                if pos == Path("."):
-                    raise PrivateCopyError(f"link {str(name)!r} leads outside the source")
-                pos = pos.parent
-                continue
-            pos /= part
-            if part.casefold() == ".git":
-                raise PrivateCopyError(f"link {str(name)!r} refers to excluded Git metadata")
-            if pos in links:
-                target = Path(links[pos])
-                if target.is_absolute():
-                    raise PrivateCopyError(f"absolute link at {str(pos)!r} cannot be relocated")
-                hops += 1
-                if hops > 40:
-                    raise PrivateCopyError(f"unresolved link chain at {str(name)!r}")
-                pos = pos.parent
-                pending.extend(reversed(target.parts))
+        check_link(name, links.get)
 
 
 def _instruction_entries(root: Path, patterns: list[str], git: bool) -> list:

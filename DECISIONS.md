@@ -1074,9 +1074,9 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-112 Carry selected settings into fix proof
 
-**Decision.** A checkout or tool-pin suggestion from a check with explicit settings repeats the snapshot path. For tightening and paperwork, each proof reads the snapshot from the private copy, verifies its repository identity against the original checkout, and uses the corresponding repository-relative path for ownership checks on each tree. Explicit apply repeats the proof and requires the same parsed evidence. Single-file checks retain their existing ownership limitation.
+**Decision.** A checkout or tool-pin command suggested by a check carries its explicit settings snapshot. For tightening and paperwork, each proof reads the snapshot from the private copy, verifies its repository identity against the original checkout, and uses the corresponding repository-relative path for ownership checks on each tree. Config, baseline and settings paths follow the directory components of the supplied path. Explicit apply recomputes the preview and repeats the proof using the evidence available to that invocation. Single-file checks retain their existing ownership limitation.
 
-**Consequence.** The snapshot must be inside the repository for a fix. An unreadable or changed input prevents applying the proposed edits. The generated blocking gate and egress drafting commands do not support this option.
+**Consequence.** A fix requires a snapshot in the working tree. For a snapshot outside the repository or under `.git`, the check gives manual guidance. An unreadable snapshot or a change in its parsed evidence during one apply run prevents the write. The generated blocking gate and egress drafting commands do not support this option.
 
 **Status.** Proposed, 2026-11-19 (#302).
 

@@ -38,7 +38,7 @@ Slice 2d.2j (issue #210); decision D-127. **OBAAF-JEN-003 now follows an AI agen
 
 The changes below are on the development branch for the prospective 0.4.0 release. A pinned gate picks them up when its maintainer changes the pin.
 
-- **Keep settings in a fix preview.** Checkout and tool-pin commands suggested by a check carry its explicit settings snapshot into the preview and apply proof.
+- **Keep settings in a fix preview.** Suggested checkout and tool-pin commands carry the selected snapshot into the preview and apply proof. Fixes require a snapshot in the repository working tree. For a snapshot outside it or under `.git`, the report gives manual guidance.
 - **Preview a first GitHub Actions check.** Run `obaaf init` from the repository and review its configuration and workflow. Run `obaaf init --apply` to create them. The workflow reports findings with `--fail-on never`. Add `--with-scanner zizmor`, `--with-scanner actionlint`, or `--with-scanner poutine` to opt into additional report-only checks from pinned scanner images.
 - **Preview paperwork changes before accepting risk.** `obaaf fix` can propose a correction to a lane name, where it changes no other finding, and removal of stale entries. Supply an owner to preview completing an ignore entry. A legacy baseline migration also needs a reason and expiry. The command lists each acceptance and shows a diff verified on a private copy.
 - **Apply a verified paperwork diff.** Run the same command with `--apply` to recompute the preview and write its exact changes. Every target must be tracked and clean in Git, and not marked assume-unchanged or skip-worktree. The command preserves its permissions and leaves the changes unstaged for review. Apply runs on Linux only.

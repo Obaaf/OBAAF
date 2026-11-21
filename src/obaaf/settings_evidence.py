@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import stat
 import sys
 
 from obaaf.audit import snapshot
@@ -12,6 +13,62 @@ from obaaf.audit.github import plain
 from obaaf.checker.workflow import environment_match
 
 MAX_AGE = timedelta(days=30)
+
+
+def fix_input_root(target: Path) -> Path:
+    """Find the proof root for a directory scan or a single workflow."""
+    from obaaf.checker.workflow import locate
+
+    if any(part.casefold() == ".git" for part in target.resolve().parts):
+        raise ValueError(f"check path is in excluded .git metadata: {target}")
+    if target.is_dir():
+        return locate(target)[0]
+    parent = target.absolute().parent.resolve(strict=True)
+    for folder in (parent, *parent.parents):
+        if (folder / ".git/HEAD").is_file() or (folder / ".git").is_file() or (folder / ".github/workflows").is_dir():
+            return folder
+    return parent
+
+
+def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
+    """Resolve the containing folder in filesystem order and retain the selected filename."""
+    path = Path(value).absolute()
+    try:
+        folder = path.parent.resolve(strict=True)
+        path = folder / path.name
+        root = root.resolve(strict=True)
+        if path.name == "..":
+            path = path.resolve(strict=True)
+        if not path.is_relative_to(root):
+            raise ValueError(f"check input must be inside the repository: {value}")
+        relative = path.relative_to(root)
+        if any(part.casefold() == ".git" for part in relative.parts):
+            raise ValueError(f"check input is in excluded .git metadata: {value}")
+        if settings:
+            _check_snapshot_path(root, relative)
+        return relative
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if settings:
+            raise ValueError("--settings: the settings path must name a regular snapshot file") from exc
+        raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
+
+
+def _check_snapshot_path(root: Path, relative: Path) -> None:
+    """Follow only links that can be reproduced inside the proof copy."""
+    from obaaf.fix_copy import check_link
+
+    def lookup(path: Path) -> Path | None:
+        entry = root / path
+        return entry.readlink() if entry.is_symlink() else None
+
+    check_link(relative, lookup)
+    info = (root / relative).stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("--settings: the settings path must name a regular snapshot file")
+    if info.st_nlink != 1:
+        raise ValueError("--settings is a hard-linked file")
 
 
 @dataclass(frozen=True)
@@ -163,6 +220,7 @@ class SettingsEvidence:
 
 def scan_identity(target: Path, base: Path) -> str | None:
     from obaaf.audit.cli import _origin
+    base = base.resolve()
     if target.is_file() and base.name == "workflows" and base.parent.name == ".github":
         base = base.parent.parent
     return _origin(str(base))

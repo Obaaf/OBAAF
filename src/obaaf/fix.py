@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import difflib
-import os
 from pathlib import Path
 import re
 import sys
@@ -15,31 +14,21 @@ from obaaf.checker.workflow import one_line
 
 
 def _paths(args):
-    from obaaf.checker.workflow import locate
     from obaaf.fix_proof import CheckOptions, ProofError
+    from obaaf.settings_evidence import fix_input_relative, fix_input_root
 
-    target = Path(os.path.abspath(args.path))
+    target = Path(args.path).absolute()
     if not target.exists():
         raise ProofError(f"check path does not exist: {target}")
-    if target.is_dir():
-        root = locate(target)[0]
-    else:
-        root = target.parent
-        for parent in target.parents:
-            if (parent / ".git/HEAD").is_file() or (parent / ".git").is_file() or (parent / ".github/workflows").is_dir():
-                root = parent
-                break
+    root = fix_input_root(target)
 
-    def relative(value):
-        if value is None:
-            return None
-        path = Path(os.path.abspath(value))
-        if not path.is_relative_to(root) or ".git" in (part.casefold() for part in path.relative_to(root).parts):
-            raise ProofError(f"check input must be inside the repository: {value}")
-        return path.relative_to(root)
+    def relative(value, *, settings=False):
+        return None if value is None else fix_input_relative(value, root, settings=settings)
 
-    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform,
-                              "medium" if args.fail_on is None else args.fail_on, relative(getattr(args, "settings", None)))
+    scan = target.resolve() if target.is_dir() else target
+    return root, CheckOptions(relative(scan), relative(args.config), relative(args.baseline), args.platform,
+                              "medium" if args.fail_on is None else args.fail_on,
+                              relative(getattr(args, "settings", None), settings=True))
 
 
 def _show_diff(edit):
@@ -127,7 +116,14 @@ def _verified_plan(source, copy, options, before, metadata, plan, prerequisite="
         text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
                 "their owner.")
         if command != one_line(command):
-            return text + " The named retry cannot be printed on one line. Use the original paths and options."
+            selector = "--pin PKG=VER" if pin else "--tighten checkout-credentials"
+            if pin and request[1] == one_line(request[1]):
+                import shlex
+                selector = shlex.join(request)
+            action = ("After resolving it, preview the same request again" if metadata.get("candidate") or prerequisite
+                      else "Retry this step alone")
+            return (f"{text} {action} by running obaaf fix with {selector}, --candidate for {item.id}, "
+                    "and the original paths and options. The named retry cannot be printed on one line.")
         # A named request run again unchanged fails the same way: say so, and keep its options for after.
         if metadata.get("candidate") or prerequisite:
             return f"{text} After resolving it, preview the same request again with: {command}"
