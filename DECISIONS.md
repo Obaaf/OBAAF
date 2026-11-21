@@ -116,6 +116,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 | D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
+| D-112 | Carry selected settings into fix proof | Proposed |
 | D-114 | Lane follow-up commands retain the inputs of the reported check | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -1071,6 +1072,14 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
 
 **Status.** Proposed, 2026-11-19 (A4b, #300).
+
+### D-112 Carry selected settings into fix proof
+
+**Decision.** A checkout or tool-pin command suggested by a check carries its explicit settings snapshot. For tightening and paperwork, each proof reads the snapshot from the private copy, verifies its repository identity against the original checkout, and uses the corresponding repository-relative path for ownership checks on each tree. Config, baseline and settings inputs keep the name the checker's ownership rule gives them, the supplied path with `..` collapsed as text, whenever that name lies in the working tree and leads to the same path once links are followed (another hard link to the same file does not count). The private copy reproduces the working tree's relative links, so ownership checks on the copy name both an alias and its target, as the check does. Otherwise, for example for a `..` after a linked folder whose textual name is another file, or a path that enters the repository from outside, the resolved containing folder selects the file the check reads; in the first case the check's own name for it can differ (#332). Explicit apply recomputes the preview and repeats the proof using the evidence available to that invocation. Single-file checks retain their existing ownership limitation.
+
+**Consequence.** A fix requires a snapshot in the working tree. For a snapshot outside the repository or under `.git`, the check gives manual guidance. An unreadable snapshot or a change in its parsed evidence during one apply run prevents the write. The generated blocking gate and egress drafting commands do not support this option.
+
+**Status.** Proposed, 2026-11-19 (#302).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 

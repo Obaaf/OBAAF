@@ -15,31 +15,21 @@ from obaaf.checker.workflow import one_line
 
 
 def _paths(args):
-    from obaaf.checker.workflow import locate
     from obaaf.fix_proof import CheckOptions, ProofError
+    from obaaf.settings_evidence import fix_input_relative, fix_input_root
 
-    target = Path(os.path.abspath(args.path))
+    target = Path(args.path).absolute()
     if not target.exists():
         raise ProofError(f"check path does not exist: {target}")
-    if target.is_dir():
-        root = locate(target)[0]
-    else:
-        root = target.parent
-        for parent in target.parents:
-            if (parent / ".git/HEAD").is_file() or (parent / ".git").is_file() or (parent / ".github/workflows").is_dir():
-                root = parent
-                break
+    root = fix_input_root(target)
 
-    def relative(value):
-        if value is None:
-            return None
-        path = Path(os.path.abspath(value))
-        if not path.is_relative_to(root) or ".git" in (part.casefold() for part in path.relative_to(root).parts):
-            raise ProofError(f"check input must be inside the repository: {value}")
-        return path.relative_to(root)
+    def relative(value, *, settings=False):
+        return None if value is None else fix_input_relative(value, root, settings=settings)
 
-    return root, CheckOptions(relative(target), relative(args.config), relative(args.baseline), args.platform,
-                              "medium" if args.fail_on is None else args.fail_on)
+    scan = target.resolve() if target.is_dir() else target
+    return root, CheckOptions(relative(scan), relative(args.config), relative(args.baseline), args.platform,
+                              "medium" if args.fail_on is None else args.fail_on,
+                              relative(getattr(args, "settings", None), settings=True))
 
 
 def _show_diff(edit):
@@ -126,6 +116,16 @@ def _verified_plan(source, copy, options, before, metadata, plan, prerequisite="
         command = tightening_command(before, request, candidate=item.id)
         text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
                 "their owner.")
+        if command != one_line(command):
+            selector = "--pin PKG=VER" if pin else "--tighten checkout-credentials"
+            if pin and request[1] == one_line(request[1]):
+                import shlex
+                selector = shlex.join(request)
+            action = ("After resolving it, preview the same request again" if metadata.get("candidate") or prerequisite
+                      else "Retry this step alone")
+            inputs = "paths, options and --settings snapshot" if before.settings_path else "paths and options"
+            return (f"{text} {action} by running obaaf fix with {selector}, --candidate for {item.id}, "
+                    f"and the original {inputs}. The named retry cannot be printed on one line.")
         # A named request run again unchanged fails the same way: say so, and keep its options for after.
         if metadata.get("candidate") or prerequisite:
             return f"{text} After resolving it, preview the same request again with: {command}"
@@ -182,10 +182,12 @@ def run(args):
     from obaaf.checker.todo import tightening_prerequisite
     from obaaf.fix_apply import apply_edits, apply_lock
     from obaaf.fix_copy import private_copy
-    from obaaf.fix_proof import ProofError, check_copy_matches, check_inputs, prove
+    from obaaf.fix_proof import ProofError, bind_settings, check_copy_matches, check_inputs, prove
 
     try:
         if args.gate is not None:
+            if args.settings is not None:
+                raise ValueError("--gate does not configure a settings snapshot in the generated workflow")
             if args.tighten is not None or args.candidate is not None or args.pin is not None:
                 raise ValueError("--gate is a separate operation; omit --tighten, --candidate and --pin")
             from obaaf.fix_gate import run as run_gate
@@ -215,14 +217,22 @@ def run(args):
             from obaaf.fix_paperwork import plan
             metadata = dict(owner=args.owner, reason=args.reason, expires=args.expires)
         with (apply_lock(root) if args.apply else nullcontext()) as lock, private_copy(root) as copy:
+            options = bind_settings(root, copy, options)
             today, catalog = date.today(), load()
             before = check_inputs(copy, options, today, catalog)
             source = check_inputs(root, options, today, catalog)
             check_copy_matches(root, source, before)
+            if options.evidence is not None:
+                from dataclasses import replace
+                from obaaf.settings_evidence import report_settings
+                target = root / options.path
+                report_settings(replace(options.evidence, source=root / options.settings),
+                                root, target.is_dir(), source.config)
             before.checked = str(args.path)
             before.options = ([f"--config={args.config}"] if args.config else []) + [f"--platform={args.platform}"]
             before.baseline_path = args.baseline or ""
             before.fail_on = options.fail_on
+            before.settings_path = args.settings or ""
             paths = _owner_paths(copy, options, before, today, catalog)
             prerequisite = tightening_prerequisite(before) if args.tighten or pin else ""
             proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan, prerequisite)

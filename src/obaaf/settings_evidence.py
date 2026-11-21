@@ -4,13 +4,109 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
+import stat
+import sys
 
 from obaaf.audit import snapshot
 from obaaf.audit.github import plain
 from obaaf.checker.workflow import environment_match
 
 MAX_AGE = timedelta(days=30)
+
+
+def fix_input_root(target: Path) -> Path:
+    """Find the proof root for a directory scan or a single workflow."""
+    from obaaf.checker.workflow import locate
+
+    if any(part.casefold() == ".git" for part in target.resolve().parts):
+        raise ValueError(f"check path is in excluded .git metadata: {target}")
+    if target.is_dir():
+        return locate(target)[0]
+    parent = target.absolute().parent.resolve(strict=True)
+    for folder in (parent, *parent.parents):
+        if (folder / ".git/HEAD").is_file() or (folder / ".git").is_file() or (folder / ".github/workflows").is_dir():
+            return folder
+    return parent
+
+
+def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
+    """Map the input into the proof copy, retaining its ownership name where reproducible."""
+    path = Path(value).absolute()
+    selected = path
+    try:
+        folder = path.parent.resolve(strict=True)
+        path = folder / path.name
+        root = root.resolve(strict=True)
+        if path.name == "..":
+            path = path.resolve(strict=True)
+        if not path.is_relative_to(root):
+            raise ValueError(f"check input must be inside the repository: {value}")
+        relative = path.relative_to(root)
+        if any(part.casefold() == ".git" for part in relative.parts):
+            raise ValueError(f"check input is in excluded .git metadata: {value}")
+        # Check the physical location even when the checker also names an in-tree alias. The proof
+        # names the input as the checker's ownership rule does (`_as_found`: the typed path with `..`
+        # collapsed as text) whenever that name leads to the same file, so both name the same paths.
+        # Where it does not (a `..` after a linked folder, #332), the physical location is used.
+        proof_path = relative
+        textual = Path(os.path.abspath(selected))
+        if textual.is_relative_to(root) and _same_path(textual, path):
+            proof_path = textual.relative_to(root)
+            if any(part.casefold() == ".git" for part in proof_path.parts):
+                raise ValueError(f"check input is in excluded .git metadata: {value}")
+        if settings:
+            _check_snapshot_path(root, selected, relative)
+        return proof_path
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if settings:
+            raise ValueError("--settings: the settings path must name a regular snapshot file") from exc
+        raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    """Whether both names lead to the same path once links are followed (not merely the same inode).
+    A missing last component compares by name, as it did before `..` was considered."""
+    try:
+        return first.resolve() == second.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _check_snapshot_path(root: Path, selected: Path, relative: Path) -> None:
+    """Check the selected components that the private copy must be able to reproduce."""
+    from obaaf.fix_copy import check_link
+
+    device = root.stat().st_dev
+
+    def lookup(path: Path) -> Path | None:
+        entry = root / path
+        info = entry.lstat()
+        if info.st_dev != device:
+            raise ValueError(f"nested filesystem at {str(path)!r}")
+        return entry.readlink() if stat.S_ISLNK(info.st_mode) else None
+
+    # An outside alias may enter the repository. Once inside, check each selected
+    # component before resolving it, including a linked folder followed by "..".
+    folder = Path(selected.anchor)
+    for part in selected.parent.parts[1:]:
+        if folder.is_relative_to(root) and part != "..":
+            check_link(folder.relative_to(root) / part, lookup)
+        folder = (folder / part).resolve(strict=True)
+
+    # An outside alias may also enter below a mount point inside the repository.
+    for parent in relative.parents:
+        if parent != Path("."):
+            lookup(parent)
+    check_link(relative, lookup)
+    info = (root / relative).stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("--settings: the settings path must name a regular snapshot file")
+    if info.st_nlink != 1:
+        raise ValueError("--settings is a hard-linked file")
 
 
 @dataclass(frozen=True)
@@ -158,3 +254,34 @@ class SettingsEvidence:
             if any(not branches[p["name"]]["protected"] for p in policies):
                 return Assessment(NOT_MET, "a selected branch was observed as unprotected")
         return Assessment(VERIFIED, "the name appears only in the required environment and only protected branches may use it")
+
+
+def scan_identity(target: Path, base: Path) -> str | None:
+    from obaaf.audit.cli import _origin
+    base = base.resolve()
+    if target.is_file() and base.name == "workflows" and base.parent.name == ".github":
+        base = base.parent.parent
+    return _origin(str(base))
+
+
+def report_settings(evidence, base, repository_scan, config):
+    diagnostic = evidence.for_scan(base, repository_scan)
+    print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
+          file=sys.stderr)
+    reasons = list(diagnostic.limitations)
+    if not config.protected_secrets:
+        reasons.extend(evidence.inventory_limitations())
+    for reason in reasons:
+        print(f"Settings evidence: {reason}.", file=sys.stderr)
+    for name, environment in sorted(config.protected_secrets.items()):
+        assessment = diagnostic.assess(name, environment or "")
+        print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
+              file=sys.stderr)
+    if any(not environment or any(c in name for c in "*?")
+           for name, environment in config.protected_secrets.items()):
+        # These lines judge the entries; the finding judges each name a job reads (review of #301).
+        print("Settings evidence: the lines above judge the configuration's entries, and one with a glob "
+              "or with no environment cannot be verified there. OBAAF-GHA-005 judges each secret name a "
+              "job reads, in the environment the job declares, and can verify it only when "
+              "protected_secrets names that environment for every secret of the job, through a glob or not.",
+              file=sys.stderr)

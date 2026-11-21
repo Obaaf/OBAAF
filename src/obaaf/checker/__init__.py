@@ -2316,7 +2316,7 @@ class CheckResult:
     whole_repository: bool = False                           # a repository root on every platform, not a part
 
     fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
-    settings_path: str = ""  # only check accepts this explicit evidence input
+    settings_path: str = ""  # explicitly selected offline settings evidence
 
     @property
     def workflow_files(self) -> list[str]:

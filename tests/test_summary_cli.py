@@ -172,7 +172,7 @@ class SummaryCliTest(unittest.TestCase):
         from obaaf.checker.todo import tightening_command
         from obaaf.checker.todo_acceptance import scoped_migration_command
         result = SimpleNamespace(checked="=ls", options=("--config==c.yml",), baseline_path="=b.json",
-                                 fail_on="low")
+                                 fail_on="low", settings_path="")
         words = shlex.split(tightening_command(result, ["--pin", "tool=VERSION"]))
         self.assertEqual(words[:3], ["obaaf", "fix", "./=ls"])
         self.assertIn("--baseline==b.json", words)
