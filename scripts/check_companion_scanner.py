@@ -21,7 +21,6 @@ env:
   ACTIONS_STEP_DEBUG: 'true'
 jobs:
   sample:
-    if: 'false'
     permissions: read-all
     runs-on: scanner-fixture-runner
     steps:
