@@ -36,7 +36,7 @@ from obaaf.checker.jenkins.parser import (
     callee_name, path_of,
 )
 from obaaf.checker.rules import Finding
-from obaaf.checker.workflow import binding_commands, declared_lane
+from obaaf.checker.workflow import _script_tokens, _strip_comment, binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -85,6 +85,30 @@ UNREAD = object()      # an argument a spread map (`*: m`) may set
 # digits, true or false. A word that could be a string or a variable makes the condition one that may change.
 PARAMS_ONLY_GUARD = re.compile(r"if(?: (?:!|params\.\w+|\d+|true|false))+")
 SELECTOR_POSITIONAL = {"specific": "buildNumber", "permalink": "id"}   # a selector's one unnamed argument
+
+
+# A provenance check named in a script (flagship slice 2d.2n): `obaaf verify release`, `gh attestation verify`,
+# `cosign verify-attestation` or `verify-blob-attestation`, `slsa-verifier verify`, also by a path to `obaaf`.
+CHECK_NAMED = re.compile(r"(\S*/)?obaaf\s+verify\s+release\b|gh\s+attestation\s+verify\b"
+                         r"|cosign\s+verify-(blob-)?attestation\b|slsa-verifier\s+verify")
+# A condition on the build's result, as in `post { always { if (currentBuild.currentResult == 'SUCCESS') {...} } }`.
+RESULT_GUARD = re.compile(r"\b(currentResult|currentBuild\s*\.\s*result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
+# Groovy values that are always a build number, so putting them into a script adds no shell syntax.
+BUILD_NUMBER_EXPRS = frozenset({"env.BUILD_NUMBER", "env.BUILD_ID", "BUILD_NUMBER", "BUILD_ID", "currentBuild.number",
+                                "currentBuild.id"})
+# Words after which the next word names a command, as the shell reads a line.
+COMMAND_START = frozenset({";", "&&", "||", "|", "&", "!", "(", "{", "then", "do", "else", "if", "elif", "while",
+                           "until", "time"})
+
+
+def _text_method(node) -> bool:
+    """Whether a script argument is passed through `.trim()`, `.stripIndent()` or the like, which may change where
+    its first line starts."""
+    while isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args:
+        if node.callee.name in ("trim", "stripIndent", "stripMargin", "replaceAll", "denormalize"):
+            return True
+        node = node.callee.target
+    return False
 
 
 def call_entries(call: Call, positional: str | None) -> dict:
@@ -3131,35 +3155,85 @@ class JenkinsRules:
     def _provenance_kind(self, info: Info) -> str | None:
         """What a step is as OBAAF-JEN-012's check (flagship slice 2d.2n): "full" for `obaaf verify release`,
         "provenance" for another provenance check (`cosign verify-attestation`, `gh attestation verify`,
-        `slsa-verifier verify`), each as a command whose failure fails the `sh` step, read by the reader of slice
-        2d.2e; "unread" when the step's text names such a check that the reader does not vouch for (not on a line of
-        its own, after a line the reader cannot read, in a `bat`, `powershell` or `pwsh` step or under another #!
-        program) and the older reading found nothing that ignores its failure; None otherwise, and for any step
-        with a computed or true `returnStatus`. Before 2d.2n the rule searched the script's text."""
-        if not info.shell or not info.script or info.verify is None or not self._status_stops(info):
+        `slsa-verifier verify`, `obaaf verify release --pre-approval`), each as a command whose failure fails the `sh`
+        step, read by the reader of slice 2d.2e; "unread" (cannot tell) when the step names such a check in a place
+        where the reader may be wrong or does not vouch for it: Groovy puts text into the script (`"... ${x}"`,
+        concatenation), `returnStatus` is computed, `.trim()` may move a #! line to the start, the command is named by
+        a path, the reader stopped before it or does not read it on its line, or the step is `bat`, `powershell`,
+        `pwsh` or another #! program; None otherwise (no such check, a true `returnStatus`, the name only in an `echo`
+        argument or a comment, `--help`). Before 2d.2n the rule searched the script's text."""
+        if not info.shell or not info.script or not CHECK_NAMED.search(info.script):
             return None
         cached = self._script_cache.get(("provenance-check", id(info.use.call)))
         if cached is not None and cached[0] is info.use.call:
             return cached[1]
-        kind = None
-        read = self._sh_commands(info.script) if info.use.name.rsplit(".", 1)[-1] == "sh" else None
-        if read is not None:
-            commands, _complete = read
-            for words in commands:
-                if {"--help", "-h", "--version"} & set(words):
-                    continue
-                joined = " ".join(words)
-                if any(r.match(joined) for r in self.release_verify):
-                    kind = "full"
-                    break
-                if any(r.match(joined) for r in self.verify_cmds):
-                    kind = "provenance"
-        if kind is None and info.verify in ("full", "provenance"):
-            # The older reading found the check and nothing that ignores its failure, but the reader does not vouch for
-            # it: cannot tell, rather than a finding on `set -o pipefail; obaaf verify release ... | tee log`
+        kind = self._provenance_read(info)
+        if kind == "unread" and info.verify not in ("full", "provenance"):
+            kind = None       # the older reading found its failure ignored: `|| true`, a pipe, `set +e`, a later command
+        elif kind == "path":
             kind = "unread"
         self._script_cache[("provenance-check", id(info.use.call))] = (info.use.call, kind)
         return kind
+
+    def _provenance_read(self, info: Info) -> str | None:
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        if status is not None and not ((isinstance(status, Name) and status.name in ("false", "true"))
+                                       or literal(status) in ("false", "true")):
+            return "unread"                        # computed: it may be true
+        if not self._status_stops(info):
+            return None                            # returnStatus: true
+        if info.dynamic or any(e not in BUILD_NUMBER_EXPRS for e in info.exprs):
+            return "unread"                        # Groovy builds the text the shell runs: "... ${EXTRA}"
+        if info.use.name.rsplit(".", 1)[-1] != "sh":
+            return "unread"                        # bat, powershell and pwsh are not read
+        text = info.script
+        for expr in info.exprs:                    # a build number is digits: read it as one
+            text = text.replace("${" + expr + "}", "1")
+        if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
+            return "unread"                        # a .trim() may make the #! line the first
+        read = self._sh_commands(text)
+        if read is None:
+            return "unread"                        # another #! program
+        commands, complete = read
+        kind = None
+        for words in commands:
+            if {"--help", "-h", "--version"} & set(words):
+                continue
+            joined = " ".join(words)
+            if any(r.match(joined) for r in self.release_verify):
+                if "--pre-approval" not in words:
+                    return "full"
+                kind = "provenance"                # everything but the approvals
+            elif any(r.match(joined) for r in self.verify_cmds):
+                kind = "provenance"
+        if kind:
+            return kind
+        # The reader vouches for no check. Cannot tell when the script names one in a command the reader does not
+        # count (`set -o pipefail; obaaf verify release ... | tee log`, `timeout 600 obaaf verify release`, a line
+        # after one it cannot read) and the older reading found nothing that ignores its failure (the caller checks);
+        # no check when the name is only an argument of `echo` or `printf`, is in a comment, or the command asks for
+        # `--help`. A path to `obaaf` is cannot tell whatever the older reading says: which program it is depends on
+        # the workspace.
+        found = None
+        for raw in text.split("\n"):
+            tokens = _script_tokens(_strip_comment(raw))
+            if not tokens:
+                if tokens is None and CHECK_NAMED.search(raw):
+                    found = found or "unread"      # a line the tokenizer cannot split
+                continue
+            words = [w for w, _quoted in tokens]
+            start = 0
+            for k, word in enumerate(words):
+                if word in COMMAND_START:
+                    start = k + 1
+                    continue
+                if not CHECK_NAMED.match(" ".join(words[k:k + 4])):
+                    continue
+                end = next((m for m in range(k, len(words)) if words[m] in COMMAND_START), len(words))
+                if words[start] in ("echo", "printf", ":") or {"--help", "-h", "--version"} & set(words[k:end]):
+                    continue
+                found = "path" if "/" in word else (found or "unread")
+        return found
 
     def _fetches_of(self, info: Info, named: set) -> list[tuple[str, str]]:
         """How a step fetches another job's artifacts: [(kind, what)], kind "moving", "fixed" or "unknown"."""
@@ -3450,29 +3524,34 @@ class JenkinsRules:
             return
         self.applicable.add("OBAAF-JEN-012")
         checks = [(i, kind) for i in self.infos if (kind := self._provenance_kind(i))]
+        called = {id(i.use.call) for i in publishes if not i.ctx.deferred}
         high, medium, unknown = [], [], []
         for publish in publishes:
+            if publish.ctx.deferred and id(publish.use.call) in called:
+                continue      # the same publish is also read where it is called; that reading decides
             found = []        # (kind, check)
             for check, kind in checks:
-                if check.ctx.deferred:
-                    # read where a closure or uncalled method is written: whether and where it runs is not known
-                    found.append(("unread", check))
-                elif check.index < publish.index and self.provenance_gates(check, publish):
+                # a check read where a closure or an uncalled method is written does not count: it may never run,
+                # or run after the publish (`def verify = {...}` called later)
+                if not check.ctx.deferred and check.index < publish.index and self.provenance_gates(check, publish):
                     found.append((kind, check))
             kinds = {k for k, _c in found}
             if "full" in kinds:
                 continue
-            if publish.ctx.deferred:
+            if publish.ctx.post in FAILURE_PATHS and any(RESULT_GUARD.search(g) for g in publish.ctx.guards):
+                unknown.append((publish, f"the publish at line {publish.line} is in a failure path "
+                                         f"({publish.ctx.post}) under a condition on the build's result, which the "
+                                         "checker does not read"))
+            elif publish.ctx.deferred:
                 unknown.append((publish, f"the publish at line {publish.line} is in {publish.ctx.deferred}; whether "
                                          "and where it runs is not known"))
             elif "unread" in kinds:
                 check = max((c for k, c in found if k == "unread"), key=lambda c: c.index)
-                where = (f"is in {check.ctx.deferred}, so whether and where it runs is not known"
-                         if check.ctx.deferred else
-                         "is written in a form the checker does not read (a line before it the shell reader cannot "
-                         "vouch for, a #! program other than sh, bash or dash, or a bat, powershell or pwsh step)")
                 unknown.append((publish, f"the check at line {check.line} before the publish at line {publish.line} "
-                                         f"{where}"))
+                                         "is written in a form the checker does not read: Groovy puts text into the "
+                                         "script, returnStatus is computed, the command is named by a path or is not "
+                                         "on a line of its own, a line before it is one the shell reader cannot vouch "
+                                         "for, or the step is bat, powershell, pwsh or another #! program"))
             elif "provenance" in kinds:
                 medium.append(publish)
             else:
