@@ -22,14 +22,15 @@ env:
 jobs:
   sample:
     if: 'false'
+    permissions: read-all
     runs-on: scanner-fixture-runner
     steps:
-      - uses: example/scanner-fixture@v1
+      - run: 'true'
 """
 
 FINDINGS = {
     "actionlint": 'label "scanner-fixture-runner" is unknown',
-    "zizmor": "unpinned-uses",
+    "zizmor": "excessive-permissions",
     "poutine": "Rule: CI Runner Debug Enabled",
 }
 
