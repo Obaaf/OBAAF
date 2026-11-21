@@ -711,6 +711,8 @@ class ModelKeysTest(unittest.TestCase):
         self.assertEqual(egress_mod.MODEL_KEYS, action_mod.MODEL_KEYS)
         self.assertEqual(egress_mod.WITHHELD_BY_AWF, action_mod.WITHHELD_BY_AWF)
         self.assertEqual(egress_mod.NAME_RE.pattern, action_mod._NAME_RE.pattern)
+        for name in ("RESERVED_NAMES", "RESERVED_PREFIXES", "RESERVED_SUFFIXES"):
+            self.assertEqual(getattr(egress_mod, name), getattr(action_mod, name), name)
 
 
 class AgentInstallTest(unittest.TestCase):
@@ -1072,7 +1074,10 @@ def lists_differ(sha):
         finally:
             os.environ.clear()
             os.environ.update(saved)
-    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF)):
+    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF),
+                       ("RESERVED_NAMES", egress_mod.RESERVED_NAMES),
+                       ("RESERVED_PREFIXES", egress_mod.RESERVED_PREFIXES),
+                       ("RESERVED_SUFFIXES", egress_mod.RESERVED_SUFFIXES)):
         if getattr(module, name, None) != mine:
             return f"its {name} is not the checker's"
     if getattr(getattr(module, "_NAME_RE", None), "pattern", None) != egress_mod.NAME_RE.pattern:
@@ -1265,6 +1270,32 @@ class KeyOutOfReachTest(unittest.TestCase):
             with self.subTest(ref=ref):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
                 self.assertNotIn("removes every OPENSSL_ variable", control.detail)
+
+    def test_a_name_the_action_reserves_under_env_is_refused_as_the_action_refuses_it(self):
+        """The action refuses `PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest of its reserved
+        names under `env`, matched exactly; the checker verified such a step (review of A3a, review-gpt
+        #283). Only at a listed commit, as for the OPENSSL_ names."""
+        for name in ("NODE_OPTIONS", "ANTHROPIC_BASE_URL", "ACTIONS_RUNTIME_TOKEN", "OTEL_ENDPOINT",
+                     "SERVICE_API_TARGET", "https_proxy", "TZ"):
+            step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", name: "x"}
+            with self.subTest(name=name):
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name))))
+                self.assertEqual(control.verdict, NOT_MET, control.detail)
+                self.assertIn(f"names {name} under env, a name the action at a listed commit sets, withholds",
+                              control.detail)
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name, ref="v1"))))
+                self.assertNotIn("a name the action at a listed commit sets", control.detail)
+        # A credential under a reserved name is not said to reach the command (second review pass).
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "ANTHROPIC_BASE_URL": "${{ secrets.GW }}"}
+        control = key_control(run_check(workflow(keyed(step_env=step_env, env_input="ANTHROPIC_BASE_URL"))))
+        self.assertEqual(control.verdict, NOT_MET, control.detail)
+        self.assertNotIn("passed to the command as ANTHROPIC_BASE_URL", control.detail)
+        # Exactly as the action matches: a spelling it does not list is passed to the command.
+        for name in ("Node_Options", "NODE_OPTIONS_EXTRA", "MY_BASE_URL_X"):
+            step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", name: "x"}
+            with self.subTest(name=name):
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name))))
+                self.assertNotIn("a name the action at a listed commit sets", control.detail)
 
     def test_with_every_control_the_checker_reads_in_place_only_the_setting_is_left(self):
         """The fifth control does not make OBAAF-GHA-005 clearable on its own: the environment's settings

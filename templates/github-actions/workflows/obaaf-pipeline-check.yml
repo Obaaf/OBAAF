@@ -48,15 +48,43 @@ jobs:
             /.github/obaaf.yml
             /.github/obaaf.yaml
             /obaaf.yml
+            /.github/obaaf-settings.json
           sparse-checkout-cone-mode: false
 
       - name: Set up OBAAF
         uses: OBAAF_OWNER/obaaf/actions/setup-obaaf@0000000000000000000000000000000000000000 # pin to an OBAAF release
 
       - name: Check workflows, code owners and agent instruction files
+        env:
+          USE_SETTINGS: ${{ vars.OBAAF_USE_SETTINGS }}
         run: |
           set -euo pipefail
           config=()
+          if [[ "${USE_SETTINGS:-}" == true ]]; then
+            # Opt in only after pinning a checker that supports the snapshot format.
+            help=$(obaaf check --help)
+            if [[ "$help" != *"--settings FILE"* ]]; then
+              echo "::error::Pin a version of OBAAF that supports --settings FILE."
+              exit 1
+            fi
+            snapshot=.github/obaaf-settings.json
+            if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+              if [[ -L .obaaf-base/.github || -L ".obaaf-base/$snapshot" || ! -f ".obaaf-base/$snapshot" ||
+                    -L .github || ! -d .github ]]; then
+                echo "::error::The selected settings snapshot must be a regular file on the target branch."
+                exit 1
+              fi
+              # Replace the PR copy at its policy path so CODEOWNERS is checked for that path.
+              staged=$(mktemp .github/.obaaf-settings-XXXXXX)
+              cp ".obaaf-base/$snapshot" "$staged"
+              mv -T "$staged" "$snapshot"
+            fi
+            if [[ -L .github || -L "$snapshot" || ! -f "$snapshot" ]]; then
+              echo "::error::The selected settings snapshot must be a regular file."
+              exit 1
+            fi
+            config+=(--settings "$snapshot")
+          fi
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             # The first that exists on the target branch, as the checker would choose; none is {}.
             echo '{}' > "$RUNNER_TEMP/obaaf.yml"
@@ -71,7 +99,7 @@ jobs:
               fi
             done
             rm -rf .obaaf-base
-            config=(--config "$RUNNER_TEMP/obaaf.yml")
+            config+=(--config "$RUNNER_TEMP/obaaf.yml")
           fi
           obaaf check . "${config[@]}" --format sarif --output obaaf.sarif --fail-on never
           obaaf check . "${config[@]}" --fail-on medium
