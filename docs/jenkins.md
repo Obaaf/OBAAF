@@ -129,7 +129,7 @@ that reads anything but properties of `env`, `params` and `currentBuild` (`env.B
 receiver, `step([$class: 'CopyArtifact', ...])`, or a Jenkins URL to another build's artifacts in a shell
 step or `httpRequest` (`job/b/lastSuccessfulBuild/artifact/`, a job's `ws/`, a URL kept in the file's
 `environment` or in a variable). Its arguments are read as Groovy builds them: a map given as the only
-argument or held in a variable the file declares once and names nowhere else, and the last of a repeated key.
+argument or held in a local variable the file declares once, in a block around the copy, and names nowhere else, and the last of a repeated key.
 A selector moves when it is the default, `lastSuccessful`, `lastCompleted`, `latestSavedBuild`, `permalink`,
 `lastWithArtifacts`, `workspace` or `buildParameter`, a `specific` build named by anything but digits (Jenkins
 reads other text as a permalink or a build's display name), or `upstream(fallbackToLastSuccessful: true)`;
@@ -146,7 +146,8 @@ computes, a spread map (`*: m`), `downstream`, `invokeMethod`, a method pointer 
 other place the file names `copyArtifacts` or the `CopyArtifact` class, a copy in a method or closure (read
 where it is written), and a file whose copies, checks and publishes expand into too many to compare. Not read:
 downloads by other tools (JFrog CLI, the Artifactory and Nexus plugins, an object store's "latest" key), a URL
-built in other ways (`withEnv`, `env.X =`, a parameter's default), `bat` and `powershell` checks, a check whose
+built in other ways (`env.X =`, a parameter's default; a value from `environment` or a variable is put in, but
+never takes away what the text alone shows, since the shell or a `withEnv` may set it otherwise), `bat` and `powershell` checks, a check whose
 status the script tests (`if (sh(..., returnStatus: true) != 0)`), and whether the check covers the files that
 were copied. Stages are told apart by name, so two Scripted stages with one name, or computed names, are one
 stage for the severity.

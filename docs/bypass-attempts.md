@@ -2937,4 +2937,9 @@ Rule: OBAAF-JEN-010, an artifact from another build used by a moving reference (
 - a URL kept in a Groovy variable;
 - 120 parameter conditions on copies in nested helpers (5.5 s in this rule at 4.5 KB; the budget now counts the copies' sets of conditions).
 
+**Third review** (the same sub-agent, about 280 earlier attempts re-run and about 28 new at `957f17d`; each blocking class is an `R3_` case in `REVIEW3_CASES`): about 13 ways past in 3 classes, fixed by class:
+- a declaration in another method or block gave the read its value, while the read was a script property a getter (`def getSel()`), `propertyMissing` or a property write could set (now the declaration must be in a block that encloses the read, with no method between, and the source is no longer searched for binding words, which a comment could hold);
+- `$NAME` in a single-quoted script read as a Groovy or `environment` value when the shell or a `withEnv` sets it itself (now the text as written is always read too, and what it shows counts);
+- `params` reassigned in the file (left as a stated limit; contrived).
+
 **Stated limits** (each a case in `LIMITS` or written in D-129): other download tools and object-store keys are not read; two Scripted stages with one name, or computed names, are one stage for the severity; what counts as publishing is the shared detector's (`curl -X PUT --data-binary` and `scp` are not publishes); a copy in a class method, a spread map and `downstream` are "cannot tell"; a digest check is "cannot tell" whatever it checks; an `echo` of an artifact URL counts as a fetch; conditions are compared by their structure (`if (go)` twice is one condition even when `go` changes), and code after a conditional `return` is not treated as conditional, both as for OBAAF-JEN-011 and 012 (slice 2d.2).
