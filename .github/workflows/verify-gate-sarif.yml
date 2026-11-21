@@ -1,0 +1,83 @@
+name: Verify gate activation before adding SARIF
+on:
+  push:
+    branches: [lead/verify-gate-before-sarif-295]
+permissions:
+  contents: read
+jobs:
+  walkthrough:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7610e75af68c083b4e8bf6a0236f43b2972fd6ee
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the merged development checker
+        run: |
+          test "$(git rev-parse HEAD)" = 7610e75af68c083b4e8bf6a0236f43b2972fd6ee
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Apply a gate and verify the SARIF report before its failing exit
+        run: |
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/walkthrough.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          import yaml
+
+          merged = Path.cwd()
+          work = Path(tempfile.mkdtemp(dir=os.environ["RUNNER_TEMP"]))
+          source = work / "source"
+          source.mkdir()
+          workflow = source / ".github/workflows/obaaf-pipeline-check.yml"
+          def run(*args):
+              return subprocess.run(args, cwd=source, text=True, check=True, capture_output=True).stdout
+
+          run("git", "init", "-q")
+          run("git", "config", "user.name", "Walkthrough")
+          run("git", "config", "user.email", "walkthrough@example.invalid")
+          run("obaaf", "init", "--apply")
+          run("git", "add", ".")
+          run("git", "commit", "-qm", "Install report-only workflow")
+          original = workflow.read_text()
+          report = 'obaaf check source "${config[@]}" --fail-on never'
+          gate = "gate_check .github/obaaf-baseline.json --fail-on medium"
+          assert original.count(report) == 1
+          assert "Gate preview at --fail-on medium" in run("obaaf", "fix", "--gate", "medium")
+          assert workflow.read_text() == original
+          assert "Applied the displayed gate change" in run("obaaf", "fix", "--gate", "medium", "--apply")
+          gated = workflow.read_text()
+          assert gated == original.replace(report, gate)
+          print("Gate preview and apply succeeded; only the final command changed.", flush=True)
+
+          guide = (merged / "docs/ci-integration.md").read_text()
+          sarif = 'obaaf check . "${config[@]}" --format sarif --output obaaf.sarif --fail-on never'
+          assert sarif in guide
+          marker = "          " + gate
+          assert gated.count(marker) == 1
+          workflow.write_text(gated.replace(marker, "          " + sarif.replace("check . ", "check source ") + "\n" + marker))
+          fixture = workflow.with_name("trial.yml")
+          fixture.write_text("name: trial\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      OBAAF_LANE: agnet\n    steps:\n      - run: echo hello\n")
+          run("git", "add", ".")
+          run("git", "commit", "-qm", "Add optional reporting and a lane typo for the trial")
+          edited = workflow.read_bytes()
+          assert "Review your CI workflow by hand" in run("obaaf", "fix", "--gate", "high")
+          assert workflow.read_bytes() == edited
+          steps = yaml.safe_load(edited)["jobs"]["check"]["steps"]
+          script = next(step["run"] for step in steps if step.get("name") == "Report findings")
+          result = subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, capture_output=True, text=True)
+          assert result.returncode == 1 and "OBAAF-CFG-001" in result.stdout, (result.returncode, result.stdout, result.stderr)
+          sarif_run = json.loads((work / "obaaf.sarif").read_text())["runs"][0]
+          matches = [item for item in sarif_run["results"] if item["ruleId"] == "OBAAF-CFG-001"]
+          uris = [loc["physicalLocation"]["artifactLocation"]["uri"] for item in matches for loc in item["locations"]]
+          assert ".github/workflows/trial.yml" in uris, uris
+          print("Manual guidance preserved the edited file. Gate exited 1 for the lane typo. SARIF already existed and named .github/workflows/trial.yml.", flush=True)
+          PY
