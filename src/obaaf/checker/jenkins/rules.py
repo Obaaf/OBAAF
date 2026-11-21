@@ -1772,8 +1772,9 @@ class JenkinsRules:
         aborted; and an input read where a closure or an uncalled method is written does not count."""
         if check.ctx.deferred or check.index >= target.index or target.ctx.post in FAILURE_PATHS:
             return False      # a publish in a failure path runs when the input is aborted
-        if check.swallowed and not (check.swallowed == check.ctx.swallowed == target.ctx.swallowed):
-            return False
+        if check.swallowed and not (check.swallowed == check.ctx.swallowed and check.ctx.swallow_id
+                                    and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False      # caught, unless the abort skips the rest of the very block the publish is in
         return (check.ctx.post not in FAILURE_PATHS and not concurrent(check.ctx, target.ctx)
                 and set(check.ctx.guards) <= set(target.ctx.guards))
 

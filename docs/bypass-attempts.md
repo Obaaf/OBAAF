@@ -2888,4 +2888,12 @@ Rule: OBAAF-JEN-005, release without an approval by a named person. Reviewer: on
 
 **Stated limits** (each a case in `LIMITS`): an input whose abort sets a flag that guards the publish does not count, nor one in a Scripted `finally` block, nor one inside `catchError(catchInterruptions: false)` (only the innermost catching block is recorded); all three fail closed, as a finding. A submitter or a map held in a variable, a method parameter or a concatenation of literals is "cannot tell". A shared-library step that might approve is not read; the file-wide note says so. Not verified on a live Jenkins: that `authenticated` lets every signed-in user respond, and that Groovy's last repeated key is the one the step receives.
 
-The reviewer did not re-attack the fixes; the slice's review passes did, and are in the pull request.
+**Review of the fixes** (a second Opus 5.5 sub-agent, 2026-11-21, about 85 attempts at `7c46a65`; each is an `R-` case in the test file): 6 blocking classes, all fixed by class in the model, which every Jenkins rule shares:
+- the two branches of a `?:` and the cases of a `switch` had one condition label, so an input in one branch counted for a publish in the other (now each branch and case is its own condition, labelled by line, column and inlined call);
+- a condition's text left out its operator, so `== 'main'` and `!= 'main'` were one condition, and `expression { ... }` left out its body (both now in);
+- a condition on a parameter of a method the file inlines meant the same at every call (`onlyIf(params.ASK) { input }`, `onlyIf(true) { publish }`; it is now qualified by the call);
+- the "same catching block" test compared the block's line, so a helper's `try` or `catchError` called twice was one block (now one number per walk of a block);
+- `beforeAgent` and `beforeInput` were part of a `when`'s text, so two stages under `branch 'main'` differed (now left out), and `beforeOptions true`, which Jenkins evaluates before input, was not read (now read as `beforeInput`);
+- a `catch` that throws only under an `if` counted as rethrowing (now only a throw or `error` that always runs counts, so a check there no longer counts for OBAAF-JEN-011 and 012 either).
+
+More iteration methods (`sum`, `sort`, `findIndexOf` and others) are conditions. Left as stated limits, each in `LIMITS`: conditions with the same text count as one even where a variable, a file or a random value changes between them; `\u0020` in slashy strings; a computed map key; `x?.with { }`; a ternary continued on the next line; an input in an outer catching block for a publish in an inner one (conservative); `retry` around an input; an unread statement anywhere makes a missing approval "cannot tell".
