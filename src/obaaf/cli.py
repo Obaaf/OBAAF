@@ -146,9 +146,10 @@ def cmd_check(args) -> int:
         if any(not environment or any(c in name for c in "*?")
                for name, environment in config.protected_secrets.items()):
             # These lines judge the entries; the finding judges each name a job reads (review of #301).
-            print("Settings evidence: an entry with a glob or with no environment is not assessed itself. "
-                  "OBAAF-GHA-005 assesses each secret name a job reads, in the environment the job declares, "
-                  "when protected_secrets names that environment for it, through a glob or not.",
+            print("Settings evidence: the lines above judge the configuration's entries, and one with a glob "
+                  "or with no environment cannot be verified there. OBAAF-GHA-005 judges each secret name a "
+                  "job reads, in the environment the job declares, and can verify it only when "
+                  "protected_secrets names that environment for every secret of the job, through a glob or not.",
                   file=sys.stderr)
     if args.expiry_warning < 0:
         print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)

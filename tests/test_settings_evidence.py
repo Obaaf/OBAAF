@@ -283,12 +283,12 @@ jobs:
                 found, err = self._environment_control(self.path)
                 self.assertEqual(found, verdict)
                 self.assertIn(line, err)
-                self.assertIn("OBAAF-GHA-005 assesses each secret name a job reads", err)
+                self.assertIn("OBAAF-GHA-005 judges each secret name a job reads", err)
         self.setUp()
         self._agent_repository("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
         found, err = self._environment_control(self.path)
         self.assertEqual(found, "verified")
-        self.assertNotIn("is not assessed itself", err)
+        self.assertNotIn("judge the configuration's entries", err)
 
     def test_a_path_through_a_linked_folder_counts_by_where_the_file_is(self):
         """Review of #301: a file link from outside is refused, because OBAAF-REPO-001 reads the path given;
