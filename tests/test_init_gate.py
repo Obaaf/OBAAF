@@ -37,7 +37,9 @@ class GateTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name) / "source"
+        # Resolved, so that a temporary folder reached through a link (macOS's /var) does not count as
+        # one of the linked paths init replaces in its follow-up commands.
+        self.root = Path(tmp.name).resolve() / "source"
         self.root.mkdir()
         self.workflow = self.root / WORKFLOW
 
@@ -94,6 +96,39 @@ class GateTests(unittest.TestCase):
             self.assertEqual(actual, expected, replay)
             if words[1] == "check":
                 self.assertIn("What to do next:", replay)
+
+    @unittest.skipIf(os.name == "nt", "symbolic links need extra rights on Windows")
+    def test_followup_through_a_link_names_the_folder_init_worked_on(self):
+        # review-gpt #305: fix does not resolve links as init and check do, so `obaaf fix -- LINKED`
+        # refused the repository, and `obaaf fix -- link/..` read another folder.
+        real = self.root / "private" / "tmp" / "repo"
+        real.mkdir(parents=True)
+        (self.root / "tmp").symlink_to(Path("private") / "tmp")
+        (self.root / ".github" / "workflows").mkdir(parents=True)
+        (self.root / ".github" / "workflows" / "top.yml").write_text(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo top\n")
+        (self.root / "l").symlink_to(Path("private") / "tmp" / "repo" / "inner")
+        (real / "inner").mkdir()
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        for given, folder in ((self.root / "tmp" / "repo", real), (Path("l") / "..", real)):
+            with self.subTest(given=str(given)):
+                for options in ((), ("--apply",)):
+                    code, output = command("init", *options, "--", given)
+                    self.assertEqual(code, 0, output)
+                    last = output.splitlines()[-1].removeprefix("Preview available fixes with ")
+                    self.assertEqual(shlex.split(last), ["obaaf", "fix", "--", str(folder)])
+                with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+                    code, output = command("init", "--", given)
+                self.assertEqual(code, 0, output)
+                check = output.splitlines()[-2].removeprefix("To check the current repository, run ")
+                self.assertEqual(shlex.split(check), ["obaaf", "check", "--summary", "--", str(folder)])
+                words = shlex.split(last)
+                expected, _ = command(*words[1:-1], folder)
+                actual, replay = command(*words[1:])
+                self.assertEqual(actual, expected, replay)
+                self.assertNotIn("top.yml", replay)
 
     @unittest.skipIf(os.name == "nt", "a Windows directory name cannot contain a newline")
     def test_followup_for_a_multiline_directory_uses_the_current_directory(self):
