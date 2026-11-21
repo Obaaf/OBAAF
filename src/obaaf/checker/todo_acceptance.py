@@ -18,7 +18,8 @@ def scoped_migration_command(baseline_path, checked, options) -> str:
     # Quoting protects spaces and shell metacharacters, but argparse reads an initial dash
     # as an option even after shell quoting. A relative path with ./ denotes the same file.
     args = ["obaaf", "baseline", "migrate"]
-    args.extend("./" + path if path.startswith("-") else path for path in paths)
+    # A leading `=` is expanded by zsh (`=ls` is the path of ls), so it gets ./ as well.
+    args.extend("./" + path if path.startswith(("-", "=")) else path for path in paths)
     args.extend(("--owner", "OWNER", "--reason", "REASON", "--expires", "YYYY-MM-DD"))
     args.extend(str(option) for option in (options or ()))
     return shlex.join(args)

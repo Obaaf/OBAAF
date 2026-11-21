@@ -293,14 +293,18 @@ def _lane_advice(text: str, result: CheckResult, reference: str = "the lane chec
     # The rule mentions the lane check twice. Keep its explanation and render the command once.
     text = text.replace(f"`{placeholder}`", placeholder)
     if command != one_line(command):
-        advice = text.replace(placeholder, "the lane check")
-        return advice + " Run the lane check manually with the original paths and options.", None
+        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess what
+        # "the lane check" is (review of #311, as review-gpt #308 asked of the migration hint).
+        advice = text.replace(placeholder, "obaaf check --lanes")
+        return (advice + " Use the check's original path and options with obaaf check --lanes; they cannot "
+                "be printed as a one-line command."), None
     return text.replace(placeholder, reference), command
 
 
 def _inline_lane_advice(text: str, result: CheckResult) -> str:
     advice, command = _lane_advice(text, result)
-    return f"{advice} {command}" if command else advice
+    # Labelled, so that "the lane check" in the advice says which command it is (review of #311).
+    return f"{advice} Lane check: {command}" if command else advice
 
 
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:

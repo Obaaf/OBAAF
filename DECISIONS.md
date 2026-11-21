@@ -1083,7 +1083,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-114 Lane inspection uses the original check inputs
 
-**Decision.** Lane advice in text findings, JSON findings and JSON to-do items carries the checked path, configuration, platform, baseline, threshold and any selected settings snapshot. When the command cannot be displayed faithfully on one line, the advice asks the reader to run the lane check manually with those inputs.
+**Decision.** Lane advice in text findings, JSON findings and JSON to-do items carries the checked path, configuration, platform, baseline, threshold and any selected settings snapshot. The command follows the label `Lane check:` in a finding's fix and in a JSON to-do item's `nextAction`, whose `command` stays null, and goes on its own line in the text action list. When it cannot be displayed faithfully on one line, the advice names `obaaf check --lanes` and asks the reader to use it with those inputs. The rule's fix gives the form of a `lanes:` key by example, a path from the repository root, and not by the lane command: for a check of one workflow file that command lists the file's jobs by file name, a key the repository's check does not match (review of #311).
 
 **Reason.** A different configuration or repository can classify the same job differently.
 
