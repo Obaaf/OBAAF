@@ -31,7 +31,7 @@ Init reads GitHub workflow files locally. It proposes agent lanes for catalogued
 
 The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
 
-Init ends with the checker’s to-do list and the command to preview fixes. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
+Init ends with the checker’s to-do list and the command to preview fixes. For a repository path that cannot be shown on one line, follow the instruction from inside that repository. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
 
 #### Optional companion checks
 

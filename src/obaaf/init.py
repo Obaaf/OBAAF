@@ -175,6 +175,22 @@ def _enclosing_work_tree(root: Path) -> Path | None:
     return None
 
 
+def _followup_command(prefix: str, command: str, path: str, root: Path) -> str:
+    # init resolves links in the path it was given, as check does, but fix does not (#336 item 3):
+    # through a link, `obaaf fix -- PATH` refuses the repository or reads another folder. Name the
+    # folder init worked on instead (review-gpt #305).
+    if Path(os.path.abspath(path)) != root:
+        path = str(root)
+    if path != one_line(path):
+        return f"From inside the selected repository, run {command}"
+    if path != ".":
+        # zsh expands an unquoted =name before the CLI sees its option terminator.
+        if path.startswith("="):
+            path = "./" + path
+        command += " -- " + shlex.quote(path)
+    return prefix + command
+
+
 def _handoff(root: Path, display_path: str, missing: dict[str, bytes], apply: bool) -> None:
     from obaaf.checker.report import to_summary
     from obaaf.fix_copy import PrivateCopyError, private_copy
@@ -199,8 +215,6 @@ def _handoff(root: Path, display_path: str, missing: dict[str, bytes], apply: bo
         text = summary(root)
         print("Current repository:")
     print(text)
-    path = [] if display_path == "." else ["--", display_path]
-    print("Preview available fixes with " + one_line(shlex.join(["obaaf", "fix", *path])))
 
 
 def run(args) -> int:
@@ -259,10 +273,9 @@ def run(args) -> int:
             _handoff(root, args.path, missing, args.apply)
         except (OSError, ValueError) as exc:
             state = "Setup files installed." if missing and args.apply else "Setup review complete."
-            command = shlex.join(["obaaf", "check", "--summary", "--", args.path])
             print(f"{state} The follow-up summary was unavailable: {one_line(exc)}", file=sys.stderr)
-            print("To check the current repository, run " + one_line(command))
-            print("Preview available fixes with " + one_line(shlex.join(["obaaf", "fix", "--", args.path])))
+            print(_followup_command("To check the current repository, run ", "obaaf check --summary", args.path, root))
+        print(_followup_command("Preview available fixes with ", "obaaf fix", args.path, root))
         return 0
     except (OSError, ValueError) as error:
         print(f"error: {one_line(error)}", file=sys.stderr)
