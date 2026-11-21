@@ -194,8 +194,9 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
             prefix = False
         if word in ("run", "exec", "--") or (_shell_c(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
             runs = True
-        elif k and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
-                not command[k - 1].startswith("-") or (k + 1 < len(command) and command[k + 1] in _PM_VERBS)):
+        elif k and "=" not in word and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
+                not command[k - 1].startswith("-")
+                or next((w for w in command[k + 1:k + 8] if not w.startswith("-")), "") in _PM_VERBS):
             # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
             runs = False
     for j, w in enumerate(command[1:], 1):
