@@ -124,7 +124,9 @@ def check_words(words: list[str]) -> str | None:
     patterns and read only the first for a failure it ignores). Only the first 64 words are read."""
     if not words:
         return None
-    program = re.sub(r"(?i)\.exe$", "", words[0].replace("\\", "/").rsplit("/", 1)[-1])
+    program = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if program.lower().endswith(".exe"):
+        program = program[:-4].lower()        # Windows: a program's name is not case-sensitive
     rest = words[1:64]
     hit = ((program == "obaaf" and rest[:1] == ["verify"])
            or (program == "gh" and rest[:2] == ["attestation", "verify"])
@@ -188,18 +190,24 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
         if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
                            or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
             prefix = False
-        if word in ("run", "exec", "--", "-c"):
+        if word in ("run", "exec", "--") or (word == "-c" and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
             runs = True
     for j, w in enumerate(command[1:], 1):
-        if " " in w and _CHECK_PROGRAM.search(w) and (command[j - 1] == "-c" or command[0] in ("ssh", "eval")):
+        if " " in w and _CHECK_PROGRAM.search(w) and (
+                (command[j - 1] == "-c" and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
+                or command[0] in ("ssh", "eval")):
             words = re.findall(r"[^\s;&|()`'\"]+", w)
             if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
                 return "unread", -1
     return None, -1
 
 
+# Shells whose `-c` takes a script (flagship slice 2d.2o).
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
 # Programs that run the command given in their other words (flagship slice 2d.2o).
 _CHECK_RUNNERS = frozenset({"sudo", "doas", "su", "ssh", "eval", "xargs", "parallel", "retry", "watch", "flock", "script",
+                            "gosu", "su-exec", "fakeroot", "unbuffer", "setpriv", "chpst", "tini", "dumb-init", "proot",
+                            "torsocks", "proxychains", "proxychains4", "catchsegv", "systemd-run",
                       "nix-shell", "devbox", "pixi", "npx", "uvx", "pipx", "chroot", "unshare", "nsenter", "bwrap",
                       "firejail", "strace", "ltrace", "valgrind", "faketime", "setsid", "runuser", "with-contenv"})
 
@@ -3615,7 +3623,8 @@ class JenkinsRules:
         out, physical, pending = [], [], ""
         for part in text.split("\n"):
             # a backslash at the end of a line joins the next, but not at the end of a comment
-            if part.endswith("\\") and _strip_comment(pending + part).endswith("\\"):
+            trailing = len(part) - len(part.rstrip("\\"))
+            if trailing % 2 == 1 and _strip_comment(part).endswith("\\"):
                 pending += part[:-1]
                 continue
             physical.append(pending + part)
@@ -3691,17 +3700,20 @@ class JenkinsRules:
         unread, swallowed = None, []
         if not states:
             unread = "the shell reader does not vouch for the line the check is on"
-        for key, kind, why in states:
+        for key, kind, why, n in states:
             if kind == "check" and vouched.get(key, 0) > 0:
                 vouched[key] -= 1
             elif why:
-                swallowed.append((self._check_rank(key), len(swallowed), why))
+                swallowed.append((self._check_rank(key), len(swallowed), why, n))
             elif kind == "path":
                 unread = unread or "the check's program is named by a path, so which program runs depends on the workspace"
             else:
                 unread = unread or "the shell reader does not vouch for the line the check is on"
         if swallowed:
-            # The reason of the first check in the catalog's order of `verify_commands`, as the older reading gave it
+            # The reason of the first check in the catalog's order of `verify_commands`, as the older reading gave it;
+            # where the first swallowed check is, for a publish in the same step
+            first = min(swallowed, key=lambda s: s[3])[3]
+            self._script_cache[("swallow-at", id(info.use.call))] = (info.use.call, text.find(lines[first][0]))
             return ("swallowed", min(swallowed)[2])
         return ("unread", unread) if unread else ("stops", "")
 
@@ -3751,7 +3763,7 @@ class JenkinsRules:
         return kept, waits
 
     @classmethod
-    def _check_states(cls, lines: list, errexit: bool) -> list[tuple[tuple, str, str | None]]:
+    def _check_states(cls, lines: list, errexit: bool) -> list[tuple[tuple, str, str | None, int]]:
         """Each check command of an `sh` script, in order, as (its words from the program on, or () when a runner or a
         quoted string runs it; "check", "path" or "unread"; why the script decides its failure does not fail the step,
         or None). Lines are read in order: errexit and pipefail set by `set` before the check count, after it they do
@@ -3781,9 +3793,9 @@ class JenkinsRules:
                 continue
             words = [w for command, _op in line for w in command] + [op for _c, op in line if op]
             case_depth += sum(1 for w in words if w == "case") - sum(1 for w in words if w == "esac")
-            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{")
-                          or (w == "(" and case_depth <= 0))
-            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}") or (w == ")" and case_depth <= 0))
+            parens = case_depth <= 0 and "case" not in words      # a case pattern's `)` closes nothing
+            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{") or (w == "(" and parens))
+            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}") or (w == ")" and parens))
             defs = len(re.findall(r"\(\s*\)", raw)) if re.search(r"(^|[\s;&|])[\w.-]+\s*\(\s*\)", raw) else 0
             opening, closing = max(opening - defs, 0), max(closing - defs, 0)     # `name()` opens nothing
             if not in_func and (defs or re.search(r"(^|[\s;&|])function\s+[\w.-]+", raw)):
@@ -3860,7 +3872,7 @@ class JenkinsRules:
                     continue
                 key = tuple(command[at:at + 64]) if at >= 0 else ()
                 if lost or in_func or heredoc:
-                    out.append((key, kind, None))
+                    out.append((key, kind, None, n))
                     continue
                 after = line[k + 1][0] if k + 1 < len(line) else []
                 ends = command[0] == "exec"
@@ -3888,7 +3900,7 @@ class JenkinsRules:
                                "the sh script does not stop at a failed command, and more commands follow it")
                 elif trap_zero:
                     why = "a trap that runs `exit 0` on EXIT or ERR decides the script's status"
-                out.append((key, kind, why))
+                out.append((key, kind, why, n))
             depth = max(depth + opening - closing, 0)
             if in_func:
                 func_opened = func_opened or opening > 0
@@ -3955,6 +3967,15 @@ class JenkinsRules:
                           info.ctx.post == "success" or any(RESULT_GUARD_SET.search(g) for g in info.ctx.guards)))
             self._script_cache[("jen011-sig", id(info))] = key
         return key[1]
+
+    def _publishes_after(self, info: Info) -> bool:
+        """Whether a step that holds a check whose failure it ignores publishes after that check in its own script, as
+        far as the text shows (a publish written before it cannot be stopped by it, and is no finding of this rule)."""
+        at = self._script_cache.get(("swallow-at", id(info.use.call)))
+        if not at or at[0] is not info.use.call or at[1] < 0 or not info.shell:
+            return True
+        starts = [m.start() for rx in self.upload_cmds for m in [rx.search(info.script)] if m]
+        return not starts or max(m.start() for rx in self.upload_cmds for m in rx.finditer(info.script)) > at[1]
 
     def _checked_earlier_stage(self, publish: Info, checks: list) -> bool:
         """A publish in a Declarative stage's own failure-path post block, where no check runs in the publish's stage
@@ -4029,7 +4050,7 @@ class JenkinsRules:
                 if at < len(group) and not (kind == "stops" and self._failure_gates(check, group[at])):
                     candidates.append(group[at])
                 same = bisect.bisect_left(indexes[key], check.index)
-                if same < len(group) and group[same] is check and kind != "stops":
+                if same < len(group) and group[same] is check and kind != "stops" and self._publishes_after(check):
                     candidates.append(check)
             found = unknown = None
             # a later step first, as before slice 2d.2o; the check's own step only when nothing after it publishes

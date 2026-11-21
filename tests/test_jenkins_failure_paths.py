@@ -1,10 +1,11 @@
 """Flagship slice 2d.2o: bypass attempts on OBAAF-JEN-011, a publish that can run after a failed or skipped check.
 
 Each case is one attempt by a reviewer that did not write the rule, run as a Jenkinsfile: an attacker's 172 on the rule
-as it was at `75dae58`, then an independent review's 77 (ids starting with V) on the slice's first version 53 (V2) on its second and 52 (V3) on its third. `expected` is what OBAAF-JEN-011 says after the slice ("finding-high", "unknown" for cannot
-tell, or "quiet"); `before` is what it said at `75dae58` (recorded, not asserted). LIMITS names the cases whose
-answer is a stated limit: the answer the reviewer judged right, and why the rule gives another; the record is
-docs/bypass-attempts.md.
+as it was at `75dae58`, then an independent reviewer's on the slice's first four versions (77 with ids starting with V,
+53 with V2, 52 with V3 and 18 with V4). `expected` is what OBAAF-JEN-011 says after the slice ("finding-high",
+"unknown" for cannot tell, or "quiet"); `before` is what it said at `75dae58` (recorded, not asserted). LIMITS names
+the cases whose answer is a stated limit: the answer the reviewer judged right, and why the rule gives another; the
+record is docs/bypass-attempts.md.
 """
 import textwrap
 import time
@@ -368,6 +369,24 @@ CASES = [
     ('V3r13_catchError_bash_more_lines_post_success', 'finding-high', 'finding-high', "pipeline {\n  agent any\n  stages {\n    stage('V') { steps { catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') { sh '''#!/bin/bash\ncosign verify --key cosign.pub registry.example.com/app:1.0\necho done\n''' } } }\n  }\n  post { success { sh 'docker push registry.example.com/app:1.0' } }\n}\n"),
     ('V3r14_local_currentResult_var', 'finding-high', 'quiet', "node {\n  sh 'cosign verify --key cosign.pub registry.example.com/app:1.0 || true'\n  def currentResult = 'SUCCESS'\n  if (currentResult == 'SUCCESS') {\n    sh 'docker push registry.example.com/app:1.0'\n  }\n}\n"),
     ('V3q06_bat_paren_block_check', 'finding-high', 'quiet', 'pipeline {\n  agent { label \'windows\' }\n  stages {\n    stage(\'V\') { steps { bat \'\'\'if "%BRANCH_NAME%"=="main" (\n  cosign verify --key cosign.pub registry.example.com/app:1.0\n)\n\'\'\' } }\n    stage(\'P\') { steps { bat \'docker push registry.example.com/app:1.0\' } }\n  }\n}\n'),
+    ('V4w01_gosu_obaaf_or_true', 'finding-high', 'finding-high', "node {\n  sh '''gosu builder obaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w02_fakeroot_sha_or_true', 'finding-high', 'quiet', "node {\n  sh '''fakeroot sha256sum -c SHA256SUMS || true\n'''\n  sh 'twine upload dist/*'\n}\n"),
+    ('V4w03_unbuffer_cosign_pipe', 'finding-high', 'quiet', "node {\n  sh '''unbuffer cosign verify --key cosign.pub registry.example.com/app:1.0 | tee verify.log\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w04_grep_c_cosign_verify_log_or_true', 'quiet', 'quiet', "node {\n  sh '''cosign verify --key cosign.pub registry.example.com/app:1.0 > verify.log\ngrep -c cosign verify.log || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w05_kubectl_exec_dashdash_or_true', 'finding-high', 'quiet', "node {\n  sh '''kubectl exec deploy/verifier -- cosign verify --key cosign.pub registry.example.com/app:1.0 || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w06_pwsh_returnStatus_true', 'unknown', 'finding-high', "node {\n  powershell(script: 'cosign verify --key cosign.pub registry.example.com/app:1.0', returnStatus: true)\n  bat 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w07_pwsh_check_in_catchError', 'unknown', 'finding-high', "node {\n  catchError(buildResult: 'UNSTABLE') {\n    powershell 'cosign verify --key cosign.pub registry.example.com/app:1.0'\n  }\n  bat 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w08_pwsh_check_parallel_beside', 'unknown', 'finding-high', "node {\n  parallel(\n    v: { powershell 'cosign verify --key cosign.pub registry.example.com/app:1.0' },\n    p: { bat 'docker push registry.example.com/app:1.0' }\n  )\n}\n"),
+    ('V4w09_shopt_uo_errexit_more', 'finding-high', 'quiet', 'node {\n  sh \'\'\'shopt -u -o errexit\nexport PATH="$HOME/bin:$PATH"\nsha256sum -c SHA256SUMS\necho done\n\'\'\'\n  sh \'twine upload dist/*\'\n}\n'),
+    ('V4w10_set_eo_pipefail_export_pipe', 'unknown', 'quiet', 'node {\n  sh \'\'\'set -eo pipefail\nexport PATH="$HOME/bin:$PATH"\nsha256sum -c SHA256SUMS | tee c.log\n\'\'\'\n  sh \'twine upload dist/*\'\n}\n'),
+    ('V4w11_func_one_line_case_uncalled', 'unknown', 'quiet', 'node {\n  sh \'\'\'soft() {\n  case "$1" in strict) echo strict ;; esac\n  cosign verify --key cosign.pub registry.example.com/app:1.0 || true\n}\ncosign verify --key cosign.pub registry.example.com/app:1.0\n\'\'\'\n  sh \'docker push registry.example.com/app:1.0\'\n}\n'),
+    ('V4w12_echo_parens_then_or_true', 'unknown', 'quiet', 'node {\n  sh \'\'\'echo "running verify()"\ncosign verify --key cosign.pub registry.example.com/app:1.0 || true\n\'\'\'\n  sh \'docker push registry.example.com/app:1.0\'\n}\n'),
+    ('V4w13_python_c_sys_exit_then_or_true', 'unknown', 'finding-high', "node {\n  sh '''python3 -c 'import sys; sys.exit()'\nobaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w14_escaped_backslash_line_end', 'finding-high', 'finding-high', "node {\n  sh '''echo C:\\\\\\\\\nobaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V4w15_bat_uppercase_exe_more_lines', 'finding-high', 'quiet', "pipeline {\n  agent { label 'windows' }\n  stages {\n    stage('V') { steps { bat '''COSIGN.EXE verify --key cosign.pub registry.example.com/app:1.0\necho done\n''' } }\n    stage('P') { steps { bat 'docker push registry.example.com/app:1.0' } }\n  }\n}\n"),
+    ('V4w16_bat_call_check_more_lines', 'finding-high', 'quiet', "pipeline {\n  agent { label 'windows' }\n  stages {\n    stage('V') { steps { bat '''call cosign verify --key cosign.pub registry.example.com/app:1.0\necho done\n''' } }\n    stage('P') { steps { bat 'docker push registry.example.com/app:1.0' } }\n  }\n}\n"),
+    ('V4w17_publish_then_check_same_step_or_true', 'quiet', 'quiet', "node {\n  sh '''docker push registry.example.com/app:1.0\nobaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n}\n"),
+    ('V4w18_same_step_or_true_then_guarded_publish', 'finding-high', 'finding-high', "node {\n  sh '''obaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\ntwine upload dist/*\n'''\n  if (params.MIRROR) {\n    sh 'docker push registry.example.com/app:1.0'\n  }\n}\n"),
 ]
 
 LIMITS = {
@@ -557,6 +576,20 @@ LIMITS = {
         "Cannot tell: the script may keep the check's failure itself (`wait $!`, `rc=$?; exit $rc`, `exit ${PIPESTATUS[0]}`), which is not read."),
     'V3q16_obaaf_semicolon_test_or_exit': ('quiet',
         'Cannot tell: the shell reader of slice 2d.2e vouches for a check only as a command on a line of its own after lines it can read (not inside `if`, after `!`, in a `&&` or `;` list, in a subshell or in `bash -c`); this form is outside it (#347).'),
+    'V4w06_pwsh_returnStatus_true': ('finding-high',
+        "Cannot tell: the step's language (powershell, a Python or other #! script) is not read, so a check's name in its text may be a string it prints."),
+    'V4w07_pwsh_check_in_catchError': ('finding-high',
+        "Cannot tell: the step's language (powershell, a Python or other #! script) is not read, so a check's name in its text may be a string it prints."),
+    'V4w08_pwsh_check_parallel_beside': ('finding-high',
+        "Cannot tell: the step's language (powershell, a Python or other #! script) is not read, so a check's name in its text may be a string it prints."),
+    'V4w10_set_eo_pipefail_export_pipe': ('quiet',
+        'Cannot tell: the shell reader of slice 2d.2e vouches for a check only as a command on a line of its own after lines it can read (not inside `if`, after `!`, in a `&&` or `;` list, in a subshell or in `bash -c`); this form is outside it (#347).'),
+    'V4w11_func_one_line_case_uncalled': ('quiet',
+        'Cannot tell: a check inside a shell function definition is not decided; whether and when the function runs is not read.'),
+    'V4w12_echo_parens_then_or_true': ('finding-high',
+        'Cannot tell: text that looks like a function definition (`name()` in an `echo`, `sys.exit()` in a `python -c` string) ends what the script decides after it.'),
+    'V4w13_python_c_sys_exit_then_or_true': ('finding-high',
+        'Cannot tell: text that looks like a function definition (`name()` in an `echo`, `sys.exit()` in a `python -c` string) ends what the script decides after it.'),
 }
 
 
