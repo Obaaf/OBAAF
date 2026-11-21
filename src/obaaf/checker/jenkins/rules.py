@@ -100,7 +100,8 @@ COMMAND_START = frozenset({";", "&&", "||", "|", "&", "!", "(", "{", "then", "do
 
 def _asks_help(words) -> bool:
     """Whether a command asks for help or the version, as argparse reads its options (`--hel` is `--help`)."""
-    return any(w == "-h" or (len(w) >= 3 and ("--help".startswith(w) or "--version".startswith(w))) for w in words)
+    return any((w.startswith("-h") and not w.startswith("--"))
+               or (len(w) >= 3 and ("--help".startswith(w) or "--version".startswith(w))) for w in words)
 
 
 def _text_method(node) -> bool:
@@ -3203,11 +3204,12 @@ class JenkinsRules:
                 continue
             joined = " ".join(words)
             if any(r.match(joined) for r in self.release_verify):
-                if any(len(w) >= 5 and "--pre-approval".startswith(w) for w in words):
-                    kind = "provenance"            # everything but the approvals (argparse takes `--pre` for it)
-                elif any("$" in w for k, w in enumerate(words)
-                         if k > 2 and not (words[k - 1].startswith("-") and "=" not in words[k - 1])):
-                    kind = kind or "expansion"     # `obaaf verify release $FLAGS`: FLAGS may be --pre-approval
+                if any(len(w) >= 4 and "--pre-approval".startswith(w) for w in words):
+                    kind = "provenance"            # everything but the approvals (argparse takes `--pr` for it)
+                elif any("$" in w or "`" in w for w in words[3:]):
+                    # `$FLAGS`, `--artifacts $A` unquoted or a substitution may become --pre-approval or --help; the
+                    # reader's words do not say what was quoted
+                    kind = kind or "expansion"
                 else:
                     return "full"
             elif any(r.match(joined) for r in self.verify_cmds):
@@ -3236,7 +3238,9 @@ class JenkinsRules:
                     command.append(word)
                     continue
                 match = CHECK_NAMED.search(" ".join(command)) if command else None
-                if match and command[0] not in ("echo", "printf", ":") and not _asks_help(command):
+                at = max((k for k in range(len(command)) if CHECK_NAMED.search(" ".join(command[k:k + 4]))),
+                         default=0) if match else 0
+                if match and command[0] not in ("echo", "printf", ":") and not _asks_help(command[at:]):
                     # `OUT="$(obaaf verify release ...)"`, `timeout 600 obaaf verify release`: not counted by the
                     # reader, but the check may stop the script
                     found = "path" if match.group(1) else (found or "unread")
@@ -3525,19 +3529,15 @@ class JenkinsRules:
         return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
 
     @staticmethod
-    def _in_stage_post(publish: Info) -> bool:
-        """Whether a publish is in a Declarative stage's own post block (its stage path ends with "post ...")."""
-        stage = publish.ctx.stage
-        return publish.ctx.post not in (None, "catch/finally") and len(stage) >= 2 and str(stage[-1]).startswith("post ")
-
-    def _stage_post_after(self, publish: Info, checks: list) -> bool:
-        """Whether a publish in a stage's post block comes after a check that runs in another, earlier stage, so that
-        the check's failure skips the publish's stage, post block included (Declarative runs stages in order)."""
-        if not self._in_stage_post(publish):
+    def _stage_post_after(publish: Info, checks: list) -> bool:
+        """Whether a publish in a Declarative stage's own post block comes after a check that runs outside that stage,
+        in an earlier one, so that the check's failure skips the publish's stage, post block included (Declarative runs
+        stages in order). Not for the pipeline's own post block, which runs whatever failed."""
+        owner = publish.ctx.post_owner
+        if not owner or publish.ctx.post in (None, "catch/finally"):
             return False
-        owner = publish.ctx.stage[:-1]
-        return any(c.ctx.stage[:len(owner)] != owner and c.ctx.stage and not str(c.ctx.stage[-1]).startswith("post ")
-                   and c.ctx.post is None for c in checks)
+        return any(c.ctx.stage and c.ctx.stage[:len(owner)] != owner and c.ctx.post in (None, "success")
+                   and c.ctx.post_owner != () for c in checks)
 
     def provenance_check(self) -> None:
         """A publish with no check before it, whose failure stops it, of the artifact's provenance, approvals and
@@ -3568,26 +3568,33 @@ class JenkinsRules:
                 if not check.ctx.deferred and check.index < publish.index and self.provenance_gates(check, publish,
                                                                                                   failing=failing):
                     found.append((kind, check))
-            kinds = {k for k, _c in found}
-            if "full" in kinds and not failing:
-                continue
-            if "full" in kinds and publish.ctx.post != "catch/finally":
-                if self._stage_post_after(publish, [c for k, c in found if k == "full"]):
-                    continue      # a stage's post block after a check in an earlier stage: a failed check skips it
-                if any(RESULT_GUARD.search(g) for g in publish.ctx.guards):
-                    # `post { always { if (currentBuild.currentResult == 'SUCCESS') { ... } } }`: not read
-                    unknown.append((publish, f"the publish at line {publish.line} is in post {{ {publish.ctx.post} }} "
-                                             "under a condition on the build's result, which is not read"))
+            if failing and publish.ctx.post != "catch/finally":
+                # A Declarative post block: a check in an earlier stage stops a stage's post block (a failed check skips
+                # the stage); nothing before the pipeline's own post block, or in the same stage, stops it.
+                found = [(k, c) for k, c in found if self._stage_post_after(publish, [c])]
+                if not found:
+                    if any(RESULT_GUARD.search(g) for g in publish.ctx.guards):
+                        # `post { always { if (currentBuild.currentResult == 'SUCCESS') { ... } } }`: not read
+                        unknown.append((publish, f"the publish at line {publish.line} is in post "
+                                                 f"{{ {publish.ctx.post} }} under a condition on the build's result, "
+                                                 "which is not read"))
+                    else:
+                        high.append(publish)
+                    continue
+            elif failing:
+                # A catch or finally block: a check before it stops the publish only when it runs before the try body
+                # whose failure runs the publish, which is not compared
+                if found:
+                    unknown.append((publish, f"the publish at line {publish.line} is in a catch or finally block; the "
+                                             "check before it stops it only if it runs before the try body whose "
+                                             "failure runs the publish, which is not read"))
                 else:
-                    # the pipeline's post block, or a stage's after checks in that stage only: it runs when they failed
                     high.append(publish)
-            elif "full" in kinds:
-                # A check before a failure handler stops the publish only when it runs outside the body that failed;
-                # how far the try body, stage or pipeline reaches is not compared
-                unknown.append((publish, f"the publish at line {publish.line} is in a failure path ({publish.ctx.post}); "
-                                         "the check before it stops it only if it runs before the block whose failure "
-                                         "runs the publish, which is not read"))
-            elif "unread" in kinds or loose is not None:
+                continue
+            kinds = {k for k, _c in found}
+            if "full" in kinds:
+                continue
+            if "unread" in kinds or loose is not None:
                 check = max((c for k, c in found if k == "unread"), key=lambda c: c.index, default=loose)
                 where = (f"is in {check.ctx.deferred} and is not seen called"
                          if check.ctx.deferred else
