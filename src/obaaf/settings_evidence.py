@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import stat
 import sys
@@ -45,10 +46,14 @@ def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
         relative = path.relative_to(root)
         if any(part.casefold() == ".git" for part in relative.parts):
             raise ValueError(f"check input is in excluded .git metadata: {value}")
-        # Check the physical location even when the checker also names an in-tree alias.
+        # Check the physical location even when the checker also names an in-tree alias. The proof
+        # names the input as the checker's ownership rule does (`_as_found`: the typed path with `..`
+        # collapsed as text) whenever that name leads to the same file, so both name the same paths.
+        # Where it does not (a `..` after a linked folder, #332), the physical location is used.
         proof_path = relative
-        if selected.is_relative_to(root) and ".." not in selected.parts:
-            proof_path = selected.relative_to(root)
+        textual = Path(os.path.abspath(selected))
+        if textual.is_relative_to(root) and _same_path(textual, path):
+            proof_path = textual.relative_to(root)
             if any(part.casefold() == ".git" for part in proof_path.parts):
                 raise ValueError(f"check input is in excluded .git metadata: {value}")
         if settings:
@@ -60,6 +65,15 @@ def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
         raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
     except (OSError, RuntimeError) as exc:
         raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    """Whether both names lead to the same path once links are followed (not merely the same inode).
+    A missing last component compares by name, as it did before `..` was considered."""
+    try:
+        return first.resolve() == second.resolve()
+    except (OSError, RuntimeError):
+        return False
 
 
 def _check_snapshot_path(root: Path, selected: Path, relative: Path) -> None:

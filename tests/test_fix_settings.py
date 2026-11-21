@@ -174,6 +174,61 @@ jobs:
             with self.subTest(is_snapshot=is_snapshot):
                 self.assertEqual(fix_input_relative(selected, self.root, settings=is_snapshot), expected)
 
+    def test_parent_component_before_a_directory_link_keeps_the_checker_name(self):
+        # Review of #310 at 6ef5790: from a subdirectory, `../current/x` is `current/x` to the
+        # checker's ownership rule. The proof must name the same alias, not only its target.
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy")
+        folder.mkdir()
+        Path("current").symlink_to(folder, target_is_directory=True)
+        Path("docs").mkdir()
+        root = self.root.resolve()
+        for name in ("settings.json", "config.yml", "baseline.json"):
+            (folder / name).write_text("{}")
+            for selected in (Path("docs/../current") / name, self.root / "docs/../current" / name):
+                with self.subTest(selected=selected):
+                    result = fix_input_relative(selected, self.root, settings=name == "settings.json")
+                    self.assertEqual(result, Path("current") / name)
+                    self.assertEqual(checker._as_found(self.root / result, root, strict=True),
+                                     checker._as_found(selected, root, strict=True))
+        # Where the textual name is another file (#332), the proof keeps the file the check reads.
+        Path("policy/archive").mkdir()
+        Path("old").symlink_to("policy/archive", target_is_directory=True)
+        Path("settings.json").write_text("{}")
+        self.assertEqual(fix_input_relative(Path("old/../settings.json"), self.root), folder / "settings.json")
+
+    def test_subdirectory_check_and_printed_fix_name_the_same_unowned_inputs(self):
+        folder = Path("policy")
+        folder.mkdir()
+        shutil.copy(self.settings, folder / "settings.json")
+        shutil.copy(self.config, folder / "obaaf.yml")
+        (folder / "baseline.json").write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        Path("current").symlink_to(folder, target_is_directory=True)
+        Path("docs").mkdir()
+        os.chdir("docs")
+        options = ["--settings=../current/settings.json", "--config=../current/obaaf.yml",
+                   "--baseline=../current/baseline.json"]
+        code, out, err = run_cli("check", "..", "--format=json", "--platform=github", "--fail-on=medium", *options)
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        unowned = {path for f in report["findings"] if f["rule"] == "OBAAF-REPO-001"
+                   for path in f["facts"]["files"]}
+        self.assertEqual(unowned, {f"{folder}/{name}" for folder in ("current", "policy")
+                                   for name in ("settings.json", "obaaf.yml", "baseline.json")})
+        groups = {g["id"]: g for g in report["todo"]}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            with self.subTest(cause=cause):
+                args = shlex.split(groups[cause]["command"].replace("=VERSION", "=1.2.3"))
+                for option in options:
+                    self.assertIn(option, args)
+                code, out, err = run_cli(*args[1:])
+                self.assertEqual(code, 0, err)
+                owners = {line.split()[0].lstrip("/") for line in out.splitlines() if line.endswith(" OWNER")}
+                self.assertEqual(owners, unowned)
+                self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+        os.chdir(self.root)
+
     def test_repository_inputs_through_a_linked_parent(self):
         policy = Path("baseline.json")
         policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
