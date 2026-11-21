@@ -321,6 +321,15 @@ class SummaryCliTest(unittest.TestCase):
                     self.assertNotIn("The full report gives the command", report)
                     self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ")
                                          for line in report.splitlines()))
+                    # Review of #319: the action list says which baseline the hint means, also when the
+                    # migration step is a prerequisite of a checkout or pin preview rather than its own row.
+                    actions = report.split("What to do next:", 1)[1]
+                    if options[1] == empty:
+                        self.assertIn(r"Original baseline (escaped, for display only): " + str(tmp) + r"/old\nempty.json",
+                                      actions)
+                    else:
+                        self.assertIn("Original baseline: " + shlex.quote(str(old)), actions)
+                        self.assertNotIn("for display only", actions)
 
     def test_manual_migration_in_the_action_list_names_the_original_baseline(self):
         from test_finding_lifecycle import fixture_repo

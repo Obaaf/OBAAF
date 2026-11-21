@@ -20,7 +20,7 @@ from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import baseline as baseline_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.checker.todo import todo
-from obaaf.checker.todo_acceptance import migration_command, migration_hint
+from obaaf.checker.todo_acceptance import baseline_identity, migration_command, migration_hint
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -331,7 +331,7 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
             if result.errors:
                 action = _RESOLVE_SCAN_ERRORS
             elif action != one_line(action):
-                action = migration_hint(action) + " Original baseline (display only): " + one_line(result.baseline_path)
+                action = migration_hint(action) + " " + baseline_identity(result.baseline_path)
         elif group["command"] is None:
             action, command = _lane_advice(action, result, "the command below")
         if action != one_line(action):

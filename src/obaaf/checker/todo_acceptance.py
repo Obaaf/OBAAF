@@ -39,6 +39,15 @@ def migration_hint(command: str, *, summary: bool = False) -> str:
     return "The full report gives the command." if summary else command
 
 
+def baseline_identity(path) -> str:
+    """Which baseline a migration hint means, for a reader who cannot copy the command (review of #319).
+    A path that prints on one line is given as a shell word; another is escaped, and said to be."""
+    text = str(path)
+    if text == one_line(text):
+        return "Original baseline: " + shlex.quote("./" + text if text.startswith(("-", "=")) else text)
+    return "Original baseline (escaped, for display only): " + one_line(text)
+
+
 def acceptance_cause(finding, result) -> Cause | None:
     """Choose one cause without counting the finding again for each problem in its entry.
 

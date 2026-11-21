@@ -1120,7 +1120,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-118 Legacy migration advice in text reports
 
-**Decision.** The full and summary text reports direct the reader to resolve scan errors before migrating a legacy baseline. After a complete scan, if a migration argument cannot be printed faithfully on one line, the action list names the migration command, describes the original arguments and displays the baseline path with control characters escaped for identification.
+**Decision.** The full and summary text reports direct the reader to resolve scan errors before migrating a legacy baseline. After a complete scan, if a migration argument cannot be printed faithfully on one line, the action list names the migration command, describes the original arguments and identifies the baseline, whether the migration is its own item or a step before a checkout or pin preview: a path that prints on one line as a shell word, another with the characters that cannot be printed escaped and marked as for display only (review of #319). JSON and SARIF are unchanged: the JSON to-do still gives the migration command during an incomplete scan.
 
 **Reason.** Migration requires a complete scan. A reader acting on the to-do list needs to identify the original baseline even when its name prevents a copyable command.
 
