@@ -120,8 +120,9 @@ let any user who can build the job approve. Not read, and so not counted as an a
 abort sets a flag the publish tests, one in a `finally` block, one inside `catchError(catchInterruptions:
 false)`, and a shared-library step. A submitter held in a variable, a method parameter or a map
 variable is "cannot tell", and so is a missing approval when part of the file was not read. Two
-conditions with the same text, operators included, count as the same condition, even where a variable or
-a file they test changes between them.
+conditions written the same way (compared by their whole structure) count as the same condition, even
+where a variable or a file they test changes between them; inside a method the file inlines, a condition
+that reads more than `env`, `params`, `currentBuild` or an upper-case variable is tied to that call.
 
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),

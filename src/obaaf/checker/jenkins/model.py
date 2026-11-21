@@ -10,8 +10,9 @@ cannot settle is recorded as unknown, never as safe (Jenkins design, section 5).
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 from obaaf.checker.workflow import is_lane_variable_spelling
 from obaaf.checker.jenkins import steps as known
@@ -712,6 +713,57 @@ class _Op:
     op: str
 
 
+def condition_key(node, limit: int = 4000) -> str:
+    """A condition's whole structure as text, so that two conditions share a key only when they are written the
+    same way: operators, grouping, numbers, lists, closure bodies, `return` and every other part (flagship slice
+    2d.2l, from its review; `_source_hint` keeps only names and strings). Past `limit` characters the key is the
+    condition's place in the file, so a long condition never matches another."""
+    out: list[str] = []
+    stack = [node]
+    while stack:
+        if sum(len(x) for x in out) > limit:
+            return f"<condition at {getattr(node, 'line', 0)}:{getattr(node, 'col', 0)}>"
+        n = stack.pop()
+        if isinstance(n, str):
+            out.append(n)
+        elif isinstance(n, Str):
+            out.append("Str" + repr(tuple(n.tok.parts)))
+        elif is_dataclass(n) and not isinstance(n, type):
+            out.append(type(n).__name__ + "(")
+            stack.append(")")
+            for f in reversed([f for f in fields(n) if f.name not in ("line", "col")]):
+                stack += [",", getattr(n, f.name), f.name + "="]
+        elif isinstance(n, (list, tuple)):
+            out.append("[")
+            stack.append("]")
+            for item in reversed(n):
+                stack += [",", item]
+        else:
+            out.append(repr(n))
+    return "".join(out)
+
+
+def condition_label(node) -> str:
+    """The readable text of a condition with a short digest of its whole structure (flagship slice 2d.2l)."""
+    digest = hashlib.sha256(condition_key(node).encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    return f"{_source_hint(node)} [{digest}]"
+
+
+# Names a condition may read that mean the same at every call of a method (flagship slice 2d.2l).
+_GLOBAL_ROOTS = {"env", "params", "currentBuild", "true", "false", "null", "scm"}
+
+
+def _reads_only_globals(node) -> bool:
+    """Whether every name a condition reads is the build's own (env, params, currentBuild, an upper-case
+    environment variable) and it calls nothing: then it means the same wherever a method is called."""
+    for n in find_nodes(node, lambda n: isinstance(n, (Name, Call, Closure)), limit=2000):
+        if isinstance(n, (Call, Closure)):
+            return False
+        if n.name not in _GLOBAL_ROOTS and not (n.name.isupper() or n.name.replace("_", "").isupper()):
+            return False
+    return True
+
+
 def _source_hint(node) -> str:
     """Names and strings in an expression, joined: enough to see what a condition tests."""
     out: list[str] = []
@@ -1296,11 +1348,20 @@ def _rethrows(block: Block) -> bool:
         if isinstance(stmt, Return) and stmt.throw:
             return True
         expr = stmt.expr if isinstance(stmt, ExprStmt) else None
-        if isinstance(expr, Call) and callee_name(expr) == "error":
+        if isinstance(expr, Call) and (callee_name(expr) == "error" or chain_name(expr.callee) == "steps.error"):
             return True
         if isinstance(stmt, Block) and _rethrows(stmt):
             return True
+        # stage('Notify') { throw e }: a step that runs its body once, and does not catch, throws on.
+        if isinstance(expr, Call) and expr.closure is not None and callee_name(expr) in _RUNS_BODY_ONCE and \
+                _rethrows(expr.closure):
+            return True
     return False
+
+
+_RUNS_BODY_ONCE = {"stage", "node", "dir", "ws", "timeout", "script", "withCredentials", "withEnv", "container",
+                   "sshagent", "wrap", "lock", "timestamps", "ansiColor", "withDockerContainer", "withAWS",
+                   "withVault", "configFileProvider", "withKubeConfig", "withDockerRegistry", "steps"}
 
 
 def _list_items(node) -> list:
@@ -1546,10 +1607,11 @@ class Builder:
             self.expr(stmt.value, ctx)
         elif isinstance(stmt, If):
             cond = if_eval(stmt.cond, self.methods)
-            hint = _source_hint(stmt.cond)
-            # A condition on a parameter of an inlined method means another thing at each call (flagship
-            # slice 2d.2l: `onlyIf(params.ASK) { input }` and `onlyIf(true) { publish }`).
-            if ctx.invocation and set(re.findall(r"[A-Za-z_]\w*", hint)) & ctx.invocation[1]:
+            hint = condition_label(stmt.cond)
+            # Inside an inlined method, a condition that reads anything but the build's own values can mean
+            # another thing at each call (flagship slice 2d.2l: `onlyIf(params.ASK) { input }` and
+            # `onlyIf(true) { publish }`, also through a local copy or a closure given to another method).
+            if ctx.invocation and not _reads_only_globals(stmt.cond):
                 hint += f" (call #{ctx.invocation[0]})"
             self.expr(stmt.cond, ctx)
             self.block(stmt.then, self.narrowed(ctx, cond[0], stmt.line, f"if {hint}"))
@@ -2161,7 +2223,9 @@ class Builder:
         # calls it by its parameter, it was walked there, with the method's bindings and conditions.
         # (A closure given as another argument was walked at the call, before the method, by `expr`.)
         if call.closure is not None and not any(walked for body, walked, _ in frame.values() if body is call.closure):
-            self.block(call.closure, ctx)
+            # The method was not seen to call it: it may run there, later or never (flagship slice 2d.2l).
+            self.block(call.closure, replace(ctx, deferred=ctx.deferred or
+                                             f"the closure given to {name}() at line {call.line}"))
 
     def record_step(self, name: str, call: Call, ctx: Ctx) -> None:
         if name:
@@ -2292,7 +2356,7 @@ class Builder:
                 options = [s for s in w.closure.stmts if isinstance(s, ExprStmt) and isinstance(s.expr, Call)
                            and callee_name(s.expr) in ("beforeAgent", "beforeInput", "beforeOptions")]
                 tested = Block([s for s in w.closure.stmts if not any(s is o for o in options)], line=w.closure.line)
-                ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line, "when " + _source_hint(tested))
+                ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line, "when " + condition_label(tested))
                 # beforeOptions is evaluated before options and input, and takes precedence over beforeInput.
                 before_input = before_input or any(
                     callee_name(o.expr) in ("beforeInput", "beforeOptions") and path_of(first_arg(o.expr)) != "false"
