@@ -49,9 +49,9 @@ Status 1. Both formats report `OBAAF-GHA-001` at line 10 and `OBAAF-CFG-001` at 
 
 ## A required check in GitHub Actions
 
-For a new workflow, save the standalone [OBAAF template](../templates/github-actions/workflows/obaaf-pipeline-check.yml) as `.github/workflows/obaaf-pipeline-check.yml` if that path is unused. The example below matches the template with its placeholder `uses:` line replaced by the pin above.
+For a new workflow, save the standalone [OBAAF template](../templates/github-actions/workflows/obaaf-pipeline-check.yml) as `.github/workflows/obaaf-pipeline-check.yml` if that path is unused. The example below is the template word for word, with its placeholder `uses:` line replaced by the pin above; a test keeps the two the same.
 
-`obaaf init` writes to that same path. If you already use its generated workflow, keep the installed checker pin and the gate’s threshold and target-branch configuration and baseline handling. To add code scanning, use the SARIF report, artifact and upload steps below as a reference. Adapt them to the existing checkout paths and review the change separately.
+`obaaf init` writes its own workflow to that same path. If you already have it, keep it rather than saving the template over it: once its gate is on, a pull request can use only the baseline entries the target commit also holds, which the template does not check. **The generated workflow only reports until you turn its gate on**, for example with `obaaf fix --gate medium` ([upgrading.md](upgrading.md#enable-the-generated-workflows-gate)), so do that before you make its `check` job a required check. Turn the gate on before you edit the workflow by hand: once it is edited, that command no longer recognises it and prints instructions for a manual edit instead. To add code scanning, copy from the example below the line that writes the SARIF report, the step that keeps it and the `upload` job (the job sets its own `security-events: write` permission, which the `check` job does not have). Run the SARIF line on `source`, the folder the generated workflow checks the repository out into, and before the line that runs the gate, as the template does, so a failing gate still leaves a report. Review the change on its own. The rest of this section describes the template.
 
 What it does:
 
