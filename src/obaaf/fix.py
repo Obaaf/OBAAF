@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 from pathlib import Path
 import re
 import sys
