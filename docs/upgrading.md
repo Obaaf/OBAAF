@@ -100,6 +100,8 @@ Once a release commit is listed, the command can draft a recognised agent run st
 
 Because `obaaf fix egress` selects this command, write a repository folder named `egress` as `./egress` in other `obaaf fix` commands. The commands OBAAF prints already do.
 
+Generate a Markdown work order on a branch you trust with `obaaf fix egress --job NAME --brief`. This option shares the draft’s release hold. Once available, it prints the job and step location as labelled data, the proposed credential placement, the checker’s predicted verdicts and a command for verifying the edit. Reasons for unresolved controls and egress-action conditions appear as bounded, quoted diagnostic data, except that a control's own reason is left out when the egress action also reports conditions; the ordinary preview shows it. Supply any path variables from your trusted check invocation. Review the result before removing an obsolete acceptance.
+
 ### Enable the generated workflow’s gate
 
 After reviewing outstanding findings and any acceptances, commit the generated workflow. Run the preview from the repository root and review its diff and count. On Linux with extended-attribute support, the second command applies that edit. On other hosts, make the displayed change by hand.

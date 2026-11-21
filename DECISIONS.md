@@ -111,6 +111,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
 | D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
+| D-107 | A Markdown work order for confinement | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
@@ -1015,6 +1016,16 @@ An assessment concerns a literal secret and its required literal environment. Re
 **Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, a workflow file that is not UTF-8 text, and edits whose precise effect cannot be proven remain for manual review. A refusal from comparing findings or baseline and ignore entries names them, and a workflow refused for its encoding is named. The checker reads the workflow offline.
 
 **Status.** Proposed, 2026-11-19 (slice A5a, #285).
+
+### D-107 A Markdown work order for confinement
+
+**Decision.** `obaaf fix egress --job NAME --brief` prints a Markdown task based on the same isolated draft and checker verdicts as the ordinary preview. Generate it from a trusted branch. The instructions and proof command come from OBAAF. Repository names and case-specific checker reasons appear as quoted, length-limited data. The work order identifies the original command by its step number.
+
+**Reason.** A person or coding agent can locate the proposed change without treating workflow commands, comments, or checker diagnostics containing repository text as instructions.
+
+**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft. The checker keeps each step an egress-action condition names with its own explanation, so the work order can show why each named step matters before a length limit; the ordinary preview therefore lists such a condition as one line per step instead of one joined line (recorded by the review, review-gpt #288). A reason the work order omits is counted, but a control's own reason is not shown when its egress-action reading has conditions, even when another control decides the verdict (#336).
+
+**Status.** Proposed, 2026-11-19 (A6a, #286).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 

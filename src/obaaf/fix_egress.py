@@ -127,7 +127,7 @@ def _rewrite(job, text, name, catalog, agents, pin):
     expected["jobs"][name]["steps"][index] = new
     if yamlutil.load(edited) != expected:
         raise ValueError("could not preserve the surrounding workflow; review this job by hand")
-    return edited, _plain(expected["jobs"][name]), blocked, broken
+    return edited, _plain(expected["jobs"][name]), blocked, broken, index
 
 
 def run(args, catalog=None):
@@ -147,58 +147,66 @@ def run(args, catalog=None):
             before = check_inputs(copy, options, today, catalog)
             check_copy_matches(root, check_inputs(root, options, today, catalog), before)
             path, text, job = _job(copy, options, before, args.job)
-            edited, draft, blocked, broken = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
+            edited, draft, blocked, broken, index = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
             path.write_text(edited, encoding="utf-8")
             after = check_inputs(copy, options, today, catalog)
-            shown = path.relative_to(copy).as_posix()
-            # Everything is worked out before anything is printed, so a refusal prints only itself
-            # (review of A3a: a date in the job printed the verdicts and then refused).
-            # Escapes for the whole job when any text holds a character Python does not count as printable
-            # (a direction override, a zero-width space, U+0085, a private-use character): printed as it
-            # is, it could make a script read otherwise, or read back as other text (second review pass).
-            draft_text = yaml.dump({args.job: draft}, Dumper=_DisplayDumper, sort_keys=False,
-                                   allow_unicode=not _needs_escapes(draft))
-            lines = [
-                "Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "
-                "evaluates this exact placeholder list. If you adopt the draft, review the action's denied "
-                "output after a run. Under confinement, the command's writes stay in the action's scratch "
-                "directory, it reaches only the listed hosts, their subdomains and the proxied provider APIs, "
-                "and it sees none of the runner's environment except the variables named under env. It can still read its copy of "
-                "the workspace and the runner's /tmp; docs/egress-control.md lists what it can still do.",
-                "Only ANTHROPIC_API_KEY and OPENAI_API_KEY can be held by the proxy. If you pass another "
-                "provider key through env, the agent can read it. Review acceptance or use your own proxy.",
-            ]
-            if blocked:
-                lines.append("The action refuses these env names. Resolve their placement by hand: " + ", ".join(blocked))
-            if broken:
-                lines.append("The action refuses an env value that holds a line break or NUL, so it would not run "
-                             "with these as written, and the checker's verdicts below do not show it, because the checker "
-                             "does not read env values. Pass them another way, for example in a file: " + ", ".join(broken))
-            lines += [
-                "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
-                "without a container; no other step and no job or workflow env holds a credential; the job "
-                "cannot request OIDC tokens or the models permission; the allow-list holds literal hosts with "
-                "no public suffix; and only artifact uploads follow the confined step (move later commit, "
-                "comment or pull request steps to another job). The conditions this job does not meet are "
-                "listed below.",
-                f"Checked on a private copy of {shown!r}, job {args.job!r}:",
-            ]
-            conditions = {}
-            for rule in ("OBAAF-GHA-005", "OBAAF-GHA-020"):
-                findings = [f for f in after.findings if f.path == job.workflow.path and f.job == args.job and f.rule == rule]
-                if not findings:
-                    lines.append(f"{rule}: no finding reported")
-                for f in findings:
-                    lines.append(f"{rule}: {f.state}")
-                    for c in f.controls:
-                        lines.append(f"  {c.name}: {c.verdict}. {workflow.one_line(c.detail)}")
-                        conditions.update(dict.fromkeys(c.action_conditions))
-            if conditions:
-                lines.append("Conditions still requiring work on the egress action:")
-                lines += ["  " + workflow.one_line(condition) for condition in conditions]
+        if getattr(args, "brief", False):
+            from obaaf.fix_egress_brief import work_order
+            print(work_order(job, index, draft["steps"][index], blocked, broken, options, after))
+            return 0
+        shown = path.relative_to(copy).as_posix()
+        # Everything is worked out before anything is printed, so a refusal prints only itself
+        # (review of A3a: a date in the job printed the verdicts and then refused).
+        # Escapes for the whole job when any text holds a character Python does not count as printable
+        # (a direction override, a zero-width space, U+0085, a private-use character): printed as it
+        # is, it could make a script read otherwise, or read back as other text (second review pass).
+        draft_text = yaml.dump({args.job: draft}, Dumper=_DisplayDumper, sort_keys=False,
+                               allow_unicode=not _needs_escapes(draft))
+        lines = [
+            "Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "
+            "evaluates this exact placeholder list. If you adopt the draft, review the action's denied "
+            "output after a run. Under confinement, the command's writes stay in the action's scratch "
+            "directory, it reaches only the listed hosts, their subdomains and the proxied provider APIs, "
+            "and it sees none of the runner's environment except the variables named under env. It can still read its copy of "
+            "the workspace and the runner's /tmp; docs/egress-control.md lists what it can still do.",
+            "Only ANTHROPIC_API_KEY and OPENAI_API_KEY can be held by the proxy. If you pass another "
+            "provider key through env, the agent can read it. Review acceptance or use your own proxy.",
+        ]
+        if blocked:
+            lines.append("The action refuses these env names. Resolve their placement by hand: " + ", ".join(blocked))
+        if broken:
+            lines.append("The action refuses an env value that holds a line break or NUL, so it would not run "
+                         "with these as written, and the checker's verdicts below do not show it, because the checker "
+                         "does not read env values. Pass them another way, for example in a file: " + ", ".join(broken))
+        lines += [
+            "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
+            "without a container; no other step and no job or workflow env holds a credential; the job "
+            "cannot request OIDC tokens or the models permission; the allow-list holds literal hosts with "
+            "no public suffix; and only artifact uploads follow the confined step (move later commit, "
+            "comment or pull request steps to another job). The conditions this job does not meet are "
+            "listed below.",
+            f"Checked on a private copy of {shown!r}, job {args.job!r}:",
+        ]
+        conditions = {}
+        for rule in ("OBAAF-GHA-005", "OBAAF-GHA-020"):
+            findings = [f for f in after.findings if f.path == job.workflow.path and f.job == args.job and f.rule == rule]
+            if not findings:
+                lines.append(f"{rule}: no finding reported")
+            for f in findings:
+                lines.append(f"{rule}: {f.state}")
+                for c in f.controls:
+                    lines.append(f"  {c.name}: {c.verdict}. {workflow.one_line(c.detail)}")
+                    conditions.update(dict.fromkeys(c.action_conditions))
+        if conditions:
+            lines.append("Conditions still requiring work on the egress action:")
+            lines += ["  " + workflow.one_line(condition) for condition in conditions]
         print("\n".join(lines))
         print(draft_text, end="")
         return 0
     except (ValueError, OSError, StopIteration, TypeError, yaml.YAMLError) as error:
+        if getattr(args, "brief", False):
+            print("Work order unavailable. Run the ordinary egress preview on a trusted branch "
+                  "to inspect its diagnostic.", file=sys.stderr)
+            return 2
         print("Draft unavailable: " + workflow.one_line(str(error) or "unsupported workflow shape"), file=sys.stderr)
         return 2

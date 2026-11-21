@@ -3303,7 +3303,9 @@ class WorkflowRules:
 
         def group(bucket, entries, explanation):
             summary = egress_mod.joined(entries, 3) + explanation
-            grouped[summary] = "; ".join(entries) + explanation
+            # Retain each subject with its explanation. A length-limited work
+            # order can then show why each named step matters before truncation.
+            grouped[summary] = tuple(entry + explanation for entry in entries)
             bucket.append(summary)
 
         if agents_outside:
@@ -3368,7 +3370,8 @@ class WorkflowRules:
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
-        conditions = tuple(grouped.get(message, message) for message in (*problems, *unsure))
+        conditions = tuple(condition for message in (*problems, *unsure)
+                           for condition in grouped.get(message, (message,)))
         return egress_mod.Reading(verdict, detail, "egress-action",
                                   {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()},
                                   conditions)
