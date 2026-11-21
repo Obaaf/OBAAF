@@ -111,7 +111,7 @@ _CHECK_NAMES = r"(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shas
 # Searched for in a script: a program's name, wherever it is (a prefilter, linear in the text's length).
 _CHECK_PROGRAM = re.compile(_CHECK_NAMES + r"['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
 # The first place a check's name appears, for where a step's check is (flagship slice 2d.2o).
-_CHECK_NAME_ANYWHERE = re.compile(_CHECK_NAMES, re.I)
+_CHECK_NAME_ANYWHERE = re.compile(r"(?<![\w.-])" + _CHECK_NAMES + r"(?![\w-])", re.I)
 # Matched against one word: the name, after any path.
 _CHECK_WORD = re.compile(r"(?:.*[/\\])?" + _CHECK_NAMES + r"['\"]?", re.I | re.S)
 _SUM_PROGRAMS = frozenset({"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shasum", "b2sum"})
@@ -194,8 +194,10 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
             prefix = False
         if word in ("run", "exec", "--") or (_shell_c(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
             runs = True
-        elif k and word in _NOT_RUNNERS and not command[k - 1].startswith("-"):
-            runs = False          # `sudo apt-get install gpgv`: what runs is the package manager (not `sudo -u git`)
+        elif k and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
+                not command[k - 1].startswith("-") or (k + 1 < len(command) and command[k + 1] in _PM_VERBS)):
+            # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
+            runs = False
     for j, w in enumerate(command[1:], 1):
         if " " in w and _CHECK_PROGRAM.search(w) and (
                 (_shell_c(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
@@ -214,6 +216,9 @@ _NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacm
                           "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
                           "which", "type", "whereis", "man", "git", "curl", "wget", "install", "cp", "mv", "ln", "chmod",
                           "echo", "printf", "grep", "test", "ls", "cat"})
+# What follows a package manager's name when it is the program run (`apk add`, `pip install`).
+_PM_VERBS = frozenset({"install", "add", "i", "get", "update", "upgrade", "remove", "del", "uninstall", "search", "info",
+                       "show", "fetch", "download", "clone", "commit", "-y"})
 # Shells whose `-c` takes a script (flagship slice 2d.2o).
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
 # Programs that run the command given in their other words (flagship slice 2d.2o).
