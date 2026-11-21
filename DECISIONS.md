@@ -113,6 +113,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
+| D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
@@ -1036,6 +1037,16 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
 
 **Status.** Proposed, 2026-11-19 (A7a, #292).
+
+### D-110 Explicit exact versions for agent tool installs
+
+**Decision.** Slice A5b (#291) adds `obaaf fix --pin PACKAGE=VERSION` for GHA-025 findings with the checker's existing evidence of a simple direct npm install. One invocation accepts one package and one exact npm version. A single to-do group retains both candidate and manual counts. Its preview command repeats the check scope and asks the adopter to select a version. The edit inserts the version in the original workflow scalar and verifies that its decoded run text changes only by that insertion. A folded YAML command can qualify when the literal package argument occupies the next physical line.
+
+**Reason.** The adopter chooses the dependency and version. An offline check can identify a literal install and prove its effect on findings. It cannot establish that a registry has published the selected version or that a job will run with it.
+
+**Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review. The proof refuses while any baseline or ignore entry matches no finding, even one that matched nothing before the edit, so while an old-format baseline or such an entry exists the to-do list withholds the checkout and pin commands and names what to settle first: migration, then the paperwork preview that names each unmatched entry and proposes its removal. A check of one file, the `.github` or `.github/workflows` folder or one platform cannot tell an entry for a finding elsewhere from an unmatched one; there the to-do asks for a check of the whole repository instead (added by the review, review-gpt #294).
+
+**Status.** Proposed, 2026-11-19 (slice A5b, #291).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 

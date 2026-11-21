@@ -67,6 +67,18 @@ obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
 
 Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
 
+### Pin a directly installed agent tool
+
+OBAAF-GHA-025 keeps one to-do group for tool installs. The counts show how many direct install occurrences are candidates and how many findings need manual review. The preview's final proof determines which candidates can change. With a legacy baseline, migrate it first. Resolve unmatched baseline and ignore entries with their owners, then rerun the check to get checkout and pin commands. The check's report does not list unmatched ignore entries: the paperwork preview, `obaaf fix` with the check's path and options and without `--pin` or `--tighten`, names each one and proposes its removal, and the to-do gives that command. A check of one file, of the `.github` or `.github/workflows` folder, or of one platform cannot tell an entry for a finding elsewhere from an unmatched one, so the to-do asks for a check of the whole repository first. Select the exact version your team has reviewed and use the same path, configuration, baseline, platform and threshold as the check. For example, if your team has selected version `1.2.3`:
+
+```sh
+obaaf fix . --pin @openai/codex=1.2.3 --baseline .github/obaaf-baseline.json --fail-on low
+```
+
+The edit appends the supplied version to the package in a literal `npm install -g PACKAGE` workflow step. A separate version query for the installed CLI may follow. OBAAF also recognizes the `sudo` form when followed by that query. It leaves scripts, indirect invocations, shared YAML and other install forms for manual review. Choose one package per invocation. The preview does not look up the version, download the package or execute the workflow.
+
+Use `--candidate NAME` from the preview to request one occurrence. On Linux with extended-attribute support, add `--apply` to write a proven diff to clean tracked targets. On other hosts, make the displayed change by hand. OBAAF reports affected acceptances and retains the original files when the named edit cannot be proven. A request in which the proof withholds every candidate exits 1. When some are proven, the withheld ones are listed and the command exits 0. For a UTF-8 workflow, an unknown candidate name exits 2. If the workflow cannot be decoded as UTF-8, the fixer can identify the reported job and package but cannot verify a step number. A request naming that job and package is withheld with exit 1. A repeat is a successful no-op when the checked files show the requested direct install at the exact selected version. Other packages can still need work. An unresolved manual install of the same package, an absent package or a conflicting directly installed version cannot establish that the request is satisfied. A malformed package or version exits 2.
+
 ### Tighten credentials on a checkout
 
 Run `obaaf fix . --tighten checkout-credentials` with the same gate options, including its baseline. The command previews a literal `persist-credentials: false` on directly identified checkout steps reported by OBAAF-GHA-011. Review later Git operations that use the checkout credential. A checker proof reads the workflow without running those steps.

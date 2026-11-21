@@ -175,6 +175,19 @@ class GateTests(unittest.TestCase):
         self.assertIn("cannot be read", text)
         self.assertEqual(self.workflow.read_bytes(), gated)
 
+    def test_gate_and_tool_pin_cannot_be_applied_together(self):
+        self.install()
+        commit(self.root)
+        original = self.workflow.read_bytes()
+        pin = ("--pin", "@openai/codex=1.2.3")
+        gate = ("--gate", "medium")
+        for options in ((*gate, *pin), (*pin, *gate)):
+            with self.subTest(options=options):
+                code, text = command("fix", self.root, *options, "--apply")
+                self.assertEqual(code, 2, text)
+                self.assertIn("--gate is a separate operation", text)
+                self.assertEqual(self.workflow.read_bytes(), original)
+
     def test_custom_ci_gets_manual_guidance_and_remains_unchanged(self):
         self.install()
         self.workflow.write_bytes(self.workflow.read_bytes() + b"# team change\n")

@@ -906,8 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # fix
     parser = sub.add_parser("fix", help="preview or apply proven paperwork and requested workflow changes")
-    parser.add_argument("--tighten", choices=["checkout-credentials"], help="preview only this requested workflow tightening")
-    parser.add_argument("--candidate", metavar="NAME", help="request one checkout using its name from the tightening preview")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--pin", action="append", metavar="PACKAGE=VERSION", help="preview a direct npm install pinned to the exact version supplied")
+    selection.add_argument("--tighten", choices=["checkout-credentials"], help="preview only this requested workflow tightening")
+    parser.add_argument("--candidate", metavar="NAME", help="request one step using its name from the tightening preview")
     parser.add_argument("--apply", action="store_true", help="recompute, prove and write edits to clean tracked targets")
     _fix_check_options(parser)
     parser.set_defaults(fail_on=None)
