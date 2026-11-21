@@ -19,7 +19,7 @@ jobs:
       - name: Check out the documentation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 630c7c32cc536d42b1dba12184012dfecc84fcf1
+          ref: f129768e771c630940556e6f02a1b3a214e74009
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 630c7c32cc536d42b1dba12184012dfecc84fcf1
+          test "$(git rev-parse HEAD)" = f129768e771c630940556e6f02a1b3a214e74009
           worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
           if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
           echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
@@ -59,7 +59,7 @@ jobs:
           page = Links()
           page.feed((Path(os.environ["RUNNER_TEMP"]) / "resource-site/index.html").read_text())
           evidence = [url for url in page.urls if "docs/site-truth-table.md" in url]
-          assert evidence == ["https://github.com/Obaaf/OBAAF/blob/ff09896a32ce5077bc385ede8180c23d6f207d6a/docs/site-truth-table.md"], evidence
+          assert evidence == ["https://github.com/Obaaf/OBAAF/blob/75dae5866219f7b23500e64434f2c51bf3df46c0/docs/site-truth-table.md"], evidence
           print("Rendered homepage contains the pinned evidence link.")
           PY
           obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
