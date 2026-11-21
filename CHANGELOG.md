@@ -14,7 +14,7 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 ### Offline settings evidence
 
-`obaaf check --settings FILE` reads an explicitly named audit snapshot and reports its date; a repository scan also checks the snapshot file's code ownership (OBAAF-REPO-001). Evidence older than 30 days or missing required observations stays uncertain. OBAAF-GHA-005 uses this evidence for its environment control and clears when all five controls verify. The production catalogue still lists no released egress action commit for its credential-isolation control. The `obaaf-pipeline-check.yml` template passes `.github/obaaf-settings.json` when the repository variable `OBAAF_USE_SETTINGS` is `true`, read from the target branch on a pull request.
+`obaaf check --settings FILE` reads an explicitly named audit snapshot and reports its date; a repository scan also checks the snapshot file's code ownership (OBAAF-REPO-001). Evidence older than 30 days or missing required observations stays uncertain. OBAAF-GHA-005 uses this evidence for its environment control and clears when all five controls verify. It assesses each secret name a job reads, in the environment `protected_secrets` names for it, a glob entry included; a plain-list entry alone names no environment and cannot verify. A settings path the system refuses, such as one too long, is a usage error (exit 2), not a traceback. The production catalogue still lists no released egress action commit for its credential-isolation control. The `obaaf-pipeline-check.yml` template passes `.github/obaaf-settings.json` when the repository variable `OBAAF_USE_SETTINGS` is `true`, read from the target branch on a pull request.
 
 ### Checking edits to JSON files
 

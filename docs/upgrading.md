@@ -4,7 +4,7 @@ What changes when you move to a newer OBAAF, and how to do it so that a gate tha
 
 ## Checking an agent job against saved settings
 
-Run `obaaf check . --settings FILE` with the audit snapshot from the repository you are checking. OBAAF-GHA-005 records its UTC date and tests exclusive secret storage and protected-branch access. Refresh observations older than 30 days. An unread setting carries its reason into the finding. Review the other four controls and any separate code-ownership finding. When verification clears a finding covered by a baseline, its entry becomes stale and can fail the gate at the configured severity. Review and remove the obsolete entry. The shipped catalogue currently has no released egress action commit for the credential-isolation control.
+Run `obaaf check . --settings FILE` with the audit snapshot from the repository you are checking. Keep the file inside that repository and check the whole repository: a single-file scan, `--lanes`, or a snapshot outside it (a link from outside included) leaves the environment control at "cannot tell", because the checker cannot then check who owns the file. OBAAF-GHA-005 records its UTC date and tests exclusive secret storage and protected-branch access. Refresh observations older than 30 days. An unread setting carries its reason into the finding. Review the other four controls and any separate code-ownership finding. When verification clears a finding covered by a baseline, its entry becomes stale and can fail the gate at the configured severity. Review and remove the obsolete entry. The shipped catalogue currently has no released egress action commit for the credential-isolation control.
 
 ## Versions, and what to pin
 

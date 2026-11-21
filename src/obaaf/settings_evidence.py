@@ -31,7 +31,11 @@ class SettingsEvidence:
 
     @classmethod
     def load(cls, path: Path, repository: str | None, now: datetime | None = None) -> SettingsEvidence:
-        if not path.is_file():
+        try:
+            regular = path.is_file()
+        except OSError as exc:      # a name too long for the file system, for one
+            raise snapshot.SnapshotError(f"the settings path cannot be read: {exc.strerror or exc}") from exc
+        if not regular:
             raise snapshot.SnapshotError("the settings path must name a regular snapshot file")
         data = snapshot.load(path)
         try:

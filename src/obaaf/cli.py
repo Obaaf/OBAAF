@@ -143,6 +143,13 @@ def cmd_check(args) -> int:
             assessment = diagnostic.assess(name, environment or "")
             print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
                   file=sys.stderr)
+        if any(not environment or any(c in name for c in "*?")
+               for name, environment in config.protected_secrets.items()):
+            # These lines judge the entries; the finding judges each name a job reads (review of #301).
+            print("Settings evidence: an entry with a glob or with no environment is not assessed itself. "
+                  "OBAAF-GHA-005 assesses each secret name a job reads, in the environment the job declares, "
+                  "when protected_secrets names that environment for it, through a glob or not.",
+                  file=sys.stderr)
     if args.expiry_warning < 0:
         print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
         return EXIT_USAGE
@@ -949,8 +956,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fail on findings at or above a severity (high, medium, low), or never. "
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
-    x.add_argument("--settings", metavar="FILE", help="inspect evidence from an explicitly named offline "
-                   "GitHub settings snapshot (a repository scan also checks its code ownership)")
+    x.add_argument("--settings", metavar="FILE", help="use evidence from an explicitly named offline "
+                   "GitHub settings snapshot for OBAAF-GHA-005's environment control, on a scan of the "
+                   "repository that holds it (which also checks its code ownership)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true",
                    help="omit each finding's why and fix lines in text output")

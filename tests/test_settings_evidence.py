@@ -232,6 +232,89 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(outstanding["controls"][1]["verdict"], "cannot tell")
             self.assertIn("30 days", outstanding["controls"][1]["detail"])
 
+    def _agent_repository(self, config: str) -> Path:
+        """A repository with one agent job in environment `release` reading PACKAGE_INDEX_TOKEN."""
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
+                        "https://github.com/example-studio/game.git"], check=True)
+        folder = self.root / ".github"
+        (folder / "workflows").mkdir(parents=True)
+        (folder / "workflows/ci.yml").write_text("""on: workflow_dispatch
+permissions: {contents: read}
+jobs:
+  assistant:
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      API_KEY: ${{ secrets.PACKAGE_INDEX_TOKEN }}
+    steps:
+      - uses: openai/codex-action@1111111111111111111111111111111111111111
+""")
+        (folder / "CODEOWNERS").write_text("* @example/build\n")
+        (folder / "obaaf.yml").write_text(config)
+        self.data["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        snapshot.write(self.data, self.path)
+        return folder
+
+    def _environment_control(self, settings) -> tuple[str, str]:
+        status, out, err = run_cli("check", str(self.root), "--format", "json", "--fail-on", "never",
+                                   "--settings", str(settings))
+        self.assertEqual(status, 0, err)
+        control = next(f for f in json.loads(out)["findings"] if f["rule"] == "OBAAF-GHA-005")["controls"][1]
+        return control["verdict"], err
+
+    def test_the_finding_assesses_each_name_a_job_reads(self):
+        """Review of #301: the stderr lines judge the configuration's entries, and the finding judges
+        each name a job reads, in the environment protected_secrets names for it. A glob entry names
+        one, so it can verify; a plain-list entry alone names none, so it cannot. Both runs say so."""
+        cases = [
+            ("protected_secrets: {'PACKAGE_*': release}\n", "verified", "PACKAGE_*: cannot tell"),
+            ("protected_secrets: {PACKAGE_INDEX_TOKEN: null, 'PACKAGE_*': release}\n", "verified",
+             "PACKAGE_INDEX_TOKEN: cannot tell"),
+            ("protected_secrets: [PACKAGE_INDEX_TOKEN]\n", "cannot tell", "PACKAGE_INDEX_TOKEN: cannot tell"),
+            ("protected_secrets: {'PACKAGE_*': release}\n", "not met", "PACKAGE_*: cannot tell"),
+        ]
+        for config, verdict, line in cases:
+            with self.subTest(config=config, verdict=verdict):
+                self.setUp()
+                if verdict == "not met":
+                    self.settings["repository_secrets"]["value"].append("package_index_token")
+                self._agent_repository(config)
+                found, err = self._environment_control(self.path)
+                self.assertEqual(found, verdict)
+                self.assertIn(line, err)
+                self.assertIn("OBAAF-GHA-005 assesses each secret name a job reads", err)
+        self.setUp()
+        self._agent_repository("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
+        found, err = self._environment_control(self.path)
+        self.assertEqual(found, "verified")
+        self.assertNotIn("is not assessed itself", err)
+
+    def test_a_path_through_a_linked_folder_counts_by_where_the_file_is(self):
+        """Review of #301: a file link from outside is refused, because OBAAF-REPO-001 reads the path given;
+        a folder link resolves to the real file, which is the path OBAAF-REPO-001 reads, so it counts."""
+        folder = self._agent_repository("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
+        (folder / "CODEOWNERS").write_text("/.github/ @example/build\n")
+        with tempfile.TemporaryDirectory() as directory:
+            linked = Path(directory) / "policy"
+            linked.symlink_to(self.path.parent)
+            status, out, err = run_cli("check", str(self.root), "--format", "json", "--fail-on", "never",
+                                       "--settings", str(linked / "settings.json"))
+            self.assertEqual(status, 0, err)
+            findings = json.loads(out)["findings"]
+            control = next(f for f in findings if f["rule"] == "OBAAF-GHA-005")["controls"][1]
+            self.assertEqual(control["verdict"], "verified")
+            self.assertTrue(any(f["rule"] == "OBAAF-REPO-001" and "policy/settings.json" in f["message"]
+                                for f in findings))
+
+    def test_a_settings_path_the_system_refuses_is_a_usage_error(self):
+        """Review of #301: a name too long for the file system was a traceback."""
+        self._agent_repository("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
+        status, out, err = run_cli("check", str(self.root), "--settings", str(self.root / ("a" * 300) / "s.json"))
+        self.assertEqual(status, 2, err)
+        self.assertIn("error: --settings: the settings path cannot be read", err)
+        self.assertNotIn("Traceback", err)
+
     def test_normal_cli_reads_only_selected_file_and_checks_ownership(self):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
