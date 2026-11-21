@@ -1,5 +1,8 @@
 import contextlib
+from contextlib import nullcontext
 from datetime import date, timedelta
+from importlib.resources import files
+from itertools import combinations
 from io import StringIO
 import json
 import os
@@ -214,6 +217,66 @@ class GateTests(unittest.TestCase):
     def test_crlf_gate_with_scanner(self):
         self.check_crlf_gate("--with-scanner", "poutine")
 
+    def test_the_first_gate_template_as_it_landed_is_recognised(self):
+        # review-gpt #306: the other tests build the historical template from the current one, so a
+        # digest taken from an edited template would pass them while every workflow installed from the
+        # real first gate-capable template fell to manual guidance. This one uses the landed bytes.
+        from hashlib import sha256
+
+        from obaaf.fix_gate import GATE_TEMPLATE_DIGEST, ORIGINAL_SETUP, REPORT
+        from obaaf.init_scanners import SCANNERS
+
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        self.assertEqual(sha256(first).hexdigest(), GATE_TEMPLATE_DIGEST)
+        self.assertIn(ORIGINAL_SETUP, first)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"e" * 40
+        (future / "init-workflow.yaml").write_bytes(first.replace(ORIGINAL_SETUP, next_setup))
+        gated = first.replace(REPORT, b"gate_check .github/obaaf-baseline.json --fail-on medium\n")
+        self.assertNotEqual(gated, first)
+        self.install()
+        for label, template in (("current template", None), ("rotated template", future)):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    with self.subTest(template=label, scanners=names):
+                        tail = steps(names)
+                        self.workflow.write_bytes(first + tail)
+                        commit(self.root)
+                        with patch("obaaf.fix_gate.files", return_value=template) if template else nullcontext():
+                            code, text = self.gate("--apply")
+                        self.assertEqual(code, 0, text)
+                        self.assertIn("Applied the displayed gate change", text)
+                        self.assertEqual(self.workflow.read_bytes(), gated + tail)
+
+    def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
+        # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF
+        # handling together. A gate written with the original checker, in CRLF, changes threshold
+        # under a newer template without taking the newer pin or losing its line endings.
+        from obaaf.fix_gate import ORIGINAL_SETUP
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"d" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        tail = steps(["zizmor"])
+        high = historical.replace(b'obaaf check source "${config[@]}" --fail-on never',
+                                  b"gate_check .github/obaaf-baseline.json --fail-on high") + tail
+        self.workflow.write_bytes(high.replace(b"\n", b"\r\n"))
+        commit(self.root)
+        with patch("obaaf.fix_gate.files", return_value=future):
+            code, text = self.gate("--apply")
+        self.assertEqual(code, 0, text)
+        self.assertIn("Applied the displayed gate change", text)
+        written = self.workflow.read_bytes()
+        self.assertEqual(written, high.replace(b"--fail-on high", b"--fail-on medium").replace(b"\n", b"\r\n"))
+        self.assertIn(ORIGINAL_SETUP, written)
+        self.assertNotIn(next_setup, written)
+
     def test_mixed_endings_and_custom_crlf_workflow_get_manual_guidance(self):
         self.install()
         generated = self.workflow.read_bytes().replace(b"\r\n", b"\n")
@@ -293,6 +356,52 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn("Applied the displayed gate change", text)
         self.assertTrue(self.workflow.read_bytes().endswith(tail))
+
+    def test_gate_changes_after_a_setup_pin_rotation(self):
+        from obaaf.fix_gate import ORIGINAL_SETUP
+        from obaaf.init_scanners import SCANNERS
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"c" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        legacy = (Path(__file__).parent / "fixtures/init/report-only-3.3.yaml").read_bytes()
+        path = self.root / "policy files" / "accepted.json"
+        path.parent.mkdir()
+        path.write_text('{"format":"obaaf-baseline/v0.2","findings":[]}')
+        old_gate = historical.replace(b"/.github/obaaf-baseline.json\n", b"/policy files/accepted.json\n").replace(
+            b'obaaf check source "${config[@]}" --fail-on never', b"gate_check 'policy files/accepted.json' --fail-on high")
+        expected = old_gate.replace(b"--fail-on high", b"--fail-on medium")
+        with patch("obaaf.fix_gate.files", return_value=future):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    tail = steps(names)
+                    for label, report in (("current report", historical), ("legacy report", legacy),
+                                          ("previous gate", old_gate)):
+                        with self.subTest(scanners=names, workflow=label):
+                            self.workflow.write_bytes(report + tail)
+                            commit(self.root)
+                            code, text = self.gate("--baseline", path, "--apply")
+                            self.assertEqual(code, 0, text)
+                            self.assertIn("Applied the displayed gate change", text)
+                            self.assertEqual(self.workflow.read_bytes(), expected + tail)
+                            self.assertIn("already gates", self.gate("--baseline", path)[1])
+            self.workflow.write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+            commit(self.root)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertEqual(self.workflow.read_bytes(), expected.replace(ORIGINAL_SETUP, next_setup))
+
+            custom = historical.replace(ORIGINAL_SETUP, b"uses: team/custom-checker@v1")
+            self.workflow.write_bytes(custom)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertIn("by hand", text)
+            self.assertEqual(self.workflow.read_bytes(), custom)
 
     def execute_ci(self, event):
         work = self.root.parent
