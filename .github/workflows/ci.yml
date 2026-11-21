@@ -65,6 +65,37 @@ jobs:
       - name: Check this repository's own workflows
         run: obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
 
+  companion-scanner:
+    # The report-only scanner steps `obaaf init --with-scanner` writes (plan slice 3.3b, #333 item 1):
+    # in a disposable Git repository it writes the workflow with all three scanners, runs one generated
+    # step's script as written against its pinned image, and checks the step's exit status, a finding
+    # the fixture should give, and the workflow-command markers around the scanner's output.
+    name: Generated scanner step (${{ matrix.scanner }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: it depends on ghcr.io and Docker Hub, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [zizmor, actionlint, poutine]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+      - name: Check the generated step against its pinned image
+        env:
+          SCANNER: ${{ matrix.scanner }}
+        run: python scripts/check_companion_scanner.py "$SCANNER"
+
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 10
