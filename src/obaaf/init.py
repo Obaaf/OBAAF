@@ -179,6 +179,9 @@ def _followup_command(prefix: str, command: str, path: str) -> str:
     if path != one_line(path):
         return f"From inside the selected repository, run {command}"
     if path != ".":
+        # zsh expands an unquoted =name before the CLI sees its option terminator.
+        if path.startswith("="):
+            path = "./" + path
         command += " -- " + shlex.quote(path)
     return prefix + command
 

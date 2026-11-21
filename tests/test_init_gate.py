@@ -71,6 +71,30 @@ class GateTests(unittest.TestCase):
         last = output.splitlines()[-1].removeprefix("Preview available fixes with ")
         self.assertEqual(shlex.split(last), ["obaaf", "fix", "--", str(directory)])
 
+    def test_followup_preserves_a_relative_equals_path(self):
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        Path("=ls").mkdir()
+        fix = "Preview available fixes with obaaf fix -- ./=ls"
+        check = "To check the current repository, run obaaf check --summary -- ./=ls"
+        for options in ((), ("--apply",)):
+            code, output = command("init", *options, "--", "=ls")
+            self.assertEqual(code, 0, output)
+            self.assertEqual(output.splitlines()[-1], fix)
+        with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+            code, output = command("init", "--", "=ls")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(output.splitlines()[-2:], [check, fix])
+        for advice, prefix in ((output.splitlines()[-2], "To check the current repository, run "),
+                               (output.splitlines()[-1], "Preview available fixes with ")):
+            words = shlex.split(advice.removeprefix(prefix))
+            expected, _ = command(*words[1:-1], self.root / "=ls")
+            actual, replay = command(*words[1:])
+            self.assertEqual(actual, expected, replay)
+            if words[1] == "check":
+                self.assertIn("What to do next:", replay)
+
     @unittest.skipIf(os.name == "nt", "a Windows directory name cannot contain a newline")
     def test_followup_for_a_multiline_directory_uses_the_current_directory(self):
         directory = self.root / "team\nrepo"
