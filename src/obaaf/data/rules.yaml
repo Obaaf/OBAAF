@@ -1408,10 +1408,13 @@ rules:
       A selector that moves can pick up another build's output, so what is published may not be what was built and
       checked.
     description: >-
-      A pipeline that publishes copies artifacts from another job by a selector that moves (the default
-      last successful build, last completed, latest saved, a permalink or a workspace) and does not check
-      their digests before publishing, so a different build's output can be published. High when the
-      same stage publishes.
+      A pipeline that publishes copies artifacts from another job by a reference that moves (the default
+      last successful build, last completed, latest saved, a permalink, a workspace, a `specific` build
+      named by anything but its number, an `upstream` that falls back to the last successful build, or a
+      Jenkins URL such as `job/b/lastSuccessfulBuild/artifact/`), and no `obaaf verify release`, run as a
+      command whose failure stops the build, comes after the copy and before the publish. Another digest
+      or signature check, a reference the file computes, and a copy in a form the checker does not read
+      are "cannot tell". High when an unchecked publish after the copy is in the copy's own stage.
     fix: >-
       Copy from a specific build number recorded with the approval, and check the artifacts' sha256
       digests against the signed build record (`obaaf verify release`) before publishing.

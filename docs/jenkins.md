@@ -125,6 +125,33 @@ where a variable or a file they test changes between them; inside a method the f
 that reads anything but properties of `env`, `params` and `currentBuild` (`env.BRANCH_NAME`, not a bare
 `BRANCH_NAME`) is tied to that call.
 
+**Another job's artifacts** (OBAAF-JEN-010, flagship slice 2d.2m). A copy is `copyArtifacts` on any
+receiver, `step([$class: 'CopyArtifact', ...])`, or a Jenkins URL to another build's artifacts in a shell
+step or `httpRequest` (`job/b/lastSuccessfulBuild/artifact/`, a job's `ws/`, a URL kept in the file's
+`environment` or in a variable). Its arguments are read as Groovy builds them: a map given as the only
+argument or held in a local variable the file declares once, in a block around the copy, and names nowhere else, and the last of a repeated key.
+A selector moves when it is the default, `lastSuccessful`, `lastCompleted`, `latestSavedBuild`, `permalink`,
+`lastWithArtifacts`, `workspace` or `buildParameter`, a `specific` build named by anything but digits (Jenkins
+reads other text as a permalink or a build's display name), or `upstream(fallbackToLastSuccessful: true)`;
+`specific` with digits, or with the number of a `build` step the file runs and keeps in a variable it names
+nowhere else, is fixed. The copy is cleared for a publish only by an `obaaf verify release` after it and before
+that publish, run in an `sh` script as a command whose failure stops the script (the reader of slice 2d.2e: not
+in an `echo`, a comment, after `|| true`, `&`, `set +e` or `exit`, nor with `returnStatus`), under no condition
+the publish does not share (a condition on parameters alone that the copy shares excepted), not in a parallel
+branch or a `catch`, `catchError` or `warnError`. A publish in a failure path, beside the copy in a parallel
+block, or before the copy in the same `retry` block or loop is never cleared. Another digest or signature check
+(`sha256sum -c`, `cosign verify`, `gpg --verify`) makes the copy "cannot tell", because its sums may come from
+the build that was copied. Also "cannot tell": a selector, a build number, a project or a `$class` the file
+computes, a spread map (`*: m`), `downstream`, `invokeMethod`, a method pointer or computed method name, any
+other place the file names `copyArtifacts` or the `CopyArtifact` class, a copy in a method or closure (read
+where it is written), and a file whose copies, checks and publishes expand into too many to compare. Not read:
+downloads by other tools (JFrog CLI, the Artifactory and Nexus plugins, an object store's "latest" key), a URL
+built in other ways (`env.X =`, a parameter's default; a value from `environment` or a variable is put in, but
+never takes away what the text alone shows, since the shell or a `withEnv` may set it otherwise), `bat` and `powershell` checks, a check whose
+status the script tests (`if (sh(..., returnStatus: true) != 0)`), and whether the check covers the files that
+were copied. Stages are told apart by name, so two Scripted stages with one name, or computed names, are one
+stage for the severity.
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
