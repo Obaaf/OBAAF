@@ -18,7 +18,7 @@ from obaaf.checker.workflow import is_lane_variable_spelling
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.parser import (
     Annotated, Assign, Binary, Block, Call, Closure, Decl, ExprStmt, If, Import, Index, ListLit, Loop, MapLit,
-    MethodDef, ClassDef, Name, Opaque, Prop, Return, Str, Switch, Ternary, Try, Unary, callee_name, path_of,
+    MethodDef, ClassDef, Name, Num, Opaque, Prop, Return, Str, Switch, Ternary, Try, Unary, callee_name, path_of,
 )
 
 # Change-request reachability of a stage.
@@ -292,6 +292,13 @@ def named_arg(call: Call, key: str):
             return value
     return None
 
+
+def _holds_no_step(node) -> bool:
+    """A name, a literal or a property of one (`env.A`): no step runs in it, so a condition on it changes
+    nothing (flagship slice 2d.2l)."""
+    while isinstance(node, Prop):
+        node = node.target
+    return isinstance(node, (Name, Num)) or (isinstance(node, Str) and not node.interpolated)
 
 # Groovy methods that run their closure once per item, or not at all (flagship slice 2d.2l).
 ITERATING = {"each", "eachWithIndex", "reverseEach", "times", "upto", "downto", "step", "forEach", "collect",
@@ -708,60 +715,86 @@ def if_condition(cond, methods: dict | None = None, depth: int = 0) -> str:
     return if_eval(cond, methods, depth)[0]
 
 
-@dataclass(frozen=True)
-class _Op:
-    op: str
+# A condition's label is its readable text, as reports show it, then KEY_SEP and what makes it the condition it
+# is (flagship slice 2d.2l). Two steps are under the same condition only when the whole label is equal.
+KEY_SEP = "\x00"
+
+
+def shown(label: str) -> str:
+    """The readable part of a condition's label."""
+    return label.split(KEY_SEP, 1)[0]
+
+
+def guard_key(label: str) -> str:
+    """What two conditions are compared by: the hidden part of a label, or the whole label when it has none."""
+    return label.split(KEY_SEP, 1)[1] if KEY_SEP in label else label
 
 
 def condition_key(node, limit: int = 4000) -> str:
     """A condition's whole structure as text, so that two conditions share a key only when they are written the
-    same way: operators, grouping, numbers, lists, closure bodies, `return` and every other part (flagship slice
-    2d.2l, from its review; `_source_hint` keeps only names and strings). Past `limit` characters the key is the
-    condition's place in the file, so a long condition never matches another."""
+    same way: operators, grouping, numbers, lists, closure bodies, `return` and every other part the parser keeps
+    (flagship slice 2d.2l, from its review; `_source_hint` keeps only names and strings). Past `limit` characters
+    the key is the condition's place in the file, so a long condition never matches another."""
     out: list[str] = []
+    size = 0
     stack = [node]
     while stack:
-        if sum(len(x) for x in out) > limit:
+        if size > limit:
             return f"<condition at {getattr(node, 'line', 0)}:{getattr(node, 'col', 0)}>"
         n = stack.pop()
-        if isinstance(n, str):
-            out.append(n)
+        if isinstance(n, _Raw):
+            piece = n.text
+        elif isinstance(n, str):
+            piece = repr(n)
         elif isinstance(n, Str):
-            out.append("Str" + repr(tuple(n.tok.parts)))
+            piece = "Str" + repr(tuple(n.tok.parts))
         elif is_dataclass(n) and not isinstance(n, type):
-            out.append(type(n).__name__ + "(")
-            stack.append(")")
-            for f in reversed([f for f in fields(n) if f.name not in ("line", "col")]):
-                stack += [",", getattr(n, f.name), f.name + "="]
+            piece = type(n).__name__ + "("
+            stack.append(_Raw(")"))
+            # `command` is only how a call is written: `branch 'main'` is `branch('main')`.
+            for f in reversed([f for f in fields(n) if f.name not in ("line", "col", "command")]):
+                stack += [_Raw(","), getattr(n, f.name), _Raw(f.name + "=")]
         elif isinstance(n, (list, tuple)):
-            out.append("[")
-            stack.append("]")
+            piece = "["
+            stack.append(_Raw("]"))
             for item in reversed(n):
-                stack += [",", item]
+                stack += [_Raw(","), item]
         else:
-            out.append(repr(n))
+            piece = repr(n)
+        out.append(piece)
+        size += len(piece)
     return "".join(out)
 
 
-def condition_label(node) -> str:
-    """The readable text of a condition with a short digest of its whole structure (flagship slice 2d.2l)."""
-    digest = hashlib.sha256(condition_key(node).encode("utf-8", "surrogatepass")).hexdigest()[:10]
-    return f"{_source_hint(node)} [{digest}]"
+@dataclass(frozen=True)
+class _Raw:
+    text: str
 
 
 # Names a condition may read that mean the same at every call of a method (flagship slice 2d.2l).
 _GLOBAL_ROOTS = {"env", "params", "currentBuild", "true", "false", "null", "scm"}
 
 
-def _reads_only_globals(node) -> bool:
-    """Whether every name a condition reads is the build's own (env, params, currentBuild, an upper-case
-    environment variable) and it calls nothing: then it means the same wherever a method is called."""
-    for n in find_nodes(node, lambda n: isinstance(n, (Name, Call, Closure)), limit=2000):
+def condition_names(node, limit: int = 2000) -> frozenset | None:
+    """The names a condition reads, or None when it calls something, holds a closure, or is too large to read
+    to the end (flagship slice 2d.2l)."""
+    names, count = set(), 0
+    for n in find_nodes(node, lambda n: True, limit=limit):
+        count += 1
         if isinstance(n, (Call, Closure)):
-            return False
-        if n.name not in _GLOBAL_ROOTS and not (n.name.isupper() or n.name.replace("_", "").isupper()):
-            return False
-    return True
+            return None
+        if isinstance(n, Name):
+            names.add(n.name)
+    return frozenset(names) if count < limit else None
+
+
+def reads_only_globals(names: frozenset | None, local: set) -> bool:
+    """Whether a condition reading `names` means the same wherever a method is called: every name is the build's
+    own (env, params, currentBuild, or an upper-case environment variable) and none is a name the file declares,
+    a parameter or variable of that name included."""
+    if names is None or names & local:
+        return False
+    return all(n in _GLOBAL_ROOTS or n.replace("_", "").isupper() for n in names)
 
 
 def _source_hint(node) -> str:
@@ -776,14 +809,9 @@ def _source_hint(node) -> str:
         elif isinstance(n, Str):
             out.append(n.text())
         elif isinstance(n, Call):
-            # A closure's body is what `expression { ... }` tests (flagship slice 2d.2l).
-            stack += ([n.closure] if n.closure is not None else []) + \
-                list(reversed([v for _, v in n.named])) + list(reversed(n.args)) + [n.callee]
+            stack += list(reversed([v for _, v in n.named])) + list(reversed(n.args)) + [n.callee]
         elif isinstance(n, Binary):
-            # The operator is part of what is tested: `== 'main'` and `!= 'main'` differ (flagship slice 2d.2l).
-            stack += [n.right, _Op(n.op), n.left]
-        elif isinstance(n, _Op):
-            out.append(n.op)
+            stack += [n.right, n.left]
         elif isinstance(n, Unary):
             out.append(n.op)
             stack.append(n.operand)
@@ -1399,6 +1427,7 @@ class Builder:
         self.stack: list[str] = []
         self.budget = self.INLINE_BUDGET
         self.seq = 0
+        self.keys: dict = {}
         # For each method being expanded, its closure parameter -> (the caller's closure, walked yet).
         self.closure_args: list[dict] = []
         # Closures and method pointers assigned to variables of this file (flagship slice 2d.2i):
@@ -1538,6 +1567,19 @@ class Builder:
         for stmt in block.stmts:
             self.stmt(stmt, ctx)
 
+    def condition_tag(self, node, ctx: Ctx) -> str:
+        """The hidden part of a condition's label: its structure's digest, cached per node, and, inside an
+        inlined method, the call when the condition reads more than the build's own values (2d.2l)."""
+        cached = self.keys.get(id(node))
+        if cached is None or cached[0] is not node:
+            digest = hashlib.sha256(condition_key(node).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            cached = (node, digest, condition_names(node))
+            self.keys[id(node)] = cached
+        tag = cached[1]
+        if ctx.invocation and not reads_only_globals(cached[2], ctx.invocation[1] | self.p.local_names):
+            tag += f" call {ctx.invocation[0]}"
+        return tag
+
     def next_seq(self) -> int:
         self.seq += 1
         return self.seq
@@ -1607,16 +1649,15 @@ class Builder:
             self.expr(stmt.value, ctx)
         elif isinstance(stmt, If):
             cond = if_eval(stmt.cond, self.methods)
-            hint = condition_label(stmt.cond)
-            # Inside an inlined method, a condition that reads anything but the build's own values can mean
-            # another thing at each call (flagship slice 2d.2l: `onlyIf(params.ASK) { input }` and
+            # The label shows the condition as before; its hidden part tells conditions written differently, and
+            # calls of an inlined method, apart (flagship slice 2d.2l: `onlyIf(params.ASK) { input }` and
             # `onlyIf(true) { publish }`, also through a local copy or a closure given to another method).
-            if ctx.invocation and not _reads_only_globals(stmt.cond):
-                hint += f" (call #{ctx.invocation[0]})"
+            hint, tag = _source_hint(stmt.cond), self.condition_tag(stmt.cond, ctx)
             self.expr(stmt.cond, ctx)
-            self.block(stmt.then, self.narrowed(ctx, cond[0], stmt.line, f"if {hint}"))
+            self.block(stmt.then, self.narrowed(ctx, cond[0], stmt.line, f"if {hint}{KEY_SEP}if {tag}"))
             if stmt.otherwise is not None:
-                self.block(stmt.otherwise, self.narrowed(ctx, _inv(cond)[0], stmt.line, f"if not {hint}"))
+                self.block(stmt.otherwise, self.narrowed(ctx, _inv(cond)[0], stmt.line,
+                                                         f"if not {hint}{KEY_SEP}if not {tag}"))
         elif isinstance(stmt, Loop):
             for h in stmt.header:
                 if isinstance(h, Decl):
@@ -1630,7 +1671,8 @@ class Builder:
                     self.p.nonliteral_names.add(h.left.name)
                 self.expr(h, ctx)
             # A loop body may run zero times: it is conditional.
-            self.block(stmt.body, replace(ctx, guards=ctx.guards + (f"loop {self.site(ctx, stmt)}",)))
+            loop = f"loop {stmt.line}{KEY_SEP}loop {self.site(ctx, stmt)}"
+            self.block(stmt.body, replace(ctx, guards=ctx.guards + (loop,)))
         elif isinstance(stmt, Try):
             body_ctx = ctx
             catches = [h for h, kind in zip(stmt.handlers, stmt.kinds or ["catch"] * len(stmt.handlers))
@@ -1649,7 +1691,8 @@ class Builder:
             for number, case in enumerate(stmt.cases):
                 inner = self.narrowed(ctx, CR_UNKNOWN, stmt.line) if branchy else ctx
                 # Each case is its own condition: a step in one case does not run in another (2d.2l).
-                self.block(case, replace(inner, guards=inner.guards + (f"switch {self.site(ctx, stmt)} case {number}",)))
+                self.block(case, replace(inner, guards=inner.guards + (
+                    f"switch {stmt.line}{KEY_SEP}switch {self.site(ctx, stmt)} case {number}",)))
         elif isinstance(stmt, Return):
             if stmt.value is not None:
                 self.expr(stmt.value, ctx)
@@ -1799,13 +1842,15 @@ class Builder:
             elif isinstance(n, Binary):
                 # `a && b`, `a || b`, `a ?: b`: b may not be evaluated (flagship slice 2d.2l).
                 right = replace(ctx, guards=ctx.guards + (f"{n.op} {self.site(ctx, n)}",)) \
-                    if n.op in ("&&", "||", "?:") else ctx
+                    if n.op in ("&&", "||", "?:") and not _holds_no_step(n.right) else ctx
                 stack += [(n.right, right), (n.left, ctx)]
             elif isinstance(n, Unary):
                 stack.append((n.operand, ctx))
             elif isinstance(n, Ternary):
-                then = replace(ctx, guards=ctx.guards + (f"?: then {self.site(ctx, n)}",))
-                otherwise = replace(ctx, guards=ctx.guards + (f"?: else {self.site(ctx, n)}",))
+                then = ctx if _holds_no_step(n.then) else \
+                    replace(ctx, guards=ctx.guards + (f"?: then {self.site(ctx, n)}",))
+                otherwise = ctx if _holds_no_step(n.otherwise) else \
+                    replace(ctx, guards=ctx.guards + (f"?: else {self.site(ctx, n)}",))
                 stack += [(n.otherwise, otherwise), (n.then, then), (n.cond, ctx)]
             elif isinstance(n, Prop):
                 stack.append((n.target, ctx))
@@ -2147,7 +2192,7 @@ class Builder:
                 inner = replace(inner, swallowed=f"{name} (line {call.line})", swallow_id=self.next_seq())
             if isinstance(call.callee, Prop) and call.callee.name in ITERATING:
                 # xs.each { }, n.times { }: a loop body may run zero times, as `for` (flagship slice 2d.2l).
-                inner = replace(inner, guards=inner.guards + (f"loop {self.site(ctx, call)}",))
+                inner = replace(inner, guards=inner.guards + (f"loop {call.line}{KEY_SEP}loop {self.site(ctx, call)}",))
             if name in ("retry", "waitUntil"):
                 inner = replace(inner, repeats=inner.repeats + (f"{name} {call.line}",))
             if name == "withEnv":
@@ -2200,12 +2245,20 @@ class Builder:
         candidates = self.defs[name]
         mdef = next((d for d in candidates if len(d.params) == len(call.args) + (1 if call.closure else 0)),
                     candidates[0])
-        values = list(call.args) + ([Closure([], call.closure, line=call.line)] if call.closure is not None else [])
-        for param, value in zip(mdef.params, values):
+        # A trailing closure is the last argument, so it binds to the last parameter: a parameter before it with
+        # a default value takes the default (flagship slice 2d.2l: `def withTimeout(int m = 60, Closure body)`).
+        pairs = list(zip(mdef.params, call.args))
+        if call.closure is not None and mdef.params:
+            closure = Closure([], call.closure, line=call.line)
+            if len(call.args) < len(mdef.params):
+                pairs = list(zip(mdef.params[:-1], call.args)) + [(mdef.params[-1], closure)]
+            else:
+                pairs = list(zip(mdef.params, list(call.args) + [closure]))
+        for param, value in pairs:
             self.track_value(param, value)
         frame: dict = {}
         depth = len(self.stack)
-        for param, value in zip(mdef.params, values):
+        for param, value in pairs:
             # Each closure given to the method, in any position, runs where the method calls it.
             if isinstance(param, str) and isinstance(value, Closure):
                 frame[param] = (value.body, False, depth)
@@ -2356,7 +2409,8 @@ class Builder:
                 options = [s for s in w.closure.stmts if isinstance(s, ExprStmt) and isinstance(s.expr, Call)
                            and callee_name(s.expr) in ("beforeAgent", "beforeInput", "beforeOptions")]
                 tested = Block([s for s in w.closure.stmts if not any(s is o for o in options)], line=w.closure.line)
-                ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line, "when " + condition_label(tested))
+                ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line,
+                                    f"when {_source_hint(w.closure)}{KEY_SEP}when {self.condition_tag(tested, ctx)}")
                 # beforeOptions is evaluated before options and input, and takes precedence over beforeInput.
                 before_input = before_input or any(
                     callee_name(o.expr) in ("beforeInput", "beforeOptions") and path_of(first_arg(o.expr)) != "false"

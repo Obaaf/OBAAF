@@ -513,7 +513,7 @@ CASES = [
      "def onlyIf(boolean cond, Closure body) {\n  stage('x') { if (cond) { body() } }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
     ('R2-N08c_closure_var_param', 'quiet', 'quiet',
      "node {\n  def onlyIf = { boolean cond, Closure body -> if (cond) { body() } }\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
-    ('R2-N09_named_param_map', 'quiet', 'unknown',
+    ('R2-N09_named_param_map', 'quiet', 'finding',
      "def onlyIf(Map o, Closure body) {\n  if (o.when) { body() }\n}\nnode {\n  onlyIf(when: params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(when: true) { sh 'npm publish' }\n}\n"),
     ('R2-N10_recursion', 'quiet', 'unknown',
      "def r(int n, Closure body) { if (n > 0) { r(n - 1, body) } else { body() } }\nnode {\n  r(0) { input message: 'Release?', submitter: 'release' }\n  sh 'npm publish'\n}\n"),
@@ -553,9 +553,40 @@ CASES = [
      "node {\n  try { sh 'obaaf verify release' } catch (e) {\n    stage('Notify') { throw e }\n  }\n  sh 'npm publish'\n}\n"),
     ('R2-S03_jen011_toplevel_rethrow', 'finding', 'finding',
      "node {\n  try { sh 'obaaf verify release' } catch (e) {\n    echo 'x'\n    throw e\n  }\n  sh 'npm publish'\n}\n"),
+    # The third review pass, at 3ec6a50.
+    ('R3-J11', 'finding', 'finding',
+     "node {\n  if (env.BRANCH_NAME == 'main') { sh 'obaaf verify release' }\n  sh 'npm publish'\n}\n"),
+    ('R3-U01_upper_param', 'quiet', 'finding',
+     "def onlyIf(boolean ASK, Closure body) {\n  if (ASK) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R3-U02_upper_local', 'quiet', 'finding',
+     "def onlyIf(boolean cond, Closure body) {\n  def GO = cond\n  if (GO) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R3-U03_params_as_param', 'quiet', 'finding',
+     "def onlyIf(Map params, Closure body) {\n  if (params.go) { body() }\n}\nnode {\n  onlyIf([go: false]) { input message: 'Release?', submitter: 'release' }\n  onlyIf([go: true]) { sh 'npm publish' }\n}\n"),
+    ('R3-U04_params_index_upper_param', 'quiet', 'finding',
+     "def onlyIf(String KEY, Closure body) {\n  if (params[KEY]) { body() }\n}\nnode {\n  onlyIf('NOPE') { input message: 'Release?', submitter: 'release' }\n  onlyIf('RELEASE') { sh 'npm publish' }\n}\n"),
+    ('R3-U05_withEnv_in_helper', 'quiet', 'quiet',
+     'def onlyIf(String v, Closure body) {\n  withEnv(["GO=${v}"]) { if (env.GO == \'yes\') { body() } }\n}\nnode {\n  onlyIf(\'no\') { input message: \'Release?\', submitter: \'release\' }\n  onlyIf(\'yes\') { sh \'npm publish\' }\n}\n'),
+    ('R3-U06_long_global_prefix', 'quiet', 'finding',
+     "def onlyIf(boolean cond, Closure body) {\n  if (env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && env.A && cond) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R3-U07_default_param_helper', 'quiet', 'quiet',
+     "def withTimeout(int minutes = 60, Closure body) {\n  timeout(time: minutes, unit: 'MINUTES') { body() }\n}\nnode {\n  withTimeout { input message: 'Release?', submitter: 'release' }\n  sh 'npm publish'\n}\n"),
+    ('R3-U07b_default_param_publish', 'finding', 'finding',
+     "def withTimeout(int minutes = 60, Closure body) {\n  timeout(time: minutes, unit: 'MINUTES') { body() }\n}\nnode {\n  withTimeout { sh 'npm publish' }\n}\n"),
+    ('R3-U08_when_command_vs_paren', 'quiet', 'quiet',
+     "pipeline {\n  agent any\n  stages {\n    stage('Approve') {\n      when { branch 'main' }\n      steps { input message: 'Release?', submitter: 'release' }\n    }\n    stage('Publish') {\n      when { branch('main') }\n      steps { sh 'npm publish' }\n    }\n  }\n}\n"),
+    ('R3-U09_if_quote_styles', 'quiet', 'quiet',
+     'node {\n  if (env.BRANCH_NAME == \'main\') { input message: \'Release?\', submitter: \'release\' }\n  if (env.BRANCH_NAME == "main") { sh \'npm publish\' }\n}\n'),
+    ('R3-U10_helper_global_cond_twice', 'quiet', 'quiet',
+     "def onRelease(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
+    ('R3-U11_helper_calls_fileExists', 'quiet', 'finding',
+     "def onRelease(Closure body) {\n  if (fileExists('release.txt')) { body() }\n}\nnode {\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
 ]
 
 LIMITS = {
+    'R3-U05_withEnv_in_helper':
+        'a condition on an environment variable a helper sets with withEnv is not tied to the call',
+    'R3-U11_helper_calls_fileExists':
+        "a helper's condition that calls a step is tied to each call (conservative)",
     'R2-N13_rethrow_in_if_else':
         'a catch that throws on both branches of an if/else counts as swallowing (conservative)',
     'R2-N15_return_in_catch_node':
@@ -568,8 +599,6 @@ LIMITS = {
         '`x && input(...) && publish` gives a finding, though the publish needs the input (conservative)',
     'R2-Q08_each_in_method_twice':
         'a loop inside a helper called twice is two loops (conservative)',
-    'R2-N09_named_param_map':
-        "named arguments are not bound to a method's first Map parameter, so its closure is read as maybe never run: cannot tell",
     'R-F05b_same_if_text_reassigned':
         'two conditions with the same text count as one, though a variable changes between them',
     'R-F05c_same_if_random':
@@ -672,6 +701,17 @@ class ApprovalBypassTests(unittest.TestCase):
             with self.subTest(text=text):
                 result = jenkins.analyze("Jenkinsfile", text.encode(), CATALOG, None)
                 self.assertIn("OBAAF-JEN-011", {f.rule for f in result.findings})
+
+    def test_condition_labels_show_the_old_text(self):
+        # The readable part of a label is what OBAAF-JEN-011 prints, as before the slice; only the hidden part
+        # tells conditions apart, so an accepted JEN-011 finding keeps its message.
+        text = ("node {\n  if (env.BRANCH_NAME == 'main') { sh 'obaaf verify release --policy p.yaml --artifacts dist' }"
+                "\n  sh 'npm publish'\n}\n")
+        result = jenkins.analyze("Jenkinsfile", text.encode(), CATALOG, None)
+        messages = [f.message for f in result.findings if f.rule == "OBAAF-JEN-011"]
+        self.assertTrue(messages)
+        self.assertIn("(if env.BRANCH_NAME main)", messages[0])
+        self.assertNotIn("\x00", messages[0])
 
     def test_every_way_past_is_now_reported(self):
         # Quiet before the slice and a finding or cannot tell now: the ways past the slice fixed.

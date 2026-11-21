@@ -26,7 +26,7 @@ from obaaf.catalog import Catalog
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
     COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
-    Pipeline, StepUse,
+    Pipeline, StepUse, guard_key, shown,
     chain_name, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
     untrusted_source,
 )
@@ -780,6 +780,11 @@ def base_stage(stage: tuple) -> tuple:
     return tuple(out)
 
 
+def guard_keys(step) -> set:
+    """The conditions a step runs under, as they are compared (flagship slice 2d.2l)."""
+    return {guard_key(g) for g in step.ctx.guards}
+
+
 def concurrent(a, b) -> bool:
     """Whether two steps are in different branches of the same parallel block."""
     for x, y in zip(a.branch, b.branch):
@@ -1209,7 +1214,7 @@ class JenkinsRules:
         is not in a failure path or a sibling parallel branch, and every condition that could skip the
         check also guards the target."""
         return (check.index < target.index and not check.swallowed and check.ctx.post not in FAILURE_PATHS
-                and not concurrent(check.ctx, target.ctx) and set(check.ctx.guards) <= set(target.ctx.guards))
+                and not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target))
 
     def bindings(self) -> dict[Binding, list[Info]]:
         out: dict[Binding, list[Info]] = {}
@@ -1776,7 +1781,7 @@ class JenkinsRules:
                                     and check.ctx.swallow_id == target.ctx.swallow_id):
             return False      # caught, unless the abort skips the rest of the very block the publish is in
         return (check.ctx.post not in FAILURE_PATHS and not concurrent(check.ctx, target.ctx)
-                and set(check.ctx.guards) <= set(target.ctx.guards))
+                and guard_keys(check) <= guard_keys(target))
 
     def approvals(self) -> None:
         publishes = [i for i in self.infos if i.publish]
@@ -2900,7 +2905,7 @@ class JenkinsRules:
             elif concurrent(check.ctx, target.ctx):
                 why = "it runs in a parallel branch beside the publish, not before it"
             else:
-                extra = [g for g in check.ctx.guards if g not in target.ctx.guards]
+                extra = [shown(g) for g in check.ctx.guards if guard_key(g) not in guard_keys(target)]
                 why = (f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the publish, "
                        "so it can be skipped" if extra else "it does not run before the publish")
             self.add("OBAAF-JEN-011", check.line,
