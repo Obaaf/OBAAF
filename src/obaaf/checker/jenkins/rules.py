@@ -24,6 +24,7 @@ from pathlib import Path
 import yaml
 
 from obaaf.catalog import Catalog
+from obaaf.checker.jenkins import prefilter
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
     COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
@@ -1366,12 +1367,12 @@ class JenkinsRules:
         # (flagship slice 2d.2i: `sh cmd` and `claude \\` + `-p` on the next line were not recognised).
         script = self.script_text(info)
         for rx in self.agent_cmds:
-            m = rx.search(script)
+            m = prefilter.search(rx, script)
             if m:
                 return f"runs an agent CLI ({m.group(0).strip()})"
         for rel in self._scripts(info.script):
             text = self._read(rel)
-            if text and any(rx.search(text) for rx in self.agent_cmds):
+            if text and any(prefilter.search(rx, text) for rx in self.agent_cmds):
                 return f"runs an agent in the script {rel}"
         return None
 
@@ -1385,7 +1386,7 @@ class JenkinsRules:
                 return "docker push"
         if info.shell:
             for rx in self.upload_cmds:
-                m = rx.search(info.script)
+                m = prefilter.search(rx, info.script)
                 if m:
                     return m.group(0).strip()
         return None
@@ -1406,7 +1407,7 @@ class JenkinsRules:
             errexit = True
         pipefail = bool(re.search(r"set\s+(-[a-z]*o\s+pipefail|-o\s+pipefail)", text))
         for pattern in self.verify_cmds:
-            for m in pattern.finditer(text):
+            for m in prefilter.finditer(pattern, text):
                 end = text.find("\n", m.end())
                 rest = text[m.end(): None if end == -1 else end]
                 before = text[: m.start()]
@@ -4035,8 +4036,9 @@ class JenkinsRules:
             if not found:
                 return True
             pos = found.start()
-        starts = [m.start() for rx in self.upload_cmds for m in [rx.search(info.script)] if m]
-        return not starts or max(m.start() for rx in self.upload_cmds for m in rx.finditer(info.script)) > pos
+        starts = [m.start() for rx in self.upload_cmds for m in [prefilter.search(rx, info.script)] if m]
+        return not starts or max(m.start() for rx in self.upload_cmds
+                                 for m in prefilter.finditer(rx, info.script)) > pos
 
     def _checked_earlier_stage(self, publish: Info, checks: list) -> bool:
         """A publish in a Declarative stage's own failure-path post block, where no check runs in the publish's stage
@@ -4370,7 +4372,7 @@ class JenkinsRules:
             hit = loads.get(id(info.use.call))
             if hit is None or hit[0] is not info.use.call:
                 # Once per call, however many times the method holding it is expanded.
-                hit = (info.use.call, any(rx.search(self.script_text(info)) for rx in commands))
+                hit = (info.use.call, any(prefilter.search(rx, self.script_text(info)) for rx in commands))
                 loads[id(info.use.call)] = hit
             if hit[1]:
                 severity = "high" if self.publishes_near(info.ctx.stage) else "medium"
