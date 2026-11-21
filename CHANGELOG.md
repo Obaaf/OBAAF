@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Init handoff and explicit gate activation
 
-`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and, on a supported Linux host, `--apply` writes the proven edit. Pull requests use the target configuration and acceptances common to both commits. A pull request can fix a finding and retire its acceptance together. Init gives commands to run from inside the selected repository when its path cannot be displayed on one line.
+`obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and, on a supported Linux host, `--apply` writes the proven edit. Pull requests use the target configuration and acceptances common to both commits. A pull request can fix a finding and retire its acceptance together. Init gives commands to run from inside the selected repository when its path cannot be displayed on one line, and names the folder it worked on when the given path passes through a symbolic link.
 
 ### Installing the GitHub Actions templates from a wheel
 
