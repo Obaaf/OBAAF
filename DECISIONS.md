@@ -116,6 +116,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
 | D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
+| D-114 | Lane follow-up commands retain the inputs of the reported check | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
@@ -1079,6 +1080,14 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
 
 **Status.** Proposed, 2026-11-19 (slice 3.3, #142).
+
+### D-114 Lane inspection uses the original check inputs
+
+**Decision.** Lane advice in text findings, JSON findings and JSON to-do items carries the checked path, configuration, platform, baseline, threshold and any selected settings snapshot. The command follows the label `Lane check:` in a finding's fix and in a JSON to-do item's `nextAction`, whose `command` stays null, and goes on its own line in the text action list. When it cannot be displayed faithfully on one line, the advice names `obaaf check --lanes` and asks the reader to use it with those inputs. The rule's fix gives the form of a `lanes:` key by example, a path from the repository root, and not by the lane command: for a check of one workflow file that command lists the file's jobs by file name, a key the repository's check does not match (review of #311).
+
+**Reason.** A different configuration or repository can classify the same job differently.
+
+**Status.** Proposed, 2026-11-20 (A1e, #262 item 6).
 
 ### D-115 Legacy baseline migration reports current acceptance eligibility
 

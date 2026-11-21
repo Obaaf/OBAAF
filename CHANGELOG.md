@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Lane commands keep the check's inputs
+
+Lane follow-up commands in text findings and JSON reports now retain the original check inputs, including custom configuration and baseline files, after the label `Lane check:`. A path that cannot be printed on one line names `obaaf check --lanes` to run by hand. Suggested `obaaf fix` and `obaaf baseline migrate` commands now print a path that begins with `=` as `./=...`, as the check commands do, because zsh expands such a word. [Issue #262, item 6](https://github.com/Obaaf/OBAAF/issues/262)
+
 ### Init handoff and explicit gate activation
 
 `obaaf init` ends with the to-do list and a fix-preview command. `obaaf fix --gate LEVEL` previews a blocking threshold on a generated workflow and, on a supported Linux host, `--apply` writes the proven edit. Pull requests use the target configuration and acceptances common to both commits. A pull request can fix a finding and retire its acceptance together. Init gives commands to run from inside the selected repository when its path cannot be displayed on one line, and names the folder it worked on when the given path passes through a symbolic link. Changing the gate threshold preserves the checker commit installed by an earlier generated workflow.
