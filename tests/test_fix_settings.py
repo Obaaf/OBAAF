@@ -163,6 +163,24 @@ jobs:
             self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
             self.assertIn("persist-credentials: false", out)
 
+    def test_check_guidance_for_absolute_directory_link_in_repository(self):
+        folder = self.root / "snapshots"
+        folder.mkdir()
+        shutil.copyfile(self.settings, folder / "settings.json")
+        alias = Path("current-snapshots")
+        alias.symlink_to(folder, target_is_directory=True)
+        args = ("check", ".", f"--settings={alias / 'settings.json'}", "--fail-on=never")
+        code, out, err = run_cli(*args, "--format=json")
+        self.assertEqual(code, 0, err)
+        groups = {g["id"]: g for g in json.loads(out)["todo"]}
+        code, report, err = run_cli(*args, "--summary")
+        self.assertEqual(code, 0, err)
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            row = groups[cause]
+            self.assertIsNone(row["command"])
+            self.assertIn("--settings", row["nextAction"])
+            self.assertIn(row["nextAction"], report)
+
     def test_check_guidance_for_settings_outside_reviewable_repository_files(self):
         with tempfile.TemporaryDirectory() as parent:
             for path in (Path(parent) / "settings.json", Path(".git/settings.json")):

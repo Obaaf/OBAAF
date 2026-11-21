@@ -33,6 +33,7 @@ def fix_input_root(target: Path) -> Path:
 def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
     """Resolve the containing folder in filesystem order and retain the selected filename."""
     path = Path(value).absolute()
+    selected = path
     try:
         folder = path.parent.resolve(strict=True)
         path = folder / path.name
@@ -45,7 +46,7 @@ def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
         if any(part.casefold() == ".git" for part in relative.parts):
             raise ValueError(f"check input is in excluded .git metadata: {value}")
         if settings:
-            _check_snapshot_path(root, relative)
+            _check_snapshot_path(root, selected, relative)
         return relative
     except (FileNotFoundError, NotADirectoryError) as exc:
         if settings:
@@ -55,14 +56,31 @@ def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
         raise ValueError(f"cannot resolve check input {value}: {exc}") from exc
 
 
-def _check_snapshot_path(root: Path, relative: Path) -> None:
-    """Follow only links that can be reproduced inside the proof copy."""
+def _check_snapshot_path(root: Path, selected: Path, relative: Path) -> None:
+    """Check the selected components that the private copy must be able to reproduce."""
     from obaaf.fix_copy import check_link
+
+    device = root.stat().st_dev
 
     def lookup(path: Path) -> Path | None:
         entry = root / path
-        return entry.readlink() if entry.is_symlink() else None
+        info = entry.lstat()
+        if info.st_dev != device:
+            raise ValueError(f"nested filesystem at {str(path)!r}")
+        return entry.readlink() if stat.S_ISLNK(info.st_mode) else None
 
+    # An outside alias may enter the repository. Once inside, check each selected
+    # component before resolving it, including a linked folder followed by "..".
+    folder = Path(selected.anchor)
+    for part in selected.parent.parts[1:]:
+        if folder.is_relative_to(root) and part != "..":
+            check_link(folder.relative_to(root) / part, lookup)
+        folder = (folder / part).resolve(strict=True)
+
+    # An outside alias may also enter below a mount point inside the repository.
+    for parent in relative.parents:
+        if parent != Path("."):
+            lookup(parent)
     check_link(relative, lookup)
     info = (root / relative).stat()
     if not stat.S_ISREG(info.st_mode):
