@@ -83,6 +83,11 @@ class Needles(unittest.TestCase):
         self.assertIsNone(self.needles(r"(?i:claude)"))
         self.assertEqual(self.needles(r"(?i:claude)x"), {"x"})
         self.assertEqual(self.needles(r"(?i:a(?-i:bcd))"), {"bcd"})
+        # A class under IGNORECASE matches the other case too (from the review's mutation of the class check).
+        self.assertIsNone(self.needles(r"(?i:[ab])"))
+        self.assertIsNone(self.needles(r"[ab]", re.I))
+        self.assertIsNone(prefilter.search(re.compile(r"x?(?i:[ab])"), "A") and None)
+        self.assertEqual(prefilter.search(re.compile(r"(?i:[ab])"), "A").group(0), "A")
 
     def test_optional_parts_and_alternatives_with_an_empty_side_give_nothing(self):
         self.assertIsNone(self.needles(r"a?"))
@@ -93,7 +98,7 @@ class Needles(unittest.TestCase):
         self.assertEqual(self.needles(r"(abc){2,}"), {"abc"})
         self.assertEqual(self.needles(r"a*bc"), {"bc"})
 
-    def test_lookarounds_classes_and_references_give_nothing(self):
+    def test_lookarounds_references_and_most_classes_give_nothing(self):
         self.assertIsNone(self.needles(r"(?=abc)"))
         self.assertIsNone(self.needles(r"(?!abc)."))
         self.assertIsNone(self.needles(r"(?<=abc)\w"))
@@ -101,8 +106,13 @@ class Needles(unittest.TestCase):
         self.assertIsNone(self.needles(r"[a-z]"))
         self.assertIsNone(self.needles(r"(a)?\1"))
         self.assertIsNone(self.needles(r"(?P<q>a)?(?(q)b|c)"))
+        # A conditional group's yes-branch is not required: here only `c` is (from the review's mutation).
+        self.assertEqual(self.needles(r"(?P<q>a)?(?(q)bbbb|c)c"), {"c"})
+        self.assertEqual(prefilter.search(re.compile(r"(?P<q>a)?(?(q)bbbb|c)c"), "cc").group(0), "cc")
         self.assertEqual(self.needles(r"(a)\1"), {"a"})
         self.assertEqual(self.needles(r"(?=abc)x"), {"x"})
+
+    def test_a_class_of_plain_characters_gives_its_characters(self):
         self.assertEqual(self.needles(r"[ab]"), {"a", "b"})
 
     def test_a_longer_string_that_holds_a_shorter_one_is_dropped(self):
@@ -112,9 +122,22 @@ class Needles(unittest.TestCase):
     def test_verbose_patterns_are_read_as_re_reads_them(self):
         self.assertEqual(self.needles(r"(?x) c l a u d e  # comment"), {"claude"})
 
-    def test_a_pattern_the_parser_refuses_or_bytes_give_nothing(self):
+    def test_bytes_patterns_give_nothing(self):
         self.assertIsNone(prefilter.needles(re.compile(rb"claude")))
 
+    def test_a_walk_that_fails_gives_nothing_and_the_pattern_runs(self):
+        # The review raised RecursionError in the walk on Python 3.11 (474 nested groups, 40 frames deep), which
+        # the first version caught only around the parse. Any failure in the walk now gives None.
+        from unittest import mock
+        rx = re.compile("(" * 474 + "claude" + ")" * 474)
+        for failure in (RecursionError, ValueError, TypeError):
+            prefilter._needles.cache_clear()
+            with mock.patch.object(prefilter, "_of_sequence", side_effect=failure):
+                self.assertIsNone(prefilter.needles(rx))
+                self.assertEqual(prefilter.search(rx, "x claude").span(), (2, 8))
+                self.assertEqual([m.span() for m in prefilter.finditer(rx, "claude claude")], [(0, 6), (7, 13)])
+        prefilter._needles.cache_clear()
+        self.assertEqual(prefilter.needles(rx), {"claude"})
 
 class SameAnswers(unittest.TestCase):
     def test_every_detection_pattern_on_every_jenkins_case(self):
@@ -190,14 +213,23 @@ class Cost(unittest.TestCase):
         # The three case-insensitive Windows signing commands give no string, and are run as before.
         self.assertGreaterEqual(sum(1 for rx in patterns if prefilter.needles(rx)), len(patterns) - 3)
         text = "".join(f"echo line {i} with some words here and there\n" for i in range(20_000))
-        started = time.monotonic()
-        plain = [rx.search(text) for rx in patterns]
-        plain_seconds = time.monotonic() - started
-        started = time.monotonic()
-        fast = [prefilter.search(rx, text) for rx in patterns]
-        fast_seconds = time.monotonic() - started
+        plain = [m and m.span() for m in (rx.search(text) for rx in patterns)]
+        fast = [m and m.span() for m in (prefilter.search(rx, text) for rx in patterns)]
         self.assertEqual(plain, fast)
-        # A ratio, not a time, so a slow machine does not fail it: about ten times faster where it was written.
+
+        def best_of_three(search) -> float:
+            times = []
+            for _ in range(3):
+                started = time.monotonic()
+                for rx in patterns:
+                    search(rx, text)
+                times.append(time.monotonic() - started)
+            return min(times)
+
+        plain_seconds = best_of_three(lambda rx, t: rx.search(t))
+        fast_seconds = best_of_three(prefilter.search)
+        # A ratio of the best of three, not a time, so a slow machine does not fail it: about ten times faster
+        # on Python 3.13 and nineteen times on 3.10 where it was written and reviewed.
         self.assertLess(fast_seconds * 3, plain_seconds)
 
 

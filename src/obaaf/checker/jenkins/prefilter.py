@@ -7,9 +7,11 @@ eighty of them. Every one of those patterns also names its command in plain lett
 the search is skipped (flagship unblock run `gannet`, 2026-11-21: CI failed on `PERF_20k_line_script`).
 
 `needles(rx)` reads the pattern's parse and returns strings one of which every match of `rx` contains, or
-None when the parse does not show any (case-insensitive parts, optional parts, lookarounds, character classes
-and anything it does not know give nothing, never a guess). `search` and `finditer` run the pattern only when
-the text holds one of them, so they return exactly what `rx.search` and `rx.finditer` return.
+None when the parse does not show any. Case-insensitive parts, optional parts, lookarounds, references,
+conditional groups and classes with ranges, categories or negation give nothing; a class of plain characters
+gives its characters. A parse it cannot read or does not expect gives None, never a guess. `search` and
+`finditer` run the pattern only when the text holds one of the strings, so they return exactly what
+`rx.search` and `rx.finditer` return.
 """
 
 from __future__ import annotations
@@ -97,15 +99,17 @@ def _of_item(name: str, av, flags: int) -> frozenset[str] | None:
 
 @functools.lru_cache(maxsize=4096)
 def _needles(pattern: str, flags: int) -> frozenset[str] | None:
+    # Never let the shortcut change an answer: a parse it cannot read, a shape it does not expect, or nesting
+    # deeper than the walk can follow (RecursionError) gives no needles, and the pattern runs as before.
     try:
         parsed = _sre_parse.parse(pattern, flags)
-    except Exception:       # never let the shortcut change an answer: no needles, the pattern runs
+        state = getattr(parsed, "state", None)
+        flags |= getattr(state, "flags", 0)
+        if flags & re.IGNORECASE:
+            return None
+        return _of_sequence(list(parsed), flags)
+    except Exception:
         return None
-    state = getattr(parsed, "state", None)
-    flags |= getattr(state, "flags", 0)
-    if flags & re.IGNORECASE:
-        return None
-    return _of_sequence(list(parsed), flags)
 
 
 def needles(rx: re.Pattern) -> frozenset[str] | None:
