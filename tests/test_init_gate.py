@@ -1,4 +1,5 @@
 import contextlib
+from contextlib import nullcontext
 from datetime import date, timedelta
 from importlib.resources import files
 from itertools import combinations
@@ -215,6 +216,38 @@ class GateTests(unittest.TestCase):
 
     def test_crlf_gate_with_scanner(self):
         self.check_crlf_gate("--with-scanner", "poutine")
+
+    def test_the_first_gate_template_as_it_landed_is_recognised(self):
+        # review-gpt #306: the other tests build the historical template from the current one, so a
+        # digest taken from an edited template would pass them while every workflow installed from the
+        # real first gate-capable template fell to manual guidance. This one uses the landed bytes.
+        from hashlib import sha256
+
+        from obaaf.fix_gate import GATE_TEMPLATE_DIGEST, ORIGINAL_SETUP, REPORT
+        from obaaf.init_scanners import SCANNERS
+
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        self.assertEqual(sha256(first).hexdigest(), GATE_TEMPLATE_DIGEST)
+        self.assertIn(ORIGINAL_SETUP, first)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"e" * 40
+        (future / "init-workflow.yaml").write_bytes(first.replace(ORIGINAL_SETUP, next_setup))
+        gated = first.replace(REPORT, b"gate_check .github/obaaf-baseline.json --fail-on medium\n")
+        self.assertNotEqual(gated, first)
+        self.install()
+        for label, template in (("current template", None), ("rotated template", future)):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    with self.subTest(template=label, scanners=names):
+                        tail = steps(names)
+                        self.workflow.write_bytes(first + tail)
+                        commit(self.root)
+                        with patch("obaaf.fix_gate.files", return_value=template) if template else nullcontext():
+                            code, text = self.gate("--apply")
+                        self.assertEqual(code, 0, text)
+                        self.assertIn("Applied the displayed gate change", text)
+                        self.assertEqual(self.workflow.read_bytes(), gated + tail)
 
     def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
         # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF
