@@ -57,10 +57,15 @@ def check_scanner(name, workspace):
     subprocess.run(["docker", "manifest", "inspect", "--verbose", image], check=True)
     run = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], cwd=workspace,
                          env={**os.environ, "GITHUB_WORKSPACE": str(workspace)},
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                         capture_output=True, text=True)
     lines = run.stdout.splitlines()
     for line in lines:
         print(f"| {line}")
+    if run.stderr:
+        # Prefixed like stdout, so no line the scanner wrote can start a `::` workflow command here.
+        for line in run.stderr.splitlines():
+            print(f"stderr | {line}")
+        raise SystemExit(f"{name} wrote outside the generated step's combined output stream")
     run.check_returncode()
     marker = re.fullmatch(r"::stop-commands::([0-9a-f-]+)", lines[0]) if lines else None
     if not marker or lines[-1] != f"::{marker[1]}::":

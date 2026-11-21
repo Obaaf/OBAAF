@@ -69,7 +69,8 @@ jobs:
     # The report-only scanner steps `obaaf init --with-scanner` writes (plan slice 3.3b, #333 item 1):
     # in a disposable Git repository it writes the workflow with all three scanners, runs one generated
     # step's script as written against its pinned image, and checks the step's exit status, a finding
-    # the fixture should give, and the workflow-command markers around the scanner's output.
+    # the fixture should give, the workflow-command markers around the scanner's output, and that the
+    # step wrote nothing to standard error, which would reach the runner outside those markers (#340).
     name: Generated scanner step (${{ matrix.scanner }})
     runs-on: ubuntu-latest
     timeout-minutes: 15

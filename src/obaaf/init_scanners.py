@@ -24,6 +24,7 @@ def steps(selected: list[str]) -> bytes:
         if name not in selected:
             continue
         script = [
+            "exec 2>&1",
             'token=$(cat /proc/sys/kernel/random/uuid)',
             'echo "::stop-commands::$token"',
             '''trap 'echo "::$token::"' EXIT''',

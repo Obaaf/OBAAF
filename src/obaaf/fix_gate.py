@@ -51,7 +51,11 @@ def _candidate(original, path, level):
         for selected in combinations(names, count):
             tail = init_scanners.steps(selected)
             if not original.endswith(tail):
-                continue
+                # Workflows generated before #340 used separate output streams. Preserve their
+                # exact scanner steps when a user requests only a gate threshold change.
+                tail = tail.replace(b"          exec 2>&1\n", b"")
+                if not original.endswith(tail):
+                    continue
             body = original.removesuffix(tail)
             for source in templates:
                 legacy = historical_known and source == historical and sha256(body).hexdigest() == LEGACY_DIGEST
