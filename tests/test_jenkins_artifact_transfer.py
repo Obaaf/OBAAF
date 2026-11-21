@@ -337,10 +337,44 @@ REVIEW_CASES = [
      "node {\n  def base = [projectName: 'a']\n  copyArtifacts(base + [selector: specific('42')])\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R40_permission_property_not_a_copy', 'quiet', 'quiet',
      "properties([[$class: 'CopyArtifactPermissionProperty', projectNames: 'x']])\nnode {\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
-    ('R41_closure_defined_and_called', 'quiet', 'quiet',
+    ('R41_closure_defined_and_called', 'unknown', 'quiet',
      "node {\n  def c = { copyArtifacts(projectName: 'a') }\n  c()\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R42_selector_null_is_default', 'finding-high', 'unknown',
      "node {\n  copyArtifacts(projectName: 'a', selector: null)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+]
+
+# The second review's attempts, on `55b4383`, with what the parent `651cb4e` said.
+REVIEW2_CASES = [
+    ('R2_01_closure_param_named_like_decl', 'unknown', 'unknown',
+     "def unused() { def sel = specific('42') }\nnode {\n  [lastSuccessful()].each { sel -> copyArtifacts(projectName: 'app', selector: sel) }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_02_build_var_closure_param', 'unknown', 'quiet',
+     'def unused() { def b = build(job: \'a\') }\nnode {\n  [[number: \'lastSuccessfulBuild\']].each { b -> copyArtifacts(projectName: \'a\', selector: specific("${b.number}")) }\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R2_03_alias_mutated', 'unknown', 'finding-high',
+     "node {\n  def m = [projectName: 'a', selector: specific('1')]\n  def n = m\n  n.selector = lastSuccessful()\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_04_passed_to_method', 'unknown', 'finding-high',
+     "def f(x) { x.selector = lastSuccessful() }\nnode {\n  def m = [projectName: 'a', selector: specific('1')]\n  f(m)\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_05_changed_in_gstring', 'unknown', 'finding-high',
+     'node {\n  def m = [projectName: \'a\', selector: specific(\'1\')]\n  echo "${m.put(\'selector\', lastSuccessful())}"\n  copyArtifacts(m)\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R2_06_binding_property', 'unknown', 'unknown',
+     "def other() { def sel = specific('42') }\nnode {\n  binding.sel = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_07_this_index', 'unknown', 'unknown',
+     "node {\n  def sel = specific('42')\n  this['sel'] = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_08_copy_condition_changes', 'finding-high', 'quiet',
+     "node {\n  if (!fileExists('app.jar')) { copyArtifacts(projectName: 'a') }\n  if (!fileExists('app.jar')) { sh 'obaaf verify release --policy p --artifacts app.jar' }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_09_copy_condition_variable_changes', 'finding-high', 'quiet',
+     "node {\n  def go = true\n  if (go) { copyArtifacts(projectName: 'a') }\n  go = false\n  if (go) { sh 'obaaf verify release --policy p --artifacts app.jar' }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_10_closure_also_run_by_parallel', 'unknown', 'quiet',
+     "node {\n  def c = { copyArtifacts(projectName: 'a') }\n  c()\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n  parallel a: c, b: { echo 'x' }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_11_loop_publish_before_copy', 'finding-high', 'quiet',
+     "node {\n  for (p in ['a', 'b']) {\n    sh 'curl -T app.jar https://repo.example/upload'\n    copyArtifacts(projectName: p)\n  }\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n}\n"),
+    ('R2_12_each_publish_before_copy', 'finding-high', 'quiet',
+     "node {\n  ['a', 'b'].each { p ->\n    sh 'curl -T app.jar https://repo.example/upload'\n    copyArtifacts(projectName: 'x')\n  }\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n}\n"),
+    ('R2_13_url_in_groovy_variable', 'finding-high', 'quiet',
+     'node {\n  def a = \'https://ci.example/job/b/lastSuccessfulBuild/artifact/app.jar\'\n  sh "curl -fO ${a}"\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R2_14_param_condition_on_copy_and_check', 'quiet', 'quiet',
+     "node {\n  if (params.RELEASE) {\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R2_15_step_map_variable_not_a_copy', 'quiet', 'quiet',
+     "node {\n  def pub = [$class: 'JUnitResultArchiver', testResults: 'r.xml']\n  step(pub)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
 ]
 
 # The answers that are a stated limit rather than what the file decides, with the reason (docs/bypass-attempts.md).
@@ -368,6 +402,9 @@ LIMITS = {
                                      "whatever it checks: only `obaaf verify release` ties the artifacts to the signed "
                                      "build record.",
     "K12_ignore_missing": "As K10.",
+    "R41_closure_defined_and_called": "A copy in a closure is cannot tell even when the closure is also called where "
+                                      "the checker reads it: it may run again elsewhere (`parallel a: c`), after the "
+                                      "check.",
 }
 
 
@@ -382,17 +419,17 @@ def verdict(text: str) -> str:
 
 class ArtifactTransferBypassTest(unittest.TestCase):
     def test_every_attempt(self):
-        for name, expected, _before, text in CASES + REVIEW_CASES:
+        for name, expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES:
             with self.subTest(case=name):
                 self.assertEqual(verdict(text), expected)
 
     def test_limits_name_real_cases(self):
-        names = {c[0] for c in CASES + REVIEW_CASES}
+        names = {c[0] for c in CASES + REVIEW_CASES + REVIEW2_CASES}
         self.assertLessEqual(set(LIMITS), names)
 
     def test_no_attempt_is_slow(self):
         # Before the slice, 744 bytes of nested helpers took 11.7 seconds in this rule alone.
-        for name, _expected, _before, text in CASES + REVIEW_CASES:
+        for name, _expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES:
             started = time.monotonic()
             verdict(text)
             with self.subTest(case=name):

@@ -179,6 +179,8 @@ class Pipeline:
     opaque: list = field(default_factory=list)          # (line, what)
     tree: object = None                                 # the parsed file (flagship slice 2d.2m: OBAAF-JEN-010 looks
                                                         # for every place it names copyArtifacts)
+    source: str = ""                                    # the file's text, as parsed (2d.2m: OBAAF-JEN-010 counts
+                                                        # every place a variable's name appears)
     triggers: list = field(default_factory=list)        # Trigger: SCM and webhook triggers named in the file
     literals: dict = field(default_factory=dict)        # variable -> Str assigned to it (last assignment)
     lists: dict = field(default_factory=dict)           # variable -> ListLit assigned to it (last assignment)
