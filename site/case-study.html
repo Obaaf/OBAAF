@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Expectrail is a project of one of OBAAF's authors. The case study of 2026-11-13, with what that page says worked, what it says did not, and what is newer than the page.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Expectrail, the first adopter</title>
+  <link rel="canonical" href="https://www.obaaf.com/case-study.html">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="header wrap">
+  <a class="brand" href="index.html">OBAAF</a>
+  <nav aria-label="Pages"><a href="index.html">Home</a> <a href="quickstart.html">Quickstart</a> <a href="rules.html">Rules</a> <a href="comparison.html">Comparison</a> <a href="case-study.html" aria-current="page">Case study</a> <a href="papers.html">Papers</a></nav>
+</header>
+<main id="main" class="section wrap">
+
+<p class="section-label">Written 2026-11-13</p>
+<h1>Expectrail, the first adopter, is one author's own project.</h1>
+<p class="large">Osita Sean Keluo-Udeke maintains Expectrail with Timothy Itodo. This page is no evidence that a team with no tie to OBAAF finds it useful. Results from outside teams are still to come, and none has been reported.</p>
+<p>The source is <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/docs/expectrail-case-study.md">the case study</a>. The numbers below are that document's.</p>
+<h2>What that document says worked</h2>
+<ul>
+<li>Expectrail declared its agent jobs, and the checker then asked what each could reach. Without the declaration file, the document says OBAAF recognises 2 of 19 as agent jobs.</li>
+<li>Jobs that use a model key name one environment, <code>main-only</code>, limited to <code>main</code>.</li>
+<li>The gate on <code>main</code>, from Expectrail's #223 at 17:36 UTC on 2026-11-10, pinned OBAAF to <code>d014b63</code>. It caught an agent job that reached <code>main</code> without baseline entries. The document says <code>main</code> went red about three hours later. Nothing was undone: the findings were accepted.</li>
+</ul>
+<h2>What it says did not</h2>
+<ul>
+<li>Each finding the gate raised was answered by accepting it. The baseline went from 32 to 38 entries in 21 hours. Every entry was <code>OBAAF-GHA-005</code> or <code>OBAAF-GHA-020</code>. The document says OBAAF itself offered no fix for either at the pin Expectrail runs. It also says that pin's checker clears OBAAF-GHA-020 for a blocking Harden-Runner step, and that Expectrail has not adopted one.</li>
+<li>The six incidents the work began from were, as reported, in GitHub's settings, which that pin did not read. The list of six is the account the case study started from, and the document says where the public record supports each one.</li>
+<li>Nothing OBAAF ran restricted a job at run time. It reported.</li>
+</ul>
+<h2>What is newer than that page</h2>
+<p>The case study says an egress control exists and the checker does not credit it yet. That sentence is the page as written on 2026-11-13. The development checker, which is not in a release, clears <code>OBAAF-GHA-020</code> for GitHub's native egress firewall in enforce mode, under conditions the <a href="rules.html">rules</a> page lists. OBAAF's own action stays "cannot tell" until a released commit is listed, and none is listed. Expectrail’s recorded checker pin leaves <code>OBAAF-GHA-005</code> open. The development checker clears it only when all five controls verify. The positive test uses a test catalogue. Release 0.3.0, like the pin, drops OBAAF-GHA-020 for a Harden-Runner step with <code>egress-policy: block</code> and no <code>if</code>, without looking at its version, its position or its sudo setting. The development checker asks for more, and answers "cannot tell" at best for Harden-Runner. The <a href="rules.html">rules</a> page records the 2026-11-14 runs.</p>
+<p>The case study also gives the result of the settings audit, <code>obaaf audit</code>, which is development only. Expectrail's settings were read without a token on 2026-11-13 at 09:10 UTC and compared with its files at commit <code>da06323</code>: four medium findings, and seven rules that could not tell. On that same reading and those same files, the development audit of 2026-11-17 finds five medium findings, and the same seven rules cannot tell. The new finding is about <code>main-only</code>. Only <code>main</code> may use that environment, and it has no required reviewers. But on that reading, merging into <code>main</code> needed no one's approval, only the required checks, so anyone with write access could merge a pull request that adds a job using the environment. These counts are for the reading of 2026-11-13; the settings may have changed since.</p>
+<p>On 2026-11-17 Expectrail's <code>main</code>, at commit <code>791f50b</code>, still installed OBAAF at commit <code>d014b63</code>, of 2026-11-10, as the case study records. The later work does not apply to it until that pin moves.</p>
+<p class="caption">Expectrail first ran the checker, in reporting mode, on 2026-10-30. The gate command the document quotes is in the block below.</p>
+<pre><code>obaaf check . --baseline .github/obaaf-baseline.json --fail-on low --no-fixes</code></pre>
+
+</main>
+<footer class="wrap">
+  <div><strong>OBAAF</strong><p>Osita Sean Keluo-Udeke led the research. Ofonna Nweze handled implementation, testing, and GitHub integration, with Osita Sean Keluo-Udeke contributing across the project.</p></div>
+  <div><p>Code is Apache-2.0. Documentation is CC BY 4.0. The development package also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/LICENSING.md">Licensing</a>.</p></div>
+</footer>
+</body>
+</html>

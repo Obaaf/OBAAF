@@ -81,6 +81,24 @@ jobs:
             with self.assertRaises(RecordError):
                 records.isolation_from_workflow(self.write(tmp, "windows-latest", "B"), "build")
 
+    def test_a_label_github_does_not_name_needs_a_declared_tier(self):
+        """`ubuntu-gpu` or two labels in one set may be a self-hosted runner: the tier is read as the
+        checker reads the runner (`HOSTED_LABELS`), not from an `ubuntu-*` pattern (flagship slice 2d.9)."""
+        for runs_on in ("ubuntu-gpu", "[ubuntu-latest, ubuntu-gpu]", "windows-builder", "{group: 0, labels: [ubuntu-latest]}"):
+            with self.subTest(runs_on=runs_on), TempDir() as tmp:
+                with self.assertRaisesRegex(RecordError, "OBAAF_TIER"):
+                    records.isolation_from_workflow(self.write(tmp, runs_on), "build")
+        with TempDir() as tmp:
+            iso = records.isolation_from_workflow(self.write(tmp, "ubuntu-gpu", "B"), "build")
+        self.assertEqual((iso["tier"], iso["slsaBuildLevel3"], iso["runnerEnvironment"]), ("B", False, "unknown"))
+
+    def test_the_firewall_runner_and_a_hosted_label_in_any_case_are_tier_a(self):
+        # A hosted label written twice is one label, as the checker reads it (flagship slice 2d.10, #216).
+        for runs_on in ("ubuntu-24.04-firewall", "Ubuntu-Latest", "[ubuntu-latest, Ubuntu-Latest]"):
+            with self.subTest(runs_on=runs_on), TempDir() as tmp:
+                iso = records.isolation_from_workflow(self.write(tmp, runs_on), "build")
+                self.assertEqual((iso["tier"], iso["runnerEnvironment"]), ("A", "github-hosted"))
+
     def test_command_line_tier_must_agree_with_the_workflow(self):
         with TempDir() as tmp:
             with self.assertRaises(RecordError):

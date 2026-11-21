@@ -63,7 +63,10 @@ def install_templates(dest: Path, repository: str = "example-studio/game") -> Pa
                              "--obaaf-sha", TEST_SHA, "--repository", repository)
     if code != 0:
         raise AssertionError(f"templates install failed: {err or out}")
-    shutil.copyfile(TEMPLATES / "CODEOWNERS.example", dest / ".github" / "CODEOWNERS")
+    # As the template asks: the placeholder team is replaced (since slice 2d.2h the checker gives the
+    # placeholder no ownership).
+    text = (TEMPLATES / "CODEOWNERS.example").read_text(encoding="utf-8").replace("@your-org/", "@example-studio/")
+    (dest / ".github" / "CODEOWNERS").write_text(text, encoding="utf-8")
     return dest
 
 

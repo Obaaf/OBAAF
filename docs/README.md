@@ -2,10 +2,14 @@
 
 | Document | For | What it covers |
 | --- | --- | --- |
+| [Try OBAAF and send us the result](send-us-the-result.md) | People asked to try OBAAF | Install a pinned development version, check a repository of yours, and send back a file of counts with no file, job, secret or other text from the repository, with two short templates for the reply |
 | [Adoption guide](adoption-guide.md) | Studios | Tier by tier, what to do and which template or guide helps |
 | [Guides F1–F9](guides/) | Studios | How to fix each self-assessment item, by control family |
 | [From a report to a gate](from-report-to-gate.md) | Build engineers | Moving `obaaf check` from something you read to something that fails a build, step by step, with the exit status of each step |
+| [CI integration](ci-integration.md) | Build engineers | `obaaf check` as a required check, in code scanning and before each commit: the workflow to copy, the exit status and what the JSON and SARIF reports carry |
 | [Upgrading](upgrading.md) | Build engineers | What to pin, how to move to a newer OBAAF, and what changes between 0.3.0 and the code after it |
+| [Bypass attempts, rule by rule](bypass-attempts.md) | Security engineers, maintainers | Every attempt to get past OBAAF's security rules: what was tried, what got through, what changed, and what each rule still does not follow |
+| [The adoption path, measured](adoption-path-measured.md) | Maintainers | One run of the released 0.3.0 from `pip install` to a gate file, on two small layouts, timed as summed command time (not a person's time), with every command, its exit status and where the documentation led astray |
 | [GitHub settings](github-settings.md) | Build engineers | Repository settings the templates depend on, and plan limits |
 | [Templates](../templates/github-actions/README.md) | Build engineers | Installing and adapting the GitHub Actions workflows |
 | [Settings audit](settings-audit.md) | Build engineers | `obaaf audit`: what it reads of a repository's GitHub settings, the fifteen rules it applies to them and to the workflow files, what it needs to read each setting, and how it says what it could not tell |
@@ -19,7 +23,8 @@
 | [Glossary](glossary.md) | Everyone | Plain-language meanings of the terms used here |
 | [Landscape](landscape.md) | Everyone | Other tools that check GitHub Actions and repository settings, what each found on the same repositories, dated and sourced |
 | [Flagship plan](flagship.md) | Maintainers | The plan and progress of the work to make the core hold up in real use |
-| [Egress control: design](egress-control.md) | Maintainers, security engineers | The design of the action that limits an agent command's network access: what it wraps, what it adds, what it will not stop, and the escape tests it has to pass. Not built yet |
+| [Adoption experience, design](adoption-experience-design.md) | Maintainers | The approved design, not built yet: a to-do list at the end of every report, fixes proven before they are offered, a draft for confining an agent, and a secrets finding that can clear |
+| [Egress control](egress-control.md) | Maintainers, security engineers | The action that limits an agent command's network access (`actions/egress`): what it wraps, what it adds, what it will not stop, and the escape tests it is put through on GitHub-hosted runners |
 
 The specifications themselves are in [`spec/`](../spec/), generated from the data in [`src/obaaf/data/`](../src/obaaf/data/).
 

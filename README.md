@@ -12,7 +12,7 @@ OBAAF is a free, open framework for keeping malicious code out of the software u
 | --- | --- | --- |
 | Build-integrity profile | 28 requirements in nine control families that tailor NIST's SSDF and SLSA to software build pipelines, with game studios as the worked example, each with a test and its mappings | [spec/profile.md](spec/profile.md) |
 | Agent controls | Taint-bounded authority, eight requirements (R1–R8), a three-lane architecture and a signed record of each agent run | [spec/agent-controls.md](spec/agent-controls.md) |
-| Self-assessment | 34 yes-or-no questions in four tiers that give a tier and a ranked list of fixes, on paper, in an offline form, or from the command line | [spec/self-assessment.md](spec/self-assessment.md), [offline form](assessment/obaaf-self-assessment.html) |
+| Self-assessment | 34 questions in four tiers, answered yes, no, not sure or, where the item allows it, N/A, that give a tier and a ranked list of fixes, on paper, in an offline form, or from the command line | [spec/self-assessment.md](spec/self-assessment.md), [offline form](assessment/obaaf-self-assessment.html) |
 | Team resource site | A public resource introducing the framework, questionnaire, workflow demonstration, and adoption steps | [Build and preview instructions](site/README.md) |
 | Reference pipeline templates | GitHub Actions workflows for four lanes: untrusted contributions, agents, approved changes and releases; Jenkins pipelines for the release lane and an audit job | [templates/github-actions](templates/github-actions/README.md), [templates/jenkins](templates/jenkins/README.md) |
 | Verification tools | A pipeline checker that flags risky settings in GitHub Actions workflows and, as an advisory auditor, in Jenkinsfiles ([Jenkins](docs/jenkins.md)); a release verifier that blocks uploads without valid provenance, approvals and agent records; and checks on an agent's signed record and proposal before anything is applied | [spec/checker-rules.md](spec/checker-rules.md), `obaaf verify release`, `obaaf verify agent-run`, `obaaf proposal check` |
@@ -63,12 +63,22 @@ obaaf assess score answers.yaml           # your tier and what to fix first
 
 Your answers never leave your machine. Then follow [the adoption guide](docs/adoption-guide.md).
 
-**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles, then install the templates (GitHub Actions; for Jenkins, see [Jenkins](docs/jenkins.md)):
+**Build engineers.** Check your GitHub Actions workflows and Jenkinsfiles. A development build installed from a commit ([how](docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the GitHub Actions templates. With it, skip the clone and checkout below, omit the `--source` option, and set `--obaaf-sha` to the same full commit you installed. For release 0.3.0, use the full example below. [Jenkins instructions](docs/jenkins.md)
 
 ```bash
 obaaf check path/to/your/repository
-obaaf templates install --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
+git clone https://github.com/Obaaf/OBAAF.git obaaf-src
+git -C obaaf-src checkout <commit>
+obaaf templates install --source obaaf-src/templates/github-actions \
+  --dest path/to/your/repository --obaaf-repo OWNER/obaaf --obaaf-sha <commit>
 ```
+
+Release 0.3.0 reads the templates from a clone of OBAAF. Keep the clone
+outside the repository you are setting up, and check out `<commit>`, the full commit SHA the installed workflows
+will pin: for release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints it. `OWNER/obaaf` is the
+repository those workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it, keeping its name. `obaaf` does not look for the
+templates in the current directory, so running it inside the clone is not enough: pass `--source`. With OBAAF
+installed from the clone in editable mode (`pip install -e obaaf-src`), `--source` can be left out.
 
 If a pipeline uses AI agents, run `obaaf check path/to/your/repository --lanes`
 and confirm that their jobs are classified as `agent`. Wrapper detection is

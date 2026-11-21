@@ -126,6 +126,8 @@ jobs:
     needs: [build, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # D-019: a release job reads no cache another workflow could have written (OBAAF-GHA-006).
+    cache-mode: none
     environment:
       name: pypi
       url: https://pypi.org/project/obaaf/

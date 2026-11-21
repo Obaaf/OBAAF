@@ -65,7 +65,7 @@ The rules that did answer without a finding: `OBAAF-SET-006` compared the 12 req
 
 ## What was read, and what was not
 
-From the report, word for word:
+From the report, word for word, as the development version printed it on 2026-11-13. Since slice 2b.8 the report prints each name in such a list in double quotes (`required_status_checks ("test", "obaaf-audit", ...)`, `may deploy: branch "main"`, `reviewers: "seanudeke"`), so that a name cannot pass for the text around it (issue #125); this record keeps the words it had then:
 
 ```text
 READ: 5 of 15

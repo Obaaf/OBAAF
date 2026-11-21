@@ -236,10 +236,10 @@ class RecordedFromGitHubTest(unittest.TestCase):
             "other_protection_rules": [], "can_admins_bypass": False,
             "branch_policies": [{"name": "v*", "type": "tag"}]})
         # A pattern is said to be for tags or for branches: "v*" means different things as each.
-        self.assertIn('"pypi": may deploy: tag v*; reviewers: FehintolaObafemi, Ofonna-N, seanudeke '
+        self.assertIn('"pypi": may deploy: tag "v*"; reviewers: "FehintolaObafemi", "Ofonna-N", "seanudeke" '
                       "(self-review prevented); administrators may bypass these rules: no\n", text)
         # Nothing for an administrator to bypass, so nothing is said about it.
-        self.assertIn('"github-pages": may deploy: branch main; no required reviewers\n', text)
+        self.assertIn('"github-pages": may deploy: branch "main"; no required reviewers\n', text)
 
     def test_a_repository_protected_by_a_ruleset_as_anyone_sees_it(self):
         snap, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
@@ -260,16 +260,16 @@ class RecordedFromGitHubTest(unittest.TestCase):
             "enabled": False, "required_status_checks": {"strict": None, "enforcement_level": "off",
                                                          "contexts": [], "checks": []}}})
         self.assertIn('"main": GitHub calls it protected; no required checks shown in this view', text)
-        self.assertIn('"unity": any branch or tag may deploy; reviewers: seanudeke (self-review allowed); '
+        self.assertIn('"unity": any branch or tag may deploy; reviewers: "seanudeke" (self-review allowed); '
                       "administrators may bypass these rules: yes\n", text)
-        self.assertIn('"main-only": may deploy: branch main; no required reviewers\n', text)
+        self.assertIn('"main-only": may deploy: branch "main"; no required reviewers\n', text)
 
     def test_every_required_check_of_a_rule_is_named_in_the_report(self):
         # The first report from this recording cut the rule off after three names and part of a fourth.
         _, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
-        checks = ("required_status_checks (test, obaaf-audit, capture-smoke, web-capture, seeded-bugs, "
-                  "agents-gate1, agents-harness-verify, feedback-offline, agents-sandbox, agents-bench-compare, "
-                  "private-export-scan)")
+        checks = ('required_status_checks ("test", "obaaf-audit", "capture-smoke", "web-capture", "seeded-bugs", '
+                  '"agents-gate1", "agents-harness-verify", "feedback-offline", "agents-sandbox", '
+                  '"agents-bench-compare", "private-export-scan")')
         rules = f"deletion, non_fast_forward, pull_request (0 approvals), {checks}"
         self.assertIn(f'"Protect main" (active, branch, from Repository Expectrail/Expectrail): {rules}\n', text)
         self.assertIn(f'      "main": {rules}\n', text)
@@ -283,7 +283,7 @@ class RecordedFromGitHubTest(unittest.TestCase):
                         if r["type"] == "required_status_checks")
             rule["parameters"]["required_status_checks"] = [{"context": f"check-{n:02}"} for n in range(35)]
         text = report.to_text(take(entries, repository="Expectrail/Expectrail")[0])
-        self.assertEqual(text.count("check-29 and 5 more)"), 2)
+        self.assertEqual(text.count('"check-29" and 5 more)'), 2)
         self.assertNotIn("check-30", text)
 
 
@@ -342,8 +342,8 @@ class ReadWithAnAdministratorsTokenTest(unittest.TestCase):
         text = report.to_text(self.snap)
         self.assertIn('ruleset 42 "main protection": OrganizationAdmin (always), RepositoryRole 5 (pull_request)', text)
         self.assertIn('NOT READ: ruleset 73 "organisation baseline"', text)
-        self.assertIn("for .github/workflows/scan.yml: only these events may start a workflow: "
-                      "pull_request_target, workflow_dispatch", text)
+        self.assertIn('for ".github/workflows/scan.yml": only these events may start a workflow: '
+                      '"pull_request_target", "workflow_dispatch"', text)
 
 
 class BypassListTest(unittest.TestCase):
@@ -455,7 +455,7 @@ class RefusedByGitHubTest(unittest.TestCase):
         self.assertEqual(value["restrictions"], {"restricted": False})
         self.assertIs(value["enforce_admins"], False)
         self.assertIsNone(value["required_signatures"])  # not in the answer, so not known
-        self.assertIn('"main": 2 approvals required, 2 names may bypass it; required checks: ci; '
+        self.assertIn('"main": 2 approvals required, 2 names may bypass it; required checks: "ci"; '
                       "administrators are not held to it\n", text)
 
     def test_sections_github_leaves_out_are_recorded_as_not_required_and_unknowns_as_null(self):
@@ -1667,7 +1667,8 @@ class WhatThePrintedReportSaysTest(unittest.TestCase):
         protection.update(enabled=False)
         protection["required_status_checks"]["enforcement_level"] = "off"
         text = report.to_text(take(entries)[0])
-        self.assertIn('"main": GitHub calls it protected; required checks: test (3.13) (enforcement: off)\n', text)
+        # The name is quoted, so "(3.13)" cannot be taken for what follows it (flagship slice 2b.8).
+        self.assertIn('"main": GitHub calls it protected; required checks: "test (3.13)" (enforcement: off)\n', text)
 
     def test_every_classic_check_is_named_up_to_the_limit(self):
         names = [f"job-{n:02}" for n in range(report.CHECKS_SHOWN)]
@@ -1675,7 +1676,8 @@ class WhatThePrintedReportSaysTest(unittest.TestCase):
             "enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": True},
             "required_status_checks": {"contexts": names, "strict": True}})
         text = report.to_text(take(entries, token=TOKEN)[0])
-        self.assertIn(f'"main": no review required; required checks: {", ".join(names)}; administrators are held '
+        shown = ", ".join(f'"{n}"' for n in names)
+        self.assertIn(f'"main": no review required; required checks: {shown}; administrators are held '
                       "to it; force pushes allowed\n", text)
 
     def test_who_may_bypass_a_classic_review_is_said_and_an_unlisted_group_is_not_nobody(self):

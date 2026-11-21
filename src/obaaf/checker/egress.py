@@ -36,6 +36,62 @@ FIREWALL_LABEL = "ubuntu-24.04-firewall"
 FIREWALL_POLICY = ".github/egress-firewall.yaml"
 LIMIT = 1_000_000       # bytes of the policy file the checker reads; a larger file is "cannot tell"
 
+# How OBAAF's egress action reads its `env` and `model-keys` inputs (actions/egress/egress.py, from the
+# merge of slice 2c.4 on; a test keeps these the same as the action's). The checker reads a step that
+# uses the action as the action would, which holds only for the commits OBAAF lists as released, and
+# those may only be commits at or after `egress_action_floor` in detection.yaml (slice 2c.12b's last
+# change to the action since that slice), which reads them the same way.
+#
+# MODEL_KEYS: the names `model-keys` accepts, each with the API host AWF's API proxy sends that key to
+# whatever `allow` says. WITHHELD_BY_AWF: names the action refuses under `env`, because AWF withholds
+# them from the command. NAME_RE: what the action takes for a variable name.
+MODEL_KEYS = {
+    "ANTHROPIC_API_KEY": "api.anthropic.com",
+    "OPENAI_API_KEY": "api.openai.com",
+}
+WITHHELD_BY_AWF = frozenset({
+    "AGENT_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_API_KEY",
+    "COPILOT_GITHUB_TOKEN", "COPILOT_PROVIDER_API_KEY", "GEMINI_API_KEY",
+    "GOOGLE_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_API_TOKEN", "GITHUB_PAT", "GH_ACCESS_TOKEN",
+})
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# RESERVED_NAMES, RESERVED_PREFIXES and RESERVED_SUFFIXES: names the action refuses under `env` because
+# it sets or withholds them on purpose, or because AWF reads them as its own configuration (egress.py's
+# `parse_env_names`, at the floor). Matched exactly, as the action matches them. Added by the review of
+# A3a (review-gpt #283): before it, the checker verified a step that the action refuses to run.
+RESERVED_NAMES = frozenset({
+    "PATH", "HOME", "TMPDIR", "SHELL", "BASH_ENV", "ENV", "IFS", "CDPATH",
+    "LC_ALL", "TZ",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP",
+    "PYTHONHOME", "NODE_OPTIONS", "PERL5LIB", "PERL5OPT", "RUBYOPT",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH",
+    "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT",
+    "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY", "GITHUB_WORKSPACE", "RUNNER_TEMP",
+})
+RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_", "OTEL_", "FOUNDRY_")
+RESERVED_SUFFIXES = ("_API_TARGET", "_API_BASE_PATH", "_BASE_URL", "_ENDPOINT_OVERRIDE")
+
+
+def reserved_under_env(name: str) -> bool:
+    """Whether the action refuses `name` under its `env` input as a name it sets, withholds or reads as
+    AWF's configuration (`PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest above)."""
+    name = str(name)
+    return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES)
+
+
+def removed_before_inputs(name: str) -> bool:
+    """Whether the action removes the variable `name` from its own steps before it reads its `env`
+    input, so a name under `env` that is one of these is refused as unset: every name that, trimmed
+    and upper-cased, begins `OPENSSL_` (egress.py from slice 2c.11a's change, which every commit at or
+    after the floor has; issue #197 is about the message)."""
+    return str(name).strip().upper().startswith("OPENSSL_")
+
 
 def split_list(text: str) -> list[str]:
     """Entries separated by commas, spaces or new lines, as OBAAF's action splits `allow`."""
@@ -169,6 +225,16 @@ def read_firewall_policy(root) -> FirewallPolicy:
                                      "take for a key of that name")
     if not isinstance(raw, dict):
         return FirewallPolicy("unreadable", digest=digest, detail="its top level is not a mapping")
+    # The README describes three keys, and says the format may change. Another key, or one of the three in
+    # another letter case beside it (`MODE: log`), may widen what the firewall allows or change its mode,
+    # so the file is not read one way (flagship slice 2d.2f; before, other keys were left out unread).
+    unknown = [key for key in raw if key not in POLICY_KEYS]
+    if unknown:
+        return FirewallPolicy("unreadable", mode=raw.get("mode") if isinstance(raw.get("mode"), str) else None,
+                              digest=digest,
+                              detail=f"it has {shown_keys(unknown)}, which the firewall's README does not describe "
+                                     f"(it names {', '.join(POLICY_KEYS)}), so the checker cannot tell what the "
+                                     "firewall makes of it")
     mode = raw.get("mode")
     allow = raw.get("allow")
     entries: list = []
@@ -180,6 +246,18 @@ def read_firewall_policy(root) -> FirewallPolicy:
     return FirewallPolicy("read", mode=mode if isinstance(mode, str) else None, allow=entries,
                           no_defaults=raw.get("no-default-urls") is True, digest=digest,
                           detail="" if isinstance(mode, str) else "its mode is not written as text")
+
+
+# The keys of the firewall's policy file its README describes (read on 2026-11-15).
+POLICY_KEYS = ("mode", "allow", "no-default-urls")
+# The endpoints the firewall allows unless `no-default-urls: true`, as its README lists them on 2026-11-15:
+# the two wildcard ones are GitHub-managed and expand to URLs from GitHub's /meta endpoint.
+DEFAULT_ENDPOINTS = "github.com, codeload.github.com, and GitHub's own blob storage and Actions endpoints"
+
+
+def shown_keys(keys: list) -> str:
+    shown = ", ".join(f"'{str(key)[:40]}'" for key in keys[:3])
+    return ("the key " if len(keys) == 1 else "the keys ") + shown + (" and more" if len(keys) > 3 else "")
 
 
 def _has_merge_key(text: str) -> bool:
@@ -218,6 +296,40 @@ class Reading:
     detail: str
     kind: str
     values: dict
+    conditions: tuple[str, ...] = ()  # full action diagnostics for a confinement draft
+
+
+@dataclass
+class Placement:
+    """Where the credentials given to one step that uses OBAAF's egress action go, read as the action
+    reads its inputs (flagship slice 2c.5). Each credential is in one of three places, or the step
+    has a reason in `unsure` or `problems`:
+
+    - `proxy`: (variable, credentials) set in the step's `env` under a name its `model-keys` input
+      names, and not written into `run`; the action gives it to AWF's API proxy, which the command
+      can use and cannot read;
+    - `command`: (how, credentials) the command can read: set in the step's `env` under a name its
+      `env` input names, or written in its `run` input, directly or through the `env` context
+      (`${{ env.KEY }}`, which holds the step's own env);
+    - `neither`: (variable, credentials) set in the step's `env` under a name neither input names,
+      and not written into any input; the action passes it to neither.
+
+    `hosts` are the API hosts AWF's API proxy reaches for the model keys the step names, whatever
+    `allow` says. `unsure` holds what the checker cannot place ("cannot tell"); `problems` what makes
+    the action refuse to run ("not met")."""
+    step: str
+    proxy: list = field(default_factory=list)
+    command: list = field(default_factory=list)
+    neither: list = field(default_factory=list)
+    hosts: list = field(default_factory=list)
+    unsure: list = field(default_factory=list)
+    problems: list = field(default_factory=list)
+
+    @property
+    def reaches(self) -> bool:
+        """Whether a credential reaches the confined command or AWF's API proxy: the evidence that the
+        agent is the confined command (decision D-050)."""
+        return bool(self.proxy or self.command)
 
 
 def worst(problems: list, unsure: list) -> str:
@@ -271,6 +383,27 @@ def uncommented(script: str) -> str:
     return "".join(out)
 
 
+# How a step can name the scratch directory (/tmp/obaaf-egress.<random>) or /tmp, read the widest way
+# (flagship slice 2d.2f): `/tmp` or `obaaf-egress` once quotes and backslashes are taken out and slashes
+# and `.` parts collapsed; a top-level path whose first part is a pattern or built from an expansion
+# (`/t[m]p`, `/t?p`, `/*/obaaf*`, `/{tmp,x}`, `/$D`, `/t$(echo m)p`); and a temporary directory asked
+# for by name. Still a pattern search: a path assembled in a way none of these sees is not found.
+_TOP_PATTERN_RE = re.compile(r"(?:^|[^\w.~$}-])/[^\s/'\"]*[*?\[{$`]")
+_TEMP_NAME_RE = re.compile(r"mktemp|tmpdir|gettempdir|tempfile|mkdtemp|tmp_dir|os\.tmpdir|temp_dir",
+                           re.I)
+
+
+def names_temporary(text: str) -> bool:
+    """Whether a value may name /tmp or the scratch directory under it (see `_TOP_PATTERN_RE`)."""
+    raw = text or ""
+    plain = re.sub(r"[\"'\\]", "", raw)
+    plain = re.sub(r"/(?:\.?/)+", "/", plain)
+    lowered = plain.lower()
+    if "/tmp" in lowered or "obaaf-egress" in lowered or "obaaf-egress" in raw.lower():
+        return True
+    return bool(_TOP_PATTERN_RE.search(raw) or _TOP_PATTERN_RE.search(plain) or _TEMP_NAME_RE.search(raw))
+
+
 # A process a step may leave running after it ends. Shell can start one in endless spellings (line
 # continuations, full paths, `--detach=true`, backticks, `sudo at`), so the checker does not try to
 # tell a detached container from one that ends with its step: any mention of a container engine, a
@@ -279,9 +412,16 @@ def uncommented(script: str) -> str:
 # "cannot tell" and never hides one. Both patterns are linear in the length of the script.
 _AMPERSAND_RE = re.compile(r"(?<![&|>])&(?![&>])")
 _DETACHING_RE = re.compile(
-    r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|coproc|docker|docker-compose|podman"
-    r"|podman-compose|nerdctl|screen|tmux|batch)\b"
+    r"\b(?:nohup|setsid|disown|daemonize|start-stop-daemon|systemd-run|systemctl|initctl|coproc"
+    r"|docker|dockerd|docker-compose|containerd|podman|podman-compose|nerdctl|screen|tmux|batch|pm2|forever"
+    r"|supervisord|supervisorctl|ssh-agent|autossh|sshd|socat|fork|spawn|popen|Popen|subprocess|child_process"
+    r"|detached|crontab|atd)\b"
+    r"|(?<![.\w-])daemon\b(?![ \t]*=)|\bservice[ \t]+\S+[ \t]+(?:start|restart)\b"
     r"|\bat[ \t]+(?:now|noon|midnight|teatime|today|tomorrow|[0-9]|-[A-Za-z])")
+# `ssh -f` or `-N`, and `sudo -b` or `--background`, read word by word on each line (a pattern with
+# `[^\n]*` between two words is quadratic on a line that repeats the first: found by the review of 2d.2f).
+_SSH_DETACH = re.compile(r"-[A-Za-z]*[fN][A-Za-z]*")
+_SUDO_DETACH = re.compile(r"-[A-Za-z]*b[A-Za-z]*|--background")
 
 
 def leaves_process(script: str) -> str | None:
@@ -289,12 +429,30 @@ def leaves_process(script: str) -> str | None:
     (not `&&`, `2>&1`, `&>` or `|&`), or a mention anywhere of `nohup`, `setsid`, `disown`,
     `daemonize`, `start-stop-daemon`, `systemd-run`, `coproc`, `batch`, `at` followed by a time word,
     a digit or an option, a container engine (`docker`, `docker-compose`, `podman`, `podman-compose`, `nerdctl`)
-    or a terminal multiplexer (`screen`, `tmux`)."""
+    or a terminal multiplexer (`screen`, `tmux`). From flagship slice 2d.2f, in any letter case, also a
+    service manager or process manager (`systemctl`, `service ... start`, `pm2`, `forever`, `supervisord`),
+    `ssh -f`, `ssh -N`, `ssh-agent` and `socat`, `sudo -b`, the container daemons, `crontab`, and the words a script language forks or spawns
+    with (`fork`, `spawn`, `popen`, `subprocess`, `child_process`, `detached`). Still a list: a process
+    started in a way it does not name is not found."""
     text = script or ""
     if _AMPERSAND_RE.search(text):
         return "&"
     found = _DETACHING_RE.search(text)
-    return found.group(0).split()[0] if found else None
+    if found:
+        return found.group(0).split()[0]
+    for line in text.splitlines():
+        if "ssh" not in line and "sudo" not in line:
+            continue
+        words = re.split(r"[\s;&|()`]+", line)
+        command = ""
+        for word in words:
+            if word in ("ssh", "sudo") or word.endswith(("/ssh", "/sudo")):
+                command = word.rsplit("/", 1)[-1]
+            elif command == "ssh" and _SSH_DETACH.fullmatch(word):
+                return "ssh"
+            elif command == "sudo" and _SUDO_DETACH.fullmatch(word):
+                return "sudo"
+    return None
 
 
 # The AWF option its own documentation says "allows firewall bypass" (landscape.md, part 2).

@@ -7,6 +7,7 @@ from urllib.parse import unquote, urlsplit
 import html
 import json
 import re
+from importlib import resources
 
 from obaaf import predicates, render
 from obaaf.catalog import data_text
@@ -53,11 +54,18 @@ def validate(output):
 # schema's $id resolves to the schema file itself.
 FORMATS = {
     "agent-run": ("Agent-run record", "The files of the proposal bundle",
-                  "obaaf attest agent-run", "The agent lane's attest job"),
+                  "obaaf attest agent-run", "the agent lane's attest job",
+                  "In the reference workflow a separate trusted job constructs the record and treats "
+                  "the agent's trace as untrusted."),
     "agent-approval": ("Approval record", "The files of the proposal bundle",
-                       "obaaf attest approval", "The effect lane's approve job"),
+                       "obaaf attest approval", "the effect lane's approve job",
+                       "Records who approved applying the proposal. In the reference workflow "
+                       "`obaaf attest approval` checks the supplied approvals for a reviewer outside "
+                       "the requester list before writing the record."),
     "build-record": ("Build record", "The release artifacts",
-                     "obaaf attest build-record", "The release lane's attest job"),
+                     "obaaf attest build-record", "the release lane's attest job",
+                     "Records how a release artifact was built. The source, assets, manifest, SDK "
+                     "entries and isolation fields carry reporter labels."),
 }
 DOCS = "https://github.com/Obaaf/OBAAF/blob/main/docs/attestations.md"
 
@@ -91,7 +99,7 @@ def _page(title, canonical, depth, body):
 
 def write_formats(output):
     """Publish a page per predicate type and build type, and the schemas at their $id."""
-    for name, (label, subjects, command, signer) in FORMATS.items():
+    for name, (label, subjects, command, signer, description) in FORMATS.items():
         uri = predicates.OBAAF_TYPES[name]
         schema_rel = predicates.SCHEMA_FOR_TYPE[uri]
         schema_text = data_text(schema_rel)
@@ -108,10 +116,10 @@ def write_formats(output):
         schema_link = "../" * depth + schema_path.relative_to(output).as_posix()
         body = f"""<div class="section-label">IN-TOTO PREDICATE TYPE</div>
 <h2>{label}, version 0.1</h2>
-<p class="large">{_inline(schema['description'])}</p>
+<p class="large">{_inline(description)}</p>
 <p><strong>Type URI.</strong> <code>{uri}</code></p>
 <p><strong>Subjects.</strong> {subjects}, each identified by its SHA-256 digest.</p>
-<p><strong>Written by.</strong> <code>{command}</code>. <strong>Signed by.</strong> {signer}, through GitHub's Sigstore with the signing workflow's identity.</p>
+<p><strong>Written by.</strong> <code>{command}</code>. The command writes an unsigned predicate. In the configured GitHub reference workflow, {signer} signs through GitHub's Sigstore using the workflow identity.</p>
 <p><strong>JSON Schema.</strong> <a href="{schema_link}">{schema_id}</a></p>
 <p><strong>Documentation.</strong> <a href="{DOCS}">Records and attestation formats</a></p>
 <p class="caption">Version 0.1 may change before OBAAF 1.0. A changed format gets a new version and a new URI; this page and its schema stay as published.</p>"""
@@ -131,6 +139,61 @@ def write_formats(output):
 <p><strong>Documentation.</strong> <a href="{DOCS}">Records and attestation formats</a></p>"""
     (page_dir / "index.html").write_text(_page("Generic build, version 0.1", uri, depth, body), encoding="utf-8")
 
+def write_schemas(output):
+    """Publish every JSON Schema OBAAF ships whose $id is under its namespace at that $id (D-007),
+    not only the predicate types' (flagship slice 4.6, issue #176: the settings snapshot's was not
+    published). A schema whose $id is elsewhere, names no .json file under schemas/ once resolved, or is
+    another schema's, stops the build, as does a file that is not a JSON object."""
+    written = {}
+    folder = (output / "schemas").resolve()
+    for entry in sorted(resources.files("obaaf.data").joinpath("schemas").iterdir(), key=lambda e: e.name):
+        if not entry.name.endswith(".json"):
+            continue
+        text = entry.read_text(encoding="utf-8")
+        try:
+            schema = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(f"schemas/{entry.name}: not JSON ({exc})") from None
+        schema_id = schema.get("$id") if isinstance(schema, dict) else None
+        if not isinstance(schema_id, str) or not schema_id.startswith(predicates.NAMESPACE + "/schemas/"):
+            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} is not under {predicates.NAMESPACE}/schemas/")
+        path = (output / schema_id.removeprefix(predicates.NAMESPACE + "/")).resolve()
+        # Resolved, so `schemas/../x.json` is caught too (found by the review of slice 4.6).
+        if not path.is_relative_to(folder) or path.suffix != ".json":
+            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} does not name a .json file under schemas/")
+        if path in written:
+            raise ValueError(f"schemas/{entry.name}: $id {schema_id!r} is also the $id of schemas/{written[path]}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        written[path] = entry.name
+    return sorted(written.values())
+
+
+ASSESSMENT_CANONICAL = predicates.NAMESPACE + "/assessment.html"
+ASSESSMENT_NOSCRIPT = (
+    '<noscript><p>This questionnaire needs JavaScript, which is off in this browser. The same questions '
+    'are in <a href="https://github.com/Obaaf/OBAAF/blob/main/spec/self-assessment.md">the self-assessment</a>, '
+    'and the command line scores them: <code>obaaf assess init</code> writes an answer file to fill in, and '
+    '<code>obaaf assess score</code> scores it.</p></noscript>')
+
+
+def assessment_page():
+    """The questionnaire from `obaaf.render.form_html`, with the site's navigation, its canonical address
+    (D-007) and a note for a browser without JavaScript, whose questions the form's script writes
+    (flagship slice 4.6). The offline form, built from the same template, is not changed."""
+    page = render.form_html(link_base='https://github.com/Obaaf/OBAAF/blob/main/')
+    for old, new in (
+            ('<header>', '<header>\n<nav aria-label="Resource site"><a href="index.html">Back to the OBAAF field guide</a></nav>'),
+            ('</head>', f'<link rel="canonical" href="{ASSESSMENT_CANONICAL}">\n</head>'),
+            # Before the element, not in it: the form's CSS styles the first tier as `:first-child`
+            # (found by the review of slice 4.6).
+            ('<div id="tiers"></div>', f'{ASSESSMENT_NOSCRIPT}<div id="tiers"></div>')):
+        if page.count(old) != 1:
+            raise ValueError(f"assessment.html: expected one {old!r} in the form, found {page.count(old)}")
+        page = page.replace(old, new, 1)
+    return page
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=SOURCE / '_site')
@@ -140,14 +203,13 @@ def main():
     if output == SOURCE or output == SOURCE.parent:
         parser.error('output must be a dedicated build directory')
     output.mkdir(parents=True, exist_ok=True)
-    for name in ('index.html', 'styles.css', 'main.js'):
+    for name in ('index.html', 'quickstart.html', 'rules.html', 'comparison.html',
+                 'case-study.html', 'papers.html', 'styles.css', 'main.js'):
         (output / name).write_bytes((SOURCE / name).read_bytes())
-    assessment = render.form_html(link_base='https://github.com/Obaaf/OBAAF/blob/main/')
-    assessment = assessment.replace('<header>',
-        '<header>\n<nav aria-label="Resource site"><a href="index.html">Back to the OBAAF field guide</a></nav>', 1)
-    (output / 'assessment.html').write_text(assessment, encoding='utf-8')
+    (output / 'assessment.html').write_text(assessment_page(), encoding='utf-8')
     (output / '.nojekyll').write_text('', encoding='utf-8')
     write_formats(output)
+    write_schemas(output)
     validate(output)
     print(f'Site built and local links validated: {output}')
 

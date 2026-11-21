@@ -8,6 +8,8 @@ audit knows. Everything that comes from GitHub or from a snapshot file passes th
 
 from __future__ import annotations
 
+import re
+
 from obaaf.audit.github import plain, quoted
 from obaaf.audit.rules import RULE_TYPES
 from obaaf.audit.settings import BY_KEY, SETTINGS
@@ -32,9 +34,24 @@ def unread_keys(snapshot: dict) -> list[str]:
     return [s.key for s in SETTINGS if snapshot["settings"][s.key]["status"] in ("unread", "partial")]
 
 
+# A value printed as it is: one word of letters, digits and the punctuation of names, paths and versions, which
+# cannot pass for a list's separator, a bracket or a quotation mark. Anything else is printed quoted (flagship
+# slice 2b.8, issue #125).
+_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]*")
+
+
 def _list(items, limit: int = 8) -> str:
-    items = [plain(i, 60) for i in items]
+    """Names from outside, each in double quotes, so that none can close early and pass for two (a required
+    check named `a), "evil" (b` would read as two rules; flagship slice 2b.8, issue #125)."""
+    items = [quoted(i, 60) for i in items]
     return ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")
+
+
+def _token(value, limit: int = 60) -> str:
+    """A single value from outside, such as a setting's word or a branch name: as it is when it is one plain
+    word, quoted otherwise."""
+    shown = plain(value, limit)
+    return shown if _WORD.fullmatch(shown) else quoted(value, limit)
 
 
 def _join(texts, limit: int = 30) -> str:
@@ -73,7 +90,7 @@ def _policy_rule_text(rule: dict) -> str:
         return "only these events may start a workflow: " + (_list(parameters["allowed_events"], 12) or "none")
     if isinstance(parameters.get("allowed_actors"), list):
         return f"only {_count(len(parameters['allowed_actors']), 'listed actor')} may start a workflow"
-    return plain(rule.get("type"), 60)
+    return _token(rule.get("type"), 60)
 
 
 def _workflow_paths(conditions) -> str:
@@ -84,7 +101,8 @@ def _workflow_paths(conditions) -> str:
 
 
 def _source(item: dict) -> str:
-    return f"{plain(item['source_type'] or 'a source not given', 20)} {plain(item['source'] or '', 60)}".strip()
+    kind = _token(item["source_type"], 20) if item["source_type"] else "a source not given"
+    return f"{kind} {_token(item['source'], 60)}" if item["source"] else kind
 
 
 def _check_names(checks: dict) -> str:
@@ -138,7 +156,8 @@ def _environment_text(env: dict) -> str:
     else:
         # A pattern is for branches or for tags, and the same text means different things: "v*" as a tag
         # pattern admits a release tag, as a branch pattern it admits any branch someone names v-something.
-        branches = "may deploy: " + (_list([f"{p['type'] or 'pattern'} {p['name']}" for p in env["branch_policies"]])
+        branches = "may deploy: " + (_join((f"{_token(p['type'], 20) if p['type'] else 'pattern'} {quoted(p['name'])}"
+                                            for p in env["branch_policies"]), 8)
                                      if env["branch_policies"] else "nothing (no pattern is set)")
     if not env["reviewers"]:
         review = "no required reviewers"
@@ -162,20 +181,22 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
     if key == "repository":
         owner_kind = {"Organization": "the organisation", "User": "the user"}.get(value["owner_type"], "")
         extra = (", a fork" if value["fork"] else "") + (", archived" if value["archived"] else "")
-        return [f"{plain(value['visibility'], 20)} repository, default branch {plain(value['default_branch'], 80)}, "
-                f"owned by {owner_kind} {plain(value['owner'], 40)}{extra}".replace("  ", " ")]
+        return [f"{_token(value['visibility'], 20)} repository, default branch {_token(value['default_branch'], 80)}, "
+                f"owned by {owner_kind} {_token(value['owner'], 40)}{extra}".replace("  ", " ")]
     if key == "rulesets":
         if not value:
             return ["no ruleset applies to this repository" if whole else "no ruleset was read"]
-        return [f"{quoted(r['name'])} ({plain(r['enforcement'], 20)}, {plain(r['target'] or 'target not given', 20)}, "
+        return [f"{quoted(r['name'])} ({_token(r['enforcement'], 20)}, "
+                f"{_token(r['target'], 20) if r['target'] else 'target not given'}, "
                 f"from {_source(r)}): " + (_join(_rule_text(x) for x in r["rules"]) if r["rules"] else "no rules")
                 for r in value]
     if key == "ruleset_bypass_actors":
         names = _ruleset_names(settings)
         lines = []
         for entry in value:
-            who = _list([f"{a['actor_type']}{'' if a['actor_id'] is None else ' ' + str(a['actor_id'])} "
-                         f"({a['bypass_mode'] or 'mode not given'})" for a in entry["actors"]])
+            who = _join((f"{_token(a['actor_type'], 30)}{'' if a['actor_id'] is None else ' ' + plain(a['actor_id'], 20)} "
+                        f"({_token(a['bypass_mode'], 30) if a['bypass_mode'] else 'mode not given'})"
+                        for a in entry["actors"]), 8)
             name = f" {quoted(names[entry['ruleset_id']])}" if entry["ruleset_id"] in names else ""
             lines.append(f"ruleset {plain(entry['ruleset_id'], 20)}{name}: {who}")
         return lines or ["no ruleset's bypass list was read"]
@@ -191,7 +212,8 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
             # This view shows the checks of a classic protection rule only. Checks a ruleset requires are
             # under the rules in force, so an empty list here is "none shown", not "none required". A list
             # can also be shown for a rule that is switched off, so the enforcement level is said with it.
-            level = f" (enforcement: {plain(checks['enforcement_level'] or 'not given', 20)})" if named else ""
+            level = (f" (enforcement: {_token(checks['enforcement_level'], 20) if checks['enforcement_level'] else 'not given'})"
+                     if named else "")
             lines.append(f"{quoted(branch, 80)}: GitHub calls it {'protected' if entry['protected'] else 'not protected'}; "
                          + (_check_names(checks) + level if named else "no required checks shown in this view"))
         return lines
@@ -208,7 +230,7 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
     if key == "actions_permissions":
         if not value["enabled"]:
             return ["GitHub Actions is turned off for this repository"]
-        allowed = plain(value["allowed_actions"] or "not given", 20)
+        allowed = _token(value["allowed_actions"], 20) if value["allowed_actions"] else "not given"
         if value["allowed_actions"] == "selected":
             selected = value["selected_actions"]
             allowed += " (the list was not read)" if selected is None else (
@@ -216,10 +238,10 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
                 f"{_yes(selected['verified_allowed'])}, {_count(len(selected['patterns_allowed']), 'pattern')})")
         return [f"allowed actions: {allowed}; pinning to a commit required: {_yes(value['sha_pinning_required'])}"]
     if key == "workflow_permissions":
-        return [f"the workflow token defaults to {plain(value['default_workflow_permissions'], 20)}; workflows "
+        return [f"the workflow token defaults to {_token(value['default_workflow_permissions'], 20)}; workflows "
                 f"{'may' if value['can_approve_pull_request_reviews'] else 'may not'} approve pull requests"]
     if key == "fork_pull_requests":
-        line = f"approval is required for: {plain(value['approval_policy'], 60)}"
+        line = f"approval is required for: {_token(value['approval_policy'], 60)}"
         if "private_repository" in value:
             private = value["private_repository"]
             line += "; on this private repository, " + (
@@ -231,7 +253,7 @@ def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:
     if key == "actions_policies":
         if not value:
             return ["no Actions policy was listed for this repository" if whole else "no Actions policy was read"]
-        return [f"{quoted(p['name'])} ({plain(p['enforcement'], 20)}, from {_source(p)})"
+        return [f"{quoted(p['name'])} ({_token(p['enforcement'], 20)}, from {_source(p)})"
                 f"{_workflow_paths(p['conditions'])}: "
                 + ("; ".join(_policy_rule_text(r) for r in p["rules"]) or "no rules")
                 for p in value]
@@ -291,6 +313,9 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
             lines.append(f"            {plain(result['message'], 1500)}")
             lines += [f"            {plain(item, 400)}" for item in result["evidence"]]
         if show_fixes:
+            # Why it matters, then the fix: both are the rule's own sentences, and --no-fixes leaves both out,
+            # as it does for `obaaf check` (flagship slice 3.2c).
+            lines.append(f"    Why: {rule.why}")
             lines.append(f"    Fix: {rule.fix}")
     unknown = [r for r in results if r["state"] == "cannot-tell"]
     if unknown:
@@ -313,6 +338,9 @@ def findings_lines(assessment: dict, show_fixes: bool = True) -> list[str]:
             parts.append(f"cannot tell ({entry['cannot_tell']})")
         if not parts:
             parts.append(f"{RULE_STATUS[entry['status']]}: {plain(entry['note'], NOTE_LIMIT)}")
+        if entry.get("assumed"):
+            # What the rule's answers took for granted is said whatever they are (slice 2d.2g).
+            parts.append(f"assumed: {plain(entry['assumed'], NOTE_LIMIT)}")
         lines.append(f"  {entry['id']}  {'; '.join(parts)}")
     return lines
 
@@ -326,9 +354,9 @@ def to_text(snapshot: dict, origin: str = "", assessment: dict | None = None, us
     tally = counts(snapshot)
     how = "with a token" if snapshot["viewer"].get("authenticated") else "without a token"
     lines = [f"Settings audit of {plain(snapshot['repository'], 140)}",
-             origin or f"Read {when(snapshot)} from {plain(snapshot['api'], 100)}, {how}."]
+             origin or f"Read {when(snapshot)} from {_token(snapshot['api'], 100)}, {how}."]
     if snapshot.get("requested_as"):
-        lines.append(f"Asked for as {plain(snapshot['requested_as'], 140)}; GitHub now calls it "
+        lines.append(f"Asked for as {_token(snapshot['requested_as'], 140)}; GitHub now calls it "
                      f"{plain(snapshot['repository'], 140)}.")
     if assessment is None:
         lines.append("This lists what was read and what was not. No rule was applied to it.")

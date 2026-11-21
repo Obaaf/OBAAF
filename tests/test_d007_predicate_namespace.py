@@ -87,12 +87,84 @@ class PublishedPagesTest(unittest.TestCase):
                 self.assertTrue(served.is_file(), served)
                 self.assertEqual(json.loads(served.read_text(encoding="utf-8")), json.loads(data_text(rel)))
 
+    def test_every_shipped_schema_with_an_id_here_is_served_at_it(self):
+        """Not only the predicate types' schemas: the settings snapshot's too (flagship slice 4.6, #176)."""
+        from importlib import resources
+        names = []
+        for entry in resources.files("obaaf.data").joinpath("schemas").iterdir():
+            if not entry.name.endswith(".json"):
+                continue
+            schema = json.loads(entry.read_text(encoding="utf-8"))
+            names.append(entry.name)
+            with self.subTest(schema=entry.name):
+                self.assertTrue(schema["$id"].startswith(predicates.NAMESPACE + "/schemas/"))
+                served = self._local(schema["$id"])
+                self.assertTrue(served.is_file(), served)
+                self.assertEqual(json.loads(served.read_text(encoding="utf-8")), schema)
+        self.assertIn("settings-snapshot.schema.json", names)
+
+    def test_the_questionnaire_names_its_canonical_address_and_says_it_needs_javascript(self):
+        text = (self.out / "assessment.html").read_text(encoding="utf-8")
+        self.assertEqual(text.count('<link rel="canonical" href="https://www.obaaf.com/assessment.html">'), 1)
+        self.assertIn('</noscript><div id="tiers"></div>', text)
+        self.assertIn("obaaf assess init", text)
+        self.assertIn("Back to the OBAAF field guide", text)
+
     def test_format_pages_use_no_dashes(self):
         for uri in [*predicates.OBAAF_TYPES.values(), predicates.GENERIC_BUILD_TYPE]:
             with self.subTest(uri=uri):
                 text = (self._local(uri) / "index.html").read_text(encoding="utf-8")
                 self.assertNotIn("—", text)
                 self.assertNotIn("–", text)
+
+
+class SchemaPublishingRefusesTest(unittest.TestCase):
+    """`write_schemas` in site/build.py stops the build on a schema it cannot publish safely (flagship
+    slice 4.6): run against a folder of made-up schemas in place of OBAAF's own."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("obaaf_site_build", ROOT / "site" / "build.py")
+        cls.build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.build)
+
+    def publish(self, files):
+        build = self.build
+        with TempDir() as tmp:
+            (tmp / "data" / "schemas").mkdir(parents=True)
+            for name, text in files.items():
+                (tmp / "data" / "schemas" / name).write_text(text, encoding="utf-8")
+            from types import SimpleNamespace
+            from unittest import mock
+            # Only build.py's own name for importlib.resources is replaced, not the shared module.
+            with mock.patch.object(build, "resources", SimpleNamespace(files=lambda package: tmp / "data")):
+                out = tmp / "site"
+                out.mkdir()
+                names = build.write_schemas(out)
+                return names, sorted(p.relative_to(out).as_posix() for p in out.rglob("*.json"))
+
+    def test_a_schema_is_published_at_its_id_and_other_files_are_skipped(self):
+        names, served = self.publish({"a.json": json.dumps({"$id": predicates.NAMESPACE + "/schemas/a/v1.json"}),
+                                      "notes.txt": "not a schema"})
+        self.assertEqual((names, served), (["a.json"], ["schemas/a/v1.json"]))
+
+    def test_what_stops_the_build(self):
+        ns = predicates.NAMESPACE
+        cases = {
+            "dot-dot": ({"a.json": json.dumps({"$id": ns + "/schemas/../assessment.json"})}, "under schemas/"),
+            "another host": ({"a.json": json.dumps({"$id": "https://example.com/schemas/a/v1.json"})}, "is not under"),
+            "not json": ({"a.json": "{not json"}, "not JSON"),
+            "an array": ({"a.json": "[1, 2]"}, "is not under"),
+            "no id": ({"a.json": "{}"}, "is not under"),
+            "not a .json file": ({"a.json": json.dumps({"$id": ns + "/schemas/a/v1.html"})}, "under schemas/"),
+            "a duplicate": ({"a.json": json.dumps({"$id": ns + "/schemas/a/v1.json"}),
+                             "b.json": json.dumps({"$id": ns + "/schemas/a/v1.json"})}, "is also the \\$id of"),
+        }
+        for case, (files, message) in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.publish(files)
 
 
 if __name__ == "__main__":

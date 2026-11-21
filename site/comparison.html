@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A dated reading of the OBAAF landscape: measurements from 2026-11-13 used OBAAF 0.4.0.dev0, not release 0.3.0. Which tools the landscape ran, and which it read about only.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Where OBAAF stands</title>
+  <link rel="canonical" href="https://www.obaaf.com/comparison.html">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="header wrap">
+  <a class="brand" href="index.html">OBAAF</a>
+  <nav aria-label="Pages"><a href="index.html">Home</a> <a href="quickstart.html">Quickstart</a> <a href="rules.html">Rules</a> <a href="comparison.html" aria-current="page">Comparison</a> <a href="case-study.html">Case study</a> <a href="papers.html">Papers</a></nav>
+</header>
+<main id="main" class="section wrap">
+
+<p class="section-label">Dated 2026-11-11, with measurements from 2026-11-13</p>
+<h1>Where OBAAF does not try to be the only tool.</h1>
+<p class="large">This page is a short reading of <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/docs/landscape.md">the landscape</a>. It is not a new comparison. The positioning section was written on 2026-11-11. Measurements of Checkov, Semgrep and ci-agent-audit were added on 2026-11-13. The positions are proposals until the maintainers accept them.</p>
+<p>OBAAF is a small open-source project with one documented adopter, a project of one of its authors. Asking what an agent job in CI can reach is not OBAAF's alone. ci-agent-audit does. Wiz and Aikido say their products detect misconfigured agents in CI. Neither was tested for that landscape.</p>
+<p>On 2026-11-13 the landscape's measured runs recorded that ci-agent-audit's AIA005 and AIA006 overlapped token-permission and egress findings on two agent fixtures, and that AIA001 identified prompt input that run did not. The OBAAF run in that measurement was 0.4.0.dev0 at commit c04d811. This page does not repeat every cell of those runs. The two fixture files are <code>clinejection-triage.yml</code> and <code>promptpwnd-issue-agent.yml</code>.</p>
+<h2>The aim, and what is true now</h2>
+<p>The landscape's position, as a thing being built towards, is: for jobs that run an AI agent or publish a release, say what each job can reach, check that a claimed control is real in the workflow file, in the repository's settings, and while the job runs, and show the evidence. For everything else, point at the tool that already does it.</p>
+<p>One sentence in that section says that today OBAAF reads files in the repository only: no settings, nothing enforced while a job runs, and a control is accepted because the file names it. That is still true of release 0.3.0. The rows under it are later, and describe the development version, which is not in a release: <code>obaaf audit</code> reads the repository settings it can see; an optional egress action exists; and the checker clears OBAAF-GHA-020, the finding that an agent job's network is not restricted, for GitHub's native egress firewall in enforce mode, under conditions the <a href="rules.html">rules</a> page lists. OBAAF's own action stays "cannot tell" until a released commit of it is listed, and none is listed. OBAAF-GHA-005, a secret available to an agent job, cannot be cleared in either version. OBAAF ships no inference proxy.</p>
+<p>In release 0.3.0, for egress, "a control is accepted because the file names it" means Harden-Runner. On 2026-11-14 it did not report OBAAF-GHA-020 for an unconditional <code>step-security/harden-runner</code> step set to <code>egress-policy: block</code>. It does not look at the action's version, at <code>disable-sudo-and-containers</code>, or at whether the step is first. The same step behind an <code>if</code> was still reported. The development version still reported OBAAF-GHA-020 on both of those files. The files, and the full commit of the pinned Harden-Runner step, are on the <a href="rules.html">rules</a> page.</p>
+<h2>What the landscape says to use instead</h2>
+<p>These are the landscape's recommendations. It ran zizmor, actionlint, poutine, Octoscan and OpenSSF Scorecard on 2026-11-11, CodeQL's queries for GitHub Actions in its second part, and Checkov, Semgrep and ci-agent-audit on 2026-11-13. Where a block below says a tool was not run, the recommendation rests on that project's documentation. Each block is one row of the landscape's positioning table: the area, what it says to use, and where it says OBAAF stands.</p>
+<h3>General mistakes in workflow files</h3>
+<p>Use zizmor first. CodeQL where code scanning is on. actionlint for plain mistakes. poutine for scripts piped into a shell. OBAAF does not replace them. All four were run for the landscape.</p>
+<h3>What a job can reach on the network</h3>
+<p>Use GitHub's native egress firewall where a repository has it. Otherwise the Agent Workflow Firewall. Harden-Runner or Cimon where a team already runs one. The landscape says none of those was run for the comparison. OBAAF's own wrapper is development only, with the limits above.</p>
+<h3>Who and what can start a workflow</h3>
+<p>Use GitHub's workflow execution protections, not run for the landscape. In the development version, <code>obaaf audit</code> compares a policy it can read with the triggers the workflows use. The landscape says that rule has never been run against a real policy. Reading a policy takes administrator access, so most runs answer "cannot tell".</p>
+<h3>Pinning actions</h3>
+<p>Use GitHub's workflow lockfiles and its policy for pinning to a commit, neither run for the landscape. Chainguard Actions is named as a commercial option in open beta, not run. OBAAF keeps its report of unpinned actions, OBAAF-GHA-008. It does not know about lockfiles.</p>
+<h3>Writing a new agent workflow</h3>
+<p>Use GitHub Agentic Workflows, not run. OBAAF's templates are a worked example, not the recommended start.</p>
+<h3>Signing what was built</h3>
+<p>Use GitHub artifact attestations and <code>gh attestation verify</code>, not run for the landscape because they need the GitHub API or a signed artifact. <code>obaaf attest</code> writes the predicate of an in-toto statement, or the whole statement with <code>--statement-out</code>. It signs neither, and it signs no agent run. A separate configured job can sign through GitHub's attestation action.</p>
+<h3>Skills, MCP servers, instruction files</h3>
+<p>Use Snyk's agent-scan, Agent Threat Rules, agent-audit, and promptwarden, none of them run. OBAAF keeps two small rules about instruction files.</p>
+<h3>A whole organisation's settings</h3>
+<p>Use Legitify, OpenSSF Scorecard, or one of the enterprise products in the landscape. Of these, only Scorecard was run; Legitify needs a token, and the enterprise products were read about only. <code>obaaf audit</code> reads only the settings the repository's own workflows depend on. It does not check an organisation against a standard, and it is not in release 0.3.0.</p>
+<h3>Other CI systems</h3>
+<p>poutine reads GitLab, Azure DevOps and Tekton. Release 0.3.0's checker is GitHub Actions, plus advisory Jenkins.</p>
+<p class="caption">The landscape, written 2026-11-11, says a third of its GitHub Actions rules report what larger tools report too. That sentence is the landscape's. The OBAAF commit measured on 2026-11-13 is <a href="https://github.com/Obaaf/OBAAF/tree/c04d811b569810796b631ac2a9862f0c812bafef">c04d811</a>.</p>
+
+</main>
+<footer class="wrap">
+  <div><strong>OBAAF</strong><p>Osita Sean Keluo-Udeke led the research. Ofonna Nweze handled implementation, testing, and GitHub integration, with Osita Sean Keluo-Udeke contributing across the project.</p></div>
+  <div><p>Code is Apache-2.0. Documentation is CC BY 4.0. The development package also ships the Public Suffix List under MPL-2.0. <a href="https://github.com/Obaaf/OBAAF/blob/20b33fe695d1904c31c4b270141c57f598333d55/LICENSING.md">Licensing</a>.</p></div>
+</footer>
+</body>
+</html>

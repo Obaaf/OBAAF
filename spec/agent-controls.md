@@ -79,7 +79,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Labels determine permissions.
 
-**In this repository.** Templates: `obaaf-agent-propose.yml: agent job permissions` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-005`, `OBAAF-JEN-001`, `OBAAF-JEN-003`
+**In this repository.** Templates: `obaaf-agent-propose.yml: agent job permissions` · Checker rules: `OBAAF-GHA-003`, `OBAAF-GHA-005`, `OBAAF-GHA-026`, `OBAAF-JEN-001`, `OBAAF-JEN-003`
 
 ### R3 Give each invocation its own short-lived identity
 
@@ -135,7 +135,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Tool descriptions treated as untrusted input.
 
-**In this repository.** Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008`
+**In this repository.** Checker rules: `OBAAF-GHA-008`, `OBAAF-GHA-025`, `OBAAF-JEN-008`
 
 ### R7 Isolate the run and constrain egress
 
@@ -149,7 +149,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Default-deny egress for agents.
 
-**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`, `OBAAF-JEN-002`, `OBAAF-JEN-006`, `OBAAF-JEN-007`
+**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`, `OBAAF-GHA-026`, `OBAAF-JEN-002`, `OBAAF-JEN-006`, `OBAAF-JEN-007`
 
 ### R8 Attest every agent run
 

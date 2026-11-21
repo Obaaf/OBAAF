@@ -42,6 +42,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The full history: a test checks that every listed release of the egress action
+          # is at or after egress_action_floor in detection.yaml.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -60,7 +63,39 @@ jobs:
           obaaf docs build --check
 
       - name: Check this repository's own workflows
-        run: obaaf check . --fail-on medium
+        run: obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium
+
+  companion-scanner:
+    # The report-only scanner steps `obaaf init --with-scanner` writes (plan slice 3.3b, #333 item 1):
+    # in a disposable Git repository it writes the workflow with all three scanners, runs one generated
+    # step's script as written against its pinned image, and checks the step's exit status, a finding
+    # the fixture should give, the workflow-command markers around the scanner's output, and that the
+    # step wrote nothing to standard error, which would reach the runner outside those markers (#340).
+    name: Generated scanner step (${{ matrix.scanner }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: it depends on ghcr.io and Docker Hub, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [zizmor, actionlint, poutine]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+      - name: Check the generated step against its pinned image
+        env:
+          SCANNER: ${{ matrix.scanner }}
+        run: python scripts/check_companion_scanner.py "$SCANNER"
 
   package:
     runs-on: ubuntu-latest
@@ -81,10 +116,19 @@ jobs:
       - name: Build and smoke-test the wheel
         run: |
           python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
-          python -m pip wheel --no-deps --no-build-isolation --wheel-dir wheelhouse .
+          python -c 'from setuptools.build_meta import build_sdist; build_sdist("dist")'
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir wheelhouse dist/obaaf-*.tar.gz
           python -m venv "$RUNNER_TEMP/clean"
           "$RUNNER_TEMP/clean/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt wheelhouse/obaaf-*.whl
           cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/clean/bin/obaaf" templates install --dest studio --obaaf-repo Obaaf/OBAAF --obaaf-sha "$GITHUB_SHA"
+          for workflow in "$GITHUB_WORKSPACE"/templates/github-actions/workflows/*.yml; do
+            test -s "studio/.github/workflows/$(basename "$workflow")"
+          done
+          test -s studio/.github/obaaf.yml
+          test -s studio/.github/obaaf-policy.yaml
+          test -s studio/obaaf-sources.yaml
+          test -x studio/.github/obaaf/agent.sh
           "$RUNNER_TEMP/clean/bin/obaaf" catalog
           "$RUNNER_TEMP/clean/bin/obaaf" assess form --output form.html
           "$RUNNER_TEMP/clean/bin/obaaf" check "$GITHUB_WORKSPACE/tests/fixtures/workflows/risky/pwn-request.yml" --fail-on never
@@ -125,6 +169,9 @@ jobs:
     # constraints.txt (D-011).
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Advisory: a maintainer chose on 2026-11-13 not to make this a required check of
+    # main, so its failure is reported and does not fail the run (OBAAF-SET-008).
+    continue-on-error: true
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -155,6 +202,84 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  zizmor-parity:
+    # The parity test of plan slice 2d.3b (F-19): on the rules OBAAF shares with zizmor, OBAAF must
+    # report what a pinned zizmor reports on the same workflows, or tests/parity/zizmor.yaml must say
+    # why it does not. It runs zizmor on OBAAF's risky workflows and on zizmor's own test workflows,
+    # checks that what zizmor reports is what tests/parity/zizmor-cases.json records, and compares.
+    name: Parity with zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: it depends on PyPI and github.com, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # zizmor's test workflows at the commit tests/parity/zizmor.yaml names (its release v1.32.0).
+      # They are read by zizmor and OBAAF, and nothing in them is run.
+      - name: Check out zizmor's test workflows
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zizmorcore/zizmor
+          ref: 21bd300700d43d9ba04b0c1fce72a89391ac80b4
+          path: third-party/zizmor
+          persist-credentials: false
+          sparse-checkout: crates/zizmor/tests/integration/test-data
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install OBAAF
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+
+      # tests/parity/zizmor-requirements.txt must hold PyPI's SHA-256 for every file of the pinned
+      # zizmor. When it does not, the file it should be is printed on one line (LOCK) for a reviewer to
+      # check and commit.
+      - name: Check the zizmor pin against PyPI
+        id: lock
+        run: python scripts/zizmor_parity.py lock --check
+
+      - name: Print the expected zizmor pin
+        if: failure() && steps.lock.outcome == 'failure'
+        run: python scripts/zizmor_parity.py lock --print
+
+      - name: Install the pinned zizmor
+        # Run when only the pin check failed: pip checks every file against the pin anyway.
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
+        run: |
+          python -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            --requirement tests/parity/zizmor-requirements.txt
+
+      - name: Run zizmor on each set
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
+        run: |
+          python scripts/zizmor_parity.py run --zizmor "$RUNNER_TEMP/zizmor/bin/zizmor" --out "$RUNNER_TEMP/parity" \
+            --root zizmor-tests=third-party/zizmor/crates/zizmor/tests/integration/test-data
+
+      - name: Compare OBAAF with zizmor
+        if: ${{ !cancelled() && steps.lock.outcome != 'skipped' }}
+        run: |
+          python scripts/zizmor_parity.py ci \
+            --zizmor risky="$RUNNER_TEMP/parity/risky.json" \
+            --zizmor zizmor-tests="$RUNNER_TEMP/parity/zizmor-tests.json" \
+            --root zizmor-tests=third-party/zizmor/crates/zizmor/tests/integration/test-data
+
+      - name: Keep zizmor's output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zizmor-parity
+          path: ${{ runner.temp }}/parity/
+          if-no-files-found: warn
+          retention-days: 7
+
   actionlint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -176,3 +301,142 @@ jobs:
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -ignore 'cache-mode' .github/workflows/*.yml templates/github-actions/workflows/*.yml
+
+  send-us-the-result:
+    # docs/send-us-the-result.md is what people asked to try OBAAF run on their own machines. This runs
+    # its bash blocks as written, with the runner's own python3 as theirs would be, on a checkout of this
+    # repository: the install from the pinned commit (which needs github.com and PyPI), the check, the
+    # audit with no token, and the result file; then it checks the file holds counts only.
+    name: The send-us-the-result page, as written (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    # Advisory: it depends on github.com and PyPI, and is not a required check of main, so its failure
+    # is reported and does not fail the run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    env:
+      PAGE: docs/send-us-the-result.md
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A Python the page says to use when the runner's own python3 is too new for the lock. It is not
+      # put on the PATH, so the first try below uses the runner's own python3.
+      - name: Set up Python 3.14 beside the runner's own
+        id: py
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          update-environment: false
+
+      - name: Step 1, install, with the runner's own python3
+        run: |
+          test "$(python3 scripts/page_blocks.py "$PAGE" --count)" = 6
+          python3 --version
+          python3 scripts/page_blocks.py "$PAGE" 1 > "$RUNNER_TEMP/install.sh"
+          if time bash "$RUNNER_TEMP/install.sh" 2> "$RUNNER_TEMP/install.err"; then
+            touch "$RUNNER_TEMP/installed"
+          else
+            cat "$RUNNER_TEMP/install.err"
+            # Allowed only where the page says the block stops: a python3 newer than 3.14, with its message.
+            python3 -c 'import sys; assert sys.version_info[:2] > (3, 14), "the install failed on a Python the page says works"'
+            grep -q 'use Python 3.10 to 3.14 (see step 1)' "$RUNNER_TEMP/install.err"
+            test ! -e "$HOME/obaaf-try"
+          fi
+
+      - name: Step 1 again with OBAAF_PYTHON, as the page says for a newer python3
+        env:
+          SETUP_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          if [ -e "$RUNNER_TEMP/installed" ]; then echo "installed with the runner's own python3"; exit 0; fi
+          "$SETUP_PYTHON" --version
+          time OBAAF_PYTHON="$SETUP_PYTHON" bash "$RUNNER_TEMP/install.sh"
+
+      - name: Steps 2 to 5, with no token, in this checkout
+        run: |
+          for n in 2 3 4 5; do python3 scripts/page_blocks.py "$PAGE" "$n"; done > "$RUNNER_TEMP/run.sh"
+          cat "$RUNNER_TEMP/run.sh"
+          time bash "$RUNNER_TEMP/run.sh"
+
+      - name: The result file holds counts only
+        run: |
+          "$HOME/obaaf-try/venv/bin/python" - <<'PY'
+          import json, os
+          from obaaf.result import FORMAT, check_sendable
+          path = os.path.expanduser("~/obaaf-try/obaaf-result.json")
+          text = open(path, encoding="ascii").read()
+          data = json.loads(text)
+          check_sendable(data)
+          assert data["format"] == FORMAT, data["format"]
+          assert data["check"]["exit"] == 0, data["check"]["exit"]
+          assert data["check"]["files"]["checked"] >= 7, data["check"]["files"]
+          assert data["audit"] is not None and data["audit"]["token"]["used"] is False, data["audit"]
+          for word in ("Obaaf", "obaaf.yml", ".github", "@", "runner"):
+              assert word not in text, word
+          print(f"{path}: {len(text)} bytes, check {data['check']['seconds']} s, exit {data['check']['exit']}")
+          PY
+
+      - name: Step 8, clean up
+        run: |
+          python3 scripts/page_blocks.py "$PAGE" 6 > "$RUNNER_TEMP/clean.sh"
+          bash -c '. "$HOME/obaaf-try/venv/bin/activate" && . "$RUNNER_TEMP/clean.sh"'
+          test ! -e "$HOME/obaaf-try"
+
+  github-env-premise:
+    # What OBAAF-GHA-016 assumes of the runner (plan slice 2d.13, F-278). A step's write to GITHUB_ENV
+    # reaches every later step of the job, so a PATH written there decides which `obaaf` a later check
+    # runs, and SHELLOPTS=noexec makes bash read a later step's script and run none of it: the step
+    # succeeds. This job shows both on a GitHub-hosted runner. It checks nothing out, holds no secret
+    # and writes only under the runner's temporary folder.
+    name: "Runner premise: what GITHUB_ENV sets for later steps (OBAAF-GHA-016)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Advisory: it is not a required check of main, so its failure is reported and does not fail the
+    # run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    steps:
+      - name: Put a stand-in obaaf first on the PATH through GITHUB_ENV
+        run: |
+          mkdir -p "$RUNNER_TEMP/premise/bin"
+          cat > "$RUNNER_TEMP/premise/bin/obaaf" <<'SH'
+          #!/bin/sh
+          touch "$RUNNER_TEMP/premise/stand-in-ran"
+          SH
+          chmod +x "$RUNNER_TEMP/premise/bin/obaaf"
+          echo "PATH=$RUNNER_TEMP/premise/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: A check as a release job writes it (the stand-in runs)
+        run: obaaf verify release --policy .github/obaaf-policy.yaml --artifacts dist
+
+      - name: Turn on noexec through GITHUB_ENV
+        run: echo "SHELLOPTS=noexec" >> "$GITHUB_ENV"
+
+      - name: A step that fails if bash runs any of it
+        run: |
+          touch "$RUNNER_TEMP/premise/noexec-step-ran"
+          exit 1
+
+      # Run whatever happened before, so a step that failed (the stand-in not found, or bash running the
+      # step that ends with exit 1) is reported here and fails the job, never skipped.
+      - name: Judge what the two steps did
+        if: always()
+        shell: /usr/bin/python3 -I -S {0}
+        run: |
+          import os, subprocess
+          tmp = os.environ["RUNNER_TEMP"]
+          bash = subprocess.run(["/usr/bin/bash", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+          print("image:", os.environ.get("ImageOS"), os.environ.get("ImageVersion"), "|", bash)
+          print("PATH starts with:", os.environ["PATH"].split(":")[0])
+          print("SHELLOPTS:", os.environ.get("SHELLOPTS"))
+          ran = os.path.exists(os.path.join(tmp, "premise", "stand-in-ran"))
+          skipped = not os.path.exists(os.path.join(tmp, "premise", "noexec-step-ran"))
+          print("the check's step ran the stand-in obaaf:", ran)
+          print("the step that ends with exit 1 succeeded without running:", skipped)
+          assert os.environ["PATH"].startswith(os.path.join(tmp, "premise", "bin") + ":")
+          assert os.environ.get("SHELLOPTS") == "noexec"
+          assert ran and skipped

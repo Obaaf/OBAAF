@@ -101,8 +101,9 @@ class TemplatesAreCleanTest(unittest.TestCase):
         self.assertEqual(rules, {"OBAAF-GHA-023"})
 
     def test_this_repositorys_own_workflows_pass(self):
-        result = checker.check(ROOT)
-        self.assertEqual([(f.rule, f.path) for f in result.active() if f.severity in ("high", "medium")], [])
+        code, out, err = run_cli("check", ROOT, "--baseline", ROOT / ".github/obaaf-baseline.json",
+                                 "--fail-on", "medium")
+        self.assertEqual(code, 0, err or out)
 
 
 SHA = "1" * 40
@@ -477,10 +478,12 @@ jobs:
             config = checker.Config.from_data({"protected_secrets": {"PRIVATE_SET_TOKEN": "private-set"}}, "test")
             head = ("name: wf\non: [push]\npermissions:\n  contents: read\njobs:\n  call:\n"
                     "    uses: example/repo/.github/workflows/x.yml@" + SHA + "\n")
-            # inherit passes repository and organization secrets only, never an environment's.
+            # inherit passes repository and organization secrets only, never an environment's: so does
+            # naming the secret, which was always reported. Until slice 2d.2b inherit was not.
             inherit = head + "    secrets: inherit\n"
-            self.assertEqual([f for f in findings_for(tmp, inherit, name="c.yml", config=config)
-                              if f.rule == "OBAAF-GHA-024"], [])
+            found = [f for f in findings_for(tmp, inherit, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
+            self.assertEqual([(f.severity, f.kind, f.facts["via"]) for f in found], [("high", "caller", ["*inherit"])])
+            self.assertIn("secrets: inherit", found[0].message)
             mapped = head + "    secrets:\n      token: ${{ secrets.PRIVATE_SET_TOKEN }}\n"
             found = [f for f in findings_for(tmp, mapped, name="c.yml", config=config) if f.rule == "OBAAF-GHA-024"]
             self.assertEqual([f.severity for f in found], ["high"])

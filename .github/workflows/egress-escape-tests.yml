@@ -53,7 +53,7 @@ jobs:
           python3 -I -c '
           import json, socket
           out = {}
-          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com"):
+          for host in ("example.org", "example.net", "example.com", "cloudflare-dns.com", "api.github.com"):
               out[host] = sorted({info[4][0] for info in socket.getaddrinfo(host, 443)})
           print(json.dumps(out, indent=1))
           ' > "$RUNNER_TEMP/resolved.json"
@@ -114,7 +114,11 @@ jobs:
           ACTION_EXIT: ${{ steps.inside.outputs.exit-code }}
           ACTION_CONFINED: ${{ steps.inside.outputs.confined }}
           INSIDE_WORKSPACE: ${{ steps.inside.outputs.workspace }}
+          INSIDE_SCRATCH: ${{ steps.inside.outputs.scratch }}
+          REMOVED: ${{ steps.inside.outputs.removed }}
           LOG_DIR: ${{ steps.inside.outputs.log-dir }}
+          DNS_LOG: ${{ steps.inside.outputs.dns-log }}
+          DNS_REFUSED: ${{ steps.inside.outputs.dns-refused }}
         run: |
           set -euo pipefail
           # The background attempt fires 20 seconds after it starts; keep listening past that.
@@ -125,6 +129,7 @@ jobs:
           cp "$RUNNER_TEMP/outside-results.txt" "$RUNNER_TEMP/egress-results/" || true
           cp "$INSIDE_WORKSPACE/egress-results-inside.txt" "$RUNNER_TEMP/egress-results/" || true
           if [ -n "$LOG_DIR" ] && [ -d "$LOG_DIR" ]; then sudo cp -r "$LOG_DIR" "$RUNNER_TEMP/egress-results/proxy-logs" && sudo chown -R "$(id -u)" "$RUNNER_TEMP/egress-results"; fi
+          if [ -n "$DNS_LOG" ] && [ -f "$DNS_LOG" ]; then cp "$DNS_LOG" "$RUNNER_TEMP/egress-results/dns.log"; fi
           python3 -I tests/egress/judge.py judge \
             --outside-pcap "$RUNNER_TEMP/outside.pcap" \
             --inside-pcap "$RUNNER_TEMP/inside.pcap" \
@@ -136,6 +141,9 @@ jobs:
             --action-exit "$ACTION_EXIT" \
             --action-confined "$ACTION_CONFINED" \
             --summary "$GITHUB_STEP_SUMMARY" \
+            --dns-refused "$DNS_REFUSED" \
+            --scratch "$INSIDE_SCRATCH" \
+            --removed "$REMOVED" \
             --json-out "$RUNNER_TEMP/egress-results/verdict.json"
 
       - name: Keep the results
@@ -218,8 +226,187 @@ jobs:
           env: ANTHROPIC_API_KEY
           run: "true"
 
+      - name: A model key the action has not tested is refused in model-keys
+        id: untestedkey
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          GEMINI_API_KEY: not-a-key
+        with:
+          allow: api.github.com
+          model-keys: GEMINI_API_KEY
+          run: "true"
+
+      - name: Made-up model keys (not secrets; each provider refuses them)
+        id: dummy
+        run: |
+          set -euo pipefail
+          mark="obaafdummy$(openssl rand -hex 8)"
+          {
+            echo "mark=$mark"
+            echo "anthropic=sk-ant-api03-$mark-$(openssl rand -hex 16)"
+            echo "openai=sk-proj-$mark-$(openssl rand -hex 16)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Model keys reach AWF's API proxy, never the command, and each provider answers
+        id: keys
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.dummy.outputs.anthropic }}
+          OPENAI_API_KEY: ${{ steps.dummy.outputs.openai }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+        with:
+          # Neither provider is listed: the API proxy reaches them whatever allow says.
+          allow: api.github.com
+          model-keys: ANTHROPIC_API_KEY OPENAI_API_KEY
+          env: KEY_MARK
+          run: bash tests/egress/model-keys.sh model-keys-results.txt
+
+      - name: Check the model keys
+        env:
+          KEYS_OUTCOME: ${{ steps.keys.outcome }}
+          KEYS_CONFINED: ${{ steps.keys.outputs.confined }}
+          KEYS_WORKSPACE: ${{ steps.keys.outputs.workspace }}
+          KEYS_LOG_DIR: ${{ steps.keys.outputs.log-dir }}
+          KEYS_DNS_LOG: ${{ steps.keys.outputs.dns-log }}
+          KEY_MARK: ${{ steps.dummy.outputs.mark }}
+          UNTESTED_OUTCOME: ${{ steps.untestedkey.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          results="$KEYS_WORKSPACE/model-keys-results.txt"
+          cat "$results" || true
+          line() { grep -m1 "^$1 " "$results" | sed "s/^$1 //" || true; }
+          if [ "$UNTESTED_OUTCOME" = failure ]; then ok "an untested model key is refused"; else bad "an untested model key was accepted"; fi
+          if [ "$KEYS_OUTCOME" = success ] && [ "$KEYS_CONFINED" = true ]; then ok "the step ran the command in a sandbox that held"; else bad "outcome $KEYS_OUTCOME, confined '$KEYS_CONFINED'"; fi
+          if grep -q "holds-the-key" "$results"; then bad "a variable the command sees holds a key: $(grep holds-the-key "$results")"; else ok "no variable the command sees holds either key"; fi
+          if [ "$(line MARK_IN_ENV)" = 0 ]; then ok "neither key is in the command's environment"; else bad "a key is in the command's environment ($(line MARK_IN_ENV))"; fi
+          searched="$(line FILES_SEARCHED)"
+          # grep: 1 = no match; 2 = some files unreadable (expected); 0 = a match; 124 = timed out.
+          grep_status="$(line GREP_STATUS)"
+          case "$grep_status" in 1|2) ok "the search for the keys finished (grep status $grep_status)";; *) bad "the search for the keys did not finish cleanly (grep status '$grep_status')";; esac
+          if [ "${searched:-0}" -ge 100 ] && [ "$(line MARK_IN_FILES)" = none ]; then ok "neither key is in any of the $searched readable files the command searched (home, TMPDIR, the copy, /tmp, /home, /run, /etc, /var)"; else bad "files searched: '${searched}', key found in: $(line MARK_IN_FILES)"; fi
+          case "$(line 'VAR ANTHROPIC_BASE_URL')" in "= http://"*) ok "the command was given ANTHROPIC_BASE_URL, the API proxy";; *) bad "ANTHROPIC_BASE_URL: $(line 'VAR ANTHROPIC_BASE_URL')";; esac
+          case "$(line 'VAR OPENAI_BASE_URL')" in "= http://"*) ok "the command was given OPENAI_BASE_URL, the API proxy";; *) bad "OPENAI_BASE_URL: $(line 'VAR OPENAI_BASE_URL')";; esac
+          anthropic="$(line ANTHROPIC)"
+          case "$anthropic" in "0 401 "*authentication_error*) ok "Anthropic refused the made-up key itself: $anthropic";; *) bad "Anthropic through the API proxy: $anthropic";; esac
+          openai="$(line OPENAI)"
+          case "$openai" in "0 401 "*invalid_api_key*) ok "OpenAI refused the made-up key itself: $openai";; *) bad "OpenAI through the API proxy: $openai";; esac
+          hosted="$(line ANTHROPIC_HOSTED_WEB)"
+          case "$hosted" in "0 40"[03]" "*hosted_web*) ok "the API proxy refused a hosted web tool before the provider: $hosted";; *) bad "a hosted web tool: $hosted";; esac
+          direct="$(line DIRECT_ANTHROPIC)"
+          if [ -n "$direct" ] && [ "$direct" != 0 ]; then ok "the command could not reach api.anthropic.com itself (curl status $direct)"; else bad "the command reached api.anthropic.com directly (curl status '$direct')"; fi
+          # The proxy's access log, format firewall_detailed: time client:port host dest:port version method status ...
+          sidecar="$(line 'VAR ANTHROPIC_BASE_URL' | sed -E 's#^= http://([0-9.]+):.*#\1#')"
+          for host in api.anthropic.com api.openai.com; do
+            n="$( { sudo find "$KEYS_LOG_DIR" -name 'access*.log' -exec cat {} + 2>/dev/null || true; } | awk -v c="$sidecar:" -v h="$host:443" 'index($2, c) == 1 && $3 == h && $6 == "CONNECT" && $7 == "200"' | wc -l)"
+            if [ "$n" -ge 1 ]; then ok "the proxy's log shows the API proxy ($sidecar) let through to $host ($n CONNECT 200)"; else bad "the proxy's log shows no CONNECT 200 from the API proxy ($sidecar) to $host"; fi
+          done
+          if sudo grep -rq -- "$KEY_MARK" "$KEYS_LOG_DIR" "$KEYS_DNS_LOG" 2>/dev/null; then bad "a key is in the proxy's or the resolver's log"; else ok "neither key is in the proxy's or the resolver's log"; fi
+          if grep -q "^allowed 1 api.anthropic.com" "$KEYS_DNS_LOG" && grep -q "^allowed 1 api.openai.com" "$KEYS_DNS_LOG"; then ok "the action's resolver answered both providers' hosts"; else bad "the resolver did not answer both providers: $(grep -c . "$KEYS_DNS_LOG") lines"; fi
+          exit "$fail"
+
+      # Last, because it leaves a repository with a kept token in the workspace,
+      # which the action refuses from here on.
+      - name: A second checkout that keeps its token (actions/checkout's default)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: kept-token
+
+      - name: How that checkout kept its token (names only, no values)
+        run: git config --file kept-token/.git/config --name-only --list
+
+      - name: A workspace holding a kept token is refused before anything runs
+        id: keptoken
+        continue-on-error: true
+        uses: ./actions/egress
+        with:
+          allow: api.github.com
+          run: "true"
+
+      # Issue #136 (slice 2c.9): what the command can read of what earlier steps
+      # left on the runner's disk. Checkout v6 and later keep the token in a file
+      # under RUNNER_TEMP that the workspace's .git/config includes; the action
+      # refuses that workspace (above). With the checkout moved out of the
+      # workspace, the file is still there: can the command read it, or files
+      # an earlier step wrote under RUNNER_TEMP, the home directory or the
+      # folder that holds the workspace?
+      - name: Where that checkout keeps its token, and marked files beside it (paths only, no values)
+        id: leftovers
+        run: |
+          set -euo pipefail
+          cred="$(git config --file kept-token/.git/config --get-regexp '^includeif\..*\.path$' | awk 'NR == 1 {print $2}')"
+          echo "credential file: $cred"
+          case "$cred" in "$RUNNER_TEMP"/*) ;; *) echo "::error::the credential file is not under RUNNER_TEMP: $cred"; exit 1 ;; esac
+          test -r "$cred"
+          mark="obaafread$(openssl rand -hex 8)"
+          work="$(dirname "$GITHUB_WORKSPACE")"
+          mkdir -p "$HOME/.config/obaaf-read-test"
+          for f in "$RUNNER_TEMP/obaaf-read-test.txt" "$HOME/.obaaf-read-test" "$HOME/.config/obaaf-read-test/hosts.yml" "$work/obaaf-read-test.txt"; do
+            printf 'not a secret: %s\n' "$mark" > "$f"
+            chmod 600 "$f"
+            grep -qF -- "$mark" "$f"
+          done
+          mv kept-token "$RUNNER_TEMP/kept-token-away"
+          {
+            echo "cred=$cred"
+            echo "mark=$mark"
+            echo "work=$work"
+            echo "home=$HOME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: What the command can read of those
+        id: reads
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          CRED_FILE: ${{ steps.leftovers.outputs.cred }}
+          READ_MARK: ${{ steps.leftovers.outputs.mark }}
+          RUNNER_TEMP_REAL: ${{ runner.temp }}
+          HOME_REAL: ${{ steps.leftovers.outputs.home }}
+          WORK_REAL: ${{ steps.leftovers.outputs.work }}
+        with:
+          allow: api.github.com
+          env: CRED_FILE READ_MARK RUNNER_TEMP_REAL HOME_REAL WORK_REAL
+          run: bash tests/egress/reads.sh reads-results.txt
+
+      - name: Put the checkout back for its post step, and check what the command could read
+        if: always() && steps.leftovers.outcome == 'success'
+        env:
+          READS_OUTCOME: ${{ steps.reads.outcome }}
+          READS_CONFINED: ${{ steps.reads.outputs.confined }}
+          READS_WORKSPACE: ${{ steps.reads.outputs.workspace }}
+        run: |
+          set -euo pipefail
+          mv "$RUNNER_TEMP/kept-token-away" kept-token
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          results="$READS_WORKSPACE/reads-results.txt"
+          cat "$results" || true
+          line() { grep -m1 "^$1 " "$results" | sed "s/^$1 //" || true; }
+          if [ "$READS_OUTCOME" = success ] && [ "$READS_CONFINED" = true ]; then ok "the command ran in a sandbox that held"; else bad "outcome $READS_OUTCOME, confined '$READS_CONFINED'"; fi
+          if grep -qx DONE "$results"; then ok "the read test finished"; else bad "the read test did not finish"; fi
+          for what in credential runner-temp home home-config work; do
+            seen="$(line "READ $what")"
+            case "$seen" in
+              absent|unreadable) ok "$what: $seen inside the sandbox" ;;
+              *) bad "$what: '$seen' inside the sandbox" ;;
+            esac
+          done
+          case "$(line GREP_STATUS)" in 1|2) ok "the search for the mark finished (grep status $(line GREP_STATUS))";; *) bad "the search for the mark did not finish cleanly (grep status '$(line GREP_STATUS)')";; esac
+          searched="$(line FILES_SEARCHED)"
+          if [ "${searched:-0}" -ge 100 ] && [ "$(line MARK_IN_FILES)" = none ]; then ok "the mark is in none of the $searched files the command could read under /home, /tmp, /run, /var or /etc"; else bad "files searched: '$searched', mark found in: $(line MARK_IN_FILES)"; fi
+          exit "$fail"
+
       - name: Check what happened
         env:
+          KEPTOKEN_OUTCOME: ${{ steps.keptoken.outcome }}
+          KEPTOKEN_CONFINED: ${{ steps.keptoken.outputs.confined }}
+          KEPTOKEN_REFUSED: ${{ steps.keptoken.outputs.refused }}
           FAILS_OUTCOME: ${{ steps.fails.outcome }}
           FAILS_EXIT: ${{ steps.fails.outputs.exit-code }}
           FAILS_WORKSPACE: ${{ steps.fails.outputs.workspace }}
@@ -244,8 +431,656 @@ jobs:
           if [ "$ADDRESS_OUTCOME" = failure ]; then ok "an address is refused"; else bad "an address was accepted"; fi
           if [ "$RESERVED_OUTCOME" = failure ]; then ok "a withheld variable is refused"; else bad "a withheld variable was accepted"; fi
           if [ "$MODELKEY_OUTCOME" = failure ]; then ok "a model key name is refused"; else bad "a model key name was accepted"; fi
+          if [ "$KEPTOKEN_OUTCOME" = failure ] && [ "$KEPTOKEN_REFUSED" = credential ] && [ -z "$KEPTOKEN_CONFINED" ]; then ok "a workspace with a checkout that kept its token is refused, for that reason, before the command runs"; else bad "a kept token: outcome $KEPTOKEN_OUTCOME, refused '$KEPTOKEN_REFUSED', confined '$KEPTOKEN_CONFINED'"; fi
           if ! compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" >/dev/null; then ok "AWF's directories (work, work-chroot-home) are gone"; else bad "AWF's directories are left: $(compgen -G "$RUNNER_TEMP/obaaf-egress/*/work*" | tr '\n' ' ')"; fi
-          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs | wc -l)" = 0 ]; then ok "only the proxy's log is left of the run's private directory"; else bad "the run's private directory holds more than the proxy's log"; fi
+          if [ -d "$FAILS_LOG_DIR" ] && [ "$(find "$run_dir" -mindepth 1 -maxdepth 1 ! -name proxy-logs ! -name dns.log | wc -l)" = 0 ]; then ok "only the proxy's and the resolver's logs are left of the run's private directory"; else bad "the run's private directory holds more than the proxy's and the resolver's logs: $(find "$run_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
           found="$(sudo find "$RUNNER_TEMP" /tmp \( -name written-in-home -o -name planted-in-copilot \) 2>/dev/null || true)"
           if [ -z "$found" ]; then ok "what the command wrote to its home and to AWF's log and session directories is nowhere under RUNNER_TEMP or /tmp"; else bad "left behind: $found"; fi
           exit "$fail"
+
+  own-steps:
+    # Slice 2c.9, issues #139 and #145. The action's own steps run outside the
+    # sandbox, holding what the workflow put in the step's env (model keys
+    # included). This job sets, for the whole job and for the action's step,
+    # each thing that makes bash, the dynamic loader or Python run a planted
+    # file: BASH_ENV, SHELLOPTS and PS4, LD_PRELOAD and LD_AUDIT, PYTHONPATH,
+    # and programs named like the real ones first on the PATH. Each planted
+    # file writes a line only in a process that holds OBAAF_EGRESS_SCRIPT, as
+    # the action's steps do. A plain step and the action at 7c1bded (the floor before slice 2c.10a)
+    # must set off each one (so the test can see them); the action now must
+    # set off none.
+    name: The action's own steps ignore the job's shell, PATH and loader variables
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+      LD_PRELOAD: /tmp/obaaf-plant/preload.so
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plant the hooks
+        run: bash tests/egress/plant.sh /tmp/obaaf-plant
+
+      - name: The runner's loader removes no variable the action does not empty
+        run: python3 -I -S tests/egress/loader-names.py actions/egress/egress.py
+
+      - name: Control, a plain step that holds OBAAF_EGRESS_SCRIPT (each hook must fire)
+        env:
+          OBAAF_EGRESS_SCRIPT: control
+        run: |
+          uname -m
+          python3 -c 'print("python")'
+
+      - name: Keep the control's lines
+        run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-control || touch /tmp/obaaf-plant/markers-control
+
+      - name: The action at 7c1bded, the floor before slice 2c.10a, with the same hooks
+        id: before
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@7c1bded84f32a86135f89dde30396a32f44de9e0
+        env:
+          BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+          LD_PRELOAD: /tmp/obaaf-plant/preload.so
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines
+        run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-before || touch /tmp/obaaf-plant/markers-before
+
+      - name: The action now, with the same hooks
+        id: after
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          BASH_ENV: /tmp/obaaf-plant/bash-env.sh
+          LD_PRELOAD: /tmp/obaaf-plant/preload.so
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines too
+        run: mv /tmp/obaaf-plant/markers /tmp/obaaf-plant/markers-after || touch /tmp/obaaf-plant/markers-after
+
+      # LD_TRACE_LOADED_OBJECTS stops every program the loader starts, whatever
+      # its value, and ends it with status 0, so a step's env cannot empty it.
+      # Set only on these steps, because it stops every later program it reaches.
+      - name: The action at 7c1bded, the floor before slice 2c.10a, with LD_TRACE_LOADED_OBJECTS
+        id: trace_before
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@7c1bded84f32a86135f89dde30396a32f44de9e0
+        env:
+          LD_TRACE_LOADED_OBJECTS: "1"
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: The action now, with LD_TRACE_LOADED_OBJECTS
+        id: trace_after
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          LD_TRACE_LOADED_OBJECTS: "1"
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Check which hooks fired
+        env:
+          AFTER_OUTCOME: ${{ steps.after.outcome }}
+          AFTER_CONFINED: ${{ steps.after.outputs.confined }}
+          AFTER_EXIT: ${{ steps.after.outputs.exit-code }}
+          TRACE_BEFORE_OUTCOME: ${{ steps.trace_before.outcome }}
+          TRACE_BEFORE_CONFINED: ${{ steps.trace_before.outputs.confined }}
+          TRACE_AFTER_OUTCOME: ${{ steps.trace_after.outcome }}
+          TRACE_AFTER_CONFINED: ${{ steps.trace_after.outputs.confined }}
+          TRACE_AFTER_REFUSED: ${{ steps.trace_after.outputs.refused }}
+          TRACE_AFTER_EXIT: ${{ steps.trace_after.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          dir=/tmp/obaaf-plant
+          for f in control before after; do echo "--- $f"; sort "$dir/markers-$f" | uniq -c; done
+          if [ -s "$dir/markers" ]; then echo "--- during the LD_TRACE_LOADED_OBJECTS steps"; sort "$dir/markers" | uniq -c; fi
+          for hook in "BASH_ENV sourced" "PS4 expanded" "LD_PRELOAD loaded" "LD_AUDIT loaded" "PATH: bash " "PATH: uname " "PATH: python3 " "PYTHONPATH sitecustomize"; do
+            if grep -qF -- "$hook" "$dir/markers-control"; then ok "control: $hook"; else bad "control: '$hook' did not fire, so this test would not see it"; fi
+          done
+          for hook in "BASH_ENV sourced" "PS4 expanded" "LD_PRELOAD loaded" "LD_AUDIT loaded" "PATH: bash " "PATH: uname "; do
+            if grep -qF -- "$hook" "$dir/markers-before"; then ok "the action at 7c1bded: $hook (issues #139, #145)"; else bad "the action at 7c1bded: '$hook' did not fire"; fi
+          done
+          if [ -s "$dir/markers-after" ]; then bad "the action now: $(sort -u "$dir/markers-after" | tr '\n' ';')"; else ok "the action now: no hook fired in any of its steps"; fi
+          if [ "$AFTER_OUTCOME" = success ] && [ "$AFTER_CONFINED" = true ] && [ "$AFTER_EXIT" = 0 ]; then ok "the action ran its command in a sandbox that held"; else bad "the action now: outcome $AFTER_OUTCOME, confined '$AFTER_CONFINED', exit '$AFTER_EXIT'"; fi
+          if [ "$TRACE_BEFORE_OUTCOME" = success ] && [ -z "$TRACE_BEFORE_CONFINED" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action at 7c1bded succeeded without running anything (confined unset)"; else bad "the action at 7c1bded with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_BEFORE_OUTCOME, confined '$TRACE_BEFORE_CONFINED'"; fi
+          if [ "$TRACE_AFTER_OUTCOME" = failure ] && [ -z "$TRACE_AFTER_CONFINED$TRACE_AFTER_REFUSED$TRACE_AFTER_EXIT" ]; then ok "with LD_TRACE_LOADED_OBJECTS the action now fails, and egress.py set no output, so its last step failed it"; else bad "the action now with LD_TRACE_LOADED_OBJECTS: outcome $TRACE_AFTER_OUTCOME, confined '$TRACE_AFTER_CONFINED', refused '$TRACE_AFTER_REFUSED', exit-code '$TRACE_AFTER_EXIT'"; fi
+          exit "$fail"
+
+  openssl-modules:
+    # Slice 2c.11, issue #195. The action's own steps import hashlib, so
+    # libcrypto is initialised in the process that holds the model key. OpenSSL
+    # reads OPENSSL_CONF at that point, and on Ubuntu loads a module from the
+    # directory OPENSSL_MODULES names when OPENSSL_FORCE_FIPS_MODE is set or
+    # OPENSSL_FIPS_MODE_SWITCH_PATH names a file holding "1"; a module the
+    # workflow named would then run in the key-holding process. This job plants
+    # such a module (it writes a marker line, nothing else, and only in a
+    # process that holds OBAAF_EGRESS_SCRIPT), sets the variables the three ways
+    # a workflow can (the job's env, GITHUB_ENV and the action step's env), and
+    # requires the marker for a plain step and for the action at c1b590c
+    # (slice 2c.9, the floor before slice 2c.11b, before this fix) and none for
+    # the action now, which
+    # removes every OPENSSL_ variable before libcrypto is initialised.
+    name: OpenSSL's variables do not reach the action's own steps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plant the module and its configuration
+        run: bash tests/egress/plant-openssl.sh /tmp/obaaf-openssl
+
+      - name: Set the FIPS route through GITHUB_ENV
+        run: |
+          {
+            echo "OPENSSL_MODULES=/tmp/obaaf-openssl/modules"
+            echo "OPENSSL_FORCE_FIPS_MODE=1"
+            echo "OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/obaaf-openssl/fipsswitch"
+          } >> "$GITHUB_ENV"
+
+      - name: Control, a plain step holding OBAAF_EGRESS_SCRIPT (the module must load)
+        env:
+          OBAAF_EGRESS_SCRIPT: control
+        run: python3 -c 'import hashlib; hashlib.sha256(b"x").hexdigest()'
+
+      - name: Keep the control's lines
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-control || touch /tmp/obaaf-openssl/markers-control
+
+      - name: The action at c1b590c, the floor before slice 2c.11b, before this fix (the module must load)
+        id: floor
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@c1b590c970e6246305415ad4d61a6136a7786d99
+        env:
+          OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-floor || touch /tmp/obaaf-openssl/markers-floor
+
+      - name: The action now (no module must load)
+        id: now
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          OPENSSL_CONF: /tmp/obaaf-openssl/evil.cnf
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep its lines too
+        run: mv /tmp/obaaf-openssl/markers /tmp/obaaf-openssl/markers-now || touch /tmp/obaaf-openssl/markers-now
+
+      - name: Check which loads happened
+        env:
+          NOW_OUTCOME: ${{ steps.now.outcome }}
+          NOW_CONFINED: ${{ steps.now.outputs.confined }}
+          NOW_EXIT: ${{ steps.now.outputs.exit-code }}
+          FLOOR_OUTCOME: ${{ steps.floor.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          dir=/tmp/obaaf-openssl
+          for f in control floor now; do echo "--- markers-$f"; cat "$dir/markers-$f" 2>/dev/null || echo "(none)"; done
+          if grep -qF "OPENSSL module loaded" "$dir/markers-control"; then ok "control: OpenSSL loaded the planted module (the mechanism works on this runner)"; else bad "control: the planted module did not load, so this test would not see it"; fi
+          if grep -qF "OPENSSL module loaded" "$dir/markers-floor"; then ok "the action at c1b590c: OpenSSL loaded the module in a step that holds the key (issue #195)"; else bad "the action at c1b590c: the module did not load, so the test proves nothing"; fi
+          if [ -s "$dir/markers-now" ]; then bad "the action now: a module loaded in its steps: $(tr '\n' ';' < "$dir/markers-now")"; else ok "the action now: no OpenSSL module loaded in any of its steps"; fi
+          if [ "$NOW_OUTCOME" = success ] && [ "$NOW_CONFINED" = true ] && [ "$NOW_EXIT" = 0 ]; then ok "the action still ran its command in a sandbox that held"; else bad "the action now: outcome $NOW_OUTCOME, confined '$NOW_CONFINED', exit '$NOW_EXIT'"; fi
+          echo "(the action at c1b590c had outcome $FLOOR_OUTCOME; it is continue-on-error and its own result is not asserted)"
+          exit "$fail"
+
+  own-steps-environment:
+    # Slice 2c.12, issues #198 and #194. Slice 2c.12a measured which variables a
+    # workflow can set for the action's own steps, which hold the model key
+    # outside the sandbox. This job shows what those steps did with them, and
+    # that they now do nothing. tests/egress/environment-watch.py plants a file
+    # or a directory for each variable to name (made-up bytes, no key anywhere),
+    # watches them with inotify, and listens on the port the proxy variable
+    # names. The variables are set in the env of one step at a time, so what is
+    # opened while that step runs was opened by its processes:
+    #   - a plain step run as the action's steps are (the control: the watch
+    #     must see the locale, the zone, the CA file and the proxy used);
+    #   - the action at cc2ba59, the floor before this slice (it must use the
+    #     same four: the locale and the zone as Python starts, the CA file and
+    #     the proxy for its one download, which then fails);
+    #   - the action now (nothing planted may be opened, the proxy may not be
+    #     used, and the command must still run in a sandbox that held).
+    # LC_ALL and LANG can only name a locale under /usr/lib/locale, so the job
+    # makes one there with sudo to see the read; everything else is planted as
+    # a workflow without sudo could. For issue #194 the command itself writes a
+    # docker plug-in into its home, which marks a file if anything runs it. AWF
+    # runs docker on the runner when it tears its containers down, with the
+    # command's home as its HOME and the model keys in its environment; AWF
+    # does not mount .docker of that home into the sandbox, so the file should
+    # never reach the place AWF's docker reads, and nothing may run it. A
+    # control first shows that docker on this runner does run a plug-in found
+    # in the .docker of the home it is given.
+    name: What a workflow sets for the action's own steps does not reach them
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plant the files and start the watch
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/obaaf-env/logs
+          sudo chown -R "$(id -u):$(id -g)" /opt/obaaf-env
+          /usr/bin/python3 -I tests/egress/environment-watch.py plant /opt/obaaf-env/planted | tee /opt/obaaf-env/logs/env
+          sudo /usr/bin/python3 -I tests/egress/environment-watch.py plant-locale
+          nohup /usr/bin/python3 -I tests/egress/environment-watch.py watch /opt/obaaf-env/planted /opt/obaaf-env/logs/seen > /opt/obaaf-env/logs/watch.out 2>&1 &
+          for _ in $(seq 1 50); do [ -f /opt/obaaf-env/logs/watch-ready ] && break; sleep 0.2; done
+          [ -f /opt/obaaf-env/logs/watch-ready ] || { echo "the watch did not start"; cat /opt/obaaf-env/logs/watch.out; exit 1; }
+
+      - name: Control for issue 194, docker given a home that holds a plug-in (docker must run it)
+        run: |
+          set -euo pipefail
+          home=/opt/obaaf-env/control-home
+          mkdir -p "$home/.docker/cli-plugins"
+          printf '#!/bin/sh\necho "the control plug-in ran: $*" >> /opt/obaaf-env/logs/ran-control\n' > "$home/.docker/cli-plugins/docker-compose"
+          chmod 755 "$home/.docker/cli-plugins/docker-compose"
+          # As AWF's docker is started: a small environment whose HOME is that home.
+          env -i PATH="$PATH" HOME="$home" docker compose version || true
+          cat /opt/obaaf-env/logs/ran-control 2>/dev/null || echo "(the control plug-in did not run)"
+
+      - name: Control, a plain step run as the action's steps are (it must use what is planted)
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          CI: obaaf-planted
+          DOCKER_CONFIG: /opt/obaaf-env/planted/docker-config
+          DOCKER_CONTEXT: obaaf-no-such-context
+          DOCKER_HOST: unix:///opt/obaaf-env/planted/no-such-docker.sock
+          HOME: /opt/obaaf-env/planted/home
+          HTTPS_PROXY: http://127.0.0.1:18473
+          LANG: obaaf-planted
+          LANGUAGE: ../../../../opt/obaaf-env/planted/language
+          LC_ALL: obaaf-planted
+          NODE_OPTIONS: --title=obaaf-planted
+          SSL_CERT_DIR: /opt/obaaf-env/planted/ca-dir
+          SSL_CERT_FILE: /opt/obaaf-env/planted/ca.pem
+          SUDO_ASKPASS: /opt/obaaf-env/planted/askpass
+          TEMP: /opt/obaaf-env/planted/temp
+          TMP: /opt/obaaf-env/planted/temp
+          TZ: ":/opt/obaaf-env/planted/zone"
+          XDG_RUNTIME_DIR: /opt/obaaf-env/planted/xdg
+        run: |
+          import urllib.request
+          try:
+              urllib.request.urlopen("https://github.com/", timeout=30)
+          except Exception as error:
+              print("the download failed, as it does through a proxy that only listens:", type(error).__name__, error)
+          else:
+              print("the download did not go through the planted proxy")
+
+      - name: Keep what the control opened
+        run: sleep 2; mv /opt/obaaf-env/logs/seen /opt/obaaf-env/logs/seen-control || touch /opt/obaaf-env/logs/seen-control
+
+      - name: The action at cc2ba59, the floor before this slice, with the variables (it must use what is planted)
+        id: floor
+        continue-on-error: true
+        uses: Obaaf/OBAAF/actions/egress@cc2ba59d4dfb70b6dcdcd660ca700c6dbe20d13e
+        env:
+          CI: obaaf-planted
+          DOCKER_CONFIG: /opt/obaaf-env/planted/docker-config
+          DOCKER_CONTEXT: obaaf-no-such-context
+          DOCKER_HOST: unix:///opt/obaaf-env/planted/no-such-docker.sock
+          HOME: /opt/obaaf-env/planted/home
+          HTTPS_PROXY: http://127.0.0.1:18473
+          LANG: obaaf-planted
+          LANGUAGE: ../../../../opt/obaaf-env/planted/language
+          LC_ALL: obaaf-planted
+          NODE_OPTIONS: --title=obaaf-planted
+          SSL_CERT_DIR: /opt/obaaf-env/planted/ca-dir
+          SSL_CERT_FILE: /opt/obaaf-env/planted/ca.pem
+          SUDO_ASKPASS: /opt/obaaf-env/planted/askpass
+          TEMP: /opt/obaaf-env/planted/temp
+          TMP: /opt/obaaf-env/planted/temp
+          TZ: ":/opt/obaaf-env/planted/zone"
+          XDG_RUNTIME_DIR: /opt/obaaf-env/planted/xdg
+        with:
+          allow: api.github.com
+          run: "true"
+
+      - name: Keep what it opened
+        run: |
+          sleep 2
+          mv /opt/obaaf-env/logs/seen /opt/obaaf-env/logs/seen-floor || touch /opt/obaaf-env/logs/seen-floor
+          mv /opt/obaaf-env/planted/ran /opt/obaaf-env/logs/ran-floor 2>/dev/null || true
+          # The next step shows nothing about the proxy and the CA file unless it downloads AWF itself,
+          # and the action skips the download when AWF is already installed. The step above shares the
+          # state directory and must have failed at its download.
+          if [ -e "$RUNNER_TEMP/obaaf-egress/bin/awf" ]; then echo "FAILED: AWF is already installed, so the action now would not download it"; exit 1; fi
+
+      - name: The action now, with the variables (it must use nothing planted, and still confine its command)
+        id: now
+        continue-on-error: true
+        uses: ./actions/egress
+        env:
+          CI: obaaf-planted
+          DOCKER_CONFIG: /opt/obaaf-env/planted/docker-config
+          DOCKER_CONTEXT: obaaf-no-such-context
+          DOCKER_HOST: unix:///opt/obaaf-env/planted/no-such-docker.sock
+          HOME: /opt/obaaf-env/planted/home
+          HTTPS_PROXY: http://127.0.0.1:18473
+          LANG: obaaf-planted
+          LANGUAGE: ../../../../opt/obaaf-env/planted/language
+          LC_ALL: obaaf-planted
+          NODE_OPTIONS: --title=obaaf-planted
+          SSL_CERT_DIR: /opt/obaaf-env/planted/ca-dir
+          SSL_CERT_FILE: /opt/obaaf-env/planted/ca.pem
+          SUDO_ASKPASS: /opt/obaaf-env/planted/askpass
+          TEMP: /opt/obaaf-env/planted/temp
+          TMP: /opt/obaaf-env/planted/temp
+          TZ: ":/opt/obaaf-env/planted/zone"
+          XDG_RUNTIME_DIR: /opt/obaaf-env/planted/xdg
+        with:
+          allow: api.github.com
+          run: |
+            set -e
+            mkdir -p "$HOME/.docker/cli-plugins"
+            printf '#!/bin/sh\necho "the plug-in the command wrote ran: $*" >> /opt/obaaf-env/planted/ran\n' > "$HOME/.docker/cli-plugins/docker-compose"
+            chmod 755 "$HOME/.docker/cli-plugins/docker-compose"
+            echo "wrote $HOME/.docker/cli-plugins/docker-compose"
+
+      - name: Keep what it opened too
+        run: |
+          sleep 2
+          mv /opt/obaaf-env/logs/seen /opt/obaaf-env/logs/seen-now || touch /opt/obaaf-env/logs/seen-now
+          mv /opt/obaaf-env/planted/ran /opt/obaaf-env/logs/ran-now 2>/dev/null || true
+
+      - name: Check what was opened and what ran
+        env:
+          NOW_OUTCOME: ${{ steps.now.outcome }}
+          NOW_CONFINED: ${{ steps.now.outputs.confined }}
+          NOW_EXIT: ${{ steps.now.outputs.exit-code }}
+          NOW_SCRATCH: ${{ steps.now.outputs.scratch }}
+          FLOOR_OUTCOME: ${{ steps.floor.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          ok() { echo "ok: $1"; }
+          bad() { echo "FAILED: $1"; fail=1; }
+          logs=/opt/obaaf-env/logs
+          # An empty record shows nothing if the watch had stopped: open the zone and the port once more.
+          cat /opt/obaaf-env/planted/zone > /dev/null
+          (exec 3<>/dev/tcp/127.0.0.1/18473) 2>/dev/null || true
+          sleep 2
+          if grep -qx zone "$logs/seen" 2>/dev/null && grep -qx proxy "$logs/seen" 2>/dev/null; then ok "the watch and its listener were still running after the last step"; else bad "the watch or its listener had stopped, so an empty record shows nothing: $(cat "$logs/watch.out" 2>/dev/null)"; fi
+          # The three steps given the variables. A planted program that ran in the action now left its line in ran-now.
+          if [ -e "$logs/ran-now" ]; then cp "$logs/ran-now" /opt/obaaf-env/planted/ran; fi
+          /usr/bin/python3 -I tests/egress/environment-watch.py judge "$logs" || fail=1
+          if [ "$NOW_OUTCOME" = success ] && [ "$NOW_CONFINED" = true ] && [ "$NOW_EXIT" = 0 ]; then ok "the action now, given the variables (a docker endpoint and a context that do not exist among them), still ran its command in a sandbox that held"; else bad "the action now: outcome $NOW_OUTCOME, confined '$NOW_CONFINED', exit '$NOW_EXIT'"; fi
+          echo "(the action at cc2ba59 with the variables had outcome $FLOOR_OUTCOME: its download goes to the planted proxy, which only listens)"
+          if [ -s "$logs/ran-floor" ]; then echo "(a planted program ran in it: $(tr '\n' ';' < "$logs/ran-floor"))"; fi
+          # Issue 194: the plug-in the command wrote into its home. The command ended 0, so it wrote the file.
+          if [ -s "$logs/ran-control" ]; then ok "control: docker ran the plug-in in the .docker of the home it was given, so the route issue 194 describes exists on this runner"; else bad "control: docker did not run a plug-in in the .docker of its home, so the checks below show nothing"; fi
+          if [ -s "$logs/ran-now" ]; then bad "something ran a planted program or the plug-in the command wrote: $(tr '\n' ';' < "$logs/ran-now")"; else ok "nothing ran the plug-in the command wrote into its home, nor the planted askpass and plug-in"; fi
+          left="$(sudo find /tmp "$RUNNER_TEMP" -xdev -path '*cli-plugins/docker-compose' 2>/dev/null || true)"
+          if [ -z "$left" ]; then ok "the plug-in the command wrote is nowhere under /tmp or RUNNER_TEMP afterwards (where the write landed inside the sandbox was not observed)"; else bad "the plug-in the command wrote is left on the runner: $left"; fi
+          if [ -n "$NOW_SCRATCH" ] && [ ! -e "$NOW_SCRATCH/home/.docker" ]; then ok "the home AWF's docker reads ($NOW_SCRATCH/home) has no .docker"; else bad "the home AWF's docker reads has a .docker, or the action gave no scratch directory ('$NOW_SCRATCH')"; fi
+          exit "$fail"
+
+  runner-variables-job-env:
+    # Slice 2c.12a, issue #198. Which of the names in
+    # tests/egress/runner-variables.json the job's env can set for a step run
+    # as the egress action's own steps are (Python by its full path, -I -S),
+    # plain and inside a composite action. The values are made-up paths and
+    # words. The names that would cut the job off from GitHub (proxies, CA
+    # files, the resolver's) are not set here, and a workflow's env keys are
+    # case-insensitive, so the lower-case proxy names are set only through
+    # GITHUB_ENV, in the next job.
+    name: "Runner variables: what the job's env can set for the action's own steps"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OBAAF_RV_NAMES: "RUNNER_TEMP RUNNER_TOOL_CACHE RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_OUTPUT GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_PATH GITHUB_STATE GITHUB_ACTION_PATH GITHUB_API_URL GITHUB_SERVER_URL GITHUB_ACTIONS CI HOME TMPDIR TEMP TMP HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY NO_PROXY no_proxy SSL_CERT_FILE SSL_CERT_DIR LC_ALL LANG LANGUAGE LOCPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT SUDO_ASKPASS NODE_OPTIONS TZDIR XDG_RUNTIME_DIR"
+      RUNNER_TEMP: "/tmp/obaaf-rv-job/RUNNER_TEMP"
+      RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-job/RUNNER_TOOL_CACHE"
+      RUNNER_WORKSPACE: "/tmp/obaaf-rv-job/RUNNER_WORKSPACE"
+      GITHUB_WORKSPACE: "/tmp/obaaf-rv-job/GITHUB_WORKSPACE"
+      GITHUB_OUTPUT: "/tmp/obaaf-rv-job/GITHUB_OUTPUT"
+      GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-job/GITHUB_STEP_SUMMARY"
+      GITHUB_ENV: "/tmp/obaaf-rv-job/GITHUB_ENV"
+      GITHUB_PATH: "/tmp/obaaf-rv-job/GITHUB_PATH"
+      GITHUB_STATE: "/tmp/obaaf-rv-job/GITHUB_STATE"
+      GITHUB_ACTION_PATH: "/tmp/obaaf-rv-job/GITHUB_ACTION_PATH"
+      GITHUB_API_URL: "https://obaaf-rv-job.invalid"
+      GITHUB_SERVER_URL: "https://obaaf-rv-job.invalid"
+      GITHUB_ACTIONS: "obaaf-rv-job"
+      CI: "obaaf-rv-job"
+      HOME: "/tmp/obaaf-rv-job/HOME"
+      TMPDIR: "/tmp/obaaf-rv-job/TMPDIR"
+      TEMP: "/tmp/obaaf-rv-job/TEMP"
+      TMP: "/tmp/obaaf-rv-job/TMP"
+      LC_ALL: "/tmp/obaaf-rv-job/LC_ALL"
+      LANG: "/tmp/obaaf-rv-job/LANG"
+      LANGUAGE: "/tmp/obaaf-rv-job/LANGUAGE"
+      LOCPATH: "/tmp/obaaf-rv-job/LOCPATH"
+      DOCKER_HOST: "/tmp/obaaf-rv-job/DOCKER_HOST"
+      DOCKER_CONFIG: "/tmp/obaaf-rv-job/DOCKER_CONFIG"
+      DOCKER_CONTEXT: "/tmp/obaaf-rv-job/DOCKER_CONTEXT"
+      SUDO_ASKPASS: "/tmp/obaaf-rv-job/SUDO_ASKPASS"
+      NODE_OPTIONS: "--title=obaaf-rv-job"
+      TZDIR: "/tmp/obaaf-rv-job/TZDIR"
+      XDG_RUNTIME_DIR: "/tmp/obaaf-rv-job/XDG_RUNTIME_DIR"
+    steps:
+      - name: Make the directories the values name
+        shell: /usr/bin/python3 -I -S {0}
+        run: |
+          import os
+          for name in os.environ["OBAAF_RV_NAMES"].split():
+              os.makedirs("/tmp/obaaf-rv-job/" + name, exist_ok=True)
+
+      - name: "The job's env: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: job-plain
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: Check out the repository, for the composite probe
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "The job's env: a step of a composite action"
+        if: steps.checkout.outcome == 'success'
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: job-composite
+
+      - name: Keep what was seen
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runner-variables-job-env
+          path: /tmp/obaaf-rv/seen
+          if-no-files-found: error
+
+  runner-variables:
+    # Slice 2c.12a, issue #198. The same names set in a step's env and through
+    # GITHUB_ENV, then judged with the previous job's record against
+    # runner-variables.json's expected (tests/egress/runner-variables.py).
+    name: "Runner variables: what a step's env and GITHUB_ENV can set for the action's own steps"
+    needs: runner-variables-job-env
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OBAAF_RV_NAMES: "RUNNER_TEMP RUNNER_TOOL_CACHE RUNNER_WORKSPACE GITHUB_WORKSPACE GITHUB_OUTPUT GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_PATH GITHUB_STATE GITHUB_ACTION_PATH GITHUB_API_URL GITHUB_SERVER_URL GITHUB_ACTIONS CI HOME TMPDIR TEMP TMP HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY NO_PROXY no_proxy SSL_CERT_FILE SSL_CERT_DIR LC_ALL LANG LANGUAGE LOCPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT SUDO_ASKPASS NODE_OPTIONS TZDIR XDG_RUNTIME_DIR"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the job's env record
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runner-variables-job-env
+          path: /tmp/obaaf-rv/seen
+
+      - name: "A step's env: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: step-plain
+          RUNNER_TEMP: "/tmp/obaaf-rv-step/RUNNER_TEMP"
+          RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-step/RUNNER_TOOL_CACHE"
+          RUNNER_WORKSPACE: "/tmp/obaaf-rv-step/RUNNER_WORKSPACE"
+          GITHUB_WORKSPACE: "/tmp/obaaf-rv-step/GITHUB_WORKSPACE"
+          GITHUB_OUTPUT: "/tmp/obaaf-rv-step/GITHUB_OUTPUT"
+          GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-step/GITHUB_STEP_SUMMARY"
+          GITHUB_ENV: "/tmp/obaaf-rv-step/GITHUB_ENV"
+          GITHUB_PATH: "/tmp/obaaf-rv-step/GITHUB_PATH"
+          GITHUB_STATE: "/tmp/obaaf-rv-step/GITHUB_STATE"
+          GITHUB_ACTION_PATH: "/tmp/obaaf-rv-step/GITHUB_ACTION_PATH"
+          GITHUB_API_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_SERVER_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_ACTIONS: "obaaf-rv-step"
+          CI: "obaaf-rv-step"
+          HOME: "/tmp/obaaf-rv-step/HOME"
+          TMPDIR: "/tmp/obaaf-rv-step/TMPDIR"
+          TEMP: "/tmp/obaaf-rv-step/TEMP"
+          TMP: "/tmp/obaaf-rv-step/TMP"
+          HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
+          HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
+          ALL_PROXY: "http://obaaf-rv-step.invalid:9"
+          NO_PROXY: "obaaf-rv-step.invalid"
+          SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
+          SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
+          LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"
+          LANG: "/tmp/obaaf-rv-step/LANG"
+          LANGUAGE: "/tmp/obaaf-rv-step/LANGUAGE"
+          LOCPATH: "/tmp/obaaf-rv-step/LOCPATH"
+          HOSTALIASES: "/tmp/obaaf-rv-step/HOSTALIASES"
+          RES_OPTIONS: "timeout:2"
+          LOCALDOMAIN: "obaaf-rv-step.invalid"
+          DOCKER_HOST: "/tmp/obaaf-rv-step/DOCKER_HOST"
+          DOCKER_CONFIG: "/tmp/obaaf-rv-step/DOCKER_CONFIG"
+          DOCKER_CONTEXT: "/tmp/obaaf-rv-step/DOCKER_CONTEXT"
+          SUDO_ASKPASS: "/tmp/obaaf-rv-step/SUDO_ASKPASS"
+          NODE_OPTIONS: "--title=obaaf-rv-step"
+          TZDIR: "/tmp/obaaf-rv-step/TZDIR"
+          XDG_RUNTIME_DIR: "/tmp/obaaf-rv-step/XDG_RUNTIME_DIR"
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: "A step's env: a step of a composite action"
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: step-composite
+          RUNNER_TEMP: "/tmp/obaaf-rv-step/RUNNER_TEMP"
+          RUNNER_TOOL_CACHE: "/tmp/obaaf-rv-step/RUNNER_TOOL_CACHE"
+          RUNNER_WORKSPACE: "/tmp/obaaf-rv-step/RUNNER_WORKSPACE"
+          GITHUB_WORKSPACE: "/tmp/obaaf-rv-step/GITHUB_WORKSPACE"
+          GITHUB_OUTPUT: "/tmp/obaaf-rv-step/GITHUB_OUTPUT"
+          GITHUB_STEP_SUMMARY: "/tmp/obaaf-rv-step/GITHUB_STEP_SUMMARY"
+          GITHUB_ENV: "/tmp/obaaf-rv-step/GITHUB_ENV"
+          GITHUB_PATH: "/tmp/obaaf-rv-step/GITHUB_PATH"
+          GITHUB_STATE: "/tmp/obaaf-rv-step/GITHUB_STATE"
+          GITHUB_ACTION_PATH: "/tmp/obaaf-rv-step/GITHUB_ACTION_PATH"
+          GITHUB_API_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_SERVER_URL: "https://obaaf-rv-step.invalid"
+          GITHUB_ACTIONS: "obaaf-rv-step"
+          CI: "obaaf-rv-step"
+          HOME: "/tmp/obaaf-rv-step/HOME"
+          TMPDIR: "/tmp/obaaf-rv-step/TMPDIR"
+          TEMP: "/tmp/obaaf-rv-step/TEMP"
+          TMP: "/tmp/obaaf-rv-step/TMP"
+          HTTPS_PROXY: "http://obaaf-rv-step.invalid:9"
+          HTTP_PROXY: "http://obaaf-rv-step.invalid:9"
+          ALL_PROXY: "http://obaaf-rv-step.invalid:9"
+          NO_PROXY: "obaaf-rv-step.invalid"
+          SSL_CERT_FILE: "/tmp/obaaf-rv-step/SSL_CERT_FILE"
+          SSL_CERT_DIR: "/tmp/obaaf-rv-step/SSL_CERT_DIR"
+          LC_ALL: "/tmp/obaaf-rv-step/LC_ALL"
+          LANG: "/tmp/obaaf-rv-step/LANG"
+          LANGUAGE: "/tmp/obaaf-rv-step/LANGUAGE"
+          LOCPATH: "/tmp/obaaf-rv-step/LOCPATH"
+          HOSTALIASES: "/tmp/obaaf-rv-step/HOSTALIASES"
+          RES_OPTIONS: "timeout:2"
+          LOCALDOMAIN: "obaaf-rv-step.invalid"
+          DOCKER_HOST: "/tmp/obaaf-rv-step/DOCKER_HOST"
+          DOCKER_CONFIG: "/tmp/obaaf-rv-step/DOCKER_CONFIG"
+          DOCKER_CONTEXT: "/tmp/obaaf-rv-step/DOCKER_CONTEXT"
+          SUDO_ASKPASS: "/tmp/obaaf-rv-step/SUDO_ASKPASS"
+          NODE_OPTIONS: "--title=obaaf-rv-step"
+          TZDIR: "/tmp/obaaf-rv-step/TZDIR"
+          XDG_RUNTIME_DIR: "/tmp/obaaf-rv-step/XDG_RUNTIME_DIR"
+
+      - name: Set every name through GITHUB_ENV but NODE_OPTIONS
+        run: python3 -I tests/egress/runner-variables.py --github-env genv | grep -v '^NODE_OPTIONS=' >> "$GITHUB_ENV"
+
+      - name: Set NODE_OPTIONS through GITHUB_ENV (the runner refuses the line; the judge requires that this step wrote it)
+        id: genv_node_options
+        continue-on-error: true
+        run: python3 -I tests/egress/runner-variables.py --github-env genv | grep '^NODE_OPTIONS=' >> "$GITHUB_ENV"
+
+      - name: "GITHUB_ENV: a plain step"
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_LABEL: genv-plain
+        run: |
+          import json, os
+          label = os.environ["OBAAF_RV_LABEL"]
+          names = os.environ["OBAAF_RV_NAMES"].split()
+          seen = {name: os.environ.get(name) for name in names}
+          os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+          with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+              json.dump(seen, out, indent=1, sort_keys=True)
+          print("recorded " + str(len(seen)) + " names for " + label)
+
+      - name: "GITHUB_ENV: a step of a composite action"
+        uses: ./tests/egress/runner-variables-probe
+        env:
+          OBAAF_RV_LABEL: genv-composite
+
+      - name: Judge what each step saw
+        shell: /usr/bin/python3 -I -S {0}
+        env:
+          OBAAF_RV_JUDGE: ${{ github.workspace }}/tests/egress/runner-variables.py
+          NODE_OPTIONS_WRITE: ${{ steps.genv_node_options.outcome }}
+        run: |
+          import os, runpy, sys
+          sys.argv = [os.environ["OBAAF_RV_JUDGE"], "--judge", "/tmp/obaaf-rv/seen", os.environ["NODE_OPTIONS_WRITE"]]
+          runpy.run_path(sys.argv[0], run_name="__main__")

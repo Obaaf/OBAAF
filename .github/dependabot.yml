@@ -4,6 +4,11 @@ updates:
     directories: ["/", "/actions/setup-obaaf"]
     schedule:
       interval: weekly
+    # Propose a version only once it has been out for seven days, so a compromised release has
+    # time to be found first (zizmor's dependabot-cooldown; slice 2d.4c). Security updates are
+    # not delayed by a cooldown.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -11,3 +16,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

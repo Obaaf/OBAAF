@@ -62,6 +62,7 @@ _IDENT_PART = _IDENT_START | set("0123456789")
 _IDENT_RUN = re.compile(r"[A-Za-z0-9_$]*")
 _STRING_SPECIAL = set("\\$\n")
 _ORDINARY_RUN = re.compile(r"[^\\$\n]*")
+_UNICODE_ESCAPE = re.compile(r"u*([0-9a-fA-F]{4})")
 
 
 class Lexer:
@@ -351,7 +352,14 @@ class Lexer:
                     continue
                 nxt = self._peek(1)
                 self._advance(2)
-                buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
+                # A backslash before a line end removes both: Groovy's line continuation in a string
+                # (flagship slice 2d.2i; it was kept as a line end, which split `gpg \\n--import`).
+                if nxt == "u" and (m := _UNICODE_ESCAPE.match(src, self.pos)):
+                    # \u0020 (and \uu0020) is the character it names (flagship slice 2d.2l: it was read as u0020).
+                    buf.append(chr(int(m.group(1), 16)))
+                    self._advance(m.end() - self.pos)
+                elif nxt != "\n":
+                    buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
                 continue
             if interpolate and ch == "$" and self._interpolation_starts():
                 if buf:

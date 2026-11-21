@@ -19,6 +19,8 @@ from obaaf.checker import CheckResult, SEVERITY_ORDER
 from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import baseline as baseline_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
+from obaaf.checker.todo import todo
+from obaaf.checker.todo_acceptance import baseline_identity, migration_command, migration_hint
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -49,6 +51,11 @@ def _requirements(rule: dict) -> str:
 def _category(catalog: Catalog, rule_id: str) -> str:
     cat = catalog.rules[rule_id].get("category")
     return cat if cat in ("authority", "hygiene") else "authority"
+
+
+def _why(rule: dict) -> str:
+    """Why a finding of this rule matters, as one line (slice 3.2b)."""
+    return " ".join(str(rule.get("why", "")).split())
 
 
 def _remediation(catalog: Catalog, rule_id: str) -> str:
@@ -264,6 +271,155 @@ def summary(result: CheckResult) -> dict:
             "notAccepted": len(result.not_accepted())}
 
 
+def _check_args(result: CheckResult) -> list[str]:
+    target = str(result.checked or ".")
+    if target.startswith(("-", "=")):
+        target = "./" + target
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult, reference: str = "the lane check") -> tuple[str, str | None]:
+    placeholder = "obaaf check . --lanes"
+    if placeholder not in text:
+        return text, None
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    # The rule mentions the lane check twice. Keep its explanation and render the command once.
+    text = text.replace(f"`{placeholder}`", placeholder)
+    if command != one_line(command):
+        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess what
+        # "the lane check" is (review of #311, as review-gpt #308 asked of the migration hint).
+        advice = text.replace(placeholder, "obaaf check --lanes")
+        return (advice + " Use the check's original path and options with obaaf check --lanes; they cannot "
+                "be printed as a one-line command."), None
+    return text.replace(placeholder, reference), command
+
+
+def _inline_lane_advice(text: str, result: CheckResult) -> str:
+    advice, command = _lane_advice(text, result)
+    # Labelled, so that "the lane check" in the advice says which command it is (review of #311).
+    return f"{advice} Lane check: {command}" if command else advice
+
+
+_RESOLVE_SCAN_ERRORS = "Resolve the scan errors before migrating the baseline."
+
+
+def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
+    if catalog.causes.problems:
+        return ["Action list unavailable because the cause catalogue is inconsistent. Run obaaf catalog for details."]
+    groups = todo(result, catalog)
+    count = sum(group["count"] for group in groups)
+    lines = [f"What to do next: {count} finding{'s' if count != 1 else ''}, "
+             f"{len(groups)} thing{'s' if len(groups) != 1 else ''} to do"]
+    for index, group in enumerate(groups, 1):
+        lines.append(f"{index}. {group['sentence']} ({_severities(group['bySeverity'])})")
+        if group.get("previousMatches"):
+            matches = group["previousMatches"]
+            entries = "entry shares" if matches == 1 else "entries share"
+            lines.append(f"   {matches} stale baseline {entries} the rule, file and job of findings in this group.")
+        if "pinCandidates" in group:
+            lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
+                         f"{group['byHand']} require manual review.")
+        action, command = group["nextAction"], None
+        if group["id"] == "acceptance-old-baseline":
+            if result.errors:
+                action = _RESOLVE_SCAN_ERRORS
+            elif action != one_line(action):
+                action = migration_hint(action) + " " + baseline_identity(result.baseline_path)
+        elif group["command"] is None:
+            action, command = _lane_advice(action, result, "the command below")
+        if action != one_line(action):
+            if group["id"] in ("checkout-credentials", "agent-tool-version") and group["command"]:
+                request = ("--tighten checkout-credentials" if group["id"] == "checkout-credentials"
+                           else "--pin PACKAGE=VERSION")
+                fallback = (f"obaaf fix with {request} and the original check paths and options, including "
+                            "any --settings snapshot (the full invocation cannot be printed as a one-line command).")
+                action = one_line(action.replace(group["command"], fallback))
+            else:
+                action = "Use the original check paths and options; they cannot be printed as a one-line command."
+        lines.append("   " + action)
+        if command is not None:
+            lines.append("      " + command)
+    if result.errors or not groups or result.baseline_format == baseline_mod.FORMAT_V1:
+        return lines
+    if result.baseline_stale:
+        lines.append("Review stale entries before deciding whether to replace the baseline.")
+        return lines
+
+    # The writer can renew an invalid baseline entry when new acceptance metadata is supplied.
+    # Such a renewal needs its own decision. Never omit it from the count then suggest that write.
+    if any(f.acceptance is not None and f.acceptance.source == acceptance_mod.BASELINE
+           for f in result.not_accepted()):
+        lines.append("Review invalid baseline acceptances before deciding whether to write the baseline.")
+        return lines
+
+    # plan(None) supplies the writer's eligibility rules. Entries the applied baseline already
+    # accepts will keep their metadata when the same baseline is written again.
+    _, _, candidates = baseline_mod.plan(result, None)
+    fresh = [f for f in candidates if f.state in (NEW, UNDECIDED) and f.acceptance is None]
+    if not fresh:
+        return lines
+    if result.baseline_used and not result.baseline_path:
+        return lines
+    destination = str(result.baseline_path or "NEW_BASELINE_FILE")
+    command = shlex.join([*_check_args(result), "--fail-on", result.fail_on,
+                          "--write-baseline=" + destination, "--owner", "OWNER",
+                          "--reason", "REASON", "--expires", "YYYY-MM-DD"])
+    if command != one_line(command):
+        lines.append("Optional bulk acceptance is not shown: the check's paths or options cannot be printed as a "
+                     "one-line command.")
+        return lines
+    lines.append(f"Optional bulk acceptance: {len(fresh)} eligible outstanding "
+                 f"finding{'s' if len(fresh) != 1 else ''} ({_severities(_by_severity(fresh))}). "
+                 "Review them before supplying the owner, reason and expiry.")
+    if not result.baseline_used:
+        lines.append("Choose an unused path for NEW_BASELINE_FILE.")
+    lines.append("   " + command)
+    return lines
+
+
+def to_summary(result: CheckResult, catalog: Catalog | None = None,
+               expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
+    """The same list as the full text report, after the report's opening lines (the accepted risk first,
+    D-043) and with scan errors, an old-format baseline and stale baseline entries."""
+    catalog = catalog or load()
+    # The opening lines are the full report's; the stale entries they point to are listed only there.
+    lines = [line.replace("; they are listed below.", "; the full report lists them.")
+             for line in _lead_lines(result, accepted_risk(result, expiring_within))]
+    if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
+        advice = _RESOLVE_SCAN_ERRORS if result.errors else migration_hint(migration_command(result), summary=True)
+        lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
+                     "finding until it is converted. " + advice)
+    lines += [f"error: {one_line(error)}" for error in result.errors]
+    if result.errors:
+        lines.append("The scan is incomplete and fails regardless of its findings.")
+    if result.jenkins_files:
+        unknown = [row for row in result.coverage if row["status"] == "unknown"]
+        if unknown:
+            files = len({row["path"] for row in unknown})
+            lines.append(f"Jenkins coverage is advisory: {len(unknown)} unknown rule results "
+                         f"across {files} Jenkinsfile{'s' if files != 1 else ''}. See the full coverage report.")
+        else:
+            lines.append("Jenkins coverage is advisory. The full report states what the checker could verify.")
+    if result.notes:
+        lines.append(f"The full report contains {len(result.notes)} advisory "
+                     f"note{'s' if len(result.notes) != 1 else ''} about this scan.")
+    if result.baseline_stale:
+        gated = result.stale_gating(result.fail_on, catalog)
+        lines.append(f"Stale baseline entries: {len(result.baseline_stale)}. "
+                     f"The current --fail-on {result.fail_on} gate counts {len(gated)}. "
+                     "The full report lists the entries.")
+    if lines:
+        lines.append("")
+    return "\n".join(lines + _todo_lines(result, catalog)) + "\n"
+
+
 def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: bool = True,
             expiring_within: int = EXPIRY_WARNING_DAYS) -> str:
     """The report a person reads. It leads with the accepted risk. Text that comes from the files
@@ -288,10 +444,15 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"  {f.line:>4}  {f.severity.upper():<6} {f.rule}  {rule['title']}" + (f"  [{where}]" if where else "")
                      + ("  (baseline)" if f.baselined else ""))
         lines.append(f"        {one_line(f.message)}")
+        if show_fixes:
+            # Why it matters, in one sentence of the catalogue (slice 3.2b); --no-fixes leaves it out
+            # with the fix, for a team that knows the rules and wants the short report.
+            lines.append(f"        Why: {_why(rule)}")
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + _inline_lane_advice(fix, result))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
@@ -325,12 +486,12 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
         if result.baseline_format == baseline_mod.FORMAT_V1:
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
-                         "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
-                         "accepts these findings, why and until when:")
-            checked = f" {shlex.quote(result.checked)}" if result.checked not in ("", ".") else ""
-            given = "".join(f" {shlex.quote(str(word))}" for word in result.options)
-            lines.append(one_line(f"    obaaf baseline migrate {shlex.quote(result.baseline_path or 'FILE')}{checked} "
-                                  f"--owner OWNER --reason REASON --expires YYYY-MM-DD{given}"))
+                         "reason or expiry date, so none of them accepts a finding.")
+            if result.errors:
+                lines.append("    " + _RESOLVE_SCAN_ERRORS)
+            else:
+                lines[-1] += " Convert it once, saying who accepts these findings, why and until when:"
+                lines.append("    " + migration_hint(migration_command(result)))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "
@@ -360,7 +521,25 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append("Notes (advisory; they do not affect the result):")
         for note in result.notes:
             lines.append(f"  - {one_line(note)}")
+    lines.append("")
+    if result.config is not None and result.config.path is None:
+        # A first run (slice 3.2a): say what an unconfigured check cannot know, and what OBAAF does not look for.
+        lines.append(FIRST_RUN_CONFIG)
+        lines.append(FIRST_RUN_OTHER_TOOLS)
+    lines.extend(_todo_lines(result, catalog))
+    lines.append(f"Checked by obaaf {__version__}.")
     return "\n".join(lines).lstrip("\n") + "\n"
+
+
+# Printed at the end of a text report when no configuration file was read (slice 3.2a).
+FIRST_RUN_CONFIG = ("No configuration file was read, so a job counts as an agent job only when it runs an agent "
+                    "tool OBAAF knows or sets OBAAF_LANE: agent. Run the same command with --lanes to see how each "
+                    "job was classified, and declare the others with OBAAF_LANE or in .github/obaaf.yml, which a "
+                    "check of one file looks for from that file's folder, not the repository's, unless given with "
+                    "--config (docs/checker-configuration.md).")
+FIRST_RUN_OTHER_TOOLS = ("Other tools find workflow mistakes OBAAF does not look for: run zizmor, actionlint and "
+                         "poutine beside it, and turn on GitHub's code scanning default setup, which analyses "
+                         "workflows with CodeQL (docs/landscape.md).")
 
 
 def _entry_text(entry: dict) -> str:
@@ -449,7 +628,9 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
                 "message": f.message,
                 "requirements": catalog.rules[f.rule].get("requirements", []),
                 "agentControls": catalog.rules[f.rule].get("agent_controls", []),
-                "fix": " ".join(catalog.rules[f.rule]["fix"].split()),
+                # Added in 0.4: why a finding of this rule matters, in one sentence (slice 3.2b).
+                "why": _why(catalog.rules[f.rule]),
+                "fix": _inline_lane_advice(" ".join(catalog.rules[f.rule]["fix"].split()), result),
                 "suppressed": f.suppressed,
                 **({"scope": f.scope} if f.scope else {}),
                 **({"baselined": f.baselined} if result.baseline_used else {}),
@@ -464,8 +645,14 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
             # that counts "findings" does not count it.
             for f in result.findings if f.state != FIXED
         ],
-        "notes": list(result.notes),
+        "notes": list(result.notes) + ([
+            "The to-do list is empty because the cause catalogue is inconsistent; obaaf catalog names the problems."
+        ] if catalog.causes.problems else []),
+        "todo": todo(result, catalog),
     }
+    for group in payload["todo"]:
+        if group["command"] is None:
+            group["nextAction"] = _inline_lane_advice(group["nextAction"], result)
     cleared = result.cleared()
     if cleared:
         payload["fixed"] = [
@@ -597,8 +784,10 @@ def to_sarif(result: CheckResult, catalog: Catalog | None = None,
             "shortDescription": {"text": rule["title"]},
             "fullDescription": {"text": " ".join(rule["description"].split())},
             "help": {
-                "text": "Fix: " + " ".join(rule["fix"].split()),
-                "markdown": f"**Fix:** {' '.join(rule['fix'].split())}\n\n**Requirements:** {_requirements(rule)}",
+                # Why it matters comes first, as in the text report (slice 3.2b).
+                "text": f"Why it matters: {_why(rule)} Fix: " + " ".join(rule["fix"].split()),
+                "markdown": f"**Why it matters:** {_why(rule)}\n\n**Fix:** {' '.join(rule['fix'].split())}\n\n"
+                            f"**Requirements:** {_requirements(rule)}",
             },
             "defaultConfiguration": {"level": SARIF_LEVEL[severity]},
             "properties": {"tags": tags, "security-severity": SECURITY_SEVERITY[severity],

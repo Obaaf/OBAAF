@@ -158,7 +158,6 @@ def approval_predicate(proposal_dir: str | Path, approvals: list[dict], environm
 
 
 # ------------------------------------------------------------------ build record
-HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[A-Za-z0-9.-]+$")
 
 
 def isolation_from_workflow(workflow_file: str | Path, job_id: str, declared_tier: str | None = None) -> dict:
@@ -184,7 +183,11 @@ def isolation_from_workflow(workflow_file: str | Path, job_id: str, declared_tie
         if tier not in ("A", "B"):
             raise RecordError(f"job {job_id!r} runs on a self-hosted runner; set OBAAF_TIER to A (ephemeral) or B "
                               "(persistent, release-only, reimaged on a schedule) in its env")
-    elif job.runs_on and all(HOSTED_LABEL_RE.match(label) for label in job.runs_on):
+    elif job.runner_kind == "github-hosted":
+        # The checker's reading (`HOSTED_LABELS`, one label per set, written once or more in any letter
+        # case, matrices resolved), not a pattern of its own: `ubuntu-gpu` or `[ubuntu-latest, gpu]` may be
+        # a self-hosted runner and must declare its tier (flagship slice 2d.9; before, any `ubuntu-*` label
+        # was Tier A).
         runner_env, tier = "github-hosted", "A"
         if env_tier and env_tier != "A":
             raise RecordError(f"job {job_id!r} runs on GitHub-hosted runners, which are Tier A, but OBAAF_TIER says {env_tier}")

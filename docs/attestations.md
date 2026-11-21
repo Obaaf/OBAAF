@@ -76,7 +76,7 @@ Who approved applying the proposal, in which environment, and who requested the 
 
 ## The build record (G7.1, FR4, FR5)
 
-Adds to SLSA provenance what game builds need. Each field says who reported it:
+Adds to SLSA provenance what game builds need. The source, assets, manifest, SDK entries and isolation fields carry reporter labels. The table also identifies where the builder and trigger metadata come from.
 
 | Field | Content | Reported by |
 | --- | --- | --- |
