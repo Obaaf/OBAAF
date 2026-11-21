@@ -110,6 +110,8 @@ def _asks_help(words) -> bool:
 _CHECK_NAMES = r"(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shasum|b2sum|gpgv?2?)(?:\.exe)?"
 # Searched for in a script: a program's name, wherever it is (a prefilter, linear in the text's length).
 _CHECK_PROGRAM = re.compile(_CHECK_NAMES + r"['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
+# The first place a check's name appears, for where a step's check is (flagship slice 2d.2o).
+_CHECK_NAME_ANYWHERE = re.compile(_CHECK_NAMES, re.I)
 # Matched against one word: the name, after any path.
 _CHECK_WORD = re.compile(r"(?:.*[/\\])?" + _CHECK_NAMES + r"['\"]?", re.I | re.S)
 _SUM_PROGRAMS = frozenset({"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shasum", "b2sum"})
@@ -190,13 +192,13 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
         if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
                            or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
             prefix = False
-        if word in ("run", "exec", "--") or (_SHELL_C.fullmatch(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
+        if word in ("run", "exec", "--") or (_shell_c(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
             runs = True
-        elif k and word.rsplit("/", 1)[-1] in _NOT_RUNNERS:
-            runs = False          # `sudo apt-get install gpgv`: what runs is the package manager
+        elif k and word in _NOT_RUNNERS and not command[k - 1].startswith("-"):
+            runs = False          # `sudo apt-get install gpgv`: what runs is the package manager (not `sudo -u git`)
     for j, w in enumerate(command[1:], 1):
         if " " in w and _CHECK_PROGRAM.search(w) and (
-                (_SHELL_C.fullmatch(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
+                (_shell_c(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
                 or command[0] in ("ssh", "eval")):
             words = re.findall(r"[^\s;&|()`'\"]+", w)
             if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
@@ -204,8 +206,9 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
     return None, -1
 
 
-# A shell's option that takes a script, alone or with others (`-c`, `-lc`, `-ec`).
-_SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
+def _shell_c(word: str) -> bool:
+    """A shell's option that takes a script, alone or with others (`-c`, `-lc`, `-ec`); linear in the word."""
+    return len(word) > 1 and word[0] == "-" and word[1:].isalpha() and word[1:].isascii() and "c" in word
 # Programs that take a check's name as an argument rather than run it (`sudo apt-get install gpgv`).
 _NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "dpkg", "rpm", "snap", "brew",
                           "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
@@ -3987,7 +3990,7 @@ class JenkinsRules:
             pos = at[1]
         else:
             # `returnStatus: true`, `bat`: the first check's name in the script
-            found = _CHECK_PROGRAM.search(info.script)
+            found = _CHECK_NAME_ANYWHERE.search(info.script)
             if not found:
                 return True
             pos = found.start()
