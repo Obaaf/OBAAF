@@ -95,40 +95,40 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-085 | What a called local workflow's jobs do counts for the job that calls it: a release there makes it a release job, a declared release job is held to the caches restored there, and a called job whose every caller in the repository forbids restoring is "cannot tell"; a call by `owner/repo/...@ref` is not matched, and a called job's `if: github.event_name == '<event>'` adds that event | Accepted, 2026-11-18 |
 | D-086 | OBAAF reports, as OBAAF-GHA-025 (high), an agent job that runs as code a script downloaded while the job runs, whatever it installs, or installs or runs an agent CLI the catalogue names at a version that can change; only agent jobs are read | Accepted, 2026-11-18 |
 | D-087 | Agent tools are data: one entry per tool in `detection.yaml`, with the sources its facts were read from and the date, from which the checker's agent lists are built; every tool ci-agent-audit recognised at `4a88ee6` has one; the agent rules' findings name the agents a job runs in a fact, `agents` | Accepted, 2026-11-18 |
-| D-088 | OBAAF reports, as OBAAF-GHA-026, a step that gives an agent action a value of an input that the tool's own documentation warns about, with the documentation's words and source; the values are data in each agent tool's entry; a value the checker cannot read is "cannot tell" at most medium | Proposed |
+| D-088 | OBAAF reports, as OBAAF-GHA-026, a step that gives an agent action a value of an input that the tool's own documentation warns about, with the documentation's words and source; the values are data in each agent tool's entry; a value the checker cannot read is "cannot tell" at most medium | Accepted, 2026-11-21 |
 | D-089 | Init previews both files, applies explicitly, stops on conflicts and starts CI in report mode | Accepted, 2026-11-18 |
-| D-090 | OBAAF-GHA-026 also reports a command-line option an agent tool's own files warn about, in an action's argument input or where a step runs the tool's program, with the words and source; the options are data; what the checker cannot read in the command is "cannot tell" at most medium | Proposed |
-| D-093 | Show the action list at the end of the text report and on its own with `--summary` | Proposed |
-| D-094 | The other agent tools' entries are read: each warned setting or option is data with its words and source, an entry with none says in `no_warnings` what was read, a Python CLI's option is read with every beginning argparse takes, and where a program name is shared with another tool, a command the checker cannot read is not "cannot tell" when every place it is named is followed by that other tool's own words | Proposed |
-| D-095 | Code in another language that runs an agent tool is read by its tokens: an argument list or a command line the checker cannot read is "cannot tell", literal pieces and names given literals are read as their text, and one value in one place of a list is one word | Proposed |
-| D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Proposed |
-| D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Proposed |
-| D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Proposed |
-| D-100 | How init proposes the first agent lanes and secret environments | Proposed |
-| D-101 | Enable individual reporting-only companion scanners explicitly during init | Proposed |
-| D-102 | Preview verified paperwork changes, listing each acceptance separately | Proposed |
-| D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Proposed |
-| D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
-| D-105 | Draft confinement for one agent job | Proposed |
-| D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
-| D-107 | A Markdown work order for confinement | Proposed |
-| D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
-| D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
-| D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
-| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
-| D-112 | Carry selected settings into fix proof | Proposed |
-| D-114 | Lane follow-up commands retain the inputs of the reported check | Proposed |
-| D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
-| D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
-| D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
-| D-118 | Defer legacy migration guidance until the text report has a complete scan | Proposed |
-| D-119 | Identify the repository input when a preview refuses it | Proposed |
-| D-125 | A check counts only when nothing written in the workflow can change what it runs: every name in an `env` or written to `GITHUB_ENV` by an earlier step that changes what bash or the check's program runs, and every write to `GITHUB_ENV` whose names the checker cannot read | Proposed |
-| D-126 | OBAAF-GHA-006 reports, at medium, a job outside the release lane that holds what publishing needs and restores a cache, directly or through a job it needs; image pushes through build outputs, bake overrides and `docker buildx imagetools create` make a job a release job | Proposed |
-| D-127 | OBAAF-JEN-003 follows the workspace an AI agent runs in, across stages, `stash` and `unarchive`; an effect before the agent in a kept workspace is medium; separate allocations that may be one machine are unknown | Proposed |
-| D-128 | OBAAF-JEN-005 counts an `input` step for a publish only when it stops that publish until someone approves; blank, empty or `null` submitters and the group `authenticated` let anyone approve | Proposed |
-| D-129 | OBAAF-JEN-010 reads a copy of another job's artifacts as Groovy builds it, judges a selector by its value, and clears it only with an `obaaf verify release` that stops each publish after it; another digest check is "cannot tell" | Proposed |
-| D-130 | OBAAF-JEN-012 reads its checks with the shell reader of slice 2d.2e and counts only one that stops the publish; forms the reader does not vouch for are "cannot tell" | Proposed |
+| D-090 | OBAAF-GHA-026 also reports a command-line option an agent tool's own files warn about, in an action's argument input or where a step runs the tool's program, with the words and source; the options are data; what the checker cannot read in the command is "cannot tell" at most medium | Accepted, 2026-11-21 |
+| D-093 | Show the action list at the end of the text report and on its own with `--summary` | Accepted, 2026-11-21 |
+| D-094 | The other agent tools' entries are read: each warned setting or option is data with its words and source, an entry with none says in `no_warnings` what was read, a Python CLI's option is read with every beginning argparse takes, and where a program name is shared with another tool, a command the checker cannot read is not "cannot tell" when every place it is named is followed by that other tool's own words | Accepted, 2026-11-21 |
+| D-095 | Code in another language that runs an agent tool is read by its tokens: an argument list or a command line the checker cannot read is "cannot tell", literal pieces and names given literals are read as their text, and one value in one place of a list is one word | Accepted, 2026-11-21 |
+| D-096 | An agent action names its own folders and a called workflow in them, never a repository whose name only begins like it; the catalogue may list, with the action's own words and a source, the actions under an agent action that run no agent, and every other path under it is the agent; a `uses:` that leaves its repository is an agent's | Accepted, 2026-11-21 |
+| D-097 | `npm publish --provenance` signs its own provenance: OBAAF-GHA-017 does not count such an upload where the checker reads the one documented form, and every other form stays reported | Accepted, 2026-11-21 |
+| D-099 | A proposed adoption fix needs an offline private-copy proof of its exact finding changes and file edits | Accepted, 2026-11-21 |
+| D-100 | How init proposes the first agent lanes and secret environments | Accepted, 2026-11-21 |
+| D-101 | Enable individual reporting-only companion scanners explicitly during init | Accepted, 2026-11-21 |
+| D-102 | Preview verified paperwork changes, listing each acceptance separately | Accepted, 2026-11-21 |
+| D-103 | Explicit apply reproves the displayed diff and requires clean tracked target files | Accepted, 2026-11-21 |
+| D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Accepted, 2026-11-21 |
+| D-105 | Draft confinement for one agent job | Accepted, 2026-11-21 |
+| D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Accepted, 2026-11-21 |
+| D-107 | A Markdown work order for confinement | Accepted, 2026-11-21 |
+| D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Accepted, 2026-11-21 |
+| D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Accepted, 2026-11-21 |
+| D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Accepted, 2026-11-21 |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Accepted, 2026-11-21 |
+| D-112 | Carry selected settings into fix proof | Accepted, 2026-11-21 |
+| D-114 | Lane follow-up commands retain the inputs of the reported check | Accepted, 2026-11-21 |
+| D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Accepted, 2026-11-21 |
+| D-116 | Compare JSON edits using JSON string and number semantics | Accepted, 2026-11-21 |
+| D-117 | Preserve the scan scope when a legacy baseline blocks a write | Accepted, 2026-11-21 |
+| D-118 | Defer legacy migration guidance until the text report has a complete scan | Accepted, 2026-11-21 |
+| D-119 | Identify the repository input when a preview refuses it | Accepted, 2026-11-21 |
+| D-125 | A check counts only when nothing written in the workflow can change what it runs: every name in an `env` or written to `GITHUB_ENV` by an earlier step that changes what bash or the check's program runs, and every write to `GITHUB_ENV` whose names the checker cannot read | Accepted, 2026-11-21 |
+| D-126 | OBAAF-GHA-006 reports, at medium, a job outside the release lane that holds what publishing needs and restores a cache, directly or through a job it needs; image pushes through build outputs, bake overrides and `docker buildx imagetools create` make a job a release job | Accepted, 2026-11-21 |
+| D-127 | OBAAF-JEN-003 follows the workspace an AI agent runs in, across stages, `stash` and `unarchive`; an effect before the agent in a kept workspace is medium; separate allocations that may be one machine are unknown | Accepted, 2026-11-21 |
+| D-128 | OBAAF-JEN-005 counts an `input` step for a publish only when it stops that publish until someone approves; blank, empty or `null` submitters and the group `authenticated` let anyone approve | Accepted, 2026-11-21 |
+| D-129 | OBAAF-JEN-010 reads a copy of another job's artifacts as Groovy builds it, judges a selector by its value, and clears it only with an `obaaf verify release` that stops each publish after it; another digest check is "cannot tell" | Accepted, 2026-11-21 |
+| D-130 | OBAAF-JEN-012 reads its checks with the shell reader of slice 2d.2e and counts only one that stops the publish; forms the reader does not vouch for are "cannot tell" | Accepted, 2026-11-21 |
 
 ---
 
@@ -154,7 +154,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 
 ### D-006 Ranking fixes
 
-**Decision.** Open items are ranked by tier (lowest first), then effort (hours, days, weeks), then the number of documented compromises the item would have prevented, then the number it would have detected or limited (Paper 2, Table 7), then item number. **Reason.** DR3 (prioritized by documented attack paths) and DR4 (effort-aware). The Python scorer and the offline form implement the same rule, and a test checks they agree. **Status.** Proposed.
+**Decision.** Open items are ranked by tier (lowest first), then effort (hours, days, weeks), then the number of documented cases the catalogue maps to the item as prevented, then the number it maps as detected or limited (Paper 2, Table 7), then item number. **Reason.** DR3 (prioritized by documented attack paths) and DR4 (effort-aware). The Python scorer and the offline form implement the same rule, and a test checks they agree. **Status.** Proposed. Wording amended on 2026-11-21 at Sean's direction (#243): the catalogue maps documented cases to controls, and a mapping is not a test that a control would have prevented a case. The ranking itself is unchanged.
 
 ### D-007 Predicate type URIs
 
@@ -828,7 +828,7 @@ Read on 2026-11-19 from `openai/codex-action` at `4aac6da` and `anthropics/claud
 
 **Consequence.** A gate can fail where it passed. Settings given as command-line options (`claude_args`, `codex-args`, a CLI's own flags such as `--dangerously-skip-permissions`) and the other 21 tools' settings are not read yet (slice 2d.5c2, F-264). A value the action itself would refuse (`UNSAFE` where it compares exactly) is reported; that is the wider reading. A setting an action reads from a configuration file (`settings`, `codex-home`) is not read, nor `display_report`, `ACTIONS_STEP_DEBUG` or a key written in clear, nor these actions inside another repository's composite action or reusable workflow. A `uses:` with an empty path segment, a leading `/` or a backslash is not matched to the action at all, here or by the agent lane (#245).
 
-**Status.** Proposed.
+**Status.** Accepted, 2026-11-21.
 
 ### D-089 How a team reviews and applies the first configuration
 
@@ -852,7 +852,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A gate can fail where it passed: a step that runs one of these CLIs in a way the checker cannot read is "cannot tell" until the options are written out. An option written in a prompt's text, or in prose in another input that starts with the program (`claude -p "never pass --dangerously-skip-permissions"`), is reported, the wider reading. A quoted word that starts with a variable or substitution (`claude -p "$PROMPT"`) is read as one word that is not an option, although a CLI's own parser may take a value that begins with `-` as one; that case is #254. Codex's `--sandbox danger-full-access` and `-c` overrides, settings given to `--settings`, options in configuration files or environment variables the tools read, a program name a step builds at run time (braces, globs, `printf`, another step's `GITHUB_ENV` or outputs, `vars`), `python -m` and repository scripts, a local Docker or JavaScript action, and the other 20 tools' settings and options are not read (slice 2d.5c2b). A `with:` written as one expression now names these options among the settings it cannot tell, so an acceptance of that finding stops matching. `codex-args` that codex-action itself refuses for the run's other inputs is still reported, the wider reading.
 
-**Status.** Proposed.
+**Status.** Accepted, 2026-11-21.
 
 ### D-091 How a finding gets a next action in the cause catalogue
 
@@ -862,7 +862,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A new rule needs an entry before the catalogue check passes. A new kind takes the rule's remaining-kinds advice until the author assigns a more specific cause. A fix kind describes the work involved. Whether a particular edit can be offered depends on the evidence for that finding. This slice adds the catalogue only. Report grouping and the commands that apply fixes follow separately.
 
-**Status.** Proposed, 2026-11-19 (A1a, #252).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A1a, #252).
 
 ### D-092 Group outstanding findings by their next action
 
@@ -872,7 +872,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** JSON gains a `todo` array. A changeable tool version is one cause with counts for pin candidates and manual fixes. An eligible literal install can be considered for a user-supplied pin. The later fix command must still prove the patch. Existing JSON fields, SARIF, gate results and acceptance identities are preserved.
 
-**Status.** Proposed, 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A1b, #257). Sean explicitly confirmed the shared install entry with separate counts.
 
 ### D-093 The text to-do list and the summary view
 
@@ -882,7 +882,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** The text report grows by one section. The summary uses the original inputs for suggested commands, with a count by severity before any suggestion to accept remaining risk. Existing machine formats keep the behavior of the preceding adoption slice.
 
-**Status.** Proposed, 2026-11-19 (A1c, #259). The summary's opening lines, the command lines and the notes on a command left out were added by the scheduled review (`review-gpt` #260), whose reviewer found that a summary without the accepted risk reopened what D-043 closed.
+**Status.** Accepted, 2026-11-21. With it, the maintainer asked that the list's line for acceptances that name no owner name the `obaaf fix --owner` command that completes them. Proposed 2026-11-19 (A1c, #259). The summary's opening lines, the command lines and the notes on a command left out were added by the scheduled review (`review-gpt` #260), whose reviewer found that a summary without the accepted risk reopened what D-043 closed.
 
 **Proposed clarification, 2026-11-19 (#307).** The old-baseline lifecycle notice applies the same one-line test to the complete migration command. If a path or option cannot be reproduced faithfully, both text views explain how to migrate using the original arguments and the adopter’s acceptance decisions.
 
@@ -894,7 +894,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A gate can fail where it passed: a step that runs `qwen`, `kilo`, `cline`, `copilot`, `openhands`, `cn`, `opencode`, `pr-agent` or `goose` with one of these options, or in a way the checker cannot read, and the three action inputs. OpenHands' documented CI command, `openhands --headless`, is now a high finding. A dangerous mode a tool runs in by default (a one-shot `cline` run, the three actions that run their CLI with `--yolo` themselves) is not reported, because no setting names it. Kiro CLI and Amp document their options only on web pages, which a source at a commit cannot cite. For every agent CLI, `-dy=true` and a versioned program after `uvx`, `uv tool run` or `pipx run` are now read.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.5c2b, #81).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.5c2b, #81).
 
 ### D-095 Code in another language that runs an agent tool
 
@@ -904,7 +904,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A gate can fail where it passed: `exec.exec('claude', flags)` was quiet and is now "cannot tell"; `os.system(f'claude -p "{x}"')` is "cannot tell"; options written in literal pieces were "cannot tell" and are now a finding at the option's own severity. Not read: a program name given by escapes or pieces (`"\x63laude"`, `"cl" "aude"`), which the step's check for the tool's name does not see, or by a path built at run time; a list held in a mapping; Perl's `exec { ... }`; code written into another process's input; AppleScript and Tcl beyond the widest reading; a shell that runs another interpreter on the script.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.5c2c, #81).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.5c2c, #81).
 
 ### D-096 Which actions and called workflows are an agent's
 
@@ -914,7 +914,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** Fewer jobs are agent jobs: a job whose only agent was the approval check, or that calls a workflow of a repository like `owner/agent-docs`, loses OBAAF-GHA-003, 004, 005, 012, 020 and 025, and a baseline entry for one of those findings no longer matches, which fails a check at or above `--fail-on` until the baseline is written again. The listed path in another case, a folder under it and any action not read are still reported. A job with a step whose `uses:` leaves its repository is now an agent job, which can turn a passing gate red; so can a configuration that is not a list of text. The listed path is taken out at every ref, so a later change to the action at `@v1`, or a fork's commit GitHub serves under the parent's name, is not read. Each new sub-action a tool publishes is the agent until it is read and listed. The other folders with an action file under listed actions on 2026-11-19 (four of `sst/opencode`'s build steps, `cline/cline`'s Windows signing step) were not listed, because only their action files were read; `coderabbitai/ai-pr-reviewer` could not be read without signing in.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.11, #236).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.11, #236).
 
 ### D-097 `npm publish --provenance` counts as provenance
 
@@ -924,7 +924,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** Fewer workflows get OBAAF-GHA-017, so a baseline entry for one it no longer reports no longer matches, which fails a check at or above `--fail-on` until the baseline is written again; where another job also publishes, the finding moves to it and an acceptance of the first job no longer matches. Most release workflows have more earlier steps than (6) allows, and keep the finding. What the repository's own files (`package.json`, `.npmrc`) and the package's scripts do when `npm ci` or `npm publish` runs them is not read; nor is where a proxy the runner uses sends the package, nor whether `actions/setup-node`'s commit is one of a fork that GitHub serves under the parent's name (as for every action, D-096), nor a shell given by a path (`shell: ./bash -e {0}`, `/tmp/x/sh -e {0}`, as for OBAAF-GHA-016). The second review found the earlier steps' `env`, bash's `SHELLOPTS` and `PS4`, and a default shell, and the third a service container, each a way past, before the merge. A workflow that also uploads anything else still needs provenance for that upload. `npm publish --provenance || exit 1` is still reported, although npm signs there too. An npm with an option that takes a value before `publish` (`npm --workspace a publish`) is not read as an upload at all, which is older than this decision. Not run: npm itself, or a publish on GitHub.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.12, #201).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.12, #201).
 
 ### D-098 Property tests, and what they found: another run's download in more spellings, and values shared through YAML aliases
 
@@ -934,7 +934,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A gate can fail where it passed: a `workflow_run` job with write access that downloads in one of the newly read ways is now in the effect lane and gets OBAAF-GHA-021 and 022 (high) unless its checks and approval are in place; a template placeholder in a step or job reached through an alias is reported for each place, so a baseline written before may not cover the new findings. Counting a `run-id` or `repository` given without `github-token`, or `repository: ${{ github.repository }}`, is the wide reading: download-artifact may ignore them, so such a job may be in the effect lane while it reads only its own run. A download given only `github-token`, or `run-id: ${{ github.run_id }}`, is not counted. A fork's download step is not one of the steps that only prepare, so checks after it do not count for OBAAF-GHA-021: an action that downloads may also apply. Still not read: the inputs of other actions (a retry wrapper's `command`), what a variable or a `gh alias` stands for, a job with no `permissions:` block (which may hold the repository's default write token) and a push with a personal token from a read-only job, which stay outside the effect lane as before. A finding at a place reached through an alias is reported at the line of the anchor. The properties claim what the checker does with each spelling; none was run on GitHub. Merge keys (`<<`) are not generated: GitHub does not read them and the checker refuses them (slice 2d.2f). The zizmor parity test the plan also asks for is the separate slice 2d.3b.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.3a, #79).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.3a, #79).
 
 ### D-099 Proving an adoption edit before offering it
 
@@ -944,7 +944,7 @@ Read on 2026-11-19: from `anthropics/claude-code-action` at `5a85689`, `--danger
 
 **Consequence.** A2b will call this proof for its paperwork preview. The preview lists each refused candidate under “Could not be made automatically”, together with the proof's single-line reason. It offers only candidates that pass. A proof needs working directory-descriptor and no-follow support and a writable temporary directory outside Git working trees and the source. The first implementation declines external check inputs, external or absolute links, nested repositories and filesystems, submodules, hard-linked files, special files and a Git index whose instruction list differs from the private copy. It edits existing YAML or JSON documents (by file suffix) whose top level is a mapping or a list, and each declared key must name a node of the document before or after the edit (a removed one before, an added one after); the review of #274 showed that any other file parsed as YAML loses everything after ` #` as a comment, so a changed shell or Groovy line compared equal. A Jenkinsfile is not compared, whatever its suffix: a file the checker read as one in this run, or the same file by another path, a file whose name the Jenkins reader takes for one, or a file a `jenkins.files` pattern of the configuration in use or of the repository's own names, in any letter case (`jenkins.files` can name `ci/pipeline.yml`). A YAML-named file that a Jenkinsfile loads as Groovy (`load 'ci/steps.yml'`), or that a Jenkins controller names as its script path, is known to neither the checker nor the proof, and is compared as YAML. A document holding a value the comparison cannot hold (a set, an ordered map of mappings) or more than 500,000 values once its aliases are expanded is withheld. A malformed document, unexpected file change, failed check read, missing CI input, changed source bytes (each edited file is read again from the source after every other check, no more than one byte past its expected length), or difference between the original and unedited-copy results also withholds the candidate. For Git working trees, an advisory about folder pruning may appear only on the private copy. The proof checks that the actual CI and Jenkins files, Jenkins coverage and all other notes agree. It declines edits that change Jenkins file selection.
 
-**Status.** Proposed, 2026-11-19 (slice A2a, #261).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice A2a, #261).
 
 ### D-100 How init proposes the first agent lanes and secret environments
 
@@ -956,7 +956,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Evidence.** The CLI tests in `tests/test_init.py` cover these decisions in `test_jobs_secrets_and_ambiguous_environments`, `test_local_composite_and_workflow_level_renamed_provider_key`, `test_dynamic_environment_reusable_secret_and_short_name_require_review`, `test_unnamed_access_in_other_environment_keeps_named_secret_for_review`, `test_alternate_config_and_linked_parent`, `test_matching_first_destination_is_preserved_when_creating_the_other`, `test_preview_apply_repeat`, and `test_second_write_failure_rolls_back_first`. A read-only preview at Expectrail commit `6bc5dce` proposed all 19 declared agent jobs and 19 additional jobs; the review of #273 reproduced that at `6bc5dce` and at `665f15e` (38 proposed, all 19 declared among them). The review added `test_an_environment_on_a_calling_job_is_not_proposed` and `test_a_name_github_refuses_or_a_short_name_says_why`. Its own configuration describes the provider smoke test as a health probe and the SAM and Glimmer jobs as perception only.
 
-**Status.** Proposed, 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
+**Status.** Accepted, 2026-11-21. With it, the maintainer asked that `obaaf init` stop writing a lane for a job the checker already recognises unaided (#321, item 1). Proposed 2026-11-19 (first increment of slice 3.3, #84). D-089 remains the accepted first-run behavior.
 
 ### D-101 Companion checks in the first workflow
 
@@ -966,7 +966,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Consequence.** Ordinary scanner findings are visible in the workflow log. New scanner steps join standard error to standard output before printing the stop marker, so the runner receives diagnostics and both markers on one stream (#340). A gate-only change preserves the installed form of the scanner steps. An inability to run a selected tool can fail the workflow; each step pulls its image before running it, so a failure to reach Docker or fetch the image fails the step rather than passing as actionlint's finding status. A pull request can change what a scanner reports, because the scanners read its files. Selection adds no GitHub permissions and passes no GitHub token to a scanner. Runtime and image downloads increase with each tool selected.
 
-**Status.** Proposed, 2026-11-19 (3.3b, #84).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (3.3b, #84).
 
 ### D-102 Paperwork changes in the fix preview
 
@@ -976,7 +976,7 @@ If another supported configuration name already exists, init shows any differenc
 
 **Consequence.** The preview tries the combined changes on an isolated copy. When they cannot be proved together, it checks smaller groups and shows only a verified cumulative diff. A conflicting change is listed with its reason. An entry of a flow-style YAML list is not removed when a comment lies in the text the removal would delete, or after the last removed entry on its line. A comment on a line of its own before or after the removed entries is kept, and then sits beside a kept entry. A missing CODEOWNERS rule gets manual guidance. This increment adds a preview only. Writing the files is A2c.
 
-**Status.** Proposed, 2026-11-19 (A2b, #275).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A2b, #275).
 
 ### D-103 Applying the paperwork preview
 
@@ -988,7 +988,7 @@ If another supported configuration name already exists, init shows any differenc
 
 The operation needs POSIX directory locks and a filesystem supporting hard links and renames. A reader can observe different files at different points in a multi-file apply, and a target name is briefly vacant while its original is retained. Other programs can edit files without taking OBAAF's lock, including after final validation. The last proof must agree with the checker result displayed in the preview. If such an edit prevents restoration, the command preserves the competing file and reports the saved original for manual recovery. Power loss, process termination and filesystem failure can also require manual recovery.
 
-**Status.** Proposed, 2026-11-19 (slice A2c, #279).
+**Status.** Accepted, 2026-11-21. With it, the maintainer asked for an option that saves the proven diff as a patch file on any system, so that where apply does not run (macOS, Windows) the same change can be made with `git apply`. Proposed 2026-11-19 (slice A2c, #279).
 
 ### D-104 What a saved settings snapshot establishes
 
@@ -1002,7 +1002,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
 
-**Status.** Proposed, 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
 
 ### D-105 Draft confinement for one agent job
 
@@ -1010,7 +1010,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Reason.** Changing how an agent runs can break a build. A static draft lets the team inspect the command, credential placement and remaining findings before deciding whether to adopt it.
 
-**Status.** Proposed, 2026-11-19 (A3a, #281). On 2026-11-19 the shipped catalogue listed no release commit. #248 tracks the proposed listing.
+**Status.** Accepted, 2026-11-21. With it, the maintainer made two fixes launch items (#335, items 1 and 5): the draft prints the original job text with only the agent step replaced, and a team can name the step to confine, so that a job whose agent runs through its own script gets a draft. Proposed 2026-11-19 (A3a, #281). On 2026-11-19 the shipped catalogue listed no release commit. #248 tracks the proposed listing.
 
 **Amended by the review (review-gpt #283, run `jacksnipe`, 2026-11-20).** The draft names the `env` names the action refuses as the action matches them: exactly, with its reserved names, prefixes and suffixes (`PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest). The checker now reads those reserved names too, at a commit OBAAF lists: the egress control and OBAAF-GHA-005's fifth control are *not met*, because the action refuses to run. Before, the draft printed a verified control for a step the action refuses, and `docs/checker-configuration.md` said reserved names were not read (D-052). No commit is listed, so no verdict changes today. The step is written into the private copy as YAML, so text outside the Basic Multilingual Plane and dates are kept, and the command works out everything before it prints, so a refusal prints only itself. It also names an `env` value written with a line break or NUL, which the action refuses (the checker does not read values), and prints the job with escapes when any text in it holds a character Python does not count as printable.
 
@@ -1022,7 +1022,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Consequence.** Both bulk and named requests use D-099 proof and D-103 apply. A named request gives the affected location and acceptance impact when proof fails and exits 1 without applying. The adopter can review the recorded decision and rerun the same named request after resolving the conflict. Shared or inherited YAML structures, a checkout found only through a local action, a workflow file that is not UTF-8 text, and edits whose precise effect cannot be proven remain for manual review. A refusal from comparing findings or baseline and ignore entries names them, and a workflow refused for its encoding is named. The checker reads the workflow offline.
 
-**Status.** Proposed, 2026-11-19 (slice A5a, #285).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice A5a, #285).
 
 ### D-107 A Markdown work order for confinement
 
@@ -1032,7 +1032,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft. The checker keeps each step an egress-action condition names with its own explanation, so the work order can show why each named step matters before a length limit; the ordinary preview therefore lists such a condition as one line per step instead of one joined line (recorded by the review, review-gpt #288). A reason the work order omits is counted, but a control's own reason is not shown when its egress-action reading has conditions, even when another control decides the verdict (#336).
 
-**Status.** Proposed, 2026-11-19 (A6a, #286).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A6a, #286).
 
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
@@ -1042,7 +1042,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Consequence.** A workflow that expands an outsider's text in yq's `cmd` or pwsh-script's `script` now gets OBAAF-GHA-010 (high), which can turn a passing gate red. The job is advisory (`continue-on-error: true`, OBAAF-SET-008) because it depends on PyPI and github.com; a maintainer may make it required. Changing a risky workflow, or moving to a newer zizmor, means recording the cases again from one CI run and judging any new silent case. What the recorded reasons say about OBAAF is the reviewer's reading of each file and of OBAAF's code, checked by running OBAAF on it; zizmor's authors were not asked. Not compared: zizmor's other audits, its pedantic and auditor personas, its online audits, composite actions on their own (OBAAF reads one only through a step that uses it), and workflows in the wild beyond these two sets. Two steps written on one line that use the same action at the same ref are told apart only by their place in zizmor's output, not in OBAAF's findings, so a finding on one answers the other; and any error OBAAF gives for a file fails every case in it, even one it could read past. The narrower readings are open questions for later work: #289 for OBAAF-GHA-006, #290 for an action input that becomes another program's arguments (addnab/docker-run-action's `options`), and whether a job a release event or tag push starts should be "cannot tell" for OBAAF-GHA-006.
 
-**Status.** Proposed, 2026-11-19 (slice 2d.3b, #79).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 2d.3b, #79).
 
 ### D-109 The handoff from init to a gate
 
@@ -1054,7 +1054,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Evidence.** The public-command and generated-shell tests in `tests/test_init_gate.py` compare the proposed and actual lists, preview and apply on a clean workflow, leave a custom workflow alone, recognize the earlier template and companions, and exercise push, PR-base and missing-baseline policy selection.
 
-**Status.** Proposed, 2026-11-19 (A7a, #292).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A7a, #292).
 
 ### D-110 Explicit exact versions for agent tool installs
 
@@ -1064,7 +1064,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review. The proof refuses while any baseline or ignore entry matches no finding, even one that matched nothing before the edit, so while an old-format baseline or such an entry exists the to-do list withholds the checkout and pin commands and names what to settle first: migration, then the paperwork preview that names each unmatched entry and proposes its removal. A check of one file, the `.github` or `.github/workflows` folder or one platform cannot tell an entry for a finding elsewhere from an unmatched one; there the to-do asks for a check of the whole repository instead (added by the review, review-gpt #294).
 
-**Status.** Proposed, 2026-11-19 (slice A5b, #291).
+**Status.** Accepted, 2026-11-21. With D-106 and this entry, the maintainer left both hold-backs as written (an entry already unmatched before the edit, and a fix for a finding that is accepted); they are issues for after the first users. Proposed 2026-11-19 (slice A5b, #291).
 
 ### D-111 Apply settings evidence to OBAAF-GHA-005
 
@@ -1074,7 +1074,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
 
-**Status.** Proposed, 2026-11-19 (A4b, #300).
+**Status.** Accepted, 2026-11-21. With it, the maintainer made it a launch item that the workflow `obaaf init` generates can use a settings snapshot, read from the target branch as the template reads it. Proposed 2026-11-19 (A4b, #300).
 
 ### D-112 Carry selected settings into fix proof
 
@@ -1082,7 +1082,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A fix requires a snapshot in the working tree. For a snapshot outside the repository or under `.git`, the check gives manual guidance. An unreadable snapshot or a change in its parsed evidence during one apply run prevents the write. The generated blocking gate and egress drafting commands do not support this option.
 
-**Status.** Proposed, 2026-11-19 (#302).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (#302).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 
@@ -1092,7 +1092,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A clone checked out at the pinned commit gave templates that matched that commit by construction; the wheel's templates are the installed version's, whatever `--obaaf-sha` names. The installer says which version its templates came with and asks for that version's commit (added by the review, `review-gpt` #309); it cannot check the commit offline.
 
-**Status.** Proposed, 2026-11-19 (slice 3.3, #142).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (slice 3.3, #142).
 
 ### D-114 Lane inspection uses the original check inputs
 
@@ -1100,7 +1100,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Reason.** A different configuration or repository can classify the same job differently.
 
-**Status.** Proposed, 2026-11-20 (A1e, #262 item 6).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (A1e, #262 item 6).
 
 ### D-115 Legacy baseline migration reports current acceptance eligibility
 
@@ -1110,7 +1110,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A 0.3.0 ignore entry names no owner, so a finding both ignored and in the old file is not carried over: once the ignore entry is completed it keeps accepting the finding; once it is removed, migration carries the finding if the old file was kept, and after a conversion the finding is accepted with `obaaf check --write-baseline` like any new one. A preserved file whose matches were prohibited has nothing left to carry over once their files get an owner; migration then finds no match and says to delete it.
 
-**Status.** Proposed, 2026-11-20 (A2d, #312).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (A2d, #312).
 
 ### D-116 Comparing JSON edits in the adoption proof
 
@@ -1120,7 +1120,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A different spelling of an unchanged number outside the named fields also withholds the edit. In a file read as JSON, equivalent string escapes and object member reordering are accepted.
 
-**Status.** Proposed, 2026-11-20 (A2e, #314 item 7).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (A2e, #314 item 7).
 
 ### D-117 Preserve the scan scope when a legacy baseline blocks a write
 
@@ -1128,7 +1128,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Reason.** Migration matches old entries against the selected workflows. Omitting the original scope can compare the entries against a different repository or configuration.
 
-**Status.** Proposed, 2026-11-20 (A1f, #308 review follow-up).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (A1f, #308 review follow-up).
 
 ### D-118 Legacy migration advice in text reports
 
@@ -1136,7 +1136,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Reason.** Migration requires a complete scan. A reader acting on the to-do list needs to identify the original baseline even when its name prevents a copyable command.
 
-**Status.** Proposed, 2026-11-20 (A1g, #315 items 1 and 2).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (A1g, #315 items 1 and 2).
 
 ### D-119 Identify the repository input when a preview refuses it
 
@@ -1146,7 +1146,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A baseline or configuration the check reads and cannot use still refuses the preview (exit 2). The repository's own configuration, which is read beside an explicit `--config` only to find Jenkins files, holds back each candidate instead, and the preview lists it among the changes it could not make automatically (exit 0). The top folder is shown as `.`, also when a folder is given as `--config` or `--baseline`, and a refusal that the proposed edit itself causes begins "after the proposed edit:", because the user's file is unchanged (both added by the review, `review-gpt` #320). Findings, edits and gate decisions keep their existing meanings.
 
-**Status.** Proposed, 2026-11-20 (slice A2f, #314 item 9).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (slice A2f, #314 item 9).
 
 ### D-125 What an earlier step writes to `GITHUB_ENV` and an `env` can change what a check runs
 
@@ -1156,7 +1156,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A release job that writes such a name to `GITHUB_ENV` before its check, writes the file in a form the checker does not read, or sets such a name in an `env`, gets OBAAF-GHA-016 `cannot-tell` (high) where it had none, an effect job's checks stop counting, which gives OBAAF-GHA-021, and a provenance command run after it no longer counts as signing, which can give OBAAF-GHA-017; each can turn a passing gate red. A write the checker reads with a harmless name (`echo "VERSION=$V" >> "$GITHUB_ENV"`) changes nothing. Writing a step's outputs from code in another language, or giving a tool the output file's path (`--github-output="$GITHUB_OUTPUT"`), before the check also counts, because the checker cannot follow that path. Moving such a step after the check, or into a job the release job needs (the file is per job), keeps the check counted. Not read: a name or a path a script assembles otherwise (`eval`, a glob over the runner's temporary folder, a value read from another program or from `/proc`), what a program or action an earlier step runs writes to the runner's files, a line break that a variable, a file or a command's output puts in a value at run time (an outsider's text there is also #232), a runner that sets `ACTIONS_ALLOW_UNSECURE_COMMANDS` for every job, and the settings a check's program reads for itself (`GIT_...`, `GH_...`, `SSL_CERT_FILE`).
 
-**Status.** Proposed, 2026-11-20 (slice 2d.13).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (slice 2d.13).
 
 ### D-126 OBAAF-GHA-006 for a job that may publish, and image pushes the release lane reads
 
@@ -1166,7 +1166,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** Such a job gets a new medium finding, and a job that pushes an image those ways is now a release job with OBAAF-GHA-006, 014, 015, 016 and 017, and OBAAF-GHA-008 and 018 at high; either can turn a passing gate red. `cache-mode: none` or `write-only` on the job, or on the jobs it needs that restore, clears the new case, and so does moving the credential to a job that restores no cache. A job that may publish but restores no cache gets nothing (the low `no-cache-mode` stays for release jobs). Two of zizmor's test cases are now answered (`cache-poisoning.yml`, and `issue-343-repro.yml`, a tag-push job given `contents: write`), and their entries in `tests/parity/zizmor.yaml` are gone. Not counted: permissions nobody declares (OBAAF-GHA-009 reports them), `contents: write` on other events, a credential whose name matches no pattern, a credential passed under another name to a workflow of the repository that restores a cache (that workflow is read with the names its jobs use), what a bake file says, options written before `buildx` or `imagetools`, an output option more than 8,192 characters into its command or after an unquoted `;`, `&` or `|` in it, and image pushes by other tools.
 
-**Status.** Proposed, 2026-11-20 (slice 2d.14).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (slice 2d.14).
 
 ### D-127 Which Jenkins steps share a workspace
 
@@ -1176,7 +1176,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A Jenkinsfile with an agent stage and a push, a publish or a `build` step in another stage of the same agent, or in the pipeline's `post`, gets a high OBAAF-JEN-003 where it had none. A push before the agent in a kept workspace gets a medium one. Either can turn a passing gate red. A pipeline that keeps them on separate labels or pods, and moves the agent's output only as an artifact applied by a separate job, gets none. Two stages under one label get an unknown, not a pass. OBAAF-JEN-006 can report a docker agent's mount of a system folder, a device, a `CAP_`-named capability or a JSON pod spec's privileged container that it did not, and stops reporting `--privileged=false`. OBAAF-JEN-007 stops reporting an agent in a container started with `--network none` and nothing that reaches the host. Not decided by the file: which machines carry which labels, what a controller-defined pod template mounts, what an agent leaves outside the workspace, matrix cells kept apart only by `when` conditions (read as one workspace), values that carry an agent's output, and commands the checker does not recognise (#330).
 
-**Status.** Proposed, 2026-11-20 (slice 2d.2j).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-20 (slice 2d.2j).
 
 ### D-128 An approval must stop the publish
 
@@ -1186,7 +1186,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A Jenkinsfile with an approval that can be skipped, caught or bypassed through a failure path, or a second publishing stage with no approval, gets a medium OBAAF-JEN-005 finding where it had none; so does a blank, `null` or `authenticated` submitter. A `submitter` given through a map variable or spread becomes "cannot tell" instead of a finding. A helper's credentials now reach a trailing closure's steps, which can add OBAAF-JEN-001 and 013 findings. Checks under `&&`, `||`, `?:`, in `.each`-style closures, in the other branch or case of a condition, under the opposite condition, or in a `catch` that rethrows only conditionally stop counting for OBAAF-JEN-011 and 012, which can add high findings there. Conditions with the same text still count as one where a value changes between them. Fail-closed limits: an input whose abort sets a flag the publish tests, one in a `finally` block, and one inside `catchError(catchInterruptions: false)` do not count. Not changed: which steps publish.
 
-**Status.** Proposed, 2026-11-21 (slice 2d.2l).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-21 (slice 2d.2l).
 
 ### D-129 Another job's artifacts need a check that stops the publish
 
@@ -1196,7 +1196,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A Jenkinsfile that copies by a moving reference in one of the newly read forms, or whose check is an `echo`, a comment, after the publish, in a parallel branch, under another condition, swallowed, or followed by a publish in a failure path, gets a high or medium OBAAF-JEN-010 finding where it had none. One whose check is a `sha256sum -c` or `cosign verify` gets "cannot tell" instead of a pass. A copy in an uncalled method or closure gets "cannot tell" instead of a finding, and a map argument with a fixed selector, a check in a later stage before the publish, and a selector map or variable the file fixes no longer give a finding or "cannot tell". Severity moves for two shapes (a publish only before the copy in its stage is now medium, and one in the stage's `post` block high), so a v0.1 baseline entry for either matches nothing. Fail-closed limits: stages with one name, or computed names, are one stage for the severity; two `retry` blocks on one line, or one helper's `retry` used twice, are one block; an `echo` of an artifact URL counts as a fetch; a spread map that is written beside the call is not read; a `build` result used in any other place (`b.getResult()`) is "cannot tell"; `if (sh(script: 'obaaf verify release', returnStatus: true) != 0) { error ... }` and a `#!` script without `-e` whose last line is the check are not counted as checks; a condition on a parameter compared with text (`params.ENV == 'prod'`) is not shared with a copy, since a condition's label does not tell text from a name; a loop that publishes, copies and then checks counts the publish as unchecked; and a value put into a script from a variable can add a finding the shell's own value would not give. Not handled: `params` reassigned in the file. OBAAF's own `templates/jenkins/obaaf-release-publish.Jenkinsfile` now gets "cannot tell" for OBAAF-JEN-010 where it passed: its copy takes a build number computed at run time, and both its checks run `obaaf` after `export PATH=...`, at which the reader of slice 2d.2e stops (#344). Not read: other download tools and object-store keys, URLs built in other ways, `bat` and `powershell` checks, and whether the check covers the copied files. Conditions are compared by their structure, as for OBAAF-JEN-011 and 012, so two `if (go)` tests count as one condition even when `go` changes between them, and code after a `return` (conditional or not) is not treated as conditional.
 
-**Status.** Proposed, 2026-11-21 (slice 2d.2m).
+**Status.** Accepted, 2026-11-21. Proposed 2026-11-21 (slice 2d.2m).
 
 ### D-130 A provenance check must stop the publish, as the shell runs it
 
@@ -1206,4 +1206,4 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Consequence.** A pipeline that passed can now get "cannot tell" (most often: Groovy values in the script, `set -Eeuo pipefail` or `export PATH=` before the check, a wrapper, a Windows step) or a finding (a check in a closure nothing calls, `--pre-approval` alone, a publish in the pipeline's post block). A finding can become "cannot tell". OBAAF's own Jenkins release template is "cannot tell" until #344 is decided. The reader's limits are #347.
 
-**Status.** Proposed, 2026-11-21 (slice 2d.2n).
+**Status.** Accepted, 2026-11-21. With D-129 and this entry, the maintainer made #344 a launch item: OBAAF's own Jenkins release template, which is "cannot tell" under OBAAF-JEN-010 and OBAAF-JEN-012, is fixed before the build goes to its first users. Proposed 2026-11-21 (slice 2d.2n).
