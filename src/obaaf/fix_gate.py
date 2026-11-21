@@ -27,6 +27,11 @@ def _gate_workflow(template, path, level):
 
 
 def _candidate(original, path, level):
+    crlf = b"\r\n" in original
+    if crlf:
+        if original.count(b"\r\n") != original.count(b"\n"):
+            return None
+        original = original.replace(b"\r\n", b"\n")
     template = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
     desired = _gate_workflow(template, path, level)
     names = tuple(init_scanners.SCANNERS)
@@ -36,11 +41,10 @@ def _candidate(original, path, level):
             if not original.endswith(tail):
                 continue
             body = original.removesuffix(tail)
-            if body in (template, desired) or sha256(body).hexdigest() == LEGACY_DIGEST:
-                return desired + tail
-            # A gate previously set by this command may change thresholds under the same policy.
-            if any(body == _gate_workflow(template, path, old) for old in ("low", "medium", "high")):
-                return desired + tail
+            if (body in (template, desired) or sha256(body).hexdigest() == LEGACY_DIGEST or
+                    any(body == _gate_workflow(template, path, old) for old in ("low", "medium", "high"))):
+                updated = desired + tail
+                return updated.replace(b"\n", b"\r\n") if crlf else updated
     return None
 
 
@@ -64,8 +68,9 @@ def run(args, root, options, lock, show_diff):
     updated = _candidate(original, path, args.gate)
     if updated is None:
         print(f"Review your CI workflow by hand. Use --fail-on {args.gate} in its obaaf check command. "
-              f"Read the configuration and --baseline {one_line(shlex.quote(str(path)))} from the target commit "
-              "on pull requests. If that commit has no baseline, omit --baseline.")
+              f"On pull requests, read the target configuration and compare {one_line(shlex.quote(str(path)))} "
+              "in both commits. Use only identical baseline entries, up to the count present in both. "
+              "If either file is missing, omit --baseline. On pushes, use the pushed policy.")
         return 0
     if options.baseline is not None:
         if not (root / path).is_file():
@@ -96,5 +101,6 @@ def run(args, root, options, lock, show_diff):
             print(one_line(warning), file=sys.stderr)
         print("Applied the displayed gate change.")
     else:
-        print("Run again with --apply to enable the displayed gate.")
+        from obaaf.fix import apply_preview_guidance
+        print(apply_preview_guidance())
     return 0
