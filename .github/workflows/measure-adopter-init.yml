@@ -1,4 +1,4 @@
-name: Measure init discovery on public snapshots
+name: Validate the init discovery plan update
 
 on:
   push:
@@ -8,95 +8,80 @@ permissions:
   contents: read
 
 jobs:
-  measure:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
     steps:
-      - name: Check out the merged checker
+      - name: Check out the plan update
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ab354f8e7746901873773820e5d661327fc4eafa
+          ref: 4186c30bd95cdce3210fef3f188357a6010c4c46
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Compare discovery with the reviewed init checker
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Prepare the checker and Git-free temporary storage
         shell: bash
         run: |
           set -euo pipefail
-          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-init-84.XXXXXX")"
-          cd "$TMPDIR"
-          git init -q previous
-          git -C previous fetch -q --depth=1 https://github.com/Obaaf/OBAAF.git b4445d14ae52f34eaaae357743444313b19ca50b
-          git -C previous checkout -q --detach FETCH_HEAD
-          test "$(git -C previous rev-parse HEAD)" = b4445d14ae52f34eaaae357743444313b19ca50b
-          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = ab354f8e7746901873773820e5d661327fc4eafa
-          python -m venv env
-          env/bin/python -m pip install --disable-pip-version-check --constraint "$GITHUB_WORKSPACE/actions/setup-obaaf/constraints.txt" "$GITHUB_WORKSPACE"
-
-          git init -q adopter
-          git -C adopter remote add origin https://github.com/Expectrail/Expectrail.git
-          git -C adopter sparse-checkout set .github
-          for revision in 6bc5dce7b02ca82a372f8e0571572ffb3e9cca59 665f15e61e8a654961d1bf314f208ce14af96ee8 7d86d92725a3258f6c681bc87a10288d507daea1; do
-            git -C adopter fetch -q --depth=1 --filter=blob:none origin "$revision"
-            git -C adopter checkout -q --detach "$revision"
-            test "$(git -C adopter rev-parse HEAD)" = "$revision"
-            mkdir "$revision"
-            cp -a adopter/.github "$revision/"
-          done
-
-          env/bin/python - <<'PY'
-          import json
+          test "$(git rev-parse HEAD)" = 4186c30bd95cdce3210fef3f188357a6010c4c46
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive ab354f8e7746901873773820e5d661327fc4eafa src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git 7d86d92725a3258f6c681bc87a10288d507daea1
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = 7d86d92725a3258f6c681bc87a10288d507daea1
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
           import os
-          import shutil
           import subprocess
           import sys
-          import tempfile
           from pathlib import Path
 
-          import yaml
-
-          public_checkout = Path(os.environ["GITHUB_WORKSPACE"])
-          workspace = Path.cwd()
-          config = Path(".github/obaaf.yml")
-          snapshots = {
-              "OBAAF@ab354f8e7746901873773820e5d661327fc4eafa": public_checkout,
-              **{f"Expectrail@{sha}": workspace / sha for sha in ["6bc5dce7b02ca82a372f8e0571572ffb3e9cca59","665f15e61e8a654961d1bf314f208ce14af96ee8","7d86d92725a3258f6c681bc87a10288d507daea1"]},
-          }
-          source_trees = {
-              "b4445d14ae52f34eaaae357743444313b19ca50b": workspace / "previous" / "src",
-              "ab354f8e7746901873773820e5d661327fc4eafa": public_checkout / "src",
-          }
-          for snapshot, source in snapshots.items():
-              original = yaml.safe_load((source / config).read_bytes()) or {}
-              declared = {name for name, lane in original.get("lanes", {}).items() if lane == "agent"}
-              proposed_sets = []
-              for checker, src in source_trees.items():
-                  with tempfile.TemporaryDirectory(dir=workspace) as tmp:
-                      target = Path(tmp)
-                      shutil.copytree(source / ".github", target / ".github", symlinks=True)
-                      (target / config).unlink()
-                      (target / ".github/workflows/obaaf-pipeline-check.yml").unlink(missing_ok=True)
-                      env = {**os.environ, "PYTHONPATH": str(src)}
-                      # Use the installed CLI entry point with the selected reviewed source tree.
-                      module_path = subprocess.check_output(
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
                           [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
-                          env=env, cwd=workspace, text=True,
+                          env=env, text=True,
                       ).strip()
-                      assert Path(module_path).resolve().is_relative_to(src.resolve())
-                      result = subprocess.run(
-                          [str(Path(sys.executable).with_name("obaaf")), "init", str(target), "--apply"],
-                          cwd=workspace, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                      )
-                      if result.returncode:
-                          raise SystemExit(f"{snapshot} checker={checker} init exit={result.returncode}")
-                      proposal = yaml.safe_load((target / config).read_bytes())
-                      proposed = {name for name, lane in proposal["lanes"].items() if lane == "agent"}
-                      proposed_sets.append(proposed)
-                      print("MEASURE " + json.dumps(dict(
-                          snapshot=snapshot, checker=checker, declared=len(declared),
-                          found=len(proposed & declared), missed=len(declared - proposed),
-                          additional=len(proposed - declared), proposed=len(proposed),
-                      )), flush=True)
-              print("COMPARE " + json.dumps(dict(snapshot=snapshot,
-                  added=len(proposed_sets[1] - proposed_sets[0]),
-                  removed=len(proposed_sets[0] - proposed_sets[1]))), flush=True)
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  assert observations[0] == observations[1], (level, mode, "outputs differ")
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Matched {path.name} {' '.join(mode)} exit={expected}", flush=True)
           PY
