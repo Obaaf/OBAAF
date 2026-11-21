@@ -27,7 +27,7 @@ jobs:
         with:
           persist-credentials: false   # the action refuses a workspace where a checkout kept its token
       - id: agent
-        uses: Obaaf/OBAAF/actions/egress@<commit> # pin it to a commit
+        uses: Obaaf/OBAAF/actions/egress@80db1e68769165c9ecf24e553254fa35d6e168d5
         env:
           REVIEW_TARGET: ${{ github.event.pull_request.number }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -168,7 +168,7 @@ Two findings about AWF on the way, neither a weakness in the confinement: with t
 
 `obaaf check` reads this action in an agent job and reports what it established under OBAAF-GHA-020; the full list is in [the checker's guide](checker-configuration.md#egress-controls). In short, the finding is cleared only when, for every step that uses the action:
 
-- the action is used from a commit OBAAF lists as released. **None is listed yet**, so today the best the action gets is "cannot tell". A maintainer lists a commit once the escape tests have passed on it (`egress_action_releases` in `src/obaaf/data/detection.yaml`). A copy in your repository (`./actions/egress`) is not taken for the action;
+- the action is used from a commit OBAAF lists as released. The development checker lists `80db1e68769165c9ecf24e553254fa35d6e168d5`. All seven jobs passed on this commit in [hosted run 44430448792](https://github.com/Obaaf/OBAAF/actions/runs/44430448792). A maintainer lists a commit once the escape tests have passed on it (`egress_action_releases` in `src/obaaf/data/detection.yaml`). A copy in your repository (`./actions/egress`) is not taken for the action;
 - the allow-list is written out, with no expression, and has no name that is, or has under it, a public suffix from the public suffix list, private section included (names under which anyone can register a host, such as `github.io` or `workers.dev`, and `amazonaws.com`, which has `s3.amazonaws.com` under it). OBAAF ships the list as `src/obaaf/data/public_suffix_list.dat`;
 - the job runs on GitHub-hosted `ubuntu-24.04`, not in a container;
 - the agent is the action's command. The checker recognises few agents by name, so a job could wrap `true` and run its agent in an ordinary step; it reads where the agent runs from where credentials go. No other step, and no `env` of the job or the workflow, may be given a secret or `github.token`; the job may not be able to request OIDC tokens or give its token the `models` permission, because any step can use those without being handed anything; and no other step may run an agent the checker recognises. A step before the action that only installs an agent's CLI globally (`sudo npm install -g @anthropic-ai/claude-code`, then `claude --version`) is not taken for running it (slice 2c.8); the exact forms are in [the checker's guide](checker-configuration.md#egress-controls). One that names the package in a form the checker cannot vouch for is "cannot tell", and one that also runs an agent is an agent outside. A job in which no credential reaches the command or AWF's API proxy is "cannot tell", unless the checker recognises the agent in the action's `run` input or a script it runs: an agent that needs no key could be anywhere;

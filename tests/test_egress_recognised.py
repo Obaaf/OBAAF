@@ -23,13 +23,14 @@ from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED
 
 SHA = "b" * 40
 RELEASED = "c" * 40
+REVIEWED_PIN = "80db1e68769165c9ecf24e553254fa35d6e168d5"
 HR_2_22_0 = "351661ca32ac09a36dc5ee2d536e3128f2a3c8ed"     # v2.22.0, as tagged on 2026-11-13
 HR_2_15_1 = "58077d3c7e43986b6b15fba718e8ea69e387dfcc"     # v2.15.1
 FIREWALL = "mode: enforce\nallow:\n  - api.example.com\n"
 
 
 def catalog(releases=(RELEASED,)):
-    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists (none ship today)."""
+    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists for this test."""
     cat = checker.load()
     detection = copy.deepcopy(cat.detection)
     detection["egress_action_releases"] = list(releases)
@@ -258,7 +259,7 @@ class EgressActionTest(unittest.TestCase):
         return egress(run_check(workflow(steps, **kw), files=files, config=config, cat=cat))
 
     def test_the_action_at_a_released_commit_with_the_agent_inside_clears_it(self):
-        f = self.check(CHECKOUT + "\n" + action())
+        f = self.check(CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual((f.kind, verdict(f), f.state), ("egress-action", VERIFIED, "fixed"))
         self.assertIn("DNS query", detail(f))
         self.assertIn("api.example.com", detail(f))
@@ -268,10 +269,15 @@ class EgressActionTest(unittest.TestCase):
         result = run_check(workflow(CHECKOUT + "\n" + action()), config={"lanes": {}})
         self.assertEqual(verdict(egress(result)), VERIFIED)
 
-    def test_today_no_commit_is_listed_so_it_is_cannot_tell(self):
-        f = self.check(action(), cat=checker.load())
+    def test_an_empty_catalog_cannot_verify_the_egress_action(self):
+        f = self.check(action(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertIn("none listed", detail(f))
+
+    def test_the_shipped_catalog_rejects_an_unknown_pin(self):
+        f = self.check(action(ref=SHA), cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", detail(f))
 
     def test_a_pin_that_is_not_a_listed_commit_is_cannot_tell(self):
         for ref in (SHA, "v1", "main", RELEASED.upper()):
@@ -962,8 +968,8 @@ class ReleaseDataTest(unittest.TestCase):
                 self.assertRegex(sha, r"^[0-9a-f]{40}$")
                 self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
-    def test_no_commit_of_the_egress_action_is_listed_yet(self):
-        self.assertEqual(checker.load().detection["egress_action_releases"], [])
+    def test_only_the_reviewed_commit_of_the_egress_action_is_listed(self):
+        self.assertEqual(checker.load().detection["egress_action_releases"], [REVIEWED_PIN])
 
     def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
         """Only a commit at or after the floor may be listed: the checker reads the action's
@@ -1134,7 +1140,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         return key_control(run_check(workflow(steps, **kw), cat=cat, config=config))
 
     def test_a_model_key_given_to_the_proxy_at_a_listed_commit_is_out_of_reach(self):
-        control = self.key(CHECKOUT + "\n" + keyed())
+        control = self.key(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual(control.verdict, VERIFIED)
         self.assertIn("the command can use a key the proxy holds and cannot read it", control.detail)
         self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy", control.detail)
@@ -1144,8 +1150,13 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("what an accepted install's own scripts do", control.detail)
         self.assertIn("make the provider act for it", control.detail)
 
+    def test_the_shipped_catalog_cannot_verify_key_handling_at_an_unknown_pin(self):
+        control = self.key(keyed(ref=SHA), cat=checker.load())
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", control.detail)
+
     def test_no_listed_commit_or_a_tag_is_cannot_tell(self):
-        control = self.key(keyed(), cat=checker.load())
+        control = self.key(keyed(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(control.verdict, CANNOT_TELL)
         self.assertIn("not a commit OBAAF lists as released (none listed)", control.detail)
         self.assertIn("goes to AWF's API proxy", control.detail)     # where the key goes, whatever the verdict
