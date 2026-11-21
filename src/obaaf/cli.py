@@ -116,6 +116,7 @@ def cmd_check(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    evidence = None
     if args.settings is not None:
         from obaaf.audit.cli import _origin
         from obaaf.audit.github import plain
@@ -130,24 +131,16 @@ def cmd_check(args) -> int:
         except SnapshotError as exc:
             print(f"error: --settings: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        if target.is_file() or args.lanes:
-            evidence.limitations += ("this scan does not check snapshot code ownership; run obaaf check "
-                                     "on the repository directory without --lanes",)
-        elif not (Path(args.settings).resolve().is_relative_to(base.resolve())
-                  and checker._as_found(Path(args.settings), base.resolve(), strict=True)):
-            # Inside by both tests: where the file is, and the path OBAAF-REPO-001 checks for an owner.
-            # A link from outside to a file inside passes the first and is never checked for an owner.
-            evidence.limitations += ("the snapshot is outside the checked repository; use a repository snapshot "
-                                     "so its code ownership can be checked",)
+        diagnostic = evidence.for_scan(base, not target.is_file() and not args.lanes)
         print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
               file=sys.stderr)
-        reasons = list(evidence.limitations)
+        reasons = list(diagnostic.limitations)
         if not config.protected_secrets:
             reasons.extend(evidence.inventory_limitations())
         for reason in reasons:
             print(f"Settings evidence: {reason}.", file=sys.stderr)
         for name, environment in sorted(config.protected_secrets.items()):
-            assessment = evidence.assess(name, environment or "")
+            assessment = diagnostic.assess(name, environment or "")
             print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
                   file=sys.stderr)
     if args.expiry_warning < 0:
@@ -238,8 +231,9 @@ def cmd_check(args) -> int:
     # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
     # baseline being written: the gate will read it with --baseline, and --write-baseline ends as that
     # gate would (slice 3.2b).
-    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline, args.settings) if p]
-    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
+    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files,
+                           settings=evidence)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
     result.settings_path = args.settings or ""
