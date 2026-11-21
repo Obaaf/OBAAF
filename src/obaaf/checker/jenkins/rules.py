@@ -107,8 +107,11 @@ def _asks_help(words) -> bool:
 
 # Flagship slice 2d.2o: the programs whose commands OBAAF-JEN-011 counts as a check that should stop a publish, read
 # from a command's words rather than searched for in the script's text.
-_CHECK_PROGRAM = re.compile(r"(?:\S*[/\\])?(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shasum|b2sum"
-                            r"|gpgv?2?)(?:\.exe)?['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
+_CHECK_NAMES = r"(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shasum|b2sum|gpgv?2?)(?:\.exe)?"
+# Searched for in a script: a program's name, wherever it is (a prefilter, linear in the text's length).
+_CHECK_PROGRAM = re.compile(_CHECK_NAMES + r"['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
+# Matched against one word: the name, after any path.
+_CHECK_WORD = re.compile(r"(?:.*[/\\])?" + _CHECK_NAMES + r"['\"]?", re.I | re.S)
 _SUM_PROGRAMS = frozenset({"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shasum", "b2sum"})
 
 
@@ -137,7 +140,8 @@ def check_words(words: list[str]) -> str | None:
 
 # What can change how OBAAF-JEN-011 reads the lines after it, or holds a command it compares (flagship slice 2d.2o). A
 # line with a quote may open a string that runs over several lines, so it is read too.
-_STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return)\b"
+_STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return|exec|shopt"
+                          r"|source)\b|(^|[;&|]\s*)\.\s"
                           r"|[(){}'\"`\\]|<<|\$\?|\$\{\?\}|\$!|PIPESTATUS")
 
 
@@ -161,29 +165,43 @@ _CHECK_WRAPPERS = frozenset({"sudo", "env", "timeout", "nice", "nohup", "time", 
 
 def _check_at(command: list[str]) -> tuple[str | None, int]:
     """Whether a command runs a check, and where its program is: ("check" or "path", index) when it is the command's
-    name or follows wrapper words and their options and assignments; ("unread", -1) when a check's program appears
-    later in its words (`uv run obaaf verify ...`, `docker run img cosign verify ...`, `bash -c "cd d && obaaf ..."`),
-    where what runs it is not read; (None, -1) when it only prints the name (`echo`, `printf`, `:`), names the program
-    without its check (`apt-get install gpgv`), or asks for help. Linear in the command's length."""
+    name or follows wrapper words and their options and assignments; ("unread", -1) when a program that runs another
+    command runs it (`uv run obaaf verify ...`, `docker run img cosign verify ...`, `ssh host cosign verify ...`,
+    `kubectl exec pod -- ...`), or a quoted string given to `-c` or to `ssh` or `eval` holds it (`bash -c "cd d &&
+    obaaf ..."`), where what runs it is not read; (None, -1) when it only prints the name (`echo`, `printf`, `:`,
+    `command -v`), names the program as an argument (`apt-get install gpgv`, `git commit -m "cosign verify ok"`), or
+    asks for help. Linear in the command's length."""
     if not command or command[0] in ("echo", "printf", ":"):
         return None, -1
-    prefix = True
+    if command[0] == "command" and any(w in ("-v", "-V") for w in command[1:3]):
+        return None, -1
+    prefix, runs = True, command[0].rsplit("/", 1)[-1] in _CHECK_RUNNERS | _CHECK_WRAPPERS
     for k, word in enumerate(command):
-        if k == 0 or _CHECK_PROGRAM.fullmatch(word):
+        if k == 0 or _CHECK_WORD.fullmatch(word):
             found = check_words(command[k:k + 64])
             if found:
                 if _asks_help(command[k:k + 64]):
                     return None, -1
-                return (found, k) if prefix else ("unread", -1)
+                if prefix:
+                    return found, k
+                return ("unread", -1) if runs else (None, -1)
         if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
                            or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
             prefix = False
-    for w in command[1:]:
-        if " " in w and _CHECK_PROGRAM.search(w):
+        if word in ("run", "exec", "--", "-c"):
+            runs = True
+    for j, w in enumerate(command[1:], 1):
+        if " " in w and _CHECK_PROGRAM.search(w) and (command[j - 1] == "-c" or command[0] in ("ssh", "eval")):
             words = re.findall(r"[^\s;&|()`'\"]+", w)
-            if any(_CHECK_PROGRAM.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
+            if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
                 return "unread", -1
     return None, -1
+
+
+# Programs that run the command given in their other words (flagship slice 2d.2o).
+_CHECK_RUNNERS = frozenset({"sudo", "doas", "su", "ssh", "eval", "xargs", "parallel", "retry", "watch", "flock", "script",
+                      "nix-shell", "devbox", "pixi", "npx", "uvx", "pipx", "chroot", "unshare", "nsenter", "bwrap",
+                      "firejail", "strace", "ltrace", "valgrind", "faketime", "setsid", "runuser", "with-contenv"})
 
 
 def _names_check(command: list[str]) -> str | None:
@@ -3594,8 +3612,17 @@ class JenkinsRules:
         quote, no `set`, `trap`, compound word, bracket, here-document, `exit`, `wait`, `$?`, `$!` or `PIPESTATUS` is
         one placeholder command: only that it holds a command matters (a 20,000-line script is not split word by
         word)."""
-        out = []
-        for raw in text.replace("\\\n", "").split("\n"):
+        out, physical, pending = [], [], ""
+        for part in text.split("\n"):
+            # a backslash at the end of a line joins the next, but not at the end of a comment
+            if part.endswith("\\") and _strip_comment(pending + part).endswith("\\"):
+                pending += part[:-1]
+                continue
+            physical.append(pending + part)
+            pending = ""
+        if pending:
+            physical.append(pending)
+        for raw in physical:
             if not _STATE_WORDS.search(raw) and not _CHECK_PROGRAM.search(raw):
                 if raw.strip() and not raw.lstrip().startswith("#"):
                     out.append((raw, [(["…"], None)]))
@@ -3613,11 +3640,17 @@ class JenkinsRules:
         read = self._sh_commands(text) if name == "sh" else None
         other = name == "sh" and read is None
         lines = None
-        if other or name not in ("sh", "bat"):
+        if other or name != "sh":
             # another #! program, powershell or pwsh: its text is not read as a shell's
             words = re.findall(r"[^\s;&|()`'\",\[\]]+", text)
-            if not any(_CHECK_PROGRAM.fullmatch(w) and check_words(words[i:i + 64]) for i, w in enumerate(words)):
+            if not any(_CHECK_WORD.fullmatch(w) and check_words(words[i:i + 64]) for i, w in enumerate(words)):
                 return None
+            # its words name a check, but they may be a string it prints: whether it runs one is not known
+            if name == "bat":
+                lines = []
+            else:
+                return ("loose", f"a {name} step is not read, so whether it runs a check is not known" if not other
+                        else "the script names a #! program other than sh, bash or dash, which is not read")
         else:
             lines = self._lines_of(text)
             named = None
@@ -3641,9 +3674,9 @@ class JenkinsRules:
         if name == "bat":
             return self._bat_check(text)
         if name != "sh":
-            return ("unread", f"a {name} step is not read")
+            return ("loose", f"a {name} step is not read, so whether it runs a check is not known")
         if other:
-            return ("unread", "the script names a #! program other than sh, bash or dash")
+            return ("loose", "the script names a #! program other than sh, bash or dash, which is not read")
         if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
             return ("unread", "a .trim() may make the #! line the first")
         commands, _complete = read
@@ -3686,11 +3719,16 @@ class JenkinsRules:
         read."""
         lines = [line.strip() for line in text.replace("^\n", "").split("\n")]
         lines = [line for line in lines if line and not re.match(r"(?i)(@?rem\b|::)", line)]
-        at = next((k for k, line in enumerate(lines) if _CHECK_PROGRAM.search(line)
-                   and not re.match(r"(?i)@?echo\b", line)
-                   and any(check_words(line.split()[j:j + 64]) for j in range(min(len(line.split()), 4)))), None)
+        def leads(line: str) -> bool:
+            words = line.lstrip("@").split()
+            start = 1 if words and words[0].lower() == "call" else 0
+            return bool(check_words(words[start:start + 64]))
+        at = next((k for k, line in enumerate(lines) if _CHECK_PROGRAM.search(line) and leads(line)), None)
         if at is None:
-            return ("unread", "a bat step names a check in a form that is not read")
+            # named only inside another command (`if exist`, `title`, `echo`): whether it runs is not read
+            return ("loose", "the bat script names a check only in a form that is not read")
+        if any(re.search(r"(?i)\b(goto|exit\s+/b|call\s+:)", line) for line in lines[:at]):
+            return ("unread", "the bat script may leave or jump before the check, which is not read")
         if re.search(r"[|&]", lines[at]) or any(re.search(r"(?i)errorlevel|^@?exit(\s+/b)?\s*$", line)
                                                 for line in lines[at + 1:]):
             return ("unread", "the bat script tests or keeps the check's result, which is not read")
@@ -3714,19 +3752,20 @@ class JenkinsRules:
 
     @classmethod
     def _check_states(cls, lines: list, errexit: bool) -> list[tuple[tuple, str, str | None]]:
-        """Each check command of an `sh` script, in order, as (its words from the program on, or () when a wrapper or
-        a quoted string runs it; "check", "path" or "unread"; why the script decides its failure does not fail the
-        step, or None). Lines are read in order: errexit, pipefail and an EXIT or ERR trap set by `set` and `trap`
-        before the check count, after it they do not; once a line cannot be read, or a `set` or `trap` runs inside a
-        compound command, a function or a subshell, or a here-document starts, nothing later is decided; a check
-        inside a function definition is never decided. Only forms whose effect does not depend on anything else give a
-        reason; a later `$?`, `PIPESTATUS` or bare `exit` leaves errexit and pipes undecided, and `wait $!` a
-        background job. The reasons are worded as before slice 2d.2o where the older reading gave one (`set +e` written
-        so before the check first): a finding's message is its identity in a baseline. Linear in the script's size."""
+        """Each check command of an `sh` script, in order, as (its words from the program on, or () when a runner or a
+        quoted string runs it; "check", "path" or "unread"; why the script decides its failure does not fail the step,
+        or None). Lines are read in order: errexit and pipefail set by `set` before the check count, after it they do
+        not. Nothing later is decided once a line cannot be read, a here-document starts, a file is sourced, a trap on
+        EXIT or ERR is set to anything but `exit 0`, or a `set` or `trap` runs inside a compound command, a function
+        or a subshell; a check inside a function definition is never decided, and one inside a compound command only
+        by its own line (`|| true`, `&`, a pipe). Only forms whose effect does not depend on anything else give a
+        reason; a later `$?`, `PIPESTATUS` or bare `exit` leaves errexit and pipes undecided, `wait $!` a background
+        job, and `exec` ends the script with the check. The reasons are worded as before slice 2d.2o, in its order
+        (`set +e` written so before the check, then `||` later on the line or `&` at its end, then a pipe, then
+        errexit off): a finding's message is its identity in a baseline. Linear in the script's size."""
         how_off = "#!"
-        literal_off = pipefail = trap_zero = lost = in_func = False
-        depth = func_depth = 0
-        # What follows each line, computed once from the end
+        literal_off = pipefail = trap_zero = lost = in_func = func_opened = False
+        depth = func_depth = case_depth = 0
         n_lines = len(lines)
         later_cmd, later_kept, later_wait = [False] * (n_lines + 1), [False] * (n_lines + 1), [False] * (n_lines + 1)
         for n in range(n_lines - 1, -1, -1):
@@ -3741,55 +3780,92 @@ class JenkinsRules:
                 lost = True
                 continue
             words = [w for command, _op in line for w in command] + [op for _c, op in line if op]
-            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{", "("))
-            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}", ")"))
-            if not in_func and re.search(r"(^|[\s;&|])(function\s+[\w.-]+|[\w.-]+\s*\(\s*\))", raw):
-                in_func, func_depth = True, depth
+            case_depth += sum(1 for w in words if w == "case") - sum(1 for w in words if w == "esac")
+            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{")
+                          or (w == "(" and case_depth <= 0))
+            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}") or (w == ")" and case_depth <= 0))
+            defs = len(re.findall(r"\(\s*\)", raw)) if re.search(r"(^|[\s;&|])[\w.-]+\s*\(\s*\)", raw) else 0
+            opening, closing = max(opening - defs, 0), max(closing - defs, 0)     # `name()` opens nothing
+            if not in_func and (defs or re.search(r"(^|[\s;&|])function\s+[\w.-]+", raw)):
+                in_func, func_depth, func_opened = True, depth, False
             compound = depth > 0 or opening > 0 or closing > 0
             heredoc = "<<" in raw
-            # What follows each command on this line, from the end
             line_cmd, line_kept, line_wait = [False] * (len(line) + 1), [False] * (len(line) + 1), \
                 [False] * (len(line) + 1)
+            line_or = [False] * (len(line) + 1)
             for k in range(len(line) - 1, -1, -1):
                 kept, waits = cls._keeps(line[k][0])
                 line_cmd[k] = line_cmd[k + 1] or cls._counts(line[k][0])
                 line_kept[k] = line_kept[k + 1] or kept
                 line_wait[k] = line_wait[k + 1] or waits
+                line_or[k] = line_or[k + 1] or line[k][1] == "||"
+            ends_bg = next((op for _c, op in reversed(line) if op), None) == "&"
             for k, (command, op) in enumerate(line):
                 if not command:
                     continue
                 before = line[k - 1][1] if k else None
                 kind, at = _check_at(command)
                 if kind is None:
-                    if command[0] in ("set", "trap"):
+                    name = command[0]
+                    if name in ("source", ".") or heredoc:
+                        lost = True
+                    elif name == "set":
                         if compound or lost or in_func:
                             lost = True
-                        elif command[0] == "set":
-                            args = command[1:]
-                            if args[:1] == ["+e"]:
-                                literal_off = True
-                            for j, w in enumerate(args):
-                                if w == "--" or not re.fullmatch(r"[-+][a-zA-Z]+", w):
-                                    break
-                                on, nxt = w[0] == "-", (args[j + 1] if j + 1 < len(args) else "")
-                                if "e" in w or ("o" in w and nxt == "errexit"):
+                            continue
+                        args, j = command[1:], 0
+                        if args[:1] == ["+e"]:
+                            literal_off = True
+                        while j < len(args):
+                            w = args[j]
+                            if w in ("-o", "+o") and j + 1 < len(args):
+                                on, option = w == "-o", args[j + 1]
+                                if option == "errexit":
                                     errexit, how_off = on, (how_off if on else "set")
-                                if "o" in w and nxt == "pipefail":
+                                elif option == "pipefail":
                                     pipefail = on
-                        else:
-                            args = [w for w in command[1:] if w != "--"]
-                            if len(args) >= 2 and any(sig in ("EXIT", "ERR", "0") for sig in args[1:]):
-                                trap_zero = bool(re.search(r"(^|[;&|\s])exit\s+0\b", args[0]))
-                    if heredoc:
-                        lost = True
+                                j += 2
+                                continue
+                            if w == "--" or not re.fullmatch(r"[-+][a-zA-Z]+", w):
+                                break
+                            on = w[0] == "-"
+                            if "e" in w:
+                                errexit, how_off = on, (how_off if on else "set")
+                            if "o" in w and j + 1 < len(args):
+                                if args[j + 1] == "errexit":
+                                    errexit, how_off = on, (how_off if on else "set")
+                                elif args[j + 1] == "pipefail":
+                                    pipefail = on
+                                j += 2
+                                continue
+                            j += 1
+                    elif name == "shopt" and any(w.startswith("-") and "o" in w for w in command[1:]):
+                        # `shopt -so pipefail` is `set -o pipefail`; `-u` turns it off
+                        if compound or lost or in_func:
+                            lost = True
+                            continue
+                        on = not any(w.startswith("-") and "u" in w for w in command[1:])
+                        for w in command[1:]:
+                            if w == "errexit":
+                                errexit, how_off = on, (how_off if on else "set")
+                            elif w == "pipefail":
+                                pipefail = on
+                    elif name == "trap":
+                        args = [w for w in command[1:] if w != "--"]
+                        if len(args) >= 2 and any(sig in ("EXIT", "ERR", "0") for sig in args[1:]):
+                            if compound or in_func or not re.search(r"(^|[;&|\s])exit\s+0\b", args[0]):
+                                trap_zero, lost = False, lost or args[0] not in ("-", "")
+                            else:
+                                trap_zero = True
                     continue
                 key = tuple(command[at:at + 64]) if at >= 0 else ()
                 if lost or in_func or heredoc:
                     out.append((key, kind, None))
                     continue
                 after = line[k + 1][0] if k + 1 < len(line) else []
+                ends = command[0] == "exec"
                 kept = line_kept[k + 1] or later_kept[n + 1]
-                more = line_cmd[k + 1] or later_cmd[n + 1]
+                more = not ends and (line_cmd[k + 1] or later_cmd[n + 1])
                 waits = line_wait[k + 1] or later_wait[n + 1]
                 set_off = not errexit and how_off == "set"
                 or_true = op == "||" and bool(after) and (after[0] in ("true", ":", "echo", "printf", "/bin/true",
@@ -3798,23 +3874,26 @@ class JenkinsRules:
                 bg = op == "&" and not waits
                 pipe = op == "|" and not pipefail and not kept
                 guarded = before in ("if", "elif", "while", "until", "!", "&&", "||")
-                no_stop = not errexit and more and op not in ("&&", "||") and not kept and not guarded
+                no_stop = not errexit and more and op not in ("&&", "||") and not kept and not guarded and not compound
                 why = None
-                if trap_zero:
+                if or_true or bg or pipe or no_stop:
+                    if literal_off:
+                        why = "set +e before the command"
+                    elif line_or[k] or ends_bg:
+                        why = "|| or & after the command"
+                    elif pipe:
+                        why = "a pipe without pipefail: the step's status is the last command's"
+                    else:
+                        why = ("set +e before the command" if set_off and literal_off else
+                               "the sh script does not stop at a failed command, and more commands follow it")
+                elif trap_zero:
                     why = "a trap that runs `exit 0` on EXIT or ERR decides the script's status"
-                elif (or_true or bg or pipe or no_stop) and literal_off:
-                    why = "set +e before the command"
-                elif or_true or bg:
-                    why = "|| or & after the command"
-                elif pipe:
-                    why = "a pipe without pipefail: the step's status is the last command's"
-                elif no_stop:
-                    why = ("set +e before the command" if set_off and literal_off else
-                           "the sh script does not stop at a failed command, and more commands follow it")
                 out.append((key, kind, why))
             depth = max(depth + opening - closing, 0)
-            if in_func and depth <= func_depth:
-                in_func = False
+            if in_func:
+                func_opened = func_opened or opening > 0
+                if func_opened and depth <= func_depth:
+                    in_func = False
         return out
 
     def _failure_gates(self, check: Info, target: Info) -> bool:
@@ -3830,6 +3909,17 @@ class JenkinsRules:
         return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
 
     def _failure_reason(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
+        if kind == "loose":
+            # The step's text names a check in a language that is not read: it may be no check at all
+            return ("unknown", f"whether the step at line {check.line} runs a check that stops the publish at line "
+                               f"{target.line} is not known: {why}")
+        verdict = self._failure_place(check, kind, why, target)
+        if verdict and verdict[0] == "finding" and check.ctx.swallowed:
+            # worded as before slice 2d.2o, which named the catching block for every finding on such a check
+            return ("finding", f"its failure is ignored ({check.ctx.swallowed})")
+        return verdict
+
+    def _failure_place(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
         """("finding" or "unknown", why) when the check cannot stop `target`, or it is not known; None when it can. The
         place comes first, then the script, as before slice 2d.2o (a finding's message is its identity). A catching
         block may mark the build's result, so a publish that runs only on a result is "cannot tell" after it, unless
@@ -3934,11 +4024,16 @@ class JenkinsRules:
                 if concurrent(check.ctx, group[0].ctx):
                     candidates.append(group[0])
                     continue
-                at = bisect.bisect_left(indexes[key], check.index)
+                # the first publish after the check's step, and the check's own step when it publishes
+                at = bisect.bisect_right(indexes[key], check.index)
                 if at < len(group) and not (kind == "stops" and self._failure_gates(check, group[at])):
                     candidates.append(group[at])
+                same = bisect.bisect_left(indexes[key], check.index)
+                if same < len(group) and group[same] is check and kind != "stops":
+                    candidates.append(check)
             found = unknown = None
-            for target in sorted(candidates, key=lambda p: p.index):
+            # a later step first, as before slice 2d.2o; the check's own step only when nothing after it publishes
+            for target in sorted(candidates, key=lambda p: (p is check, p.index)):
                 verdict = self._failure_reason(check, kind, why, target)
                 if verdict is None:
                     continue
