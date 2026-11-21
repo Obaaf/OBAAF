@@ -1,8 +1,8 @@
 """The pages that tell a reader to run `obaaf templates install` give a command that works with the
 package from PyPI (flagship slice 3.9, issue #142).
 
-The package does not include the templates, so the command needs `--source`, the templates directory
-of a clone of OBAAF. Before this slice the README and the adoption guide printed a command without it,
+Release 0.3.0 does not include the templates, so its command needs `--source`, the templates
+directory of a clone of OBAAF. The development wheel also supports omitting this option. Before this slice the README and the adoption guide printed a command without it,
 which exits 2 after `pip install obaaf`. For each page this reads the clone it tells the reader to make,
 the commit it checks out and the install command, holds them to each other, and runs the command as
 printed, with this checkout's templates standing for the clone's and the placeholders filled in. Run
@@ -130,6 +130,69 @@ class TemplatesInstallAsDocumented(unittest.TestCase):
                     self.assertEqual(code, 0, f"{page}: {args}\n{err}")
                     text = (dest / ".github" / "workflows" / "obaaf-pipeline-check.yml").read_text(encoding="utf-8")
                     self.assertIn(f"/actions/setup-obaaf@{TEST_SHA}", text)
+
+
+class TemplateSourceSelection(unittest.TestCase):
+    def test_default_installs_pinned_workflows_and_points_to_the_actual_example(self):
+        source = ROOT / "templates/github-actions"
+        with TempDir() as dest:
+            code, out, err = run_cli("templates", "install", "--dest", dest, "--obaaf-repo", "example/obaaf",
+                                     "--obaaf-sha", TEST_SHA, "--repository", "studio/app")
+            self.assertEqual(code, 0, err)
+            self.assertIn(str(source / "CODEOWNERS.example"), out)
+            workflows = dest / ".github/workflows"
+            self.assertEqual({p.name for p in workflows.iterdir()}, {p.name for p in (source / "workflows").glob("*.yml")})
+            for installed in workflows.iterdir():
+                expected = (source / "workflows" / installed.name).read_text(encoding="utf-8")
+                expected = expected.replace("OBAAF_OWNER/obaaf", "example/obaaf").replace("OBAAF_OWNER", "example")
+                self.assertEqual(installed.read_text(encoding="utf-8"), expected.replace("0" * 40, TEST_SHA))
+            self.assertIn("repository: studio/app", (dest / ".github/obaaf-policy.yaml").read_text(encoding="utf-8"))
+            self.assertFalse((dest / ".github/CODEOWNERS").exists())
+            # From a checkout the templates are the repository's, not a bundled version's.
+            self.assertNotIn("These templates came with obaaf", out)
+
+    def test_bundled_templates_name_their_version(self):
+        from unittest import mock
+        import obaaf.cli as cli
+        with TempDir() as tmp:
+            package = tmp / "site-packages" / "obaaf"
+            bundled = package / "_github_templates"
+            (bundled / "workflows").mkdir(parents=True)
+            (bundled / "workflows/x.yml").write_text("name: X\n", encoding="utf-8")
+            with mock.patch.object(cli, "__file__", str(package / "cli.py")):
+                code, out, err = run_cli("templates", "install", "--dest", tmp / "studio", "--obaaf-repo",
+                                         "example/obaaf", "--obaaf-sha", TEST_SHA)
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"These templates came with obaaf {cli.__version__}.", out)
+            self.assertTrue((tmp / "studio/.github/workflows/x.yml").is_file())
+
+    def test_explicit_source_wins_and_force_is_required_for_existing_files(self):
+        with TempDir() as tmp:
+            source = tmp / "custom"
+            dest = tmp / "studio"
+            workflow = source / "workflows/example.yml"
+            target = dest / ".github/workflows/example.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Example\n", encoding="utf-8")
+            args = ("templates", "install", "--source", source, "--dest", dest, "--obaaf-repo", "example/obaaf",
+                    "--obaaf-sha", TEST_SHA)
+            code, out, err = run_cli(*args)
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("CODEOWNERS.example", out)
+            self.assertEqual(list(target.parent.iterdir()), [target])
+            example = source / "CODEOWNERS.example"
+            example.write_text("* @example/build\n", encoding="utf-8")
+            target.write_text("name: Local\n", encoding="utf-8")
+            code, out, err = run_cli(*args)
+            self.assertEqual(code, 0, err)
+            self.assertIn(str(example.resolve()), out)
+            self.assertEqual(target.read_text(encoding="utf-8"), "name: Local\n")
+            self.assertEqual(run_cli(*args, "--force")[0], 0)
+            self.assertEqual(target.read_bytes(), workflow.read_bytes())
+            workflow.parent.rename(source / "no-workflows")
+            code, _, err = run_cli(*args)
+            self.assertEqual(code, 2)
+            self.assertIn(str(source), err)
 
 
 if __name__ == "__main__":

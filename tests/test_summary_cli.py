@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 import json
+import os
 import shlex
 import unittest
 
@@ -72,6 +73,39 @@ class SummaryCliTest(unittest.TestCase):
             self.assertIn(settings.name, replay)
             self.assertTrue((folder / "accepted.json").is_file())
 
+    def test_check_suggestions_keep_a_literal_equals_target(self):
+        with TempDir() as parent:
+            root = parent / "=ls"
+            workflow = root / ".github/workflows/build.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            config = root / "team config.yml"
+            config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+            previous = os.getcwd()
+            try:
+                os.chdir(parent)
+                code, summary, err = run_cli("check", "=ls", "--config", config, "--fail-on", "never", "--summary")
+                self.assertEqual(code, 0, summary + err)
+                commands = [shlex.split(line) for line in summary.splitlines()
+                            if line.strip().startswith("obaaf check ")]
+                lane, = [args for args in commands if "--lanes" in args]
+                write, = [args for args in commands if "--write-baseline=NEW_BASELINE_FILE" in args]
+                for args in (lane, write):
+                    self.assertEqual(args[:3], ["obaaf", "check", "./=ls"])
+                code, lanes, err = run_cli(*lane[1:])
+                self.assertEqual(code, 0, err)
+                self.assertIn("build.yml#build", lanes)
+                destination = parent / "accepted.json"
+                replacements = {"--write-baseline=NEW_BASELINE_FILE": f"--write-baseline={destination}",
+                                "OWNER": "@example/build", "REASON": "Reviewed during local adoption",
+                                "YYYY-MM-DD": (date.today() + timedelta(days=7)).isoformat()}
+                code, output, err = run_cli(*(replacements.get(word, word) for word in write[1:]))
+                self.assertEqual(code, 0, output + err)
+                findings = json.loads(destination.read_text(encoding="utf-8"))["findings"]
+                self.assertIn("OBAAF-CFG-001", [entry["rule"] for entry in findings])
+            finally:
+                os.chdir(previous)
+
     def test_lane_advice_replays_from_finding_and_json_without_settings(self):
         with TempDir() as root:
             workflow = root / ".github/workflows/build.yml"
@@ -94,6 +128,8 @@ class SummaryCliTest(unittest.TestCase):
                     finding = next(f for f in data["findings"] if f["rule"] == "OBAAF-CFG-001")
                     group = next(g for g in data["todo"] if "configured path and target" in g["nextAction"])
                     self.assertIsNone(group["command"])
+                    for remedy in (fix, finding["fix"]):
+                        self.assertIn("Correct the declaration or delete it", remedy)
                     for advice in (fix, finding["fix"], group["nextAction"]):
                         if "\n" in name:
                             self.assertIn("original", advice)
@@ -104,7 +140,30 @@ class SummaryCliTest(unittest.TestCase):
                             self.assertEqual(command, ["obaaf", "check", str(root), f"--config={config}",
                                                        "--platform=github", f"--baseline={baseline}",
                                                        "--fail-on", "never", "--lanes"])
-                            self.assertEqual(run_cli(*command[1:])[0], 0)
+                            code, lanes, err = run_cli(*command[1:])
+                            self.assertEqual(code, 0, err)
+                            self.assertIn("build.yml#build", lanes)
+
+    def test_an_unprintable_scope_loses_only_the_command_in_a_fix(self):
+        """Review of #299: with a selected snapshot whose path cannot be printed on one line, the rule's
+        whole Fix text was replaced by the fallback sentence; only its command may be."""
+        with TempDir() as root:
+            folder = root / ".github"
+            (folder / "workflows").mkdir(parents=True)
+            (folder / "workflows/build.yml").write_text(
+                "on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            config = folder / "obaaf.yml"
+            config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+            settings = root / "line\nbreak.json"
+            settings.write_bytes((ROOT / ".github/obaaf-settings.json").read_bytes())
+            code, text, err = run_cli("check", root, "--settings", settings, "--platform", "github",
+                                      "--fail-on", "never")
+            self.assertEqual(code, 0, err)
+            fix, = [line for line in text.splitlines() if line.strip().startswith("Fix: Correct the declaration")]
+            self.assertIn("Correct the declaration or delete it", fix)
+            self.assertIn("original paths and options", fix)
+            self.assertNotIn("obaaf check", fix)
+            self.assertNotIn("line\nbreak", fix)
 
     def test_summary_keeps_scan_errors_visible(self):
         with TempDir() as root:
@@ -173,6 +232,55 @@ class SummaryCliTest(unittest.TestCase):
             code, short, _ = run_cli(*args, "--summary")
             self.assertEqual((1, 1), (full_code, code))
             self.assertIn("The baseline is in the old format (obaaf-baseline/v0.1)", short)
+
+    def test_printable_migration_hint_replays_in_both_views(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            name = "-old team baseline.json"
+            baseline = tmp / name
+            old.rename(baseline)
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                for display in ((), ("--summary",)):
+                    status, report, err = run_cli("check", repo, "--baseline=" + name, "--platform", "github",
+                                                  "--fail-on", "low", *display)
+                    self.assertEqual(status, 1, err)
+                    commands = {line.strip() for line in report.splitlines()
+                                if line.strip().startswith("obaaf baseline migrate ")}
+                    self.assertEqual(len(commands), 1)
+                    words = shlex.split(commands.pop())
+                    self.assertEqual(words[3:5], ["./" + name, str(repo)])
+                    self.assertIn("--platform=github", words)
+                decisions = {"OWNER": "@studio/build", "REASON": "Reviewed legacy findings",
+                             "YYYY-MM-DD": (date.today() + timedelta(days=30)).isoformat()}
+                status, out, err = run_cli(*(decisions.get(w, w) for w in words[1:]))
+                self.assertEqual(status, 0, out + err)
+                self.assertIn("obaaf-baseline/v0.2", baseline.read_text())
+            finally:
+                os.chdir(previous)
+
+    def test_unprintable_migration_arguments_get_manual_guidance_in_both_views(self):
+        from test_finding_lifecycle import fixture_repo
+
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            # With no matching acceptance there is no migration group in the to-do
+            # list; the lifecycle notice still has to explain what the user can do.
+            empty = tmp / "old\nempty.json"
+            empty.write_text('{"format":"obaaf-baseline/v0.1","findings":[]}')
+            config = tmp / "team\tpolicy.yml"
+            config.write_text("{}")
+            for options in (["--baseline", empty], ["--baseline", old, "--config", config]):
+                for display in ((), ("--summary",)):
+                    status, report, err = run_cli("check", repo, *options, "--fail-on", "low", *display)
+                    self.assertEqual(status, 1, err)
+                    self.assertIn("Run obaaf baseline migrate yourself with the baseline's original path", report)
+                    self.assertNotIn("The full report gives the command", report)
+                    self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ")
+                                         for line in report.splitlines()))
 
     def test_the_lanes_command_stands_on_its_own_line_and_runs(self):
         with TempDir() as root:
