@@ -2310,6 +2310,7 @@ class CheckResult:
     checked: str = ""                                        # the path the command line asked to check
     options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
     today: date | None = None                                # the day acceptances were judged against
+    whole_repository: bool = False                           # a repository root on every platform, not a part
 
     fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
     settings_path: str = ""  # only check accepts this explicit evidence input
@@ -2450,6 +2451,9 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
     jenkins_sought = is_repo and platform != "github" and target == root
+    # Only a check of the repository's own folder, on every platform, can tell that a baseline or
+    # ignore entry matches no finding at all (fix_paperwork._full_scope makes the same test).
+    whole_repository = is_repo and platform == "auto" and target == root
     errors: list[str] = []
     jenkins_notes: list[str] = []
     if jenkins_sought:
@@ -2586,7 +2590,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         cov.extend(jenkins_mod.coverage(result, findings))
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
-                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
+                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today,
+                       whole_repository=whole_repository)
 
 
 def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",

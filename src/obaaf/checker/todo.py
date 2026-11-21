@@ -12,6 +12,7 @@ from obaaf.checker import CheckResult, baseline
 from obaaf.checker.rules import ACCEPTED, FIXED
 from obaaf.checker.todo_acceptance import acceptance_cause, migration_command, migration_hint
 from obaaf.checker.todo_upgrade import previous_acceptances
+from obaaf.checker.workflow import one_line
 
 
 _LEVELS = ("high", "medium", "low", "info")
@@ -35,16 +36,40 @@ def tightening_command(result, request, candidate=None):
 
 
 def tightening_prerequisite(result: CheckResult) -> str:
+    """What must be settled before a workflow edit can be proven: the proof refuses while any baseline or
+    ignore entry matches no finding (fix_proof.prove), even one that matched nothing before the edit."""
     steps = []
-    if result.baseline_format == baseline.FORMAT_V1:
+    legacy = result.baseline_format == baseline.FORMAT_V1
+    if legacy:
         steps.append("Migrate the old-format baseline.")
-    if result.baseline_stale:
-        steps.append("Resolve the unmatched baseline entries.")
-    if any(result.unmatched_ignores()):
-        steps.append("Resolve the unmatched ignore entries.")
+    # Migration drops the old entries that match no finding, so only a converted baseline's need resolving.
+    stale_baseline = bool(result.baseline_stale) and not legacy
+    stale_ignores = any(result.unmatched_ignores())
+    removal = ""
+    if (stale_baseline or stale_ignores) and not result.whole_repository:
+        # A file or platform on its own cannot tell an entry for a finding elsewhere from a stale one, and
+        # the paperwork preview refuses to remove it (review-gpt #294).
+        steps.append("Run the check on the whole repository, on every platform: this scope cannot tell whether "
+                     "a baseline or ignore entry that matches nothing here matches a finding elsewhere.")
+    else:
+        if stale_baseline:
+            steps.append("Resolve the unmatched baseline entries.")
+        if stale_ignores:
+            steps.append("Resolve the unmatched ignore entries.")
+        if (stale_baseline or stale_ignores) and not legacy:
+            # The check's report does not list unmatched ignore entries; the paperwork preview names each
+            # one and proposes its removal (review-gpt #294). The command, never the entries' own text,
+            # goes into the to-do. With an old-format baseline the migration comes first, and the check
+            # after it gives this command.
+            command = tightening_command(result, [])
+            removal = (f" To see each unmatched entry and preview its removal, run {command}"
+                       if command == one_line(command) else
+                       " To see each unmatched entry and preview its removal, run obaaf fix with this check's "
+                       "original path, options and baseline, which cannot be printed faithfully as a one-line "
+                       "command.")
     if steps:
         steps.append("Then rerun the check before previewing workflow edits.")
-    return " ".join(steps)
+    return " ".join(steps) + removal
 
 
 @dataclass
@@ -89,7 +114,8 @@ class _Group:
                 manual = "Review other forms by hand. " if item["byHand"] else ""
                 item["nextAction"] = (f"{manual}Choose an exact npm version for {', '.join(packages)} "
                                       f"and substitute your selection in {command}")
-            elif result.errors:
+            elif count and result.errors:
+                # With no candidate there is no pin to preview: keep the rule's own guidance (review-gpt #294).
                 item["nextAction"] = "Resolve the scan errors before previewing a package pin."
             elif count and prerequisites:
                 item["nextAction"] = prerequisites
