@@ -934,8 +934,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fail on findings at or above a severity (high, medium, low), or never. "
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
-    x.add_argument("--settings", metavar="FILE", help="inspect evidence from an explicitly named offline "
-                   "GitHub settings snapshot (a repository scan also checks its code ownership)")
+    x.add_argument("--settings", metavar="FILE", help="use evidence from an explicitly named offline "
+                   "GitHub settings snapshot for OBAAF-GHA-005's environment control, on a scan of the "
+                   "repository that holds it (which also checks its code ownership)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true",
                    help="omit each finding's why and fix lines in text output")

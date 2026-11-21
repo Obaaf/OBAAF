@@ -32,7 +32,11 @@ class SettingsEvidence:
 
     @classmethod
     def load(cls, path: Path, repository: str | None, now: datetime | None = None) -> SettingsEvidence:
-        if not path.is_file():
+        try:
+            regular = path.is_file()
+        except OSError as exc:      # a name too long for the file system, for one
+            raise snapshot.SnapshotError(f"the settings path cannot be read: {exc.strerror or exc}") from exc
+        if not regular:
             raise snapshot.SnapshotError("the settings path must name a regular snapshot file")
         data = snapshot.load(path)
         try:
@@ -176,4 +180,12 @@ def report_settings(evidence, base, repository_scan, config):
     for name, environment in sorted(config.protected_secrets.items()):
         assessment = diagnostic.assess(name, environment or "")
         print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
+              file=sys.stderr)
+    if any(not environment or any(c in name for c in "*?")
+           for name, environment in config.protected_secrets.items()):
+        # These lines judge the entries; the finding judges each name a job reads (review of #301).
+        print("Settings evidence: the lines above judge the configuration's entries, and one with a glob "
+              "or with no environment cannot be verified there. OBAAF-GHA-005 judges each secret name a "
+              "job reads, in the environment the job declares, and can verify it only when "
+              "protected_secrets names that environment for every secret of the job, through a glob or not.",
               file=sys.stderr)
