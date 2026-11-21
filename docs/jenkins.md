@@ -182,10 +182,14 @@ it in a `bat` script. It is also reported when it runs in a parallel branch besi
 `warnError` or `catch` the publish is not also in, or under a condition the publish does not share. "Cannot tell"
 covers:
 
-- a check the reader does not vouch for (Groovy text in the script, a computed `returnStatus`, `powershell`,
-  another `#!` program, a path to the program, `bash -c`, a check inside `if`, after `!` or in a `&&` list, a line
-  before it the reader cannot read, such as `export PATH=...`, a script that may keep the failure itself with a
-  later `$?` or `PIPESTATUS`, and a `bat` script that tests `errorlevel`);
+- a check the reader does not vouch for and no listed form decides: Groovy text in the script, a computed
+  `returnStatus`, a path to the program, a check inside `if`, after `!` or in a `&&` list, one run by another
+  program (`uv run`, `docker run`, `kubectl exec`, `ssh`, `bash -c '...'`), a line before it the reader cannot read
+  (`export PATH=...`), a script that sources a file, sets another EXIT or ERR trap, starts a here-document or
+  defines a function before it, a later `$?`, `PIPESTATUS` or bare `exit`, and a `bat` script that tests
+  `errorlevel` or may leave before the check;
+- a `powershell` or `pwsh` step, or another `#!` program, that names a check: its language is not read, so the
+  name may be text it prints;
 - a check or publish read only where a closure or uncalled method is written;
 - a publish in a Declarative `post` block under a condition on the build's result;
 - a check in a catching block when the publish runs only on a result that block may have set (`post { success }`
