@@ -166,6 +166,39 @@ or uncalled method is written, and a check read only there. To clear it, put `ob
 line in an `sh` step, with literal arguments, before the publish. The limits are listed in
 [bypass-attempts.md](bypass-attempts.md#2d2n-a-provenance-check-before-the-publish).
 
+**A publish that can run after a failed or skipped check** (OBAAF-JEN-011, flagship slice 2d.2o). Two cases are
+reported at high. First, a publish in a failure path: a Declarative `post` condition that runs after a failure
+(`always`, `changed`, `regression`, `aborted`, `failure`, `unstable`, `unsuccessful`, `notBuilt`, `cleanup`) or a
+Scripted `catch` or `finally` block. A publish in a stage's own `post` block is not reported when no check runs in
+that stage and a check that stops its step runs in an earlier stage before it, since a failed check skips the
+stage, post block included. Second, a check before a publish whose failure does not stop it. The checks are
+`obaaf verify ...`, `gh attestation verify`, `cosign verify...`, `slsa-verifier verify...`, `sha256sum -c` and its
+kin, `gpg --verify` and `gpgv FILE`, as a command's name or after a wrapper such as `sudo`, `env` or `timeout`.
+Each is read from the command's words by the shell reader of slice 2d.2e, and every check in a step counts. Its
+failure is ignored when the step says so: `returnStatus: true`, `|| true`, `|| :`, `|| echo`, `|| printf`,
+`|| exit 0`, a trailing `&` (not followed by `wait $!`), a pipe without pipefail set before it, `set +e` or a `#!`
+line without `-e` with more commands after it, a trap on `EXIT` or `ERR` that runs `exit 0`, or more lines after
+it in a `bat` script. It is also reported when it runs in a parallel branch beside the publish, in a `catchError`,
+`warnError` or `catch` the publish is not also in, or under a condition the publish does not share. "Cannot tell"
+covers:
+
+- a check the reader does not vouch for and no listed form decides: Groovy text in the script, a computed
+  `returnStatus`, a path to the program, a check inside `if`, after `!` or in a `&&` list, one run by another
+  program (`uv run`, `docker run`, `kubectl exec`, `ssh`, `bash -c '...'`), a line before it the reader cannot read
+  (`export PATH=...`), a script that sources a file, sets another EXIT or ERR trap, starts a here-document or
+  defines a function before it, a later `$?`, `PIPESTATUS` or bare `exit`, and a `bat` script that tests
+  `errorlevel` or may leave before the check;
+- a `powershell` or `pwsh` step, or another `#!` program, that names a check: its language is not read, so the
+  name may be text it prints;
+- a check or publish read only where a closure or uncalled method is written;
+- a publish in a Declarative `post` block under a condition on the build's result;
+- a check in a catching block when the publish runs only on a result that block may have set (`post { success }`
+  or a guard on `currentBuild.result`).
+
+To clear it, publish in a later stage or in `post { success }`, and put each check on its own line in an `sh` step
+with literal arguments and nothing that ignores its failure. The limits are listed in
+[bypass-attempts.md](bypass-attempts.md#2d2o-a-publish-after-a-failed-or-skipped-check).
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply

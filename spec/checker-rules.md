@@ -446,7 +446,7 @@ A pipeline that publishes copies artifacts from another job by a reference that 
 
 **Why it matters.** The publish can run after verification failed or was skipped.
 
-A publish step sits in a post condition that runs after failure (always, failure, unstable, unsuccessful, changed, regression, aborted, cleanup) or in a Scripted catch or finally block, or a check before the publish ignores its own failure (catchError, warnError, returnStatus, `|| ...`). The publish can then run after verification failed or was skipped.
+A publish step sits in a post condition that runs after failure (always, failure, unstable, unsuccessful, changed, regression, aborted, notBuilt, cleanup) or in a Scripted catch or finally block, or a check before the publish (`obaaf verify`, `gh attestation verify`, `cosign verify`, `slsa-verifier verify`, `sha256sum -c`, `gpg --verify`) cannot stop it: the step ignores the check's failure (`returnStatus: true`, `|| true`, a trailing `&`, a pipe without pipefail, `set +e`), or the check runs in catchError, warnError or a catch block the publish is not in, in a parallel branch beside it, or under a condition the publish does not share. A check the checker cannot read is "cannot tell". The publish can then run after verification failed or was skipped.
 
 **Fix.** Publish only in steps that run after every check succeeded (in a later stage, or in post { success }), and let a failed check stop the build.
 
