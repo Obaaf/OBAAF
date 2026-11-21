@@ -144,6 +144,20 @@ jobs:
                         self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
             os.chdir(self.root)
 
+    def test_parent_component_is_relative_to_the_linked_directory(self):
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy") / "archive"
+        folder.mkdir(parents=True)
+        Path("current").symlink_to(folder, target_is_directory=True)
+        selected = Path("current/../settings.json")
+        expected = folder.parent / "settings.json"
+        expected.write_text("{}")
+        self.assertEqual(selected.resolve(), self.root / expected)
+        for is_snapshot in (False, True):
+            with self.subTest(is_snapshot=is_snapshot):
+                self.assertEqual(fix_input_relative(selected, self.root, settings=is_snapshot), expected)
+
     def test_repository_inputs_through_a_linked_parent(self):
         policy = Path("baseline.json")
         policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
