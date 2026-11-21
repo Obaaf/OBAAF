@@ -1023,7 +1023,7 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Reason.** A person or coding agent can locate the proposed change without treating workflow commands, comments, or checker diagnostics containing repository text as instructions.
 
-**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft.
+**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft. The checker keeps each step an egress-action condition names with its own explanation, so the work order can show why each named step matters before a length limit; the ordinary preview therefore lists such a condition as one line per step instead of one joined line (recorded by the review, review-gpt #288). A reason the work order omits is counted, but a control's own reason is not shown when its egress-action reading has conditions, even when another control decides the verdict (#336).
 
 **Status.** Proposed, 2026-11-19 (A6a, #286).
 
