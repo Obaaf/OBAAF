@@ -1,9 +1,13 @@
 import contextlib
+from contextlib import nullcontext
 from datetime import date, timedelta
+from importlib.resources import files
+from itertools import combinations
 from io import StringIO
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 import subprocess
@@ -36,7 +40,9 @@ class GateTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name) / "source"
+        # Resolved, so that a temporary folder reached through a link (macOS's /var) does not count as
+        # one of the linked paths init replaces in its follow-up commands.
+        self.root = Path(tmp.name).resolve() / "source"
         self.root.mkdir()
         self.workflow = self.root / WORKFLOW
 
@@ -58,6 +64,88 @@ class GateTests(unittest.TestCase):
         self.assertEqual(preview.split("What to do next:")[-1], applied.split("What to do next:")[-1])
         self.assertIn("What to do next: 1 finding", preview)
         self.assertTrue(applied.rstrip().endswith(f"obaaf fix -- {self.root}"))
+
+    def test_followup_keeps_a_printable_relative_path(self):
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        directory = Path("-team repo")
+        directory.mkdir()
+        status, output = command("init", "--", directory)
+        self.assertEqual(status, 0, output)
+        last = output.splitlines()[-1].removeprefix("Preview available fixes with ")
+        self.assertEqual(shlex.split(last), ["obaaf", "fix", "--", str(directory)])
+
+    def test_followup_preserves_a_relative_equals_path(self):
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        Path("=ls").mkdir()
+        fix = "Preview available fixes with obaaf fix -- ./=ls"
+        check = "To check the current repository, run obaaf check --summary -- ./=ls"
+        for options in ((), ("--apply",)):
+            code, output = command("init", *options, "--", "=ls")
+            self.assertEqual(code, 0, output)
+            self.assertEqual(output.splitlines()[-1], fix)
+        with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+            code, output = command("init", "--", "=ls")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(output.splitlines()[-2:], [check, fix])
+        for advice, prefix in ((output.splitlines()[-2], "To check the current repository, run "),
+                               (output.splitlines()[-1], "Preview available fixes with ")):
+            words = shlex.split(advice.removeprefix(prefix))
+            expected, _ = command(*words[1:-1], self.root / "=ls")
+            actual, replay = command(*words[1:])
+            self.assertEqual(actual, expected, replay)
+            if words[1] == "check":
+                self.assertIn("What to do next:", replay)
+
+    @unittest.skipIf(os.name == "nt", "symbolic links need extra rights on Windows")
+    def test_followup_through_a_link_names_the_folder_init_worked_on(self):
+        # review-gpt #305: fix does not resolve links as init and check do, so `obaaf fix -- LINKED`
+        # refused the repository, and `obaaf fix -- link/..` read another folder.
+        real = self.root / "private" / "tmp" / "repo"
+        real.mkdir(parents=True)
+        (self.root / "tmp").symlink_to(Path("private") / "tmp")
+        (self.root / ".github" / "workflows").mkdir(parents=True)
+        (self.root / ".github" / "workflows" / "top.yml").write_text(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo top\n")
+        (self.root / "l").symlink_to(Path("private") / "tmp" / "repo" / "inner")
+        (real / "inner").mkdir()
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+        for given, folder in ((self.root / "tmp" / "repo", real), (Path("l") / "..", real)):
+            with self.subTest(given=str(given)):
+                for options in ((), ("--apply",)):
+                    code, output = command("init", *options, "--", given)
+                    self.assertEqual(code, 0, output)
+                    last = output.splitlines()[-1].removeprefix("Preview available fixes with ")
+                    self.assertEqual(shlex.split(last), ["obaaf", "fix", "--", str(folder)])
+                with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+                    code, output = command("init", "--", given)
+                self.assertEqual(code, 0, output)
+                check = output.splitlines()[-2].removeprefix("To check the current repository, run ")
+                self.assertEqual(shlex.split(check), ["obaaf", "check", "--summary", "--", str(folder)])
+                words = shlex.split(last)
+                expected, _ = command(*words[1:-1], folder)
+                actual, replay = command(*words[1:])
+                self.assertEqual(actual, expected, replay)
+                self.assertNotIn("top.yml", replay)
+
+    @unittest.skipIf(os.name == "nt", "a Windows directory name cannot contain a newline")
+    def test_followup_for_a_multiline_directory_uses_the_current_directory(self):
+        directory = self.root / "team\nrepo"
+        directory.mkdir()
+        advice = "From inside the selected repository, run "
+        for args in ((), ("--apply",)):
+            status, output = command("init", directory, *args)
+            self.assertEqual(status, 0, output)
+            self.assertEqual(output.splitlines()[-1], advice + "obaaf fix")
+        with patch("obaaf.checker.check", side_effect=OSError("summary unavailable")):
+            status, output = command("init", directory)
+        self.assertEqual(status, 0, output)
+        self.assertEqual(output.splitlines()[-2:], [advice + "obaaf check --summary", advice + "obaaf fix"])
 
     def test_copy_refusal_labels_the_actual_repository_and_writes_nothing(self):
         from obaaf.fix_copy import PrivateCopyError
@@ -128,6 +216,66 @@ class GateTests(unittest.TestCase):
 
     def test_crlf_gate_with_scanner(self):
         self.check_crlf_gate("--with-scanner", "poutine")
+
+    def test_the_first_gate_template_as_it_landed_is_recognised(self):
+        # review-gpt #306: the other tests build the historical template from the current one, so a
+        # digest taken from an edited template would pass them while every workflow installed from the
+        # real first gate-capable template fell to manual guidance. This one uses the landed bytes.
+        from hashlib import sha256
+
+        from obaaf.fix_gate import GATE_TEMPLATE_DIGEST, ORIGINAL_SETUP, REPORT
+        from obaaf.init_scanners import SCANNERS
+
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        self.assertEqual(sha256(first).hexdigest(), GATE_TEMPLATE_DIGEST)
+        self.assertIn(ORIGINAL_SETUP, first)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"e" * 40
+        (future / "init-workflow.yaml").write_bytes(first.replace(ORIGINAL_SETUP, next_setup))
+        gated = first.replace(REPORT, b"gate_check .github/obaaf-baseline.json --fail-on medium\n")
+        self.assertNotEqual(gated, first)
+        self.install()
+        for label, template in (("current template", None), ("rotated template", future)):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    with self.subTest(template=label, scanners=names):
+                        tail = steps(names)
+                        self.workflow.write_bytes(first + tail)
+                        commit(self.root)
+                        with patch("obaaf.fix_gate.files", return_value=template) if template else nullcontext():
+                            code, text = self.gate("--apply")
+                        self.assertEqual(code, 0, text)
+                        self.assertIn("Applied the displayed gate change", text)
+                        self.assertEqual(self.workflow.read_bytes(), gated + tail)
+
+    def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
+        # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF
+        # handling together. A gate written with the original checker, in CRLF, changes threshold
+        # under a newer template without taking the newer pin or losing its line endings.
+        from obaaf.fix_gate import ORIGINAL_SETUP
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"d" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        tail = steps(["zizmor"])
+        high = historical.replace(b'obaaf check source "${config[@]}" --fail-on never',
+                                  b"gate_check .github/obaaf-baseline.json --fail-on high") + tail
+        self.workflow.write_bytes(high.replace(b"\n", b"\r\n"))
+        commit(self.root)
+        with patch("obaaf.fix_gate.files", return_value=future):
+            code, text = self.gate("--apply")
+        self.assertEqual(code, 0, text)
+        self.assertIn("Applied the displayed gate change", text)
+        written = self.workflow.read_bytes()
+        self.assertEqual(written, high.replace(b"--fail-on high", b"--fail-on medium").replace(b"\n", b"\r\n"))
+        self.assertIn(ORIGINAL_SETUP, written)
+        self.assertNotIn(next_setup, written)
 
     def test_mixed_endings_and_custom_crlf_workflow_get_manual_guidance(self):
         self.install()
@@ -208,6 +356,52 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn("Applied the displayed gate change", text)
         self.assertTrue(self.workflow.read_bytes().endswith(tail))
+
+    def test_gate_changes_after_a_setup_pin_rotation(self):
+        from obaaf.fix_gate import ORIGINAL_SETUP
+        from obaaf.init_scanners import SCANNERS
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"c" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        legacy = (Path(__file__).parent / "fixtures/init/report-only-3.3.yaml").read_bytes()
+        path = self.root / "policy files" / "accepted.json"
+        path.parent.mkdir()
+        path.write_text('{"format":"obaaf-baseline/v0.2","findings":[]}')
+        old_gate = historical.replace(b"/.github/obaaf-baseline.json\n", b"/policy files/accepted.json\n").replace(
+            b'obaaf check source "${config[@]}" --fail-on never', b"gate_check 'policy files/accepted.json' --fail-on high")
+        expected = old_gate.replace(b"--fail-on high", b"--fail-on medium")
+        with patch("obaaf.fix_gate.files", return_value=future):
+            for count in range(len(SCANNERS) + 1):
+                for names in combinations(SCANNERS, count):
+                    tail = steps(names)
+                    for label, report in (("current report", historical), ("legacy report", legacy),
+                                          ("previous gate", old_gate)):
+                        with self.subTest(scanners=names, workflow=label):
+                            self.workflow.write_bytes(report + tail)
+                            commit(self.root)
+                            code, text = self.gate("--baseline", path, "--apply")
+                            self.assertEqual(code, 0, text)
+                            self.assertIn("Applied the displayed gate change", text)
+                            self.assertEqual(self.workflow.read_bytes(), expected + tail)
+                            self.assertIn("already gates", self.gate("--baseline", path)[1])
+            self.workflow.write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+            commit(self.root)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertEqual(self.workflow.read_bytes(), expected.replace(ORIGINAL_SETUP, next_setup))
+
+            custom = historical.replace(ORIGINAL_SETUP, b"uses: team/custom-checker@v1")
+            self.workflow.write_bytes(custom)
+            code, text = self.gate("--baseline", path, "--apply")
+            self.assertEqual(code, 0, text)
+            self.assertIn("by hand", text)
+            self.assertEqual(self.workflow.read_bytes(), custom)
 
     def execute_ci(self, event):
         work = self.root.parent

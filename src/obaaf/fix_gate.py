@@ -18,6 +18,12 @@ from obaaf.checker.workflow import one_line
 
 BASELINE = Path(".github/obaaf-baseline.json")
 REPORT = b'obaaf check source "${config[@]}" --fail-on never\n'
+# Both the pre-gate report and the first gate-capable template installed this checker. The digest is
+# that template as it landed on flagship with #293 (27b15c9, after ad03f16 changed its pull-request
+# policy step). A later change to the template other than its setup pin stops it matching, and then
+# earlier workflows are no longer recognised; the tests of earlier workflows fail (review-gpt #306).
+ORIGINAL_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@4e2ba222d31f9ce8e7e352f18e8f88c75aabcbd8"
+GATE_TEMPLATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"
 LEGACY_DIGEST = "58b64917ab435b974f4d6defac5b9c6f2dab3c536097cdef8e7e8402f4977b5c"
 
 
@@ -33,7 +39,13 @@ def _candidate(original, path, level):
             return None
         original = original.replace(b"\r\n", b"\n")
     template = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
-    desired = _gate_workflow(template, path, level)
+    # Reconstruct the first gate-capable template only when the complete historical
+    # body matches its digest. Gate activation does not change the installed checker.
+    historical = re.sub(rb"uses: Obaaf/OBAAF/actions/setup-obaaf@[0-9a-f]{40}", ORIGINAL_SETUP, template)
+    templates = [template]
+    historical_known = sha256(historical).hexdigest() == GATE_TEMPLATE_DIGEST
+    if historical_known and historical != template:
+        templates.append(historical)
     names = tuple(init_scanners.SCANNERS)
     for count in range(len(names) + 1):
         for selected in combinations(names, count):
@@ -41,10 +53,13 @@ def _candidate(original, path, level):
             if not original.endswith(tail):
                 continue
             body = original.removesuffix(tail)
-            if (body in (template, desired) or sha256(body).hexdigest() == LEGACY_DIGEST or
-                    any(body == _gate_workflow(template, path, old) for old in ("low", "medium", "high"))):
-                updated = desired + tail
-                return updated.replace(b"\n", b"\r\n") if crlf else updated
+            for source in templates:
+                legacy = historical_known and source == historical and sha256(body).hexdigest() == LEGACY_DIGEST
+                if body == source or legacy or any(
+                    body == _gate_workflow(source, path, old) for old in ("low", "medium", "high")
+                ):
+                    updated = _gate_workflow(source, path, level) + tail
+                    return updated.replace(b"\n", b"\r\n") if crlf else updated
     return None
 
 

@@ -31,7 +31,7 @@ Init reads GitHub workflow files locally. It proposes agent lanes for catalogued
 
 The generated workflow pins the development checker to a commit on `flagship`. It checks pull requests against configuration from their target commit, checks pushes with their own configuration, and reports the findings in the job log. Finding severity leaves the first job green. A checker or setup error can still fail the job. A pull request can still change the workflow file itself, because GitHub runs a pull request's copy of it, so that pull request's own report can differ; code-owner review of `.github/`, required by a branch rule, keeps such a change from merging.
 
-Init ends with the checker’s to-do list and the command to preview fixes. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
+Init ends with the checker’s to-do list and the command to preview fixes. For a repository path that cannot be shown on one line, follow the instruction from inside that repository. A first preview checks the proposed files on a temporary copy and labels that result. If the copy is unavailable, it identifies the reason and shows the current repository. Apply shows the installed configuration and workflow’s findings.
 
 #### Optional companion checks
 
@@ -114,6 +114,10 @@ obaaf fix --gate medium --apply
 Choose `low`, `medium`, or `high`. The proof checks the current repository with that threshold and leaves existing acceptances alone. The gate uses `.github/obaaf-baseline.json` when present. Supply `--baseline FILE` on both invocations to use another existing baseline. Without a baseline, each outstanding finding at the threshold counts. Creating acceptances remains a separate, explicit decision.
 
 On a pull request, the checker uses configuration from the exact target commit. It honors a baseline entry only when both commits contain the same entry, including its owner, reason and expiry. Fix a finding and remove its entry in the same pull request. Removing an entry while the finding persists makes the finding count again. A new or changed entry cannot grant an acceptance on that pull request. If either commit lacks the baseline, every outstanding finding at the threshold counts. On pushes, the checker uses the pushed repository’s own policy and reports stale entries. A policy read failure stops the job. The preview can upgrade an earlier, unedited init workflow and preserves the generated companion steps. For a custom workflow it prints the threshold and target-branch policy instructions for a manual edit. Apply requires a clean tracked workflow.
+
+Enabling a gate or changing its threshold keeps the workflow’s checker commit. For a gate-capable generated workflow, take the exact commit from the new init preview and update the `Obaaf/OBAAF/actions/setup-obaaf@` line in a separate reviewed change. Keep the existing baseline path, threshold, target-branch policy steps and companion checks. Automatic gate changes recognise a generated workflow that installs the original development checker (`4e2ba22`) or the commit in the current init template. After you move the pin to another commit, a later change of the template's commit leaves threshold changes to a manual edit.
+
+For the original report-only workflow that predates gate support, run init with the same companion options. It reports a conflict and shows the proposed workflow as a diff against yours. Adopt the proposed workflow whole to continue reporting and keep automatic gate activation available. A team ready to block can first enable the gate with its existing checker, then update the pin. Verify the resulting report or gate on a push and a pull request before merging.
 
 ### What can turn a passing gate red
 
