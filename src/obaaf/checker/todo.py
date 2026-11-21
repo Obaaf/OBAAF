@@ -21,6 +21,7 @@ _LEVELS = ("high", "medium", "low", "info")
 def tightening_command(result, request, candidate=None):
     """Reproduce this check's scope without enabling apply or modifying acceptances."""
     target = str(result.checked or ".")
+    # zsh expands a word that begins with `=` (`=ls` is the path of ls), as for the check commands.
     if target.startswith(("-", "=")) or target == "egress":
         target = "./" + target
     options = list(map(str, result.options or ()))

@@ -1,6 +1,7 @@
 """The summary changes how the checker reports, while preserving its verdict."""
 
 from datetime import date, timedelta
+import json
 import os
 import shlex
 import unittest
@@ -57,6 +58,11 @@ class SummaryCliTest(unittest.TestCase):
                     self.assertIn("--platform=github", words)
                     self.assertEqual(words[words.index("--fail-on") + 1], "never")
                 self.assertEqual(run_cli(*lane_words[1:])[0], 0)
+            code, output, err = run_cli(*args, "--format", "json")
+            self.assertEqual(code, 0, err)
+            group = next(g for g in json.loads(output)["todo"] if "configured path and target" in g["nextAction"])
+            self.assertIsNone(group["command"])
+            self.assertEqual(shlex.split(group["nextAction"].split("obaaf check ", 1)[1]), lane_words[2:])
             # Fill in only the acceptance decisions and destination in the printed command.
             replacements = {"--write-baseline=NEW_BASELINE_FILE": f"--write-baseline={folder / 'accepted.json'}",
                             "OWNER": "@example/build", "REASON": "Reviewed during local adoption",
@@ -66,6 +72,117 @@ class SummaryCliTest(unittest.TestCase):
             self.assertIn("OBAAF-REPO-001", replay)
             self.assertIn(settings.name, replay)
             self.assertTrue((folder / "accepted.json").is_file())
+
+    def test_check_suggestions_keep_a_literal_equals_target(self):
+        with TempDir() as parent:
+            root = parent / "=ls"
+            workflow = root / ".github/workflows/build.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            config = root / "team config.yml"
+            config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+            previous = os.getcwd()
+            try:
+                os.chdir(parent)
+                code, summary, err = run_cli("check", "=ls", "--config", config, "--fail-on", "never", "--summary")
+                self.assertEqual(code, 0, summary + err)
+                commands = [shlex.split(line) for line in summary.splitlines()
+                            if line.strip().startswith("obaaf check ")]
+                lane, = [args for args in commands if "--lanes" in args]
+                write, = [args for args in commands if "--write-baseline=NEW_BASELINE_FILE" in args]
+                for args in (lane, write):
+                    self.assertEqual(args[:3], ["obaaf", "check", "./=ls"])
+                code, lanes, err = run_cli(*lane[1:])
+                self.assertEqual(code, 0, err)
+                self.assertIn("build.yml#build", lanes)
+                destination = parent / "accepted.json"
+                replacements = {"--write-baseline=NEW_BASELINE_FILE": f"--write-baseline={destination}",
+                                "OWNER": "@example/build", "REASON": "Reviewed during local adoption",
+                                "YYYY-MM-DD": (date.today() + timedelta(days=7)).isoformat()}
+                code, output, err = run_cli(*(replacements.get(word, word) for word in write[1:]))
+                self.assertEqual(code, 0, output + err)
+                findings = json.loads(destination.read_text(encoding="utf-8"))["findings"]
+                self.assertIn("OBAAF-CFG-001", [entry["rule"] for entry in findings])
+            finally:
+                os.chdir(previous)
+
+    def test_lane_advice_replays_from_finding_and_json_without_settings(self):
+        with TempDir() as root:
+            workflow = root / ".github/workflows/build.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            baseline = root / "team baseline.json"
+            baseline.write_text(json.dumps({"format": "obaaf-baseline/v0.2", "findings": []}))
+            for name in ("team config.yml", "team\nconfig.yml"):
+                with self.subTest(name=name):
+                    config = root / name
+                    config.write_text("lanes: {'.github/workflows/build.yml#missing': agent}\n")
+                    args = ("check", root, "--config", config, "--platform", "github",
+                            "--baseline", baseline, "--fail-on", "never")
+                    code, text, err = run_cli(*args)
+                    self.assertEqual(code, 0, err)
+                    code, output, err = run_cli(*args, "--format", "json")
+                    self.assertEqual(code, 0, err)
+                    data = json.loads(output)
+                    fix = next(line for line in text.splitlines() if "Fix: Correct the declaration" in line)
+                    finding = next(f for f in data["findings"] if f["rule"] == "OBAAF-CFG-001")
+                    group = next(g for g in data["todo"] if "configured path and target" in g["nextAction"])
+                    self.assertIsNone(group["command"])
+                    for remedy in (fix, finding["fix"]):
+                        self.assertIn("Correct the declaration or delete it", remedy)
+                    for advice in (fix, finding["fix"], group["nextAction"]):
+                        if "\n" in name:
+                            # The command is named, never printed with the path it cannot show.
+                            self.assertIn("original path and options with obaaf check --lanes", advice)
+                            self.assertNotIn("obaaf check /", advice)
+                            self.assertNotIn("config.yml", advice)
+                        else:
+                            self.assertEqual(advice.count("obaaf check"), 1)
+                            command = shlex.split(advice[advice.index("obaaf check"):])
+                            self.assertEqual(command, ["obaaf", "check", str(root), f"--config={config}",
+                                                       "--platform=github", f"--baseline={baseline}",
+                                                       "--fail-on", "never", "--lanes"])
+                            code, lanes, err = run_cli(*command[1:])
+                            self.assertEqual(code, 0, err)
+                            self.assertIn("build.yml#build", lanes)
+
+    def test_a_check_of_one_file_gives_the_repository_form_of_a_lanes_key(self):
+        """Review of #311: the lane command of a one-file check lists `build.yml#build`, a key the repository's
+        check does not match, so the fix gives the key's form by example, not by that command."""
+        with TempDir() as root:
+            workflow = root / ".github/workflows/build.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs: {build: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}\n")
+            config = root / "c.yml"
+            config.write_text("lanes: {'.github/workflows/build.yml#build': probe}\n")
+            code, text, err = run_cli("check", workflow, "--config", config, "--fail-on", "never")
+            self.assertEqual(code, 0, err)
+            fix, = [line for line in text.splitlines() if "Fix: Correct the declaration" in line]
+            self.assertIn("(`.github/workflows/ci.yml#build`)", fix)
+            self.assertEqual(fix.count("obaaf check"), 1)
+            command = shlex.split(fix[fix.index("Lane check: ") + len("Lane check: "):])
+            self.assertEqual(command[:3], ["obaaf", "check", str(workflow)])
+            code, lanes, err = run_cli(*command[1:])
+            self.assertEqual(code, 0, err)
+            self.assertIn("build.yml#build", lanes)
+
+    def test_a_leading_equals_sign_gets_dot_slash_in_fix_and_migration_commands(self):
+        """Review of #311: zsh expands a word that begins with `=`, and only the check commands guarded it."""
+        from types import SimpleNamespace
+        from obaaf.checker.todo import tightening_command
+        from obaaf.checker.todo_acceptance import scoped_migration_command
+        result = SimpleNamespace(checked="=ls", options=("--config==c.yml",), baseline_path="=b.json",
+                                 fail_on="low")
+        words = shlex.split(tightening_command(result, ["--pin", "tool=VERSION"]))
+        self.assertEqual(words[:3], ["obaaf", "fix", "./=ls"])
+        self.assertIn("--baseline==b.json", words)
+        words = shlex.split(scoped_migration_command("=b.json", "=ls", ()))
+        self.assertEqual(words[3:5], ["./=b.json", "./=ls"])
+        for plain in ("ls", "-x"):
+            with self.subTest(plain=plain):
+                result.checked = plain
+                target = shlex.split(tightening_command(result, ["--pin", "t=V"]))[2]
+                self.assertEqual(target, plain if plain == "ls" else "./-x")
 
     def test_an_unprintable_scope_loses_only_the_command_in_a_fix(self):
         """Review of #299: with a selected snapshot whose path cannot be printed on one line, the rule's
@@ -82,9 +199,10 @@ class SummaryCliTest(unittest.TestCase):
             code, text, err = run_cli("check", root, "--settings", settings, "--platform", "github",
                                       "--fail-on", "never")
             self.assertEqual(code, 0, err)
-            fix, = [line for line in text.splitlines() if line.strip().startswith("Fix: ") and "--lanes" in line]
+            fix, = [line for line in text.splitlines() if line.strip().startswith("Fix: Correct the declaration")]
             self.assertIn("Correct the declaration or delete it", fix)
-            self.assertIn("obaaf check --lanes with the check's own paths and options", fix)
+            self.assertIn("original path and options with obaaf check --lanes", fix)
+            self.assertNotIn("--settings", fix)
             self.assertNotIn("line\nbreak", fix)
 
     def test_summary_keeps_scan_errors_visible(self):

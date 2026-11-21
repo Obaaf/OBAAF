@@ -1164,7 +1164,8 @@ rules:
       Correct the declaration or delete it. The value is one of untrusted, agent, effect, release or
       trusted, and the variable is spelled OBAAF_LANE. In a workflow it belongs in the job's env or
       the workflow's env; in a Jenkinsfile, in an environment block or a withEnv around the steps. A
-      `lanes:` entry names a workflow's file and job as `obaaf check . --lanes` prints them, and a
+      `lanes:` entry names a job by the workflow's path from the repository root and the job's id
+      (`.github/workflows/ci.yml#build`), as a lane listing of the whole repository prints it, and a
       Jenkinsfile's stage by the file and the stage's own name (`Jenkinsfile#Ship`). Run
       `obaaf check . --lanes` afterwards and confirm the lane (see
       docs/checker-configuration.md#a-declaration-that-does-nothing).
