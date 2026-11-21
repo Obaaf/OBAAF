@@ -1,11 +1,11 @@
 """Flagship slice 2d.2o: bypass attempts on OBAAF-JEN-011, a publish that can run after a failed or skipped check.
 
 Each case is one attempt by a reviewer that did not write the rule, run as a Jenkinsfile: an attacker's 172 on the rule
-as it was at `75dae58`, then an independent reviewer's on the slice's first four versions (77 with ids starting with V,
-53 with V2, 52 with V3 and 18 with V4). `expected` is what OBAAF-JEN-011 says after the slice ("finding-high",
-"unknown" for cannot tell, or "quiet"); `before` is what it said at `75dae58` (recorded, not asserted). LIMITS names
-the cases whose answer is a stated limit: the answer the reviewer judged right, and why the rule gives another; the
-record is docs/bypass-attempts.md.
+as it was at `75dae58`, then an independent reviewer's on the slice's first five versions (77 with ids starting with V,
+53 with V2, 52 with V3, 18 with V4 and 10 with V5). `expected` is what OBAAF-JEN-011 says after the slice
+("finding-high", "unknown" for cannot tell, or "quiet"); `before` is what it said at `75dae58` (recorded, not
+asserted). LIMITS names the cases whose answer is a stated limit: the answer the reviewer judged right, and why the rule
+gives another; the record is docs/bypass-attempts.md.
 """
 import textwrap
 import time
@@ -387,6 +387,16 @@ CASES = [
     ('V4w16_bat_call_check_more_lines', 'finding-high', 'quiet', "pipeline {\n  agent { label 'windows' }\n  stages {\n    stage('V') { steps { bat '''call cosign verify --key cosign.pub registry.example.com/app:1.0\necho done\n''' } }\n    stage('P') { steps { bat 'docker push registry.example.com/app:1.0' } }\n  }\n}\n"),
     ('V4w17_publish_then_check_same_step_or_true', 'quiet', 'quiet', "node {\n  sh '''docker push registry.example.com/app:1.0\nobaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n}\n"),
     ('V4w18_same_step_or_true_then_guarded_publish', 'finding-high', 'finding-high', "node {\n  sh '''obaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\ntwine upload dist/*\n'''\n  if (params.MIRROR) {\n    sh 'docker push registry.example.com/app:1.0'\n  }\n}\n"),
+    ('V5x01_sudo_apt_install_gpgv_or_true', 'quiet', 'quiet', "node {\n  sh '''sudo apt-get install -y gpgv ca-certificates || true\ncosign verify --key cosign.pub registry.example.com/app:1.0\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V5x02_env_apt_install_gpgv_or_true', 'quiet', 'quiet', "node {\n  sh '''env DEBIAN_FRONTEND=noninteractive apt-get install -y gpgv curl || true\ncosign verify --key cosign.pub registry.example.com/app:1.0\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V5x03_bash_lc_obaaf_or_true', 'finding-high', 'finding-high', 'node {\n  sh \'bash -lc "cd dist && obaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz" || true\'\n  sh \'docker push registry.example.com/app:1.0\'\n}\n'),
+    ('V5x04_sh_ec_cosign_or_true', 'finding-high', 'quiet', 'node {\n  sh \'sh -ec "cosign verify --key cosign.pub registry.example.com/app:1.0" || true\'\n  sh \'docker push registry.example.com/app:1.0\'\n}\n'),
+    ('V5x05_push_check_or_true_echo_push', 'finding-high', 'quiet', 'node {\n  sh \'\'\'docker push registry.example.com/app:1.0\ncosign verify --key cosign.pub registry.example.com/app:1.0 || true\necho "done: docker push registry.example.com/app:1.0"\n\'\'\'\n}\n'),
+    ('V5x06_returnStatus_push_then_check', 'quiet', 'quiet', "node {\n  sh(script: '''docker push registry.example.com/app:1.0\ncosign verify --key cosign.pub registry.example.com/app:1.0\n''', returnStatus: true)\n}\n"),
+    ('V5x07_bat_push_then_check_more', 'quiet', 'quiet', "node {\n  bat '''docker push registry.example.com/app:1.0\ncosign verify --key cosign.pub registry.example.com/app:1.0\necho done\n'''\n}\n"),
+    ('V5x08_three_backslashes_continue_or_true', 'quiet', 'finding-high', "node {\n  sh '''echo a\\\\\\\\\\\\\nobaaf verify release --policy release-policy.json --artifacts dist/app.tar.gz || true\n'''\n  sh 'docker push registry.example.com/app:1.0'\n}\n"),
+    ('V5x09_func_case_one_line_uncalled', 'unknown', 'quiet', 'node {\n  sh \'\'\'soft() { case "$1" in a) cosign verify --key cosign.pub registry.example.com/app:1.0 || true ;; esac; }\ncosign verify --key cosign.pub registry.example.com/app:1.0\n\'\'\'\n  sh \'docker push registry.example.com/app:1.0\'\n}\n'),
+    ('V5x10_bat_mixed_case_exe_more', 'finding-high', 'quiet', "pipeline {\n  agent { label 'windows' }\n  stages {\n    stage('V') { steps { bat '''Cosign.EXE verify --key cosign.pub registry.example.com/app:1.0\necho done\n''' } }\n    stage('P') { steps { bat 'docker push registry.example.com/app:1.0' } }\n  }\n}\n"),
 ]
 
 LIMITS = {
@@ -590,6 +600,10 @@ LIMITS = {
         'Cannot tell: text that looks like a function definition (`name()` in an `echo`, `sys.exit()` in a `python -c` string) ends what the script decides after it.'),
     'V4w13_python_c_sys_exit_then_or_true': ('finding-high',
         'Cannot tell: text that looks like a function definition (`name()` in an `echo`, `sys.exit()` in a `python -c` string) ends what the script decides after it.'),
+    'V5x05_push_check_or_true_echo_push': ('quiet',
+        "A finding: a publish's name later in the step's script, here in an `echo`, is taken for a publish after the check (the publish detector reads the step's text)."),
+    'V5x09_func_case_one_line_uncalled': ('quiet',
+        'Cannot tell: a check inside a shell function definition is not decided; whether and when the function runs is not read.'),
 }
 
 

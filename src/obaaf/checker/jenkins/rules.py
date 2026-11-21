@@ -190,11 +190,13 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
         if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
                            or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
             prefix = False
-        if word in ("run", "exec", "--") or (word == "-c" and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
+        if word in ("run", "exec", "--") or (_SHELL_C.fullmatch(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
             runs = True
+        elif k and word.rsplit("/", 1)[-1] in _NOT_RUNNERS:
+            runs = False          # `sudo apt-get install gpgv`: what runs is the package manager
     for j, w in enumerate(command[1:], 1):
         if " " in w and _CHECK_PROGRAM.search(w) and (
-                (command[j - 1] == "-c" and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
+                (_SHELL_C.fullmatch(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
                 or command[0] in ("ssh", "eval")):
             words = re.findall(r"[^\s;&|()`'\"]+", w)
             if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
@@ -202,6 +204,13 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
     return None, -1
 
 
+# A shell's option that takes a script, alone or with others (`-c`, `-lc`, `-ec`).
+_SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
+# Programs that take a check's name as an argument rather than run it (`sudo apt-get install gpgv`).
+_NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "dpkg", "rpm", "snap", "brew",
+                          "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
+                          "which", "type", "whereis", "man", "git", "curl", "wget", "install", "cp", "mv", "ln", "chmod",
+                          "echo", "printf", "grep", "test", "ls", "cat"})
 # Shells whose `-c` takes a script (flagship slice 2d.2o).
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
 # Programs that run the command given in their other words (flagship slice 2d.2o).
@@ -3972,10 +3981,18 @@ class JenkinsRules:
         """Whether a step that holds a check whose failure it ignores publishes after that check in its own script, as
         far as the text shows (a publish written before it cannot be stopped by it, and is no finding of this rule)."""
         at = self._script_cache.get(("swallow-at", id(info.use.call)))
-        if not at or at[0] is not info.use.call or at[1] < 0 or not info.shell:
+        if not info.shell:
             return True
+        if at and at[0] is info.use.call and at[1] >= 0:
+            pos = at[1]
+        else:
+            # `returnStatus: true`, `bat`: the first check's name in the script
+            found = _CHECK_PROGRAM.search(info.script)
+            if not found:
+                return True
+            pos = found.start()
         starts = [m.start() for rx in self.upload_cmds for m in [rx.search(info.script)] if m]
-        return not starts or max(m.start() for rx in self.upload_cmds for m in rx.finditer(info.script)) > at[1]
+        return not starts or max(m.start() for rx in self.upload_cmds for m in rx.finditer(info.script)) > pos
 
     def _checked_earlier_stage(self, publish: Info, checks: list) -> bool:
         """A publish in a Declarative stage's own failure-path post block, where no check runs in the publish's stage
