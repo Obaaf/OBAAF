@@ -13,6 +13,10 @@ import shlex
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from obaaf.settings_evidence import SettingsEvidence
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
@@ -741,7 +745,8 @@ class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
-                 agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None) -> None:
+                 agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
+                 settings: SettingsEvidence | None = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -749,6 +754,7 @@ class WorkflowRules:
         # The `agents` section of the configuration, and what was read of the repository's policy for
         # GitHub's native egress firewall (None when no repository was checked, only files).
         self.agents = dict(agents or {})
+        self.settings = settings
         self.firewall = firewall
         self.findings: list[Finding] = []
 
@@ -824,7 +830,7 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall)
+                               firewall=self.firewall, settings=self.settings)
         second._through = True
         second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
@@ -3303,7 +3309,9 @@ class WorkflowRules:
 
         def group(bucket, entries, explanation):
             summary = egress_mod.joined(entries, 3) + explanation
-            grouped[summary] = "; ".join(entries) + explanation
+            # Retain each subject with its explanation. A length-limited work
+            # order can then show why each named step matters before truncation.
+            grouped[summary] = tuple(entry + explanation for entry in entries)
             bucket.append(summary)
 
         if agents_outside:
@@ -3368,7 +3376,8 @@ class WorkflowRules:
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
-        conditions = tuple(grouped.get(message, message) for message in (*problems, *unsure))
+        conditions = tuple(condition for message in (*problems, *unsure)
+                           for condition in grouped.get(message, (message,)))
         return egress_mod.Reading(verdict, detail, "egress-action",
                                   {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()},
                                   conditions)
@@ -3499,9 +3508,7 @@ class WorkflowRules:
         workflow and the checker configuration: every secret the job receives is listed in
         `protected_secrets`, and the job declares the environment the entry names, which is what
         OBAAF-GHA-024 checks for the secrets that are listed. The second is a repository setting
-        (the environment holds the secrets, nothing outside it does, and only protected branches
-        may use it), which `obaaf check` does not read, so it is "cannot tell" for a job that
-        declares an environment and "not met" for one that declares none."""
+        which an explicit audit snapshot can establish for a concrete secret and environment."""
         scoped = "each of the job's secrets is listed in protected_secrets, and the job declares the environment named there"
         setting = "the secrets are stored only in that environment, and only protected branches may use it"
         declared = job.environment
@@ -3512,13 +3519,29 @@ class WorkflowRules:
         odd = written is not None and not isinstance(written, str)
         shown = "the job's environment" if odd else f"environment '{one_line(declared, 120)}'"
 
-        def both(verdict: str, detail: str, second: str = CANNOT_TELL) -> list[Control]:
+        def both(verdict: str, detail: str, second: str = CANNOT_TELL, *, named_secrets=()) -> list[Control]:
             if second == NOT_MET:
                 about = "the job declares no environment, so its secrets come from the repository or organization"
             else:
                 about = (f"where a secret is stored and which branches may use {shown} are repository "
                          "settings, which obaaf check does not read; obaaf audit reads environments and their "
                          "branch rules")
+            if self.settings is not None:
+                if verdict != VERIFIED:
+                    about = detail
+                elif self.wf.callable:
+                    about = "the snapshot cannot establish the storage of caller-supplied secrets"
+                elif job.environment_reading[0] != "literal" or not named_secrets:
+                    about = "each secret needs a literal environment named by protected_secrets and the job"
+                else:
+                    results = [self.settings.assess(secret, declared) for secret in named_secrets]
+                    verdicts = {result.verdict for result in results}
+                    if NOT_MET in verdicts:
+                        second = NOT_MET
+                    elif verdicts == {VERIFIED}:
+                        second = VERIFIED
+                    about = "; ".join(dict.fromkeys(result.reason for result in results))
+                about = f"Settings snapshot taken {self.settings.taken_at}: {about}"
             return [Control(scoped, verdict, detail, "secrets-protected"),
                     Control(setting, second, about, "environment-restricted")]
 
@@ -3560,7 +3583,8 @@ class WorkflowRules:
                                      f"protected_secrets names {', '.join(repr(one_line(env, 120)) for env in unsure)}"
                                      ", which differ only in the case of letters outside ASCII")
         listed = ", ".join(upper[:5]) + (f", and {len(upper) - 5} more" if len(upper) > 5 else "")
-        return both(VERIFIED, f"{listed} in environment '{one_line(declared, 120)}'")
+        return both(VERIFIED, f"{listed} in environment '{one_line(declared, 120)}'",
+                    named_secrets=upper if all(any(envs) for envs in wanted.values()) else ())
 
     # Events that only someone with write access can cause, and whose payload outsiders do not write.
     _WRITE_ACCESS_EVENTS = frozenset({"push", "workflow_dispatch", "schedule", "release"})

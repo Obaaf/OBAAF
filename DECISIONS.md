@@ -111,9 +111,11 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-104 | How an explicit audit snapshot supplies dated, repository-bound secret-environment evidence | Proposed |
 | D-105 | Draft confinement for one agent job | Proposed |
 | D-106 | Checkout credential tightening needs an explicit request and an unchanged acceptance outcome for other findings | Proposed |
+| D-107 | A Markdown work order for confinement | Proposed |
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
 | D-114 | Lane follow-up commands retain the inputs of the reported check | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -1017,6 +1019,16 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Status.** Proposed, 2026-11-19 (slice A5a, #285).
 
+### D-107 A Markdown work order for confinement
+
+**Decision.** `obaaf fix egress --job NAME --brief` prints a Markdown task based on the same isolated draft and checker verdicts as the ordinary preview. Generate it from a trusted branch. The instructions and proof command come from OBAAF. Repository names and case-specific checker reasons appear as quoted, length-limited data. The work order identifies the original command by its step number.
+
+**Reason.** A person or coding agent can locate the proposed change without treating workflow commands, comments, or checker diagnostics containing repository text as instructions.
+
+**Consequence.** The work order forbids adding or widening acceptances. An obsolete entry is removed only after the checker shows its finding is gone. Production availability follows the same release-pin decision as the draft. The checker keeps each step an egress-action condition names with its own explanation, so the work order can show why each named step matters before a length limit; the ordinary preview therefore lists such a condition as one line per step instead of one joined line (recorded by the review, review-gpt #288). A reason the work order omits is counted, but a control's own reason is not shown when its egress-action reading has conditions, even when another control decides the verdict (#336).
+
+**Status.** Proposed, 2026-11-19 (A6a, #286).
+
 ### D-108 A parity test against a pinned zizmor, and two actions whose inputs are code
 
 **Decision.** From flagship slice 2d.3b (issue #79), under F-19. (1) `tests/parity/zizmor.yaml` pairs zizmor audits with the OBAAF rules that answer them: `template-injection` with OBAAF-GHA-010, `unpinned-uses` with 008, `excessive-permissions` with 009, `artipacked` with 011, and `cache-poisoning` with 006 and 007 (zizmor 1.32.0's audit also reports `cache-mode: write` on a job a dangerous trigger starts, which is 007's subject). (2) CI's advisory job `zizmor-parity` installs zizmor 1.32.0 with `--require-hashes --only-binary=:all: --no-deps` from `tests/parity/zizmor-requirements.txt`, which holds PyPI's SHA-256 for each of its 12 files and is checked against PyPI on every run; runs it offline, with no configuration, strict collection and the default persona, on two sets: OBAAF's risky workflows, and zizmor's own test workflows for the five audits at its release commit `21bd300`, checked out and never copied into this repository. A case is one file, job and audit zizmor reports, with the steps it names. It is answered when OBAAF reports a mapped rule, in any state but `fixed`, on the same job (anywhere in the file, for a case zizmor puts on no job), and for each step zizmor names, on that step, matched by its place in the job's `steps` (a `parallel` group's steps included) to the step OBAAF's own reader made of the same YAML node; OBAAF-GHA-006's one `restores` finding counts for every step that rule takes to restore a cache, and a finding on the job as a whole answers the job, never a step. The job fails when a case is neither answered nor named under `silent` with a kind (`narrower`, or `gap` with its issue) and a reason; when a `silent` entry names no case, one OBAAF answers, or, for a case OBAAF answers in part, places (`steps`) other than those OBAAF leaves unanswered; when OBAAF could not read a file the comparison needs; when OBAAF-GHA-002, 013 or 019 is not reported on a file where poutine or CodeQL reported their counterpart in landscape.md; and when zizmor's cases, or the SHA-256 of any file they were read from, differ from `tests/parity/zizmor-cases.json`. (3) The ordinary test suite runs the same comparison against the recorded cases for every set whose files are in this repository (today the risky workflows), and fails when one of those files has changed since the cases were recorded. (4) `mikefarah/yq` `cmd` and `Amadevus/pwsh-script` `script` join `script_inputs`, so an outsider's text expanded in either gets OBAAF-GHA-010.
@@ -1048,6 +1060,16 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Consequence.** The named step selector, private-copy proof and explicit apply use the same requirements as checkout tightening. Registry tags, ranges, missing versions and invalid semantic versions produce no proposal. Indirect scripts, shared YAML, installation commands outside the directly identified forms and any candidate disturbing another acceptance remain for manual review. Tightening never modifies acceptance paperwork. A repeated request can identify its already-pinned package in the checked files while other packages still need work. A manual finding specifically naming the requested package still needs review. The proof refuses while any baseline or ignore entry matches no finding, even one that matched nothing before the edit, so while an old-format baseline or such an entry exists the to-do list withholds the checkout and pin commands and names what to settle first: migration, then the paperwork preview that names each unmatched entry and proposes its removal. A check of one file, the `.github` or `.github/workflows` folder or one platform cannot tell an entry for a finding elsewhere from an unmatched one; there the to-do asks for a check of the whole repository instead (added by the review, review-gpt #294).
 
 **Status.** Proposed, 2026-11-19 (slice A5b, #291).
+
+### D-111 Apply settings evidence to OBAAF-GHA-005
+
+**Decision.** For each concrete secret a job reads, assess the environment named by its configuration and declared in the workflow against the explicitly selected D-104 snapshot. Record the timestamp and reasons on the environment control. Caller-supplied secrets, unresolved names and ambiguous environments cannot establish exclusive storage.
+
+**Consequence.** All five controls must verify for the finding to count as fixed. A missing code owner remains a separate medium-severity OBAAF-REPO-001 finding. It can fail a medium gate even when all five controls verify and the high-severity job finding clears. Under D-104, explicitly selecting a regular snapshot within the repository permits local use of an untracked file. The local checker does not authenticate the file or compare it with the Git index or pull request head. CI reads the snapshot at the policy path on the target branch. Snapshots do not change the identity of an acceptance. The production catalogue currently lists no egress action release for credential isolation. Each secret name a job reads is assessed, in the environment the job declares, when `protected_secrets` names that environment for it; a glob entry counts, so `*_API_KEY: main-only` can verify `OPENAI_API_KEY`, while a plain-list entry alone, which names no environment, cannot (review of #301). The snapshot reads Actions secrets only: Dependabot secrets are not read, so a Dependabot secret of the same name is not ruled out.
+
+**Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
+
+**Status.** Proposed, 2026-11-19 (A4b, #300).
 
 ### D-113 Install the GitHub Actions templates from the distribution
 
