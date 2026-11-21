@@ -13,6 +13,7 @@ from __future__ import annotations
 import bisect
 import csv
 import functools
+import itertools
 import posixpath
 import json
 import re
@@ -147,6 +148,13 @@ def check_words(words: list[str]) -> str | None:
 _STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return|exec|shopt"
                           r"|source)\b|(^|[;&|]\s*)\.\s"
                           r"|[(){}'\"`\\]|<<|\$\?|\$\{\?\}|\$!|PIPESTATUS")
+# Either of the two, searched once over a whole script.
+_LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.pattern + ")", re.M)
+
+
+# A line that holds a command that cannot change the reading (flagship slice 2d.2o), shared by every such line.
+_PLACEHOLDER = ["\u2026"]
+_PLACEHOLDER_LINE = [(_PLACEHOLDER, None)]
 
 
 def _commands_of(tokens: list[tuple[str, bool]]) -> list[tuple[list[str], str | None]]:
@@ -3270,6 +3278,7 @@ class JenkinsRules:
         return status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
 
     @staticmethod
+    @functools.lru_cache(maxsize=256)       # OBAAF-JEN-011 and 012 read the same scripts (flagship slice 2d.2o)
     def _sh_commands(text: str) -> tuple[list[list[str]], bool] | None:
         """The commands of an `sh` script whose failure fails the step, read by the reader of slice 2d.2e, and
         whether the whole script was read; None when the script names a #! program other than sh, bash or dash,
@@ -3644,7 +3653,7 @@ class JenkinsRules:
         one placeholder command: only that it holds a command matters (a 20,000-line script is not split word by
         word)."""
         out, physical, pending = [], [], ""
-        for part in text.split("\n"):
+        for part in (text.split("\n") if "\\\n" in text or text.endswith("\\") else ()):
             # a backslash at the end of a line joins the next, but not at the end of a comment
             trailing = len(part) - len(part.rstrip("\\"))
             if trailing % 2 == 1 and _strip_comment(part).endswith("\\"):
@@ -3654,10 +3663,17 @@ class JenkinsRules:
             pending = ""
         if pending:
             physical.append(pending)
-        for raw in physical:
-            if not _STATE_WORDS.search(raw) and not _CHECK_PROGRAM.search(raw):
-                if raw.strip() and not raw.lstrip().startswith("#"):
-                    out.append((raw, [(["…"], None)]))
+        if not physical:
+            physical = text.split("\n")        # no line continues another
+        # Which lines need reading, found in one pass over the text rather than two searches per line
+        joined = "\n".join(physical)
+        starts = [0, *itertools.accumulate(len(raw) + 1 for raw in physical[:-1])]
+        wanted = {bisect.bisect_right(starts, m.start()) - 1 for m in _LINE_WANTED.finditer(joined)}
+        for n, raw in enumerate(physical):
+            if n not in wanted:
+                stripped = raw.lstrip()
+                if stripped and stripped[0] != "#":
+                    out.append((raw, _PLACEHOLDER_LINE))
                 continue
             tokens = _script_tokens(_strip_comment(raw))
             if tokens is None:
@@ -3689,6 +3705,8 @@ class JenkinsRules:
             for raw, line in lines:
                 if line is None:
                     named = named or ("unread" if _CHECK_PROGRAM.search(raw) else None)
+                    continue
+                if line is _PLACEHOLDER_LINE:
                     continue
                 for command, _op in line:
                     kind = _names_check(command)
@@ -3805,6 +3823,9 @@ class JenkinsRules:
         later_cmd, later_kept, later_wait = [False] * (n_lines + 1), [False] * (n_lines + 1), [False] * (n_lines + 1)
         for n in range(n_lines - 1, -1, -1):
             ln = lines[n][1] or []
+            if ln is _PLACEHOLDER_LINE:
+                later_cmd[n], later_kept[n], later_wait[n] = True, later_kept[n + 1], later_wait[n + 1]
+                continue
             later_cmd[n] = later_cmd[n + 1] or any(cls._counts(c) for c, _o in ln)
             flags = [cls._keeps(c) for c, _o in ln]
             later_kept[n] = later_kept[n + 1] or any(k for k, _w in flags)
@@ -3814,6 +3835,8 @@ class JenkinsRules:
             if line is None:
                 lost = True
                 continue
+            if line is _PLACEHOLDER_LINE:
+                continue        # a command that changes nothing the reading tracks
             words = [w for command, _op in line for w in command] + [op for _c, op in line if op]
             case_depth += sum(1 for w in words if w == "case") - sum(1 for w in words if w == "esac")
             parens = case_depth <= 0 and "case" not in words      # a case pattern's `)` closes nothing
