@@ -49,7 +49,9 @@ Status 1. Both formats report `OBAAF-GHA-001` at line 10 and `OBAAF-CFG-001` at 
 
 ## A required check in GitHub Actions
 
-Use OBAAF's template [`obaaf-pipeline-check.yml`](../templates/github-actions/workflows/obaaf-pipeline-check.yml). Below it is word for word, with its placeholder `uses:` line replaced by the pin above; a test keeps the two the same. Save it as `.github/workflows/obaaf-pipeline-check.yml`.
+For a new workflow, save the standalone [OBAAF template](../templates/github-actions/workflows/obaaf-pipeline-check.yml) as `.github/workflows/obaaf-pipeline-check.yml` if that path is unused. The example below matches the template with its placeholder `uses:` line replaced by the pin above.
+
+`obaaf init` writes to that same path. If you already use its generated workflow, keep the installed checker pin and the gate’s threshold and target-branch configuration and baseline handling. To add code scanning, use the SARIF report, artifact and upload steps below as a reference. Adapt them to the existing checkout paths and review the change separately.
 
 What it does:
 
