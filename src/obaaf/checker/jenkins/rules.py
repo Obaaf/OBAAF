@@ -146,7 +146,7 @@ def check_words(words: list[str]) -> str | None:
 # What can change how OBAAF-JEN-011 reads the lines after it, or holds a command it compares (flagship slice 2d.2o). A
 # line with a quote may open a string that runs over several lines, so it is read too.
 _STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return|exec|shopt"
-                          r"|source)\b|(^|[;&|]\s*)\.\s"
+                          r"|source)\b|(^|[;&|][^\S\n]*)\.[^\S\n]"
                           r"|[(){}'\"`\\]|<<|\$\?|\$\{\?\}|\$!|PIPESTATUS")
 # Either of the two, searched once over a whole script.
 _LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.pattern + ")", re.M)
