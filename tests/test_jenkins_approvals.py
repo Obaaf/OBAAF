@@ -649,6 +649,21 @@ CASES = [
      "def onlyIf(boolean c, Closure body) {\n  boolean BRANCH_NAME = c\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
     ('R6-Y06_this_assign', 'quiet', 'finding',
      "def onlyIf(boolean c, Closure body) {\n  this.BRANCH_NAME = c\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    # The seventh review check, at 78bc032.
+    ('R7-Z01_dyn_env_prop', 'quiet', 'finding',
+     'def onlyIf(String key, Closure body) {\n  if (env."${key}" == \'yes\') { body() }\n}\nnode {\n  onlyIf(\'NOPE\') { input message: \'Release?\', submitter: \'release\' }\n  onlyIf(\'HOME\') { sh \'npm publish\' }\n}\n'),
+    ('R7-Z02_gstring_param', 'quiet', 'finding',
+     'def onlyIf(boolean c, Closure body) {\n  if ("${c}" == \'true\') { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: \'Release?\', submitter: \'release\' }\n  onlyIf(true) { sh \'npm publish\' }\n}\n'),
+    ('R7-Z02b_gstring_dollar', 'quiet', 'finding',
+     'def onlyIf(boolean c, Closure body) {\n  if ("$c" == \'true\') { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: \'Release?\', submitter: \'release\' }\n  onlyIf(true) { sh \'npm publish\' }\n}\n'),
+    ('R7-Z03_safe_nav_params', 'quiet', 'quiet',
+     "def onlyIf(boolean c, Closure body) {\n  if (params?.RELEASE) { body() }\n}\nnode {\n  onlyIf(false) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R7-Z04_paren_env', 'quiet', 'quiet',
+     "def onlyIf(boolean c, Closure body) {\n  if ((env).BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onlyIf(false) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R7-Z05_env_index_param', 'quiet', 'finding',
+     "def onlyIf(String k, Closure body) {\n  if (env[k] == 'yes') { body() }\n}\nnode {\n  onlyIf('A') { input message: 'Release?', submitter: 'release' }\n  onlyIf('B') { sh 'npm publish' }\n}\n"),
+    ('R7-Z06_top_level_bare_branch', 'quiet', 'quiet',
+     "node {\n  if (BRANCH_NAME == 'main') { input message: 'Release?', submitter: 'release' }\n  if (BRANCH_NAME == 'main') { sh 'npm publish' }\n}\n"),
 ]
 
 LIMITS = {

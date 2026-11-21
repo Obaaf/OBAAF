@@ -806,12 +806,15 @@ def declared_names(tree, limit: int = 2_000_000) -> set:
 
 def condition_names(node, limit: int = 2000) -> frozenset | None:
     """The names a condition reads, each as ("root", name) when it is read as `name.x` or `name[...]` and as
-    ("bare", name) otherwise; None when it calls something, holds a closure, or is too large to read to the end
-    (flagship slice 2d.2l)."""
+    ("bare", name) otherwise; None when it calls something, holds a closure or an interpolation, or is too large
+    to read to the end (flagship slice 2d.2l)."""
     names, rooted, count = [], set(), 0
     for n in find_nodes(node, lambda n: True, limit=limit):
         count += 1
         if isinstance(n, (Call, Closure)):
+            return None
+        # `"${c}" == 'true'`, `env."${key}"`: the names inside an interpolation are text the walk does not see.
+        if (isinstance(n, Str) and n.interpolated) or (isinstance(n, Prop) and "$" in n.name):
             return None
         if isinstance(n, (Prop, Index)) and isinstance(n.target, Name):
             rooted.add(id(n.target))
