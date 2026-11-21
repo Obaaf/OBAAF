@@ -2942,6 +2942,8 @@ Rule: OBAAF-JEN-010, an artifact from another build used by a moving reference (
 - `$NAME` in a single-quoted script read as a Groovy or `environment` value when the shell or a `withEnv` sets it itself (now the text as written is always read too, and what it shows counts);
 - `params` reassigned in the file (left as a stated limit; contrived).
 
+On this repository the slice changes one result: `templates/jenkins/obaaf-release-publish.Jenkinsfile` line 74 is OBAAF-JEN-010 "cannot tell" instead of a pass, because its copy's build number is computed and its checks follow `export PATH=...` (#344). Expectrail has no Jenkinsfile and is unchanged.
+
 A fourth pass (19 new attempts at `e9203ff`) found no blocking fault; its one minor class, a read before the declaration on the same line, is fixed (the place is compared by line and column) and is case `R4_01`.
 
 **Stated limits** (each a case in `LIMITS` or written in D-129): other download tools and object-store keys are not read; two Scripted stages with one name, or computed names, are one stage for the severity; what counts as publishing is the shared detector's (`curl -X PUT --data-binary` and `scp` are not publishes); a copy in a class method, a spread map and `downstream` are "cannot tell"; a digest check is "cannot tell" whatever it checks; an `echo` of an artifact URL counts as a fetch; conditions are compared by their structure (`if (go)` twice is one condition even when `go` changes), and code after a conditional `return` is not treated as conditional, both as for OBAAF-JEN-011 and 012 (slice 2d.2).
