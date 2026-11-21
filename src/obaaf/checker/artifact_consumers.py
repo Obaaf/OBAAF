@@ -16,7 +16,9 @@ def _subscribes(candidate: Workflow, producer: Workflow) -> bool:
     if isinstance(names, str):
         names = [names]
     name = producer.raw.get("name")
-    if not isinstance(name, str) or not name.strip() or not isinstance(names, list) or not names:
+    if not isinstance(name, str) or not name.strip() or "${{" in name:
+        return True
+    if not isinstance(names, list) or not names:
         return True
     return any(not isinstance(item, str) or not item.strip() or "${{" in item
                or item.casefold() == name.casefold() for item in names)
@@ -34,7 +36,7 @@ def _might_download(job: Job) -> bool:
 def artifact_may_be_consumed(repository: Iterable[Workflow] | None, workflow: Workflow, job: Job) -> bool:
     """Whether repository evidence leaves a possible consumer of this job's artifact.
 
-    Pass None when the full workflow inventory is unavailable. All other jobs in
+    Pass None when the full workflow inventory is unavailable. All jobs in
     the workflow qualify regardless of needs, artifact name or conditional steps.
     A workflow_run subscriber may also consume the output. Stop at an opaque
     reusable-workflow boundary, including a producer that runs as a called workflow.
@@ -43,7 +45,7 @@ def artifact_may_be_consumed(repository: Iterable[Workflow] | None, workflow: Wo
         return False
     if repository is None or workflow.error or workflow.problems or workflow.callable:
         return True
-    if any(_might_download(other) for other in workflow.jobs.values() if other.id != job.id):
+    if any(_might_download(other) for other in workflow.jobs.values()):
         return True
     for candidate in repository:
         if candidate.error or candidate.problems:
