@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
-import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 
 import yaml
@@ -81,8 +81,31 @@ def _relative(root: Path, path: Path) -> Path:
     return relative
 
 
-def _run(root, options, today, catalog):
+def check_inputs(root, options, today, catalog):
+    """Run the requested check, including its baseline, on a source tree or its copy."""
     target = root / options.path
+    if not target.exists():
+        raise ProofError(f"check path does not exist: {options.path}")
+    try:
+        return _read_inputs(root, target, options, today, catalog)
+    except (baseline.BaselineError, checker.ConfigError, ProofError) as exc:
+        raise ProofError(_input_message(root, exc)) from exc
+
+
+def _input_message(root, error):
+    # Both the source and the temporary tree have the same repository-relative paths, so a path
+    # under either is shown from the repository's top folder ("./..."). The top folder itself is
+    # ".", wherever the message names it and not only at its start: a config error for two
+    # competing configs, and a directory given as --config or --baseline (`--baseline .`) whose
+    # error names the copy's folder (added by the review, review-gpt #320). The root counts only
+    # where no path character (a letter, digit, `.`, `-` or `~`) touches it, so a longer name that
+    # begins or ends with its text is left alone; a `.` that ends a sentence does not touch it.
+    pattern = (r"(?<![\w.~-])" + re.escape(str(root))
+               + "(?:(" + re.escape(os.sep) + r")|(?![\w~-]|\.\w))")
+    return re.sub(pattern, lambda m: "./" if m.group(1) else ".", str(error))
+
+
+def _read_inputs(root, target, options, today, catalog):
     base = workflow.locate(target)[0] if target.is_dir() else target.parent
     files = [root / p for p in (options.config, options.baseline) if p is not None]
     config = checker.Config.load(base, str(root / options.config) if options.config is not None else None)
@@ -108,8 +131,29 @@ def _equivalent_notes(source, copy, git):
     return git and len(advisory) == 1 and source == [n for n in copy if n != advisory[0]]
 
 
+def check_copy_matches(root, original, before):
+    """Before planning or proving, make sure the copy sees the same input and results."""
+    if (original.files != before.files or original.findings != before.findings
+            or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
+            or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
+            or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
+        raise ProofError("checker results on the source and unedited copy differ")
+
+
 def _rows(findings):
     return Counter((baseline.key(f), f.severity, f.state) for f in findings)
+
+
+def _named(rows, limit: int = 3) -> str:
+    """Rule, file, job and step of each finding in a Counter of rows, for a refusal to name."""
+    names = []
+    for (identity, severity, state), count in sorted(rows.items()):
+        fields = json.loads(identity)
+        where = " ".join(str(fields.get(k) or "") for k in ("job", "step")).strip()
+        names.append(f"{count} × {fields['rule']} in {fields['path']}{' ' + where if where else ''} "
+                     f"({severity}, {state})")
+    more = len(names) - limit
+    return ", ".join(names[:limit]) + (f" and {more} more" if more > 0 else "")
 
 
 def _evidence(findings):
@@ -135,15 +179,6 @@ def _changed_occurrences(difference):
     for (row, _, _), count in difference.items():
         counts[row] += count
     return counts
-
-
-def _stale_ignore(result):
-    for entry in result.config.ignore:
-        if not any(f.rule == entry["rule"] and f.rule != checker.IDLE_DECLARATION
-                   and fnmatch.fnmatch(f.path, str(entry["path"]))
-                   and (not entry.get("job") or entry["job"] == f.job) for f in result.findings):
-            return True
-    return False
 
 
 def _manifest(root: Path) -> dict:
@@ -179,6 +214,43 @@ STRUCTURE_LIMIT = 500_000
 # Only these documents are compared by structure. A file of any other kind parsed as YAML loses
 # everything after " #" as a comment, so a changed shell line could compare equal (review of #274).
 DOCUMENT_SUFFIXES = (".yml", ".yaml", ".json")
+
+
+class _JsonNumber(str):
+    """Keep the numeric token distinct from a JSON string and avoid float rounding."""
+
+
+def _invalid_json_constant(token):
+    raise ValueError(f"{token} is not a JSON number")
+
+
+def _same_file(a, b) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _reader(path: Path, baseline_file, config_file) -> str:
+    """Read a file as the checker does: the baseline as JSON and the configuration it read as
+    YAML, whatever their names and through any link, and any other file by its suffix.
+    Choosing by suffix alone let a configuration named `.json`, which the checker reads as
+    YAML, be compared as JSON, where some text decodes differently; comparing names alone
+    missed a configuration or baseline reached through a link (review of #316)."""
+    if baseline_file is not None and _same_file(path, baseline_file):
+        return "json"
+    if config_file is not None and _same_file(path, config_file):
+        return "yaml"
+    return "json" if path.suffix.lower() == ".json" else "yaml"
+
+
+def _document(data: bytes, reader: str):
+    text = data.decode("utf-8")
+    if reader == "json":
+        return json.loads(text, object_pairs_hook=baseline._no_duplicates,
+                          parse_int=_JsonNumber, parse_float=_JsonNumber,
+                          parse_constant=_invalid_json_constant)
+    return yamlutil.load(text)
 
 
 def _structure(value, path, allowed, budget=None):
@@ -220,7 +292,7 @@ def _names_node(doc, key) -> bool:
     return True
 
 
-def _apply(dest, edits, expected):
+def _apply(dest, edits, expected, baseline_file=None, config_file=None):
     touched = set()
     for edit in edits:
         rel = Path(edit.path)
@@ -237,8 +309,9 @@ def _apply(dest, edits, expected):
         allowed = {tuple((type(part), part) for part in key) for key in edit.keys}
         removed = {tuple((type(part), part) for part in key) for key in edit.removed}
         added = {tuple((type(part), part) for part in key) for key in edit.added}
-        old = yamlutil.load(edit.before.decode("utf-8"))
-        new = yamlutil.load(edit.after.decode("utf-8"))
+        reader = _reader(path, baseline_file, config_file)
+        old = _document(edit.before, reader)
+        new = _document(edit.after, reader)
         if not isinstance(old, (dict, list)) or not isinstance(new, (dict, list)):
             raise ProofError(f"the document is not a mapping or a list in {str(rel)!r}")
         # A declared key must name something: one that names nothing would let the comparison
@@ -301,7 +374,7 @@ def _read_as_jenkins(root: Path, options: CheckOptions, result, edits) -> None:
     try:
         globs += [str(g) for g in (checker.Config.load(root, None).jenkins.get("files") or [])]
     except checker.ConfigError as exc:
-        raise ProofError(f"the repository's own configuration could not be read: {exc}") from exc
+        raise ProofError(f"the repository's own configuration could not be read: {_input_message(root, exc)}") from exc
     for edit in edits:
         rel = _relative(root, Path(edit.path))
         path = root / rel
@@ -331,17 +404,21 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
         today = date.today()
         catalog = load()
         with private_copy(root) as dest:
-            before = _run(dest, options, today, catalog)
-            original = _run(root, options, today, catalog)
-            if (original.files != before.files or original.findings != before.findings
-                    or original.baseline_stale != before.baseline_stale or original.coverage != before.coverage
-                    or original.jenkins != before.jenkins or original.jenkins_files != before.jenkins_files
-                    or not _equivalent_notes(original.notes, before.notes, (root / ".git").exists())):
-                raise ProofError("checker results on the source and unedited copy differ")
+            before = check_inputs(dest, options, today, catalog)
+            original = check_inputs(root, options, today, catalog)
+            check_copy_matches(root, original, before)
             expected_files = _manifest(dest)
             _read_as_jenkins(dest, options, before, edits)
-            _apply(dest, edits, expected_files)
-            after = _run(dest, options, today, catalog)
+            # The files the checker read in each role on the copy, before any edit is written.
+            _apply(dest, edits, expected_files,
+                   dest / options.baseline if options.baseline is not None else None,
+                   before.config.path)
+            try:
+                after = check_inputs(dest, options, today, catalog)
+            except ProofError as exc:
+                # The edit made the file unusable; the user's own file is still as it was
+                # (added by the review, review-gpt #320).
+                raise ProofError(f"after the proposed edit: {exc}") from exc
             if before.config.jenkins != after.config.jenkins or after.files != before.files:
                 raise ProofError("the candidate changes which CI files the checker can read")
             if expected_files != _manifest(dest):
@@ -362,21 +439,47 @@ def prove(root: Path, options: CheckOptions, edits: tuple[Edit, ...], promises: 
                     expected[promise.identity, promise.severity, ACCEPTED] += 1
                 elif promise.outcome != "gone" or promise.approval is not None:
                     raise ProofError("unknown or invalid promised finding transition")
-            if _rows(after.findings) != +expected:
-                raise ProofError("finding changes differ from the promised identities, severities or states")
+            losses = (_rows(f for f in before.findings if f.state == ACCEPTED)
+                      - _rows(f for f in after.findings if f.state == ACCEPTED))
+            promised_gone = Counter((p.identity, p.severity, p.previous) for p in promises
+                                    if p.outcome == "gone" and p.previous == ACCEPTED)
+            unpromised = losses - promised_gone
+            if unpromised:
+                names = []
+                for (identity, _, _), count in unpromised.items():
+                    fields = json.loads(identity)
+                    names.append(f"{count} × {fields['rule']} in {fields['path']} "
+                                 f"{fields.get('job', '')} {fields.get('step', '')}".rstrip())
+                raise ProofError(f"{sum(unpromised.values())} previously accepted finding(s) would lose "
+                                 f"their acceptance: {', '.join(names)}")
+            actual = _rows(after.findings)
+            if actual != +expected:
+                # Name what differs, so a withheld edit says which finding stopped it (review of #287).
+                parts = [f"{label}: {_named(rows)}" for label, rows in
+                         (("unexpected after the edit", actual - expected),
+                          ("expected and absent", +expected - actual)) if rows]
+                raise ProofError("finding changes differ from the promised identities, severities or states ("
+                                 + "; ".join(parts) + ")")
             if _approvals(after.findings) - _approvals(before.findings) != approved:
                 raise ProofError("changed acceptance differs from its promised source, owner, reason or expiry")
             before_detail = _evidence(before.findings)
             after_detail = _evidence(after.findings)
             permitted_old = _rows(before.findings) - previous_rows
             permitted_new = +expected - previous_rows
-            if (_changed_occurrences(before_detail - after_detail) - permitted_old
-                    or _changed_occurrences(after_detail - before_detail) - permitted_new):
-                raise ProofError("an unrelated finding changed its acceptance or control evidence")
-            if _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog)):
-                raise ProofError("a finding newly counts at the selected gate")
-            if after.baseline_stale or _stale_ignore(after):
-                raise ProofError("a baseline or ignore entry no longer matches a finding")
+            # `|` keeps the larger count: one finding whose evidence changed is in both differences.
+            changed = (_changed_occurrences(before_detail - after_detail) - permitted_old
+                       | (_changed_occurrences(after_detail - before_detail) - permitted_new))
+            if changed:
+                raise ProofError(f"an unrelated finding changed its acceptance or control evidence: {_named(changed)}")
+            newly = _rows(after.gating(options.fail_on, catalog)) - _rows(before.gating(options.fail_on, catalog))
+            if newly:
+                raise ProofError(f"a finding newly counts at the selected gate: {_named(newly)}")
+            stale = [("baseline", e) for e in after.baseline_stale] + [("ignore", e) for e in after.unmatched_ignores()]
+            if stale:
+                names = [f"{kind} {entry['rule']} in {entry['path']} {entry.get('job', '')}".rstrip()
+                         for kind, entry in stale]
+                raise ProofError(f"a baseline or ignore entry no longer matches a finding "
+                                 f"({len(stale)} unmatched): {', '.join(names)}")
             _source_unchanged(root, edits)
             return after
     except ProofError:

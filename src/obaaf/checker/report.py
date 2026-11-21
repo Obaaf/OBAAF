@@ -273,9 +273,34 @@ def summary(result: CheckResult) -> dict:
 
 def _check_args(result: CheckResult) -> list[str]:
     target = str(result.checked or ".")
-    if target.startswith("-"):
+    if target.startswith(("-", "=")):
         target = "./" + target
-    return ["obaaf", "check", target, *map(str, result.options or ())]
+    words = ["obaaf", "check", target, *map(str, result.options or ())]
+    if result.settings_path:
+        words.append(f"--settings={result.settings_path}")
+    return words
+
+
+def _lane_advice(text: str, result: CheckResult, reference: str = "the lane check") -> tuple[str, str | None]:
+    placeholder = "obaaf check . --lanes"
+    if placeholder not in text:
+        return text, None
+    args = _check_args(result)
+    if result.baseline_path:
+        args.append("--baseline=" + str(result.baseline_path))
+    args.extend(["--fail-on", result.fail_on, "--lanes"])
+    command = shlex.join(args)
+    # The rule mentions the lane check twice. Keep its explanation and render the command once.
+    text = text.replace(f"`{placeholder}`", placeholder)
+    if command != one_line(command):
+        advice = text.replace(placeholder, "the lane check")
+        return advice + " Run the lane check manually with the original paths and options.", None
+    return text.replace(placeholder, reference), command
+
+
+def _inline_lane_advice(text: str, result: CheckResult) -> str:
+    advice, command = _lane_advice(text, result)
+    return f"{advice} {command}" if command else advice
 
 
 _RESOLVE_SCAN_ERRORS = "Resolve the scan errors before migrating the baseline."
@@ -297,26 +322,14 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
         if "pinCandidates" in group:
             lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
                          f"{group['byHand']} require manual review.")
-        action = group["nextAction"]
-        command = None
+        action, command = group["nextAction"], None
         if group["id"] == "acceptance-old-baseline":
             if result.errors:
                 action = _RESOLVE_SCAN_ERRORS
             elif action != one_line(action):
                 action = migration_hint(action) + " Original baseline (display only): " + one_line(result.baseline_path)
-        elif "obaaf check . --lanes" in action:
-            # The command goes on a line of its own, so that copying it takes no full stop with it, and a
-            # path or option that cannot be printed on one line loses only the command, not the advice.
-            args = _check_args(result)
-            if result.baseline_path:
-                args.append("--baseline=" + str(result.baseline_path))
-            args.extend(["--fail-on", result.fail_on, "--lanes"])
-            command = shlex.join(args)
-            action = action.replace("obaaf check . --lanes", "the command below")
-        if command is not None and command != one_line(command):
-            action, command = action.replace(
-                "the command below", "obaaf check --lanes and the check's own paths and options (they cannot be "
-                "printed as a one-line command)"), None
+        elif group["command"] is None:
+            action, command = _lane_advice(action, result, "the command below")
         if action != one_line(action):
             action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)
@@ -427,7 +440,8 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines += _lifecycle_lines(f)
         lines.append(f"        Requirement: {_requirements(rule)}")
         if show_fixes:
-            lines.append(f"        Fix: {' '.join(rule['fix'].split())}")
+            fix = " ".join(rule["fix"].split())
+            lines.append("        Fix: " + _inline_lane_advice(fix, result))
         if _remediation(catalog, f.rule) == "architecture" and not f.controls:
             where_to = "docs/jenkins.md" if f.rule.startswith("OBAAF-JEN-") else "templates/github-actions/"
             lines.append("        Architecture: fixing this means adopting the agent and effect lanes, not a "
@@ -605,7 +619,7 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
                 "agentControls": catalog.rules[f.rule].get("agent_controls", []),
                 # Added in 0.4: why a finding of this rule matters, in one sentence (slice 3.2b).
                 "why": _why(catalog.rules[f.rule]),
-                "fix": " ".join(catalog.rules[f.rule]["fix"].split()),
+                "fix": _inline_lane_advice(" ".join(catalog.rules[f.rule]["fix"].split()), result),
                 "suppressed": f.suppressed,
                 **({"scope": f.scope} if f.scope else {}),
                 **({"baselined": f.baselined} if result.baseline_used else {}),
@@ -625,6 +639,9 @@ def to_json(result: CheckResult, catalog: Catalog | None = None,
         ] if catalog.causes.problems else []),
         "todo": todo(result, catalog),
     }
+    for group in payload["todo"]:
+        if group["command"] is None:
+            group["nextAction"] = _inline_lane_advice(group["nextAction"], result)
     cleared = result.cleared()
     if cleared:
         payload["fixed"] = [
