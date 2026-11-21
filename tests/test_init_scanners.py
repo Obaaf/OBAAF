@@ -79,7 +79,7 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(code, 0, text)
         docker = self.root / "docker"
         docker.write_text('#!/bin/sh\nif [ "$1" = pull ]; then exit "${PULL_STATUS:-0}"; fi\n'
-                          'echo "::error::forged by the scanner"\nexit "$SCANNER_STATUS"\n')
+                          'echo "::error::forged by the scanner"\necho ordinary-diagnostic >&2\nexit "$SCANNER_STATUS"\n')
         docker.chmod(0o755)
         env = {**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}", "RUNNER_TEMP": str(self.root),
                "GITHUB_WORKSPACE": str(self.root)}
@@ -94,7 +94,8 @@ class CompanionTests(unittest.TestCase):
                     lines = run.stdout.splitlines()
                     token = lines[0].removeprefix("::stop-commands::")
                     self.assertNotEqual(token, lines[0])
-                    self.assertEqual(lines[1:], ["::error::forged by the scanner", f"::{token}::"])
+                    self.assertEqual(run.stderr, "")
+                    self.assertEqual(lines[1:], ["::error::forged by the scanner", "ordinary-diagnostic", f"::{token}::"])
             # The Docker client exits 1 when it cannot reach the daemon: a failed pull fails every step,
             # actionlint's included, instead of passing as actionlint's finding status (review of #276).
             for code in (1, 125):

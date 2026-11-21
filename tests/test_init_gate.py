@@ -191,8 +191,13 @@ class GateTests(unittest.TestCase):
         self.assertIn("already gates", self.gate()[1])
         self.assertNotEqual(self.gate("--owner", "@demo")[0], 0)
 
-    def check_crlf_gate(self, *extra):
+    def check_crlf_gate(self, *extra, previous_scanners=False):
         self.install(*extra)
+        if previous_scanners:
+            workflow = self.workflow.read_bytes()
+            previous = workflow.replace(b"          exec 2>&1\n", b"")
+            self.assertNotEqual(workflow, previous)
+            self.workflow.write_bytes(previous)
         (self.root / ".gitattributes").write_text(f"{WORKFLOW} text eol=crlf\n")
         commit(self.root)
         self.workflow.unlink()
@@ -216,6 +221,10 @@ class GateTests(unittest.TestCase):
 
     def test_crlf_gate_with_scanner(self):
         self.check_crlf_gate("--with-scanner", "poutine")
+
+    def test_crlf_gate_preserves_previous_scanner_steps(self):
+        self.check_crlf_gate("--with-scanner", "poutine", "--with-scanner", "zizmor",
+                             previous_scanners=True)
 
     def test_the_first_gate_template_as_it_landed_is_recognised(self):
         # review-gpt #306: the other tests build the historical template from the current one, so a
