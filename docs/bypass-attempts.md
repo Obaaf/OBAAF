@@ -2929,4 +2929,12 @@ Rule: OBAAF-JEN-010, an artifact from another build used by a moving reference (
 - `selector: null`, which is the default;
 - 30 nested `if` blocks around a check and a publish in nested helpers (2.6 s in this rule at 1.3 KB; now "cannot tell" at once, as more than 150,000 comparisons). The rest of the checker still takes about 6 s on that input, as it did before the slice.
 
+**Second review** (the same sub-agent, about 220 earlier attempts re-run and about 60 new at `55b4383`; each blocking class is an `R2_` case in `REVIEW2_CASES`): about 26 ways past in 6 classes, 3 of them regressions, all fixed by class:
+- a variable read by its one declaration while a closure's parameter, an alias, an argument, a use inside an interpolated string or a binding write could change it (now a variable is read only when the file names it in exactly one other place and writes no binding or property);
+- a copy's own condition clearing a check under the same condition, when the copy makes it false at the check (`if (!fileExists('app.jar'))`; now only conditions on parameters alone are shared);
+- a closure called where the checker reads it and run again by `parallel` after the check (a copy in a closure is now always "cannot tell");
+- a loop that publishes before it copies (a loop around the copy now counts like a `retry` block);
+- a URL kept in a Groovy variable;
+- 120 parameter conditions on copies in nested helpers (5.5 s in this rule at 4.5 KB; the budget now counts the copies' sets of conditions).
+
 **Stated limits** (each a case in `LIMITS` or written in D-129): other download tools and object-store keys are not read; two Scripted stages with one name, or computed names, are one stage for the severity; what counts as publishing is the shared detector's (`curl -X PUT --data-binary` and `scp` are not publishes); a copy in a class method, a spread map and `downstream` are "cannot tell"; a digest check is "cannot tell" whatever it checks; an `echo` of an artifact URL counts as a fetch; conditions are compared by their structure (`if (go)` twice is one condition even when `go` changes), and code after a conditional `return` is not treated as conditional, both as for OBAAF-JEN-011 and 012 (slice 2d.2).
