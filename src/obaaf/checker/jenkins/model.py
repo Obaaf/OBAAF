@@ -775,6 +775,31 @@ class _Raw:
 _GLOBAL_ROOTS = {"env", "params", "currentBuild", "true", "false", "null", "scm"}
 
 
+def declared_names(tree, limit: int = 2_000_000) -> set:
+    """Every name a file declares: method and closure parameters, `def` and typed variables, the first name of
+    an assignment's target, loop variables (flagship slice 2d.2l)."""
+    out: set = set()
+    for n in find_nodes(tree, lambda n: isinstance(n, (MethodDef, Closure, Block, Decl, Assign, Loop)), limit=limit):
+        if isinstance(n, (MethodDef, Closure, Block)):
+            out.update(x for x in n.params if isinstance(x, str))
+        elif isinstance(n, Decl):
+            out.add(n.name)
+        elif isinstance(n, Assign):
+            target = path_of(n.target) or path_of(getattr(n.target, "target", None)) or ""
+            if target:
+                out.add(target.split(".")[0])
+        else:
+            for h in n.header:
+                if isinstance(h, Decl):
+                    out.add(h.name)
+                elif isinstance(h, Name):
+                    out.add(h.name)
+                elif isinstance(h, Binary) and h.op == "in" and isinstance(h.left, Name):
+                    out.add(h.left.name)
+    out -= _GLOBAL_ROOTS - {"params", "env", "currentBuild"}
+    return out
+
+
 def condition_names(node, limit: int = 2000) -> frozenset | None:
     """The names a condition reads, or None when it calls something, holds a closure, or is too large to read
     to the end (flagship slice 2d.2l)."""
@@ -790,11 +815,22 @@ def condition_names(node, limit: int = 2000) -> frozenset | None:
 
 def reads_only_globals(names: frozenset | None, local: set) -> bool:
     """Whether a condition reading `names` means the same wherever a method is called: every name is the build's
-    own (env, params, currentBuild, or an upper-case environment variable) and none is a name the file declares,
-    a parameter or variable of that name included."""
+    own (env, params, currentBuild, or an environment variable Jenkins sets) and none is a name the file
+    declares, a parameter or variable of that name included."""
     if names is None or names & local:
         return False
-    return all(n in _GLOBAL_ROOTS or n.replace("_", "").isupper() for n in names)
+    return all(n in _GLOBAL_ROOTS or n in JENKINS_ENV for n in names)
+
+
+# Environment variables Jenkins sets for every build, read bare in Scripted Pipeline (flagship slice 2d.2l: any
+# other upper-case name may be a parameter the parser does not keep, such as a closure's `{ GO -> }`).
+JENKINS_ENV = {"BRANCH_NAME", "BRANCH_IS_PRIMARY", "CHANGE_ID", "CHANGE_URL", "CHANGE_TITLE", "CHANGE_AUTHOR",
+               "CHANGE_AUTHOR_DISPLAY_NAME", "CHANGE_AUTHOR_EMAIL", "CHANGE_TARGET", "CHANGE_BRANCH", "CHANGE_FORK",
+               "TAG_NAME", "TAG_TIMESTAMP", "TAG_UNIXTIME", "TAG_DATE", "BUILD_NUMBER", "BUILD_ID",
+               "BUILD_DISPLAY_NAME", "BUILD_TAG", "BUILD_URL", "JOB_NAME", "JOB_BASE_NAME", "JOB_URL",
+               "EXECUTOR_NUMBER", "NODE_NAME", "NODE_LABELS", "WORKSPACE", "JENKINS_HOME", "JENKINS_URL",
+               "GIT_COMMIT", "GIT_PREVIOUS_COMMIT", "GIT_PREVIOUS_SUCCESSFUL_COMMIT", "GIT_BRANCH", "GIT_LOCAL_BRANCH",
+               "GIT_URL", "GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"}
 
 
 def _source_hint(node) -> str:
@@ -1428,6 +1464,7 @@ class Builder:
         self.budget = self.INLINE_BUDGET
         self.seq = 0
         self.keys: dict = {}
+        self.declared: set = set()
         # For each method being expanded, its closure parameter -> (the caller's closure, walked yet).
         self.closure_args: list[dict] = []
         # Closures and method pointers assigned to variables of this file (flagship slice 2d.2i):
@@ -1481,6 +1518,10 @@ class Builder:
                     self.methods[target.name] = target.body
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
+        # Every name the file declares anywhere, before the walk: a method's or closure's parameter, a variable, an
+        # assigned name, a loop variable (flagship slice 2d.2l, from its fourth review: names collected while
+        # walking missed methods defined below their use and closure parameters).
+        self.declared = declared_names(tree)
         # A list is followed into withCredentials only when its name is used nowhere else: passed to a method or
         # copied to another name, it can be changed there (the second review of slice 2d.2i).
         uses: dict[str, int] = {}
@@ -1576,7 +1617,7 @@ class Builder:
             cached = (node, digest, condition_names(node))
             self.keys[id(node)] = cached
         tag = cached[1]
-        if ctx.invocation and not reads_only_globals(cached[2], ctx.invocation[1] | self.p.local_names):
+        if ctx.invocation and not reads_only_globals(cached[2], ctx.invocation[1] | self.declared | self.p.local_names):
             tag += f" call {ctx.invocation[0]}"
         return tag
 

@@ -580,9 +580,50 @@ CASES = [
      "def onRelease(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
     ('R3-U11_helper_calls_fileExists', 'quiet', 'finding',
      "def onRelease(Closure body) {\n  if (fileExists('release.txt')) { body() }\n}\nnode {\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
+    # The fourth review pass, at 33929df (W cases are about other rules; only OBAAF-JEN-005 is compared here).
+    ('R4-V01_with_upper_closure_param', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  c.with { GO -> if (GO) { body() } }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R4-V02_upper_outer_param_defs_at_bottom', 'quiet', 'finding',
+     "node {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\ndef inner(Closure b) { b() }\ndef onlyIf(boolean ASK, Closure body) {\n  inner { if (ASK) { body() } }\n}\n"),
+    ('R4-V02b_upper_param_defs_at_bottom_direct', 'quiet', 'finding',
+     "node {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\ndef onlyIf(boolean ASK, Closure body) {\n  if (ASK) { body() }\n}\n"),
+    ('R4-V03_binding_var_helper', 'quiet', 'finding',
+     "RELEASE = params.RELEASE\ndef onRelease(Closure body) { if (RELEASE) { body() } }\nnode {\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
+    ('R4-V04_upper_local_defs_bottom', 'quiet', 'finding',
+     "node {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\ndef onlyIf(boolean c, Closure body) {\n  def GO = c\n  if (GO) { body() }\n}\n"),
+    ('R4-V05_if_not_vs_neg', 'quiet', 'finding',
+     "node {\n  if (params.A) { echo 'a' } else { input message: 'Release?', submitter: 'release' }\n  if (!params.A) { sh 'npm publish' }\n}\n"),
+    ('R4-V06_and_name_right', 'quiet', 'quiet',
+     "node {\n  def ok = params.A && params.B\n  input message: 'Release?', submitter: 'release'\n  sh 'npm publish'\n}\n"),
+    ('R4-V07_gstring_step_in_and', 'finding', 'finding',
+     'node {\n  params.X && "${input(message: \'Release?\', submitter: \'release\')}"\n  sh \'npm publish\'\n}\n'),
+    ('R4-V08_dyn_prop_and', 'finding', 'finding',
+     'node {\n  params.X && env."${input(message: \'Release?\', submitter: \'release\')}"\n  sh \'npm publish\'\n}\n'),
+    ('R4-V09_ternary_name_branches', 'quiet', 'finding',
+     "node {\n  def v = params.X ? 'a' : 'b'\n  params.Y ? input(message: 'Release?', submitter: 'release') : null\n  sh 'npm publish'\n}\n"),
+    ('R4-W01_default_param_creds', 'quiet', 'quiet',
+     'def withNpm(String id = \'npm\', Closure body) {\n  withCredentials([string(credentialsId: id, variable: \'NPM_TOKEN\')]) { body() }\n}\nnode {\n  withNpm { sh "echo ${NPM_TOKEN}" }\n}\n'),
+    ('R4-W02_two_closures', 'finding', 'finding',
+     'def both(Closure a, Closure b) { a(); b() }\nnode {\n  withCredentials([string(credentialsId: \'npm\', variable: \'T\')]) {\n    both({ sh "echo ${T}" }) { sh \'npm publish\' }\n  }\n}\n'),
+    ('R4-W03_overloads', 'quiet', 'quiet',
+     'def f(Closure c) { c() }\ndef f(String s, Closure c) { withCredentials([string(credentialsId: s, variable: \'T\')]) { c() } }\nnode {\n  f(\'npm\') { sh "echo ${T}" }\n}\n'),
+    ('R4-W04_map_named_creds', 'quiet', 'quiet',
+     'def deploy(Map cfg, Closure body) {\n  withCredentials([usernamePassword(credentialsId: cfg.creds, usernameVariable: \'U\', passwordVariable: \'P\')]) { body() }\n}\nnode {\n  deploy(creds: \'x\') { sh "curl -u ${U}:${P} https://x" }\n}\n'),
+    ('R4-W05_param_creds_id', 'quiet', 'quiet',
+     'def withId(String id, Closure body) {\n  withCredentials([string(credentialsId: id, variable: \'T\')]) { body() }\n}\nnode {\n  withId(\'npm\') { sh "echo ${T}" }\n}\n'),
+    ('R4-W06_extra_args_vs_params', 'finding', 'unknown',
+     "def f(a, Closure body) { body() }\nnode {\n  f(1, 2) { sh 'npm publish' }\n}\n"),
 ]
 
 LIMITS = {
+    'R4-V03_binding_var_helper':
+        'a script-binding variable read in a helper ties the condition to the call (conservative)',
+    'R4-V05_if_not_vs_neg':
+        '`else` of `if (A)` and `if (!A)` are two conditions (conservative)',
+    'R4-V07_gstring_step_in_and':
+        'a step inside a GString interpolation is not read (older behaviour; conservative here)',
+    'R4-V08_dyn_prop_and':
+        'a step inside a dynamic property name is not read (older behaviour; conservative here)',
     'R3-U05_withEnv_in_helper':
         'a condition on an environment variable a helper sets with withEnv is not tied to the call',
     'R3-U11_helper_calls_fileExists':
