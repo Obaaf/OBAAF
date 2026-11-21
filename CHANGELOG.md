@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Migration waits for a complete scan
 
-With an old-format baseline, the full and summary text reports now ask you to resolve scan errors before migrating it, instead of printing `obaaf baseline migrate` for an incomplete scan. When the migration command cannot be printed on one line, the action list names it and identifies the baseline. The JSON and SARIF reports are unchanged.
+With an old-format baseline, the full and summary text reports now ask you to resolve scan errors before migrating it, instead of printing `obaaf baseline migrate` for an incomplete scan. When the migration command cannot be printed on one line, the action list names it and identifies the baseline, and so does a JSON to-do item whose migration is a step before a checkout or pin preview. Otherwise the JSON and SARIF reports are unchanged.
 
 ### Lane commands keep the check's inputs
 
