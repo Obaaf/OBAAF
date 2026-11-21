@@ -3278,8 +3278,8 @@ class JenkinsRules:
             return None
         decl, value = found
         block = parents.get(id(decl))
-        if block is None or getattr(read, "line", 0) < decl.line:
-            return None
+        if block is None or (getattr(read, "line", 0), getattr(read, "col", 0)) <= (decl.line, decl.col):
+            return None             # read before the declaration, on an earlier line or earlier on its line
         node = parents.get(id(read))
         while node is not None:
             if node is block:

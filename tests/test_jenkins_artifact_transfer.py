@@ -396,6 +396,8 @@ REVIEW3_CASES = [
      '// binding of the release\nnode {\n  def b = build job: \'a\'\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
     ('R3_08_local_wins_in_with_closure', 'quiet', 'unknown',
      "node {\n  def sel = specific('42')\n  [x: 1].with { copyArtifacts(projectName: 'a', selector: sel) }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R4_01_read_before_declaration_on_one_line', 'unknown', 'unknown',
+     "node { binding.setVariable('sel', lastSuccessful()); copyArtifacts(projectName: 'a', selector: sel); def sel = specific('42')\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
 ]
 
 # The answers that are a stated limit rather than what the file decides, with the reason (docs/bypass-attempts.md).
