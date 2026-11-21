@@ -1207,3 +1207,13 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Consequence.** A pipeline that passed can now get "cannot tell" (most often: Groovy values in the script, `set -Eeuo pipefail` or `export PATH=` before the check, a wrapper, a Windows step) or a finding (a check in a closure nothing calls, `--pre-approval` alone, a publish in the pipeline's post block). A finding can become "cannot tell". OBAAF's own Jenkins release template is "cannot tell" until #344 is decided. The reader's limits are #347.
 
 **Status.** Accepted, 2026-11-21. With D-129 and this entry, the maintainer made #344 a launch item: OBAAF's own Jenkins release template, which is "cannot tell" under OBAAF-JEN-010 and OBAAF-JEN-012, is fixed before the build goes to its first users. Proposed 2026-11-21 (slice 2d.2n).
+
+### D-132 Egress credit follows an uploaded artifact to possible consumers
+
+**Decision.** For GitHub's native firewall and OBAAF's egress action, withhold `egress-enforced` credit when the agent job uploads an artifact and another job may download it. Read jobs in the producing workflow and repository workflows that `workflow_run` may start for it. An incomplete inventory also makes the otherwise verified control "cannot tell" for an uploading producer.
+
+**Reason.** Both controls restrict execution on the producer. A consumer that builds, tests or loads the uploaded files may run agent-written code with its own credentials and network access. A download is sufficient to withhold credit because the checker cannot establish how each file will be used.
+
+**Consequence.** OBAAF-GHA-020 can stay open on the producing job, and OBAAF-GHA-005 cannot clear on the strength of the producer's controls. Uploads kept for inspection can still qualify when the inventory is complete and the checker finds no possible consumer.
+
+**Status.** Proposed, 2026-11-21 (#354). Draft awaiting maintainer review.
