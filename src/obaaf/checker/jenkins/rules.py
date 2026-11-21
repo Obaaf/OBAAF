@@ -196,7 +196,7 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
             runs = True
         elif k and "=" not in word and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
                 not command[k - 1].startswith("-")
-                or "-y" in command[k + 1:k + 8]
+                or ("-y" in command[k + 1:k + 8] and word.rsplit("/", 1)[-1] in _PACKAGE_MANAGERS)
                 or next((w for w in command[k + 1:k + 8] if not w.startswith("-")), "") in _PM_VERBS):
             # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
             runs = False
@@ -218,6 +218,9 @@ _NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacm
                           "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
                           "which", "type", "whereis", "man", "git", "curl", "wget", "install", "cp", "mv", "ln", "chmod",
                           "echo", "printf", "grep", "test", "ls", "cat"})
+# Package managers, whose `-y` says they are the program run (`sudo -E apt-get -y purge gpgv`).
+_PACKAGE_MANAGERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "snap", "brew", "choco",
+                               "winget", "scoop", "pip", "pip3", "npm", "pnpm", "yarn", "gem", "cargo", "dpkg", "rpm"})
 # What follows a package manager's name when it is the program run (`apk add`, `pip install`).
 _PM_VERBS = frozenset({"install", "add", "i", "get", "update", "upgrade", "remove", "del", "uninstall", "search", "info",
                        "show", "fetch", "download", "clone", "commit", "purge", "reinstall", "autoremove", "dist-upgrade",
