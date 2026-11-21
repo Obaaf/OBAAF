@@ -87,6 +87,14 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         ])
         self.assertEqual([g["count"] for g in groups], [1, 2, 1, 1, 1, 3])
 
+    def test_checkout_preview_precedes_higher_severity_manual_work(self):
+        checkout = Finding("OBAAF-GHA-011", "low", "ci.yml", 1, "Checkout.")
+        manual = Finding("OBAAF-JEN-001", "high", "Jenkinsfile", 1, "Review manually.")
+        groups = self.todo([manual, checkout])
+        self.assertEqual(groups[0]["id"], "checkout-credentials")
+        self.assertIsNotNone(groups[0]["command"])
+        self.assertIsNone(groups[1]["command"])
+
     def test_fields_of_a_rule_entry_and_an_acceptance_entry(self):
         ownerless = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
         ownerless.acceptance = acceptance.make(acceptance.IGNORE, None, "reviewed", "2027-01-01",
@@ -130,6 +138,19 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         data = json.loads(report.to_json(result, catalog))
         self.assertEqual(data["todo"], [])
         self.assertTrue(any("cause catalogue is inconsistent" in note for note in data["notes"]))
+
+        for render in (report.to_text, report.to_summary):
+            with self.subTest(render=render.__name__):
+                text = render(result, catalog)
+                self.assertIn("Action list unavailable", text)
+                self.assertNotIn("0 findings, 0 things to do", text)
+
+    def test_text_suggestions_accept_missing_original_options(self):
+        result = CheckResult([Finding("OBAAF-GHA-009", "low", "wf", 1, "Implicit.")], [], [], Config())
+        result.options = None
+        for render in (report.to_text, report.to_summary):
+            with self.subTest(render=render.__name__):
+                self.assertIn("obaaf check . --fail-on", render(result))
 
     def test_acceptance_causes_do_not_share_an_id_with_the_catalogue(self):
         import ast

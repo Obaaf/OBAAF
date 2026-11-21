@@ -36,7 +36,7 @@ def _proof(options):
     return " ".join(command)
 
 
-def work_order(job, index, step, blocked, options, result):
+def work_order(job, index, step, blocked, broken, options, result):
     inputs = step["with"]
     # The four-space indentation makes this one literal Markdown block. quoted()
     # prevents a value from crossing even a single line or ending its own quotation.
@@ -47,6 +47,7 @@ def work_order(job, index, step, blocked, options, result):
         _names("Proxy variable names", inputs.get("model-keys", "").split()),
         _names("Command variable names", inputs.get("env", "").split()),
         _names("Refused variable names", blocked),
+        _names("Variable names with a line break or NUL in the value", broken),
         "    Check target = " + quoted(options.path, 120),
     ]
     if options.config is not None:
@@ -96,11 +97,11 @@ def work_order(job, index, step, blocked, options, result):
         "2. Put supported proxy variable names in `with.model-keys` and review each remaining name for "
         "`with.env`. Only ANTHROPIC_API_KEY and OPENAI_API_KEY can be proxy-held. Other provider keys "
         "passed to the command remain readable by the agent, even with restricted networking. Resolve "
-        "refused names by hand. Consider your own proxy for a provider the action cannot protect.",
+        "refused names by hand. Pass values containing a line break or NUL another way, for example in a file. Consider your own proxy for a provider the action cannot protect.",
         "3. Replace the reserved .invalid host placeholder in `with.allow` with the literal hosts required, "
         "excluding public suffixes. A listed host covers its subdomains. Proxied provider APIs can be "
         "reached independently of the list. If you deploy the change, inspect the action’s `denied` output "
-        "after a run. Under confinement, writes stay in the scratch copy.",
+        "after a run. Under confinement, command writes stay in the action’s scratch directory. The command can still read its copy of the workspace and the runner’s /tmp.",
         "4. Use GitHub-hosted ubuntu-24.04 without a container. Keep credentials out of other steps and "
         "workflow or job environments. Remove OIDC and models permissions. Review steps that could run "
         "beside the agent. Only artifact uploads may follow it. Plan a separate job for later commit, "

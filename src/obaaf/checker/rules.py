@@ -23,7 +23,7 @@ from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
-    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
+    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
@@ -279,6 +279,211 @@ def _strip_comment_text(line: str) -> str:
 
 # Actions that restore a GitHub Actions cache whatever their inputs, or that hand the cache service's
 # token to the steps after them (flagship slice 2d.2e).
+# Flagship slice 2d.13 (F-278). Names that, given to a bash or sh step, change what its shell runs or what
+# the programs it names run: which program a name finds (`PATH`); bash's start and its reading
+# (`BASH_ENV`, `ENV`, `SHELLOPTS`, whose `noexec` makes bash read the script and run none of it,
+# `BASHOPTS`, `BASH_FUNC_NAME%%`, `BASH_COMPAT`, `PS4`, `EXECIGNORE` and the rest of `BASH...`); the
+# loader's (`LD_...` and `GCONV_PATH` on Linux, `DYLD_...` on macOS, whose `DYLD_INSERT_LIBRARIES` the runner
+# keeps for each step's process there), which load code into every program the step starts, bash included;
+# Python's, which load code into `obaaf` (`PYTHONPATH`, `PYTHONHOME`, `PYTHONWARNINGS`, `PYTHONUSERBASE`
+# and the rest of `PYTHON...`), and `HOME`, under which an interpreter outside a virtual environment
+# finds the user's own packages; and `ACTIONS_ALLOW_UNSECURE_COMMANDS`, with which any line a later step
+# prints can set the others. The checks OBAAF counts are `obaaf` (Python) and `gh`, `cosign` and
+# `slsa-verifier` (Go); Node.js's, Perl's, Ruby's and Java's variables (`NODE_OPTIONS`, `PERL5OPT`,
+# `RUBYOPT`, `JAVA_TOOL_OPTIONS`) change none of them and not bash, so they are not here. What the
+# programs read for their own settings (`GIT_...`, `GH_...`, `SSL_CERT_FILE`) is not read.
+_STEERING_NAMES = frozenset({"PATH", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND", "EXECIGNORE", "GCONV_PATH", "HOME",
+                             "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
+_STEERING_PREFIXES = ("BASH", "LD_", "DYLD_", "PYTHON")
+# Python's variables that load nothing: output buffering, bytecode files, the standard streams' encoding
+# (looked up only among the standard library's `encodings` modules, a name with a dot refused), UTF-8
+# mode, the hash seed, and turning the user's own packages off.
+_PYTHON_PLAIN = frozenset({"PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING", "PYTHONUTF8",
+                           "PYTHONHASHSEED", "PYTHONNOUSERSITE"})
+
+
+def steers(name) -> bool:
+    """Whether a variable's name, read the widest way (space around it trimmed, any letter case), is one
+    that changes what a bash or sh step runs or what the programs it names run (`_STEERING_NAMES`)."""
+    text = str(name).strip().upper()
+    return text in _STEERING_NAMES or (text.startswith(_STEERING_PREFIXES) and text not in _PYTHON_PLAIN)
+
+
+_NAMES_GITHUB_ENV = re.compile(r"GITHUB_ENV", re.I)
+# The runner's file commands. It names a step's files side by side with one suffix
+# (`FileCommandManager.InitializeFiles`, v2.338.2), so the path of any of them leads to GITHUB_ENV's.
+_NAMES_FILE_VAR = re.compile(r"GITHUB_(ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)", re.I)
+_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+
+
+def _squeeze(text: str) -> str:
+    """Text as bash puts a word together, for searching names: a backslash and the line break after it (a
+    continued line) taken out, `$'...'` decoded, `$""` taken out, then quotes, backslashes and the
+    lexer's `\x03` marks. So `$GITHUB_\\<line break>ENV`, `GITHUB_E""NV`, `GITHUB_E\\NV` and
+    `$'GITHUB_\x45NV'` are found (the reviews of slice 2d.13; the lexer reads the first as `$GITHUB_` and
+    `ENV`). It can join what bash keeps apart, which only finds more."""
+    text = re.sub(r"\\\r?\n", "", text)
+
+    def decoded(match):
+        try:
+            return agent_flags._ansi_c(match.group(1))
+        except (AttributeError, ValueError, OverflowError):
+            return match.group(0)
+
+    text = _ANSI_C_RE.sub(decoded, text).replace('$""', "")
+    return re.sub(r"[\"'\\\x03]", "", text)
+
+
+def _names_file_var(text: str) -> bool:
+    return bool(_NAMES_FILE_VAR.search(text) or _NAMES_FILE_VAR.search(_squeeze(text)))
+
+
+# A redirection's target as the lexer gives it, naming one of the files plainly: `$NAME`, `${NAME}`, or
+# `${NAME:-/dev/stdout}` (or stderr, or null), which keeps a script runnable outside Actions.
+_FILE_TARGET_RE = re.compile(r"\x03\$(?:(GITHUB_[A-Z_]+)|\{(GITHUB_[A-Z_]+)(?::-/dev/(?:stdout|stderr|null))?\})\x03\Z")
+_ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Words that may begin a command before its name; the lexer gives `then echo ...` as one command.
+_LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+# The redirections that write to GITHUB_ENV from its end, or from its start after emptying it.
+_WRITE_OPS = frozenset({">>", ">", "&>>", "&>", ">|", ">&"})
+# A continued line beside an operator's character: bash joins the line first, so `<\<line break>>` is
+# `<>`, while the lexer reads `<` and `>` (the fourth review of slice 2d.13).
+_SPLIT_OPERATOR_RE = re.compile(r"[<>&|]\\\r?\n|\\\r?\n[<>&|]")
+# What a write's output may also be sent to beside GITHUB_ENV: a duplicated descriptor (`2>&1`) or nothing.
+_OTHER_TARGETS = frozenset({"/dev/null"})
+# A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
+# most one escape, a line break at its end.
+_PRINTF_FORMAT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=|<<)([^%\\\n\r\x03]|%s)*(\\n)?\Z")
+# An assignment in a command substitution in a written value could print it on a line of its own. Upper
+# case only, as a variable's name is written (`--home=` is an option); anchored, so a long word is cheap.
+_ASSIGNED_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*(=|<<)")
+# `${!PREFIX*}` and `${!PREFIX@}` list the names of variables; with a prefix of a file command's name
+# (or none) they reach its path without naming it (`${!GITHUB_E*}`, the first review of slice 2d.13).
+_NAMES_LISTED_RE = re.compile(r"\$\{!\s*([A-Za-z_][A-Za-z0-9_]*)?\s*[*@]\s*\}")
+# `tee` writing an output, the step summary or the state: its options that change nothing else.
+_TEE_OPTIONS = frozenset({"-a", "--append", "-i", "--ignore-interrupts", "-p"})
+# Ways a script can make `echo` or `printf` something other than bash's own: a function, a builtin
+# loaded or turned off, an alias (which bash expands only after `shopt -s expand_aliases`).
+_ECHO_REPLACED_RE = re.compile(r"(?<![\w./-])(function|enable|alias|shopt)(?![\w./-])|"
+                               r"(?<![\w./-])(echo|printf)\s*\(\s*\)")
+
+
+def _lists_file_vars(text: str) -> bool:
+    for match in _NAMES_LISTED_RE.finditer(text):
+        prefix = (match.group(1) or "").upper()
+        if any(name.startswith(prefix) for name in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                                                       "GITHUB_STEP_SUMMARY")):
+            return True
+    return False
+
+
+def _file_target(word) -> str | None:
+    match = _FILE_TARGET_RE.match(word.text) if word.redirect else None
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _github_env_names(script: str) -> set | None:
+    """The names a bash or sh script writes to GITHUB_ENV, or None when the checker cannot read them all
+    (flagship slice 2d.13). The script is read with the lexer. A file command's variable (`GITHUB_ENV`,
+    `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`, found with `_squeeze`) may
+    appear only as a redirection's target written plainly (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`) of
+    a command other than `exec`, or as a file `tee` writes an output, the summary or the state to, its own
+    output sent to no file command; anywhere else (an argument,
+    an assignment, `set --`, `for`, `read`, `printf -v`, a name reference, a here-document, a command
+    substitution, a parameter expansion that changes it) gives None, because the runner's files sit side
+    by side and any of their paths leads to GITHUB_ENV's (the second review of slice 2d.13), and so does
+    listing names with `${!GITHUB_E*}` and any write to GITHUB_PATH. A write to GITHUB_ENV is read in two
+    forms, redirected with `>>`, `>`, `&>>`, `&>`, `>|` or `>&` (`<>` writes over what is there, and is
+    refused, and so is a script with a continued line beside an operator's character, which bash joins
+    into an operator the lexer reads in two), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word
+    (dash, Ubuntu's sh, does not read it, and its `echo` reads the backslash): `echo` with words and no
+    option, the name
+    before the first `=` (or `<<`, the runner's multi-line form) a plain word written out in the
+    script; and `printf` with a literal format that begins with such a name, has `%s` for its only
+    conversion and no escape but a line break at its end. Any other write gives None, as does a name put
+    together from a variable, an expression, a glob or a brace expansion, a word that can put a line
+    break in what is printed (a backslash, which sh's `echo` reads as an escape, or a line break written
+    inside quotes), a written value with a command substitution, nested or not, whose script assigns a
+    steering name in upper case (it could print it on a line of its own), a script that can replace
+    `echo` or `printf`, and a script the lexer cannot read. A value is otherwise read as one line: a line
+    break that a variable, a file or a command's output puts in it at run time, which would let the write
+    set a second name, is not read (an outsider's text there is also #232). Every line the runner reads
+    begins where a write begins, and the lines of the runner's multi-line form are each read as a name,
+    so this is never fewer names than the runner sets."""
+    if _lists_file_vars(_squeeze(script)):
+        return None
+    commands, problem = agent_flags.lex(script)
+    if problem:
+        return None
+    names: set = set()
+    for command in commands:
+        if any(_names_file_var(text) for _kind, text, _literal in command.stdin):
+            return None             # a here-document or here-string that names one
+        if any(_names_file_var(inner) for word in command.words for inner in word.inner):
+            return None             # a command substitution that names one
+        mentions = [w for w in command.words if _names_file_var(w.text) or _names_file_var(w.shown)]
+        if not mentions:
+            continue
+        words = list(command.words)
+        while words and not words[0].redirect and not words[0].computed and words[0].text in _LEADING_WORDS:
+            words.pop(0)
+        if not words:
+            return None
+        targets = {_file_target(w) for w in mentions}
+        if words[0].text == "tee" and not words[0].computed and all(
+                (w.redirect and not (_names_file_var(w.text) or _names_file_var(w.shown))) or w.text in _TEE_OPTIONS
+                or (not w.redirect and _FILE_TARGET_RE.match(w.text) and
+                    (_FILE_TARGET_RE.match(w.text).group(1) or _FILE_TARGET_RE.match(w.text).group(2))
+                    in ("GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"))
+                for w in words[1:]):
+            continue                # `tee -a "$GITHUB_OUTPUT"`, its own output not sent to a file command
+        if None in targets or "GITHUB_PATH" in targets or not targets <= {
+                "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"}:
+            return None
+        if words[0].text == "exec":
+            return None             # a descriptor left open on a file command, whose path `/proc` then gives
+        if "GITHUB_ENV" not in targets:
+            continue                # a write to an output, the summary or the state
+        if _ECHO_REPLACED_RE.search(script) or _SPLIT_OPERATOR_RE.search(script):
+            return None
+        if words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
+            return None
+        arguments = [w for w in words[1:] if not w.redirect]
+        # Only a redirection that writes from where the file ends, or from its start after emptying it: `<>`
+        # writes over what is there, which can turn an earlier line into another name (the third review).
+        if any(_file_target(w) == "GITHUB_ENV" and w.redirect_op not in _WRITE_OPS for w in words[1:]):
+            return None
+        # sh is dash on Ubuntu, which does not read `$'...'` and passes the backslash to its `echo`.
+        if any("$'" in w.shown or '$"' in w.shown for w in arguments):
+            return None
+        if not arguments or any(_file_target(w) not in (None, "GITHUB_ENV") for w in words[1:] if w.redirect) or any(
+                w.redirect and _file_target(w) is None and w.text not in _OTHER_TARGETS and not w.text.isdigit()
+                for w in words[1:]):
+            return None
+        for word in arguments:
+            shown = _squeeze(word.shown)
+            if ("$(" in word.shown or "`" in word.shown) and any(
+                    steers(m.group(1)) for m in _ASSIGNED_NAME_RE.finditer(shown)):
+                return None
+        if words[0].text == "printf":
+            form = arguments[0]
+            if form.computed or not _PRINTF_FORMAT_RE.match(form.text) or any(
+                    c in w.text for w in arguments[1:] for c in "\\\n\r"):
+                return None
+            line = form.text
+        else:
+            if arguments[0].text.startswith("-") or any(c in w.text for w in arguments for c in "\\\n\r"):
+                return None
+            line = " ".join(w.text for w in arguments)
+        equals, heredoc = line.find("="), line.find("<<")
+        cut = equals if equals >= 0 and (heredoc < 0 or equals < heredoc) else heredoc
+        # The name is a plain word: no unknown expansion (marked `\x03`), glob or brace in it.
+        if cut < 0 or not _ENV_LINE_NAME_RE.match(line[:cut]):
+            return None
+        names.add(line[:cut])
+    return names
+
+
 _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
@@ -406,6 +611,25 @@ class CallEffects:
 def _forbids_restores(mode) -> bool:
     """Whether a cache-mode as the checker reads it forbids restoring caches: exactly `none` or `write-only`."""
     return mode in ("none", "write-only")
+
+
+def _local_like(uses) -> bool:
+    """A `uses` that may name an action of the repository itself (`./`, `$/` or `.\\` at its start, after any
+    space), read as the checker reads a local action for an agent."""
+    return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
+
+
+def _image_build_only(step: Step, job: Job | None = None) -> bool:
+    """Whether a step that uses `docker/build-push-action` can only build an image (flagship slice 2d.14):
+    its `with`, if written, is a mapping; `push` (in any letter case, as GitHub reads inputs) is not given
+    or is `false` in any case; and no output of its `outputs` may push (`workflow.image_outputs_push`).
+    Any other value, `push:` with no value included, is read as one that may push. `docker/bake-action` reads what it
+    pushes from files the checker does not read, so it is never taken to build only."""
+    raw = step.raw.get("with")
+    if not step.uses_action("docker/build-push-action") or (raw is not None and not isinstance(raw, dict)):
+        return False
+    push = as_text(step.with_.get("push", "")).strip().lower()
+    return push in ("", "false") and not through_matrix(step.with_.get("outputs", ""), job, image_outputs_push)
 
 
 # What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
@@ -617,6 +841,7 @@ class WorkflowRules:
         relaned = {job_id for job_id, job in view.jobs.items() if set(job.lanes) != set(self.wf.jobs[job_id].lanes)}
         place = {id(finding): n for n, finding in enumerate(self.findings)}
         added: list = []
+        answered: set = set()
         for finding in found:
             if finding.step in inner:
                 # A step of an action: one finding for each step, as for steps written in the job.
@@ -641,7 +866,17 @@ class WorkflowRules:
             if finding.job not in relaned and there and all(
                     order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
                 continue
+            if finding.job in relaned and not finding.kind.startswith("capability"):
+                # Flagship slice 2d.14: where the action's steps made the job a release job, the first pass's
+                # "cannot tell whether it releases" case of the same rule there (OBAAF-GHA-006's and 015's
+                # `capability...`) is answered by the release case, when that is at least as severe.
+                for mate in there:
+                    if (mate.kind.startswith("capability") and mate.kind != "capability-call"
+                            and order.get(finding.severity, 3) <= order.get(mate.severity, 3)):
+                        answered.add(id(mate))
             added.append(finding)
+        if answered:
+            self.findings = [f for f in self.findings if id(f) not in answered]
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
@@ -2761,6 +2996,11 @@ class WorkflowRules:
                 place.problems.append(f"{where} names {name} under env, and the action at a listed commit removes "
                                       "every OPENSSL_ variable from its own steps before it reads env (slice 2c.11a), "
                                       "so it finds the name unset and refuses to run (issue #197)")
+            elif listed and egress_mod.reserved_under_env(name):
+                # Known only for a listed commit, as above (added by the review of A3a, review-gpt #283).
+                place.problems.append(f"{where} names {name} under env, a name the action at a listed commit "
+                                      "sets, withholds or reads as AWF's own configuration, so the action "
+                                      "refuses to run")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
@@ -2846,7 +3086,8 @@ class WorkflowRules:
                 place.proxy.append((name, found))
             elif name in env_names:
                 if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
-                        or (listed and egress_mod.removed_before_inputs(name)):
+                        or (listed and (egress_mod.removed_before_inputs(name)
+                                        or egress_mod.reserved_under_env(name))):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:
@@ -3728,18 +3969,21 @@ class WorkflowRules:
         written = job.raw.get("environment")
         return written.get("name") if isinstance(written, dict) else written
 
-    def _publishing_capabilities(self, job: Job) -> list[str]:
+    def _publishing_capabilities(self, job: Job, builds: bool = True) -> list[str]:
         """What a job holds that publishing needs: `packages: write`, a step that uses an action listed
         under `publishing_actions`, a secret whose name says it publishes. `id-token: write` alone is not
         counted: OBAAF's own templates use it to sign and attest, which is what a repository should do,
-        and OBAAF-GHA-004 reports it for an agent job."""
+        and OBAAF-GHA-004 reports it for an agent job. With `builds=False` (OBAAF-GHA-006 on a job that is
+        not a release job, flagship slice 2d.14), a `docker/build-push-action` step that cannot push is not
+        counted: it builds an image, and an image build with a GitHub Actions cache is common in jobs that
+        publish nothing."""
         capabilities = []
         permissions = job.permissions
         if permissions is not None and permissions.level("packages") == "write":
             capabilities.append("packages: write")
         for step in job.steps:
             action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
-            if action:
+            if action and (builds or not _image_build_only(step, job)):
                 capabilities.append(f"uses {step.action}")
         patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
         capabilities += [f"secret {name}" for name in sorted(job.secret_names())
@@ -3792,6 +4036,7 @@ class WorkflowRules:
         effects = job.call_effects if job.called else None
         if not job.in_lane("release"):
             self.release_capability(job)
+            self.may_publish_caches(job)
             return
         if effects is not None and effects.lane_given:
             # Flagship slice 2d.4b3b: a job in the release lane only because a workflow it calls releases has
@@ -3923,6 +4168,135 @@ class WorkflowRules:
                          "Step '{step}' uploads after a provenance check only; approvals and agent "
                          "records are not checked (use obaaf verify release).", job, partial[0], severity="medium",
                          kind="provenance-only", steps=Fact([self._release_step(s) for s in partial], ""))
+
+    def may_publish_caches(self, job: Job) -> None:
+        """OBAAF-GHA-006 for a job nothing puts in the release lane that holds what publishing needs and
+        restores a cache, directly or through a job it needs and downloads from (flagship slice 2d.14, #289).
+        Release jobs are recognised by lists of actions and commands, which miss many (`uv build publish`
+        in zizmor's test workflow `cache-poisoning.yml`), and code from a poisoned cache entry runs with
+        what the job holds whether or not the job itself publishes: it can publish with it. So such a job is
+        reported at medium, as one the checker cannot tell releases. What it holds is a fact, so an
+        acceptance written for one credential does not cover another one added later. Nothing when the job
+        holds nothing for publishing, or restores nothing its cache-mode lets through; a job with no cache
+        step gets no `no-cache-mode` finding, which is for release jobs. A job that calls a workflow of the
+        repository is read for the jobs it needs, as for a release job (`_jobs_feeding`); a cache restored in
+        the workflow it calls is read there, with the secret names that workflow's jobs use, so a credential
+        the caller passes under another name is not counted."""
+        mode = job.cache_mode
+        # A step that uses a local action is taken to restore unless its steps were read as the job's, which
+        # then decide (slice 2d.4b2's second pass): a local action is not a cache step by being local.
+        # In the second pass a local action inside one is followed at once by its steps, named after it.
+        read = {id(steps[0].via.raw) for steps in job.local_steps.values() if steps and steps[0].via is not None}
+        read |= {id(s.via.raw) for s in job.steps if s.via is not None}
+
+        def restores(n: int, step: Step) -> bool:
+            if not _local_like(step.uses):
+                return self._restores_cache(step)
+            if step.via is None:
+                return id(step.raw) not in read
+            after = job.steps[n + 1] if n + 1 < len(job.steps) else None
+            return not (after is not None and after.via is step.via
+                        and after.name.startswith((f"{step.name}: ", f"{step.name} > ")))
+
+        cache_steps = [] if _forbids_restores(mode) else [s for n, s in enumerate(job.steps) if restores(n, s)]
+        # What the job holds is worked out only for a job that restores or downloads, and the jobs it needs
+        # only for one that holds something: reading what callers grant costs, and so does following a long
+        # chain of `needs` (the lead found a benchmark of 2,000 callers eight times slower when the first was
+        # worked out for every job, and the review a chain of 2,000 downloading jobs eighteen times slower
+        # when the second was).
+        downloads = self._downloads_artifacts(job)
+        if not cache_steps and not downloads:
+            return
+        held = self._may_publish_holds(job)
+        if not held:
+            return
+        feeding = self._jobs_feeding(job) if downloads else []
+        if cache_steps:
+            names = ", ".join(f"'{s.name}'" for s in cache_steps)
+            values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
+                      "mode": Fact(mode or "", mode or "not set")}
+            controls = self._callers_cache_controls()
+            if job.self_hosted:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them. This job also runs on a "
+                         "self-hosted runner, where local caches (such as an engine's derived-data cache) are "
+                         "outside what this check can see.", job, cache_steps[0], severity="medium",
+                         kind="capability-restores-self-hosted", controls=controls, **values)
+            else:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them.", job, cache_steps[0],
+                         severity="medium", kind="capability-restores", controls=controls, **values)
+        if feeding:
+            self.add("OBAAF-GHA-006", job.line,
+                     "Job '{job}' holds what publishing needs ({capabilities}), downloads artifacts and needs {jobs}, "
+                     "which restore caches and whose cache-mode does not forbid it. The checker cannot tell whether "
+                     "it releases what they built; if it does, a poisoned cache entry can reach what it releases.",
+                     job, severity="medium", kind="capability-needed-job-restores",
+                     controls=self._callers_cache_controls("on the jobs it needs that restore"), capabilities=held,
+                     jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
+
+    def _may_publish_holds(self, job: Job) -> list[str]:
+        """What a job holds that publishing needs, for OBAAF-GHA-006 on a job that is not a release job
+        (flagship slice 2d.14): what OBAAF-GHA-015 counts (`_publishing_capabilities`), less an image build
+        that cannot push; a reference that can read every secret (`toJSON(secrets)`, a computed name,
+        `secrets: inherit`), since which secrets exist is not in the workflow (as OBAAF-GHA-018 reads it);
+        and a token with `contents: write`, which can create a GitHub release and upload its assets, in a job
+        that a release event, a tag push, a tag's creation or another workflow's call can start
+        (`_release_or_tag_events`). On other events `contents: write` is not counted: it is common in jobs
+        that commit back, which this rule would then take for jobs that may release. A job of a called
+        workflow that declares no permissions holds what the jobs of this repository that call it grant
+        (`Job.granted_by_callers`, as OBAAF-GHA-003 and 004 read it); permissions nobody declares, the
+        repository's default, are not counted (OBAAF-GHA-009 reports them)."""
+        held = self._publishing_capabilities(job, builds=False)
+        if any(name.startswith("*") for name in job.secret_names()):
+            held.append("every secret, through a reference that is not one literal name or secrets: inherit")
+        permissions = job.permissions
+        if permissions is None:
+            granted = {scope: [entry for entry in job.granted_by_callers(scope) if entry.endswith(f"{scope}: write")]
+                       for scope in ("packages", "contents")}
+        else:
+            granted = {scope: [""] if permissions.level(scope) == "write" else [] for scope in ("packages", "contents")}
+        events = self._release_or_tag_events(job) if granted["contents"] else []
+        for scope in ("packages", "contents"):
+            if not granted[scope] or (scope == "contents" and not events):
+                continue
+            on = f", on {' or '.join(events)}" if scope == "contents" else ""
+            # The callers that grant it, as one bounded entry: the first three named, and a digest of all, so
+            # the fact does not grow with the callers and a change to any changes it.
+            wheres = sorted({entry[:-len(f" grants {scope}: write")] for entry in granted[scope] if entry})
+            if not wheres:
+                text = f"{scope}: write{on}"
+            elif len(wheres) <= 3:
+                text = f"{scope}: write{on}, granted by {', '.join(wheres)}"
+            else:
+                digest = hashlib.sha256("\n".join(wheres).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                text = (f"{scope}: write{on}, granted by {', '.join(wheres[:3])} and {len(wheres) - 3} more "
+                        f"(sha256:{digest})")
+            if text not in held:
+                held.append(text)
+        return held
+
+    def _release_or_tag_events(self, job: Job) -> list[str]:
+        """The events among those that can start the job that can be for a release or a tag: `release`,
+        `create` (a branch's or a tag's creation), a `push` unless its filters keep tags out, and
+        `workflow_call`, which stands for a calling workflow's event, any event. GitHub runs a push workflow
+        for a tag unless it names `branches` or `branches-ignore` and neither `tags` nor `tags-ignore` (path
+        filters are not applied to tags). A filter written as anything but a mapping, or with its keys in
+        another spelling, is read as letting tags through, the wider reading."""
+        triggers = job.triggers()
+        events = [event for event in ("release", "create") if event in triggers]
+        if "push" in triggers and "push" in self.wf.triggers:
+            config = self.wf.triggers.get("push")
+            keys = {key for key in config if isinstance(key, str)} if isinstance(config, dict) else set()
+            if keys & {"tags", "tags-ignore"} or not keys & {"branches", "branches-ignore"}:
+                events.append("a tag push")
+        if "workflow_call" in triggers:
+            events.append("a call from another workflow")
+        return events
 
     def _called_caches(self, job: Job, effects: CallEffects) -> None:
         """OBAAF-GHA-006 for a release job that calls workflows of the repository (flagship slice 2d.4b3b):
@@ -4114,26 +4488,142 @@ class WorkflowRules:
             env = scope.get("env") if isinstance(scope, dict) else None
             if isinstance(env, str):
                 return True
-            if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
-                                             or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
+            # Flagship slice 2d.13: every name that changes what the step's shell or the check's program
+            # runs (`steers`), where only `BASH_ENV`, `ENV` and `BASH_FUNC...` counted, and a name written
+            # as an expression, which may be any of them.
+            if isinstance(env, dict) and any(steers(key) or expr_mod.OPEN in str(key) for key in env):
+                return True
+        # A container job's steps run with the container's `env` and its `options` (`-e NAME=...`); the
+        # runner takes the PATH from the container too (the third review of slice 2d.13). What its image
+        # holds, the `obaaf` it ships included, is not read.
+        container = job.raw.get("container")
+        if isinstance(container, dict):
+            env = container.get("env")
+            if (env is not None and not isinstance(env, dict)) or (isinstance(env, dict) and any(
+                    steers(key) or expr_mod.OPEN in str(key) for key in env)):
+                return True
+            options = container.get("options")
+            if options is not None and (not isinstance(options, str) or self._CONTAINER_ENV_RE.search(options)):
                 return True
         return self._first_shell_change(job) < step.index
 
+    # In a container's `options`: an environment variable given to it, by name or from a file.
+    # Short options may be joined (`-ite NAME`) and a value written beside them (`-eNAME=...`).
+    _CONTAINER_ENV_RE = re.compile(r"(?<![\w-])(-[A-Za-z]*e|--env)", re.I)
+
     def _first_shell_change(self, job: Job) -> int:
-        """Where the first step of `job` whose script or `env` names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`
-        is, or the number of its steps when none does, worked out once per job: each check of each upload
-        read every earlier step again, which took a job of 1,000 steps (as slice 2d.4b2's reading of
-        local actions can give one) a minute and a half."""
+        """Where the first step of `job` that may change, for the steps after it, what their shell or the
+        programs they name run is (`_changes_later_steps`), or the number of its steps when none may,
+        worked out once per job: each check of each upload read every earlier step again, which took a
+        job of 1,000 steps (as slice 2d.4b2's reading of local actions can give one) a minute and a half."""
         memo = self.__dict__.setdefault("_shell_changes", {})
         found = memo.get(id(job))
         if found is None or found[0] is not job:
-            first = len(job.steps)
-            for position, earlier in enumerate(job.steps):
-                if re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", earlier.scripts() + " " + str(earlier.raw.get("env", ""))):
+            first = 0 if job.steps and self._job_sets_later_steps(job) else len(job.steps)
+            for position, earlier in enumerate(job.steps[:first]):
+                if self._changes_later_steps(job, earlier):
                     first = position
                     break
             found = memo[id(job)] = (job, first)
         return found[1]
+
+    # What a step's text may use to set variables or the PATH for the steps after it, other than a write
+    # to a file command `_github_env_names` reads: bash's own names, the toolkit's calls (github-script and
+    # JavaScript actions), the workflow commands a runner obeys when `ACTIONS_ALLOW_UNSECURE_COMMANDS` is
+    # true, and the runner's folder that holds the file commands' files. Any letter case.
+    _SETS_LATER_STEPS_RE = re.compile(r"BASH_ENV|BASH_FUNC|GITHUB_PATH|addPath|add-path|set-env|exportVariable|"
+                                      r"_runner_file_commands|ACTIONS_ALLOW_UNSECURE_COMMANDS", re.I)
+    # The runner's own contexts for its files (`github.env`, `github.path` and the others), or the whole
+    # `github` context, which holds them and can be written out as text.
+    _FILE_CONTEXTS = ({"github"}, {"env", "path", "output", "state", "step_summary"})
+
+    def _sets_later_steps_text(self, text: str) -> bool:
+        """Whether text that is not a bash script the checker reads names a way to set variables or the PATH
+        for later steps: one of `_SETS_LATER_STEPS_RE`, a file command's variable, `${!GITHUB_E*}`, or an
+        expression that reaches the runner's contexts for its files."""
+        squeezed = _squeeze(text)
+        if self._SETS_LATER_STEPS_RE.search(squeezed) or _NAMES_FILE_VAR.search(squeezed) \
+                or _lists_file_vars(squeezed):
+            return True
+        try:
+            return any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                       for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
+        except expr_mod.TooComplex:
+            return True
+
+    _VALUES_READ = 20_000
+
+    @classmethod
+    def _values_text(cls, value) -> str:
+        """The keys, strings and other values in a value of lists and mappings, as plain text, each node once
+        (a YAML alias can make one hold itself): a line break stays a line break, which `str()` of a mapping
+        writes as two characters (the second review of slice 2d.13). More than `_VALUES_READ` of them
+        give text that names GITHUB_ENV, so the reading fails closed."""
+        out: list = []
+        stack, seen = [value], set()
+        while stack:
+            if len(out) > cls._VALUES_READ:
+                return "GITHUB_ENV (more values than the checker reads)"
+            node = stack.pop()
+            if isinstance(node, (list, dict)):
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                if isinstance(node, dict):
+                    for key, item in node.items():
+                        out.append(str(key))
+                        stack.append(item)
+                else:
+                    stack.extend(node)
+            elif node is not None:
+                out.append(str(node))
+        return "\n".join(out)
+
+    def _job_sets_later_steps(self, job: Job) -> bool:
+        """Whether the workflow's or the job's `env`, `defaults` or the job's `strategy` hold such text: a
+        step can run it (`eval "$CMD"`, `${{ env.CMD }}`, `${{ matrix.cmd }}`, a default `shell`), so every
+        step of the job may set variables for the steps after it (the second review of slice 2d.13)."""
+        parts = [self.wf.raw.get("env"), self.wf.raw.get("defaults"), job.raw.get("env"), job.raw.get("defaults"),
+                 job.raw.get("strategy")]
+        return self._sets_later_steps_text(self._values_text(parts))
+
+    def _changes_later_steps(self, job: Job, step: Step) -> bool:
+        """Whether a step's text may change, for the steps after it in the job, what their shell or the
+        programs they name run (flagship slices 2d.2e and 2d.13). Before 2d.13 only `BASH_ENV`,
+        `BASH_FUNC` and `GITHUB_PATH` were looked for, so a step that wrote `PATH=...` (or
+        `SHELLOPTS=noexec`, with which bash reads a step's script and runs none of it) to GITHUB_ENV
+        left a later check counted. The runner gives every later step of the job what a step writes to
+        that file, and refuses only `NODE_OPTIONS` (actions/runner v2.338.2, `SetEnvFileCommand` in
+        src/Runner.Worker/FileCommandManager.cs).
+
+        A bash or sh `run` script is read by `_github_env_names`: True when it cannot read the script's
+        writes to the runner's files or a name written to GITHUB_ENV `steers`. Everything else about the
+        step (its `shell`, `env` and inputs, and the whole of a step that is not such a script, as code
+        in another language or an action) is text the checker does not read as bash: True when
+        `_sets_later_steps_text` finds a way to set variables for later steps in it, a file command's
+        variable included. Only the workflow's text is read: a name or a path a script puts together
+        otherwise, and what a program or an action the step runs writes, are not."""
+        shell = step.raw.get("shell")
+        beside = self._values_text([step.raw.get("env"), step.raw.get("with"), shell])
+        bash = isinstance(step.raw.get("run"), str) and bool(step.run) and not step.uses \
+            and self._step_shell(job, step) in ("bash", "sh")
+        if not bash:
+            return self._sets_later_steps_text(step.scripts() + "\n" + beside)
+        if self._sets_later_steps_text(beside):
+            return True
+        squeezed = _squeeze(step.run)
+        if self._SETS_LATER_STEPS_RE.search(squeezed):
+            return True
+        try:
+            if any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                   for body in expr_mod.bodies(step.run) for ref in expr_mod.refs(body)):
+                return True
+        except expr_mod.TooComplex:
+            return True
+        if not _NAMES_FILE_VAR.search(squeezed) and not _lists_file_vars(squeezed):
+            return False
+        names = _github_env_names(step.run)
+        return names is None or any(steers(name) for name in names)
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
@@ -4220,9 +4710,7 @@ class WorkflowRules:
         # downloads: a called release job's, for a job the call makes a release job, and any called job's, for
         # one declared a release job, whose call is the release it declares. A needed job that calls a workflow
         # restores what the jobs it calls restore.
-        effects = job.call_effects if job.called else None
-        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
-        if not called and not any(s.uses_action("actions/download-artifact") for s in job.steps):
+        if not self._downloads_artifacts(job):
             return []
         out, seen, todo = [], {job.id}, list(job.needs)
         while todo:
@@ -4239,6 +4727,14 @@ class WorkflowRules:
                 out.append(name)
             todo += dep.needs
         return sorted(out)
+
+    @staticmethod
+    def _downloads_artifacts(job: Job) -> bool:
+        """Whether a job downloads the run's artifacts: a step that uses `actions/download-artifact`, or, for a
+        job that calls workflows of the repository, a called job that does (`_jobs_feeding`)."""
+        effects = job.call_effects if job.called else None
+        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
+        return called or any(s.uses_action("actions/download-artifact") for s in job.steps)
 
     @staticmethod
     def _cache_step(step: Step) -> str:
