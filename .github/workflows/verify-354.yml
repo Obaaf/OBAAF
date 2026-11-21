@@ -19,7 +19,7 @@ jobs:
       - name: Check out the candidate commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 2894acaff9c4420c79e48040e7aa7a8611dbfcd3
+          ref: 65dda992e485e5af57e5810361ff7b9863818d3e
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 2894acaff9c4420c79e48040e7aa7a8611dbfcd3
+          test "$(git rev-parse HEAD)" = 65dda992e485e5af57e5810361ff7b9863818d3e
           worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
           if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
           echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/base-src"
-          git archive 41e53f758b33e4bbee5d6b9cfb09064e52be4497 src | tar -x -C "$RUNNER_TEMP/base-src"
+          git archive bf01efbd46813ed0e7b58fcec2ecaaf22e678a13 src | tar -x -C "$RUNNER_TEMP/base-src"
           git init -q "$RUNNER_TEMP/expectrail"
           git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
           git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
