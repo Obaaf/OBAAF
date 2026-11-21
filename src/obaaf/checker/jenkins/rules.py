@@ -156,7 +156,7 @@ _LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.patter
 _PLACEHOLDER = ["\u2026"]
 _PLACEHOLDER_LINE = [(_PLACEHOLDER, None)]
 # A line that holds something other than blanks and a comment.
-_COMMAND_LINE = re.compile(r"^[ \t\r\f\v]*[^\s#]", re.M)
+_COMMAND_LINE = re.compile(r"^[^\S\n]*[^\s#]", re.M)       # as `raw.lstrip()` reads a line: any whitespace first
 
 
 def _commands_of(tokens: list[tuple[str, bool]]) -> list[tuple[list[str], str | None]]:

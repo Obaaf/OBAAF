@@ -2,7 +2,7 @@
 
 Each case is one attempt by a reviewer that did not write the rule, run as a Jenkinsfile: an attacker's 172 on the rule
 as it was at `75dae58`, then an independent reviewer's on the slice's later versions (77 with ids starting with V,
-53 with V2, 52 with V3, 18 with V4, 10 with V5 and 11 with V6). `expected` is what OBAAF-JEN-011 says after the slice
+53 with V2, 52 with V3, 18 with V4, 10 with V5 and 12 with V6). `expected` is what OBAAF-JEN-011 says after the slice
 ("finding-high", "unknown" for cannot tell, or "quiet"); `before` is what it said at `75dae58` (recorded, not
 asserted). LIMITS names the cases whose answer is a stated limit: the answer the reviewer judged right, and why the rule
 gives another; the record is docs/bypass-attempts.md.
@@ -408,6 +408,7 @@ CASES = [
     ('V6i_sudo_E_apt_get_y_purge_gpgv_or_true', 'quiet', 'quiet', "node {\n  sh 'sudo -E apt-get -y purge gpgv gnupg || true'\n  sh 'docker push img'\n}\n"),
     ('V6j_ssh_l_git_y_host_cosign_or_true', 'finding-high', 'quiet', "node {\n  sh 'ssh -l git -y host cosign verify --key k img || true'\n  sh 'docker push img'\n}\n"),
     ('V6k_semicolon_line_then_dot_source_or_true', 'unknown', 'quiet', "node {\n  sh '''export CI=1;\n. ./ci/env.sh\ncosign verify --key k img || true'''\n  sh 'docker push img'\n}\n"),
+    ('V6l_nbsp_before_later_command_shebang', 'finding-high', 'quiet', "node {\n  sh '''#!/bin/sh\ncosign verify --key k img\n\xa0make'''\n  sh 'docker push img'\n}\n"),
 ]
 
 LIMITS = {
