@@ -230,3 +230,93 @@ jobs:
         self.assertIn("Wrote " + WORKFLOW, text)
         self.assertEqual(original.st_ino, self.config.stat().st_ino)
         self.assertEqual(original.st_mtime_ns, self.config.stat().st_mtime_ns)
+
+
+class InitReviewTests(unittest.TestCase):
+    """From the review of #273 (run goosander)."""
+
+    setUp = InitTests.setUp
+    invoke = InitTests.invoke
+
+    def write_workflow(self, name, text):
+        path = self.workflow.with_name(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_a_workflow_that_is_not_utf8_is_named(self):
+        self.workflow.parent.mkdir(parents=True)
+        self.workflow.with_name("latin.yml").write_bytes(b"on: push\njobs:\n  j:\n    steps:\n      - run: echo \xff\n")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 2, text)
+        self.assertIn(".github/workflows/latin.yml is not UTF-8 text", text)
+        self.assertFalse(self.config.exists())
+
+    def test_an_environment_on_a_calling_job_is_not_proposed(self):
+        self.write_workflow("called.yml", "on: workflow_call\njobs:\n  x:\n    steps: []\n")
+        self.write_workflow("caller.yml", """on: push
+jobs:
+  mapped:
+    environment: production
+    uses: ./.github/workflows/called.yml
+    secrets:
+      TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+  inherited:
+    environment: production
+    uses: ./.github/workflows/called.yml
+    secrets: inherit
+  plain:
+    environment: production
+    env:
+      VALUE: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("Review DEPLOY_TOKEN: no single literal environment", text)
+        self.assertIn("Review SERVICE_TOKEN: no single literal environment", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {})
+
+    def test_a_name_github_refuses_or_a_short_name_says_why(self):
+        self.write_workflow("names.yml", """on: push
+jobs:
+  j:
+    environment: production
+    env:
+      A: ${{ secrets.AB }}
+      B: ${{ secrets.GITHUB_PAT }}
+      C: ${{ secrets._X_Y }}
+      D: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        for name in ("AB", "GITHUB_PAT", "_X_Y"):
+            self.assertIn(f"Review {name}: init proposes rules only for secret names GitHub accepts", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {"SERVICE_TOKEN": "production"})
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_written_files_get_the_mode_of_other_new_files(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.workflow.stat().st_mode & 0o777, 0o644)
+
+    def test_the_diff_breaks_lines_only_at_newlines(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text("lanes: {}\u2028\rprotected_secrets: {}\n")
+        status, text = self.invoke()
+        self.assertEqual(status, 1, text)
+        self.assertNotIn("No newline at end of file", text)
+        self.assertEqual(sum(line.startswith("-lanes") for line in text.splitlines()), 1)
+
+    def test_a_folder_inside_a_git_repository_is_named(self):
+        (self.root / ".git").mkdir()
+        inner = self.root / "src"
+        inner.mkdir()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["init", str(inner)]), 0)
+        self.assertIn(f"is inside the Git repository at {self.root.resolve()}", stdout.getvalue())
+        self.assertNotIn("is inside the Git repository", self.invoke()[1])

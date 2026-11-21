@@ -261,6 +261,10 @@ class TheTemplateStepTest(unittest.TestCase):
         self.assertIn("edited", on["pull_request"]["types"])
         patterns = steps[checkout]["with"]["sparse-checkout"].split()
         self.assertEqual(patterns, ["/" + name for name in CONFIG_LOCATIONS] + ["/.github/obaaf-settings.json"])
+        # The target branch as it is when the run starts, not the event's recorded base commit: a re-run
+        # reuses its event, so `pull_request.base.sha` can name a commit from before the configuration
+        # or the snapshot was tightened (review of #284).
+        self.assertEqual(steps[checkout]["with"]["ref"], "${{ github.base_ref }}")
 
 if __name__ == "__main__":
     unittest.main()

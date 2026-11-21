@@ -1,9 +1,11 @@
 """Replay reported tightening commands with the selected offline settings evidence."""
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from unittest.mock import patch
 
 from helpers import run_cli
 from obaaf import checker, fix
+from obaaf.catalog import load
 from obaaf.audit import snapshot
 from obaaf.checker import baseline
 from test_settings_audit import recording, take
@@ -84,6 +87,73 @@ jobs:
                     self.assertGreaterEqual(len(set(observed)), 4 if flags else 3)
                 subprocess.run(["git", "-c", "user.name=Example", "-c", "user.email=test@example.org",
                                 "commit", "-qam", "Apply fixture change"], check=True)
+
+    def test_child_targets_replay_report_and_named_commands_from_parent(self):
+        findings = checker.check(self.root).findings
+        expires = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+        with tempfile.TemporaryDirectory() as parent:
+            self.addCleanup(os.chdir, self.root)
+            os.chdir(parent)
+            for name in ("egress", "=ls"):
+                child = Path(name)
+                shutil.copytree(self.root, child)
+                settings = f"--settings={child / self.settings}"
+                threshold = "--fail-on=never"
+                policy = child / "baseline.json"
+                policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+                code, out, err = run_cli("check", name, "--format=json", settings, threshold,
+                                         "--platform=github", f"--baseline={policy}")
+                self.assertEqual(code, 0, err)
+                groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                workflow = child / self.path
+                original = workflow.read_bytes()
+                for cause, rule, step, change in (
+                    ("checkout-credentials", "OBAAF-GHA-011", 1, "persist-credentials: false"),
+                    ("agent-tool-version", "OBAAF-GHA-025", 2, "@openai/codex@1.2.3"),
+                ):
+                    with self.subTest(name=name, cause=cause):
+                        def replay(command):
+                            args = shlex.split(command)
+                            self.assertEqual(args[:3], ["obaaf", "fix", "./" + name])
+                            for option in (settings, threshold, "--platform=github", f"--baseline={policy}"):
+                                self.assertIn(option, args)
+                            self.assertNotIn("--apply", args)
+                            result = run_cli(*args[1:])
+                            self.assertEqual(workflow.read_bytes(), original)
+                            return result
+
+                        command = groups[cause]["command"].replace("=VERSION", "=1.2.3")
+                        code, out, err = replay(command)
+                        self.assertEqual(code, 0, err)
+                        self.assertIn(change, out)
+                        self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+
+                        finding = next(f for f in findings if f.rule == rule)
+                        entry = baseline.entry_for(finding, "@example/build", "previous review", expires)
+                        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [entry]}))
+                        candidate = f"{self.path}#assistant/step-{step}"
+                        code, out, err = replay(command + " " + shlex.quote("--candidate=" + candidate))
+                        self.assertEqual(code, 1, err or out)
+                        marker = "After resolving it, preview the same request again with: "
+                        retry, = [line.split(marker, 1)[1] for line in out.splitlines() if marker in line]
+                        self.assertIn("--candidate=" + candidate, shlex.split(retry))
+                        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+                        code, out, err = replay(retry)
+                        self.assertEqual(code, 0, err)
+                        self.assertIn(change, out)
+                        self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+            os.chdir(self.root)
+
+    def test_explicit_egress_job_still_previews_confinement(self):
+        before = self.path.read_bytes()
+        catalog = load()
+        catalog = replace(catalog, detection={**catalog.detection, "egress_action_releases": ["c" * 40]})
+        with patch("obaaf.fix_egress.load", return_value=catalog):
+            code, out, err = run_cli("fix", "egress", "--job", "assistant", ".")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Checked on a private copy", out)
+        self.assertIn("job 'assistant'", out)
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_partial_scan_and_unusable_settings(self):
         args = ("fix", str(self.path), "--config", str(self.config), "--tighten", "checkout-credentials")

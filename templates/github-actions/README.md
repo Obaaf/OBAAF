@@ -15,8 +15,7 @@ One more is optional and not installed: [optional/obaaf-settings-drift.yml](opti
 
 ## Install
 
-The package from PyPI does not include these templates, so they are copied from a clone of the OBAAF
-repository, kept outside the repository you are setting up and checked out at the commit you pin:
+A development build installed from a commit ([how](../../docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the templates. Use the install command below with that same full commit and omit `--source`. For release 0.3.0, copy the templates from a separate checkout at the commit you pin.
 
 ```bash
 git clone https://github.com/Obaaf/OBAAF.git obaaf-src

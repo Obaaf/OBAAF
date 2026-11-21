@@ -35,6 +35,18 @@ class PinTest(unittest.TestCase):
     def fix(self, *args):
         return run_cli("fix", self.root, *args)
 
+    def test_non_utf8_install_refusal_leaves_other_files_available(self):
+        other = self.path.with_name("other.yml")
+        other.write_text(agent_job(f"- run: {self.install}\n"))
+        self.path.write_bytes(agent_job(f"- name: caf\xe9\n  run: {self.install}\n").encode("latin-1"))
+        code, out, err = self.fix("--pin", self.pin, "--candidate", self.name)
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(f"{self.rel}: review its installs by hand; the file is not UTF-8 text", out)
+        code, out, err = self.fix("--pin", self.pin)
+        self.assertEqual(code, 0, err or out)
+        self.assertIn("other.yml#a/step-1", out)
+        self.assertIn(f"{self.rel}: review its installs by hand", out)
+
     def test_explicit_pin_previews_only_the_requested_token_and_package(self):
         self.write(f"- name: first\n  run: {self.install} # keep\n"
                    f"- run: |\n    sudo {self.install}\n    claude --version\n"
@@ -113,22 +125,225 @@ class PinTest(unittest.TestCase):
         self.assertIn("At --fail-on never", out)
 
     def test_accepted_target_stays_withheld_and_named_retry_preserves_package_and_version(self):
-        f = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-025")
+        target = self.root / "egress"
+        target.mkdir()
+        self.path.parent.parent.rename(target / ".github")
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(self.root)
+        f = next(f for f in checker.check(target).findings if f.rule == "OBAAF-GHA-025")
         expiry = (date.today() + timedelta(days=30)).isoformat()
-        policy = self.root / "baseline.json"
+        policy = target / "baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        code, report, err = run_cli("check", "egress", "--format", "json", "--baseline", policy,
+                                    "--platform", "github", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        group, = [g for g in json.loads(report)["todo"] if g["id"] == "agent-tool-version"]
+        preview = shlex.split(group["command"])
+        self.assertEqual(preview[:3], ["obaaf", "fix", "./egress"])
+        preview[preview.index(self.package + "=VERSION")] = self.pin
         policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [
             baseline.entry_for(f, "@team", "previous review", expiry)]}))
         original = policy.read_bytes()
-        code, out, err = self.fix("--pin", self.pin, "--candidate", self.name, "--baseline", policy, "--apply")
+        workflow = (target / self.rel).read_bytes()
+        code, out, err = run_cli(*preview[1:], "--candidate", self.name, "--apply")
         self.assertEqual(code, 1, err or out)
         self.assertIn("1 unmatched", out)
-        line = next(l for l in out.splitlines() if "Retry this step alone with " in l)
-        command = shlex.split(line.split("Retry this step alone with ", 1)[1])
+        prefix = "After resolving it, preview the same request again with: "
+        line = next(l for l in out.splitlines() if prefix in l)
+        command = shlex.split(line.split(prefix, 1)[1])
+        self.assertEqual(command[:3], ["obaaf", "fix", "./egress"])
         self.assertIn(self.pin, command)
         self.assertIn("--candidate=" + self.name, command)
         self.assertIn("--baseline=" + str(policy), command)
+        self.assertIn("--platform=github", command)
+        self.assertIn("--fail-on=never", command)
+        self.assertNotIn("--apply", command)
         self.assertNotIn("--- a/", out)
+        code, out, err = run_cli(*command[1:])
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(prefix, out)
         self.assertEqual(policy.read_bytes(), original)
+        self.assertEqual((target / self.rel).read_bytes(), workflow)
+
+    def test_first_command_migrates_scoped_legacy_baseline_before_workflow_edits(self):
+        self.write(f"- run: {self.install}\n- run: {self.install}\n- uses: actions/checkout@v4\n")
+        other = self.path.with_name("previous.yml")
+        other.write_text(agent_job(f"- run: {self.install}\n"))
+        finding, = [f for f in checker.check(self.root).findings
+                    if f.path.endswith("previous.yml") and f.rule == "OBAAF-GHA-025"]
+        entry = {key: getattr(finding, key) or "" for key in ("rule", "severity", "path", "job", "step", "scope")}
+        entry.update(message=finding.legacy or finding.message, fingerprint=baseline.fingerprint(finding))
+        policy = self.root / "team's baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": [entry]}))
+        config = self.root / "team config.yml"
+        config.write_text("{}")
+        opts = ["--baseline", policy, "--config", config, "--platform", "github", "--fail-on", "never"]
+        code, out, err = run_cli("check", self.root, "--format", "json", *opts)
+        self.assertEqual(code, 0, err)
+        groups = json.loads(out)["todo"]
+        self.assertEqual(groups[0]["id"], "acceptance-old-baseline")
+        commands = {g["id"]: g["command"] for g in groups}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            self.assertIsNone(commands[cause])
+        args = shlex.split(groups[0]["command"])
+        self.assertEqual(args[:5], ["obaaf", "baseline", "migrate", str(policy), str(self.root)])
+        self.assertIn(f"--config={config}", args)
+        self.assertIn("--platform=github", args)
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        decisions = {"OWNER": "@team", "REASON": "previous review", "YYYY-MM-DD": expiry}
+        code, out, err = run_cli(*(decisions.get(arg, arg) for arg in args[1:]))
+        self.assertEqual(code, 0, err or out)
+        migrated = json.loads(policy.read_text())
+        self.assertEqual(migrated["format"], baseline.FORMAT)
+        accepted, = migrated["findings"]
+        self.assertEqual(accepted, baseline.entry_for(finding, "@team", "previous review", expiry))
+        code, out, err = run_cli("check", self.root, "--format", "json", *opts)
+        self.assertEqual(code, 0, err)
+        commands = {g["id"]: g["command"] for g in json.loads(out)["todo"]}
+        self.assertIn("--pin", shlex.split(commands["agent-tool-version"]))
+        self.assertIn("--tighten", shlex.split(commands["checkout-credentials"]))
+
+    def test_empty_legacy_baseline_keeps_scoped_migration_guidance_in_json(self):
+        policy = self.root / "former baseline.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": []}))
+        code, out, err = run_cli("check", self.root, "--format", "json", "--baseline", policy,
+                                 "--platform", "github", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        groups = {group["id"]: group for group in json.loads(out)["todo"]}
+        self.assertNotIn("acceptance-old-baseline", groups)
+        pin = groups["agent-tool-version"]
+        self.assertIsNone(pin["command"])
+        command = "obaaf baseline migrate"
+        self.assertIn(command, pin["nextAction"])
+        args = shlex.split(pin["nextAction"][pin["nextAction"].index(command):])
+        self.assertEqual(args[:5], ["obaaf", "baseline", "migrate", str(policy), str(self.root)])
+        self.assertIn("--platform=github", args)
+
+    def test_preexisting_unmatched_entries_withhold_commands_and_explain_pin_refusal(self):
+        self.write(f"- run: {self.install}\n- run: {self.install}\n- uses: actions/checkout@v4\n")
+        finding = next(f for f in checker.check(self.root).findings if f.rule == "OBAAF-GHA-025")
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        missing = ".github/workflows/removed.yml"
+        entry = baseline.entry_for(finding, "@team", "previous review", expiry)
+        entry["path"] = missing
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [entry]}))
+        config = self.root / "ignore.yml"
+        config.write_text(json.dumps({"ignore": [{"rule": finding.rule, "path": missing, "owner": "@team",
+                                                 "reason": "previous review", "until": expiry}]}))
+        original = self.path.read_bytes()
+        for source, opts in (("baseline", ["--baseline", policy]), ("ignore", ["--config", config])):
+            with self.subTest(source=source):
+                code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never", *opts)
+                self.assertEqual(code, 0, err or out)
+                groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                for cause in ("agent-tool-version", "checkout-credentials"):
+                    self.assertIsNone(groups[cause]["command"])
+                    self.assertIn("unmatched " + source, groups[cause]["nextAction"].lower())
+                code, out, err = self.fix("--pin", self.pin, *opts)
+                self.assertEqual(code, 1, err or out)
+                self.assertIn("unmatched", out.strip().splitlines()[-1].lower())
+                self.assertNotIn("Retry this step alone", out)
+                self.assertNotIn("Review the reported install", out)
+                self.assertNotIn("--- a/", out)
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_unmatched_ignore_is_named_by_the_paperwork_command_the_todo_gives(self):
+        # review-gpt #294: the check's report lists no unmatched ignore entry, so "resolve" alone was a
+        # dead end; the to-do gives the paperwork preview, which names it and proposes its removal.
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        config = self.root / ".github" / "obaaf.yml"
+        config.write_text(json.dumps({"ignore": [{"rule": "OBAAF-GHA-013", "path": ".github/workflows/gone.yml",
+                                                 "job": "verify", "owner": "@team", "reason": "fixed since",
+                                                 "until": expiry}]}))
+        code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        pin, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+        self.assertIsNone(pin["command"])
+        self.assertNotIn("unmatched baseline", pin["nextAction"])
+        self.assertNotIn("whole repository", pin["nextAction"])
+        lead = "To see each unmatched entry and preview its removal, run "
+        self.assertIn("Resolve the unmatched ignore entries. Then rerun the check", pin["nextAction"])
+        args = shlex.split(pin["nextAction"].split(lead, 1)[1])
+        self.assertEqual(args[:3], ["obaaf", "fix", str(self.root)])
+        self.assertFalse({"--pin", "--tighten", "--apply"} & set(args))
+        source = config.read_bytes()
+        code, out, err = run_cli(*args[1:])
+        self.assertEqual(code, 0, err or out)
+        self.assertIn("Remove unmatched ignore entry 1 in .github/obaaf.yml", out)
+        self.assertIn("gone.yml", out)
+        self.assertEqual(config.read_bytes(), source)
+        code, out, err = self.fix("--pin", self.pin)
+        self.assertEqual(code, 1, err or out)
+        self.assertIn(lead, out.strip().splitlines()[-1])
+        config.write_text("{}")
+        code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        pin, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+        self.assertIn("--pin", shlex.split(pin["command"]))
+
+    def test_partial_scope_asks_for_the_whole_repository_instead_of_removing_an_entry(self):
+        # review-gpt #294: an ignore entry for a finding outside the scope is not unmatched; telling the
+        # user to resolve it would mean deleting a valid acceptance.
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        (self.root / "Jenkinsfile").write_text(
+            "pipeline {\n  agent { label 'linux' }\n  stages {\n    stage('Test') {\n"
+            "      when { changeRequest() }\n      steps {\n        sh \"echo ${env.CHANGE_TITLE}\"\n"
+            "      }\n    }\n  }\n}\n")
+        other = self.path.with_name("other.yml")
+        other.write_text(agent_job("- run: npx @openai/codex\n"))
+        config = self.root / ".github" / "obaaf.yml"
+        ignores = [{"rule": rule, "path": path, "owner": "@team", "reason": "reviewed risk", "until": expiry}
+                   for rule, path in (("OBAAF-JEN-009", "Jenkinsfile"),
+                                      ("OBAAF-GHA-025", ".github/workflows/other.yml"))]
+        config.write_text(json.dumps({"ignore": ignores}))
+        code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        pin, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+        self.assertIn("--pin", shlex.split(pin["command"]))
+        for scope in ([self.root, "--platform", "github"], [self.root / ".github" / "workflows"],
+                      [self.path, "--config", config]):
+            with self.subTest(scope=scope[1:] or scope[0].name):
+                code, out, err = run_cli("check", *scope, "--format", "json", "--fail-on", "never")
+                self.assertEqual(code, 0, err)
+                pin, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+                self.assertIsNone(pin["command"])
+                self.assertIn("Run the check on the whole repository", pin["nextAction"])
+                self.assertNotIn("Resolve the unmatched", pin["nextAction"])
+                self.assertNotIn("preview its removal", pin["nextAction"])
+
+    def test_legacy_baseline_with_unmatched_ignore_migrates_first(self):
+        expiry = (date.today() + timedelta(days=30)).isoformat()
+        gone = self.path.with_name("gone.yml")
+        gone.write_text(agent_job(f"- run: {self.install}\n"))
+        finding, = [f for f in checker.check(self.root).findings
+                    if f.path.endswith("gone.yml") and f.rule == "OBAAF-GHA-025"]
+        entry = {key: getattr(finding, key) or "" for key in ("rule", "severity", "path", "job", "step", "scope")}
+        entry.update(message=finding.legacy or finding.message, fingerprint=baseline.fingerprint(finding))
+        gone.unlink()
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"format": baseline.FORMAT_V1, "findings": [entry]}))
+        (self.root / ".github" / "obaaf.yml").write_text(json.dumps({"ignore": [
+            {"rule": "OBAAF-GHA-013", "path": ".github/workflows/gone.yml", "owner": "@team",
+             "reason": "fixed since", "until": expiry}]}))
+        code, out, err = run_cli("check", self.root, "--format", "json", "--baseline", policy, "--fail-on", "never")
+        self.assertEqual(code, 0, err)
+        pin, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+        self.assertIsNone(pin["command"])
+        # Migration drops the unmatched old entry; the check after it gives the paperwork command.
+        self.assertTrue(pin["nextAction"].startswith(
+            "Migrate the old-format baseline. Resolve the unmatched ignore entries. Then rerun the check"))
+        self.assertNotIn("unmatched baseline", pin["nextAction"])
+        self.assertNotIn("obaaf fix", pin["nextAction"])
+
+    def test_scan_errors_without_a_candidate_keep_the_rules_guidance(self):
+        self.write(f"- run: npx {self.package}\n")
+        self.path.with_name("broken.yml").write_text("jobs: [\n")
+        code, out, err = run_cli("check", self.root, "--format", "json", "--fail-on", "never")
+        group, = [g for g in json.loads(out)["todo"] if g["id"] == "agent-tool-version"]
+        self.assertEqual(group["pinCandidates"], 0)
+        self.assertNotIn("scan errors", group["nextAction"])
+        self.assertIn("Pin registry CLIs to an exact version", group["nextAction"])
 
     def test_all_manual_group_has_no_pin_command(self):
         self.write(f"- run: npx {self.package}\n")
@@ -212,3 +427,4 @@ class PinTest(unittest.TestCase):
                 self.assertEqual(code, 1, err or out)
                 self.assertNotIn("Nothing to apply", out)
                 self.assertNotIn("--- a/", out)
+

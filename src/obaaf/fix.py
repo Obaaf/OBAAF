@@ -45,7 +45,9 @@ def _paths(args):
 def _show_diff(edit):
     before = edit.before.decode("utf-8").splitlines(keepends=True)
     after = edit.after.decode("utf-8").splitlines(keepends=True)
-    for line in difflib.unified_diff(before, after, fromfile=f"a/{edit.path}", tofile=f"b/{edit.path}"):
+    # The path can come from a link the repository names, so it is shown as one escaped line.
+    name = one_line(Path(edit.path).as_posix())
+    for line in difflib.unified_diff(before, after, fromfile=f"a/{name}", tofile=f"b/{name}"):
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         if not line.endswith("\n"):
             print(r"\ No newline at end of file")
@@ -112,7 +114,7 @@ def _render(proposal, before, after, reasons, paths, threshold, catalog):
             _show_diff(edit)
 
 
-def _verified_plan(source, copy, options, before, metadata, plan):
+def _verified_plan(source, copy, options, before, metadata, plan, prerequisite=""):
     from obaaf.fix_proof import ProofError, prove
 
     def rejection(item, error):
@@ -122,11 +124,14 @@ def _verified_plan(source, copy, options, before, metadata, plan):
         pin = metadata.get("pin")
         request = ["--pin", "=".join(pin)] if pin else ["--tighten", "checkout-credentials"]
         command = tightening_command(before, request, candidate=item.id)
-        advice = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries "
-                  "with their owner.")
+        text = (f"{item.id}: {error}. Review the reported findings and any baseline or ignore entries with "
+                "their owner.")
         if command != one_line(command):
-            return advice + " The named retry cannot be printed on one line. Use the original paths and options."
-        return f"{advice} Retry this step alone with {command}"
+            return text + " The named retry cannot be printed on one line. Use the original paths and options."
+        # A named request run again unchanged fails the same way: say so, and keep its options for after.
+        if metadata.get("candidate") or prerequisite:
+            return f"{text} After resolving it, preview the same request again with: {command}"
+        return f"{text} Retry this step alone with {command}"
 
     def verify(candidate):
         for edit in candidate.edits:
@@ -165,9 +170,18 @@ def _verified_plan(source, copy, options, before, metadata, plan):
     return verified, verdict, reasons
 
 
+def apply_preview_guidance():
+    from obaaf.fix_apply import XATTR_FUNCTIONS
+
+    if all(hasattr(os, name) for name in XATTR_FUNCTIONS):
+        return "Run again with --apply to write these changes."
+    return "Make the displayed changes by hand on this host."
+
+
 def run(args):
     from obaaf import checker
     from obaaf.catalog import load
+    from obaaf.checker.todo import tightening_prerequisite
     from obaaf.fix_apply import apply_edits, apply_lock
     from obaaf.fix_copy import private_copy
     from obaaf.fix_proof import ProofError, bind_settings, check_copy_matches, check_inputs, prove
@@ -176,8 +190,8 @@ def run(args):
         if args.gate is not None:
             if args.settings is not None:
                 raise ValueError("--gate does not configure a settings snapshot in the generated workflow")
-            if args.candidate is not None:
-                raise ValueError("--candidate selects a tightening step and cannot be combined with --gate")
+            if args.tighten is not None or args.candidate is not None or args.pin is not None:
+                raise ValueError("--gate is a separate operation; omit --tighten, --candidate and --pin")
             from obaaf.fix_gate import run as run_gate
             root, options = _paths(args)
             with (apply_lock(root) if args.apply else nullcontext()) as lock:
@@ -222,7 +236,8 @@ def run(args):
             before.fail_on = options.fail_on
             before.settings_path = args.settings or ""
             paths = _owner_paths(copy, options, before, today, catalog)
-            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan)
+            prerequisite = tightening_prerequisite(before) if args.tighten or pin else ""
+            proposal, after, reasons = _verified_plan(root, copy, options, before, metadata, plan, prerequisite)
             if args.tighten:
                 print("Checkout tightening can affect later steps that use Git credentials.")
             _render(proposal, source, after, reasons, paths, options.fail_on, catalog)
@@ -230,11 +245,11 @@ def run(args):
                 if proposal.already_satisfied:
                     print(one_line(proposal.already_satisfied))
                     return 0
-                print("No proven pin to apply. Review the reported install and its original workflow by hand.")
+                print(prerequisite or "No proven pin to apply. Review the reported install and its original workflow by hand.")
                 return 1
             if args.candidate is not None and not proposal.edits:
-                print("Named checkout withheld. Review its original workflow and resolve the reported condition "
-                      "before running this named request again.")
+                print(prerequisite or "Named checkout withheld. Review its original workflow and resolve the reported "
+                      "condition before running this named request again.")
                 return 1
             if args.apply:
                 sys.stdout.flush()
@@ -251,7 +266,7 @@ def run(args):
                 else:
                     print("No proven changes to apply.")
             elif proposal.edits:
-                print("Run again with --apply to write these changes.")
+                print(apply_preview_guidance())
         return 0
     except (ValueError, OSError) as error:
         print("error: " + one_line(error), file=sys.stderr)

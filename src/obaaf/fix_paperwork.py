@@ -62,8 +62,11 @@ def _mapping(node):
 
 
 def _description(path, index, entry):
+    # Keys are made text first: YAML allows `1:` or `true:` beside text keys, and sorting
+    # mixed keys raised TypeError (found by the review of #278).
+    shown = {str(k): v for k, v in entry.items()} if isinstance(entry, dict) else entry
     return (f"{path} entry {index + 1}: "
-            + json.dumps(entry, sort_keys=True, ensure_ascii=True, default=str))
+            + json.dumps(shown, sort_keys=True, ensure_ascii=True, default=str))
 
 
 def _last_content(node):
@@ -74,10 +77,21 @@ def _last_content(node):
     return node.end_mark.index
 
 
-def _delete_rows(text, sequence, indices):
-    """Delete whole adjacent groups, keeping separators needed by the surviving entries."""
+def _comment_at(text, start, end, scalars):
+    """Whether a YAML comment begins in text[start:end]: a `#` outside every scalar token."""
+    return any(text[i] == "#" and not any(a <= i < b for a, b in scalars) for i in range(start, end))
+
+
+def _delete_rows(text, sequence, indices, comments=True):
+    """Delete whole adjacent groups, keeping separators needed by the surviving entries.
+
+    In a flow-style list a deletion runs from one entry to the next, so a comment in it, or
+    beside the last entries, would be lost from a kept entry or moved onto one: such a
+    deletion is refused. `comments=False` is for JSON, which has none."""
     edits = []
     rows = sequence.value
+    scalars = ([(t.start_mark.index, t.end_mark.index) for t in yaml.scan(text, Loader=yaml.SafeLoader)
+                if isinstance(t, yaml.ScalarToken)] if comments and sequence.flow_style else [])
     for index in sorted(indices):
         if index - 1 in indices:
             continue
@@ -91,6 +105,14 @@ def _delete_rows(text, sequence, indices):
                 start, end = rows[index - 1].end_mark.index, rows[last].end_mark.index
             else:
                 start, end = rows[index].start_mark.index, rows[last].end_mark.index
+            line_end = text.find("\n", end)
+            line_end = line_end if line_end >= 0 else len(text)
+            if comments and (_comment_at(text, start, end, scalars)
+                             or (last + 1 == len(rows) and _comment_at(text, end, line_end, scalars))):
+                # Found by the review of #278: a comment above the next entry, or beside the
+                # kept entry before the last ones, was deleted or moved onto another entry.
+                raise ValueError("a comment in or beside the flow-style list entries to remove would "
+                                 "be lost or moved to another entry")
             edits.append((start, end, ""))
         else:
             start = _dash(text, rows[index])
@@ -129,8 +151,10 @@ def _splice(text, spans):
 
 
 def _full_scope(root, options):
-    target = root / options.path
-    return options.platform == "auto" and target.is_dir() and workflow.locate(target)[0] == root
+    # Only a check of the repository's own folder reads its Jenkinsfiles (checker.check's
+    # `jenkins_sought`), so `.github` or `.github/workflows` is a partial check (review of #278).
+    target = (root / options.path).resolve()
+    return options.platform == "auto" and target.is_dir() and target == root
 
 
 def _relative(root, path):
@@ -230,6 +254,12 @@ def _config_plan(root, result, owner, full, selected, items, refused):
                    and f.kind == "entry-not-a-lane" and (f.facts or {}).get("entry") == workflow.bounded(key)]
         if not matches:
             continue
+        if not full:
+            # A job's lane can change findings in files a partial check does not read, such as
+            # a workflow that calls it (review of #278).
+            refused.append(f"{path} lane {key!r} ({value!r}): a partial check cannot establish "
+                           "what the correction changes")
+            continue
         targets = sorted(lane for lane in workflow.LANES if isinstance(value, str)
                          and _one_edit(value.strip().lower(), lane))
         if len(targets) != 1 or key not in lanes or not isinstance(lanes[key], yaml.ScalarNode):
@@ -293,7 +323,7 @@ def _baseline_plan(root, options, result, owner, reason, expires, full, selected
                           removals=(_description(path, i, old.entries[i]),)))
     text = before.decode()
     seq = _mapping(yaml.compose(text, Loader=yaml.SafeLoader))["findings"]
-    after = _splice(text, _delete_rows(text, seq, indices))
+    after = _splice(text, _delete_rows(text, seq, indices, comments=False))
     return Edit(path, before, after.encode(), (), removed=tuple(("findings", i) for i in sorted(indices)))
 
 
@@ -311,7 +341,7 @@ def plan(root: Path, options: CheckOptions, result, *, owner=None, reason=None, 
         generated = []
         try:
             edit = generator(*args, selected, generated, refused)
-        except (ValueError, OSError, yaml.YAMLError, RecursionError) as exc:
+        except (ValueError, OSError, yaml.YAMLError, RecursionError, TypeError) as exc:
             refused.append(f"Could not prepare paperwork: {exc}")
             continue
         if edit is not None:
