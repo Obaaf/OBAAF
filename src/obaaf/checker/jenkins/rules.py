@@ -155,6 +155,8 @@ _LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.patter
 # A line that holds a command that cannot change the reading (flagship slice 2d.2o), shared by every such line.
 _PLACEHOLDER = ["\u2026"]
 _PLACEHOLDER_LINE = [(_PLACEHOLDER, None)]
+# A line that holds something other than blanks and a comment.
+_COMMAND_LINE = re.compile(r"^[ \t\r\f\v]*[^\s#]", re.M)
 
 
 def _commands_of(tokens: list[tuple[str, bool]]) -> list[tuple[list[str], str | None]]:
@@ -3668,13 +3670,18 @@ class JenkinsRules:
         # Which lines need reading, found in one pass over the text rather than two searches per line
         joined = "\n".join(physical)
         starts = [0, *itertools.accumulate(len(raw) + 1 for raw in physical[:-1])]
-        wanted = {bisect.bisect_right(starts, m.start()) - 1 for m in _LINE_WANTED.finditer(joined)}
-        for n, raw in enumerate(physical):
-            if n not in wanted:
-                stripped = raw.lstrip()
-                if stripped and stripped[0] != "#":
-                    out.append((raw, _PLACEHOLDER_LINE))
-                continue
+        wanted = sorted({bisect.bisect_right(starts, m.start()) - 1 for m in _LINE_WANTED.finditer(joined)})
+        previous = 0
+        for n in wanted + [len(physical)]:
+            if n > previous:
+                # the lines between two that matter: one placeholder when any holds a command
+                gap = joined[starts[previous]:starts[n] - 1 if n < len(physical) else len(joined)]
+                if _COMMAND_LINE.search(gap):
+                    out.append((gap.split("\n", 1)[0], _PLACEHOLDER_LINE))
+            previous = n + 1
+            if n == len(physical):
+                break
+            raw = physical[n]
             tokens = _script_tokens(_strip_comment(raw))
             if tokens is None:
                 out.append((raw, None))
