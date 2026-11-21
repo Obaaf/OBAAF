@@ -386,7 +386,7 @@ The pipeline loads code that the Jenkinsfile's reviewers did not approve: a shar
 
 **Why it matters.** Any user with Build permission, the person who started the build included, can approve the release, or nobody is asked at all.
 
-An input step sets no submitter, so any user with Build permission on the job can approve it, including the person who started the build; or the pipeline publishes with no input step before the publish. Whether approvers are independent of the requester, and whether an approval is bound to the exact artifacts, is reported as unknown.
+An input step sets no submitter (or a blank or `null` one, or the group `authenticated`), so any user with Build permission on the job can approve it, including the person who started the build; or the pipeline publishes with no input step that stops the publish until someone approves: one before it on every path, whose abort stops the build, not caught, skipped by a condition, in another parallel branch, or in a failure path. Whether approvers are independent of the requester, and whether an approval is bound to the exact artifacts, is reported as unknown.
 
 **Fix.** Put an input step with `submitter` set to a release group before the publish, keep the requester out of that group, and bind the approval to artifact digests (for example with `obaaf verify release`).
 
