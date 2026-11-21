@@ -1,4 +1,8 @@
-"""Run one generated companion-scanner step against a disposable Git repository."""
+"""Run one generated companion-scanner step against a disposable Git repository.
+
+Written for the `companion-scanner` job of `.github/workflows/ci.yml`: it needs Docker, network
+access to the scanner's registry, and the runner's `RUNNER_TEMP`.
+"""
 import argparse
 import os
 from pathlib import Path
@@ -12,7 +16,7 @@ from obaaf.init import WORKFLOW
 from obaaf.init_scanners import SCANNERS
 
 
-# This file is scanned as data. No workflow in the fixture is dispatched.
+# The fixture workflow is scanned as data. It is never pushed, so it is never dispatched.
 FIXTURE = """\
 name: Scanner fixture
 on: workflow_dispatch
