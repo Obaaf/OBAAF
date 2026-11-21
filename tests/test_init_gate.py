@@ -216,6 +216,34 @@ class GateTests(unittest.TestCase):
     def test_crlf_gate_with_scanner(self):
         self.check_crlf_gate("--with-scanner", "poutine")
 
+    def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
+        # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF
+        # handling together. A gate written with the original checker, in CRLF, changes threshold
+        # under a newer template without taking the newer pin or losing its line endings.
+        from obaaf.fix_gate import ORIGINAL_SETUP
+
+        self.install()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"d" * 40
+        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        tail = steps(["zizmor"])
+        high = historical.replace(b'obaaf check source "${config[@]}" --fail-on never',
+                                  b"gate_check .github/obaaf-baseline.json --fail-on high") + tail
+        self.workflow.write_bytes(high.replace(b"\n", b"\r\n"))
+        commit(self.root)
+        with patch("obaaf.fix_gate.files", return_value=future):
+            code, text = self.gate("--apply")
+        self.assertEqual(code, 0, text)
+        self.assertIn("Applied the displayed gate change", text)
+        written = self.workflow.read_bytes()
+        self.assertEqual(written, high.replace(b"--fail-on high", b"--fail-on medium").replace(b"\n", b"\r\n"))
+        self.assertIn(ORIGINAL_SETUP, written)
+        self.assertNotIn(next_setup, written)
+
     def test_mixed_endings_and_custom_crlf_workflow_get_manual_guidance(self):
         self.install()
         generated = self.workflow.read_bytes().replace(b"\r\n", b"\n")

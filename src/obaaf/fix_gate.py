@@ -18,9 +18,12 @@ from obaaf.checker.workflow import one_line
 
 BASELINE = Path(".github/obaaf-baseline.json")
 REPORT = b'obaaf check source "${config[@]}" --fail-on never\n'
-# Both the pre-gate report and the first gate-capable template installed this checker.
+# Both the pre-gate report and the first gate-capable template installed this checker. The digest is
+# that template as it landed on flagship with #293 (27b15c9, after ad03f16 changed its pull-request
+# policy step). A later change to the template other than its setup pin stops it matching, and then
+# earlier workflows are no longer recognised; the tests of earlier workflows fail (review-gpt #306).
 ORIGINAL_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@4e2ba222d31f9ce8e7e352f18e8f88c75aabcbd8"
-GATE_TEMPLATE_DIGEST = "58bb8286e9216bf905ce6f540245882ecbb44518711b32d6c4dac4d3c590ceb6"
+GATE_TEMPLATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"
 LEGACY_DIGEST = "58b64917ab435b974f4d6defac5b9c6f2dab3c536097cdef8e7e8402f4977b5c"
 
 
