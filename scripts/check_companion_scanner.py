@@ -62,7 +62,7 @@ def check_scanner(name, workspace):
     for line in lines:
         print(f"| {line}")
     if run.stderr:
-        # Prefixed like stdout, so nothing the scanner wrote is read as a workflow command here.
+        # Prefixed like stdout, so no line the scanner wrote can start a `::` workflow command here.
         for line in run.stderr.splitlines():
             print(f"stderr | {line}")
         raise SystemExit(f"{name} wrote outside the generated step's combined output stream")
