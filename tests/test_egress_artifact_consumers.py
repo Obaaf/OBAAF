@@ -80,3 +80,61 @@ class ArtifactHandoffTest(unittest.TestCase):
     def test_firewall_job_downloads_its_own_upload(self):
         result = check_handoff("firewall", same_job=DOWNLOADS["action"])
         self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+
+
+def other_workflow(steps, on="workflow_dispatch"):
+    """A workflow that `workflow_run` does not start for the producer, with a job that runs what it fetched."""
+    return (f"name: Deploy\non: {on}\npermissions: {{actions: read, contents: read}}\njobs:\n  deploy:\n"
+            "    runs-on: ubuntu-24.04\n    steps:\n" + steps + "\n      - run: make test\n"
+            "        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}\n")
+
+
+class DownloadsFromAnyRunTest(unittest.TestCase):
+    """From the review of #357 (run gannet): a workflow the producer does not start can still download the
+    producer's artifact by naming its run, so the subscriber test alone left these verified."""
+
+    CONSUMERS = {
+        "dawidd6 in a dispatched workflow": {".github/workflows/deploy.yml": other_workflow(
+            f"      - uses: dawidd6/action-download-artifact@{SHA}\n        with: {{workflow: agent.yml, name: report}}")},
+        "download-artifact with a run id on a schedule": {".github/workflows/deploy.yml": other_workflow(
+            f"      - uses: actions/download-artifact@{SHA}\n"
+            "        with: {name: report, run-id: '${{ inputs.run }}', github-token: '${{ github.token }}'}",
+            on="schedule")},
+        "gh run download on push": {".github/workflows/deploy.yml": other_workflow(
+            "      - run: gh run download \"$RUN\" -n report", on="push")},
+        "a called workflow of this repository downloads": {
+            ".github/workflows/deploy.yml": ("name: Deploy\non: workflow_dispatch\njobs:\n  deploy:\n"
+                                             "    uses: ./.github/workflows/build.yml\n    secrets: inherit\n"),
+            ".github/workflows/build.yml": other_workflow(
+                f"      - uses: dawidd6/action-download-artifact@{SHA}\n        with: {{workflow: agent.yml}}",
+                on="workflow_call")},
+        "a call of another repository's workflow": {".github/workflows/deploy.yml": (
+            "name: Deploy\non: workflow_dispatch\njobs:\n  deploy:\n"
+            f"    uses: example/shared/.github/workflows/build.yml@{SHA}\n    secrets: inherit\n")},
+        "a local action in another workflow": {".github/workflows/deploy.yml": other_workflow(
+            "      - uses: ./.github/actions/fetch")},
+    }
+
+    def test_a_download_from_another_run_anywhere_in_the_repository(self):
+        for route in ROUTES:
+            for name, files in self.CONSUMERS.items():
+                with self.subTest(route=route, case=name):
+                    result = check_handoff(route, files=files)
+                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    finding, = [f for f in result.findings if f.rule == "OBAAF-GHA-005"]
+                    self.assertNotEqual(finding.state, "fixed")
+
+    def test_a_download_from_its_own_run_in_another_workflow_is_not_a_consumer(self):
+        files = {".github/workflows/deploy.yml": other_workflow(
+            f"      - uses: actions/download-artifact@{SHA}\n        with: {{name: report}}")}
+        for route in ROUTES:
+            with self.subTest(route=route):
+                self.assertEqual(verdict(egress(check_handoff(route, files=files))), VERIFIED)
+
+    def test_an_upload_by_an_action_named_like_one(self):
+        # The firewall route confines the whole job, so the upload can be any step after the agent's.
+        pages = f"      - uses: actions/upload-pages-artifact@{SHA}\n        with: {{path: site}}"
+        consumer = f"      - uses: actions/download-artifact@{SHA}\n        with: {{name: github-pages}}"
+        self.assertEqual(verdict(egress(check_handoff("firewall", upload=False, same_job=pages,
+                                                      same_workflow=consumer))), CANNOT_TELL)
+        self.assertEqual(verdict(egress(check_handoff("firewall", upload=False, same_job=pages))), VERIFIED)

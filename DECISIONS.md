@@ -1221,10 +1221,12 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-132 Egress credit follows an uploaded artifact to possible consumers
 
-**Decision.** For GitHub's native firewall and OBAAF's egress action, withhold `egress-enforced` credit when the agent job uploads an artifact and another job may download it. Read jobs in the producing workflow and repository workflows that `workflow_run` may start for it. An incomplete inventory also makes the otherwise verified control "cannot tell" for an uploading producer.
+**Decision.** For GitHub's native firewall and OBAAF's egress action, withhold `egress-enforced` credit when the agent job uploads an artifact and another job may download it. Read jobs in the producing workflow and repository workflows that `workflow_run` may start for it, and, in every workflow of the repository, jobs that can download another run's artifacts (the checker's reading of such downloads, a call of another repository's workflow, or a local action). An upload is `actions/upload-artifact`, an action named like an artifact upload, or a local action. An incomplete inventory also makes the otherwise verified control "cannot tell" for an uploading producer.
 
 **Reason.** Both controls restrict execution on the producer. A consumer that builds, tests or loads the uploaded files may run agent-written code with its own credentials and network access. A download is sufficient to withhold credit because the checker cannot establish how each file will be used.
 
 **Consequence.** OBAAF-GHA-020 can stay open on the producing job, and OBAAF-GHA-005 cannot clear on the strength of the producer's controls. Uploads kept for inspection can still qualify when the inventory is complete and the checker finds no possible consumer.
+
+**Amended in review (run `gannet`, 2026-11-21).** The first version read only the producing workflow and `workflow_run` subscribers, so a dispatched, scheduled or push workflow that downloads the producer's artifact by run id (dawidd6's action with `workflow:`, `actions/download-artifact` with `run-id`, `gh run download`) left the producer verified, and so did an upload through `actions/upload-pages-artifact` on the firewall route. Both now give "cannot tell". A repository with any local action or any call of another repository's workflow in any workflow can no longer verify an uploading agent job's egress.
 
 **Status.** Proposed, 2026-11-21 (#354). Draft awaiting maintainer review.

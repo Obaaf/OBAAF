@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### GitHub Actions egress checks follow artifact uploads
 
-An agent job that uploads an artifact can now receive "cannot tell" for its egress control when another job may download the output or the checker cannot inspect all relevant workflows. This affects both GitHub's native firewall and OBAAF's egress action. OBAAF-GHA-020 stays open in that case, and OBAAF-GHA-005 no longer receives credit for `egress-enforced`. A build or test in a consuming job can run the uploaded files with that job's credentials and network access (#354).
+An agent job that uploads an artifact can now receive "cannot tell" for its egress control when another job may download the output (a job in the same workflow, a `workflow_run` subscriber, or a job in any workflow that can download another run's artifacts) or the checker cannot inspect all relevant workflows. This affects both GitHub's native firewall and OBAAF's egress action. OBAAF-GHA-020 stays open in that case, and OBAAF-GHA-005 no longer receives credit for `egress-enforced`. A build or test in a consuming job can run the uploaded files with that job's credentials and network access (#354).
 
 ### Companion scanner diagnostics in GitHub Actions
 
