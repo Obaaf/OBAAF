@@ -31,7 +31,8 @@ from obaaf.checker.jenkins.model import (
     untrusted_source,
 )
 from obaaf.checker.jenkins.parser import (
-    Assign, Binary, Call, Decl, ListLit, MapLit, Name, Num, Prop, Str, callee_name, path_of,
+    Assign, Binary, Call, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop, Str,
+    callee_name, path_of,
 )
 from obaaf.checker.rules import Finding
 from obaaf.checker.workflow import binding_commands, declared_lane
@@ -111,6 +112,32 @@ class _SpreadDict(dict):
     """Arguments after a spread map: a key not written after it may be in the map."""
     def get(self, key, default=None):
         return super().get(key, UNREAD)
+
+
+# A permalink's artifacts wherever the URL starts (`${JOB_URL}../b/lastSuccessfulBuild/artifact/x`), a job's
+# workspace (`job/b/ws/app.jar`), and a `..` in a URL to artifacts, which curl removes before it asks.
+PERMALINK_ANYWHERE = re.compile(r"(?<![\w-])(?P<ref>" + "|".join(sorted(JENKINS_PERMALINKS)) + r")/artifact/")
+WORKSPACE_URL = re.compile(r"(?<![\w.-])job/(?P<job>[^/\s'\"]+(?:/job/[^/\s'\"]+)*)/ws/")
+DOT_ARTIFACT = re.compile(r"/\.\./\S*/(artifact|ws)/|/(artifact|ws)/\S*/\.\./")
+
+
+def artifact_urls(text: str) -> list[tuple[str, str]]:
+    """How a text fetches another job's artifacts through Jenkins URLs (flagship slice 2d.2m)."""
+    out = []
+    for m in PERMALINK_ARTIFACT.finditer(text):
+        ref, job = m.group("ref"), m.group("job")
+        if ref in JENKINS_PERMALINKS:
+            out.append(("moving", f"job '{job}' by its permalink {ref} (a URL)"))
+        elif not (ref.isascii() and ref.isdigit()):
+            out.append(("unknown", f"job '{job}' by the build reference '{ref}' in a URL"))
+    if not out:
+        for m in PERMALINK_ANYWHERE.finditer(text):
+            out.append(("moving", f"a job by its permalink {m.group('ref')} (a URL)"))
+    for m in WORKSPACE_URL.finditer(text):
+        out.append(("moving", f"the workspace of job '{m.group('job')}' (a URL)"))
+    if not out and DOT_ARTIFACT.search(text):
+        out.append(("unknown", "a URL to another build's artifacts with a `..` in it"))
+    return out
 
 
 def text_or_expr(node) -> str:
@@ -2936,67 +2963,93 @@ class JenkinsRules:
                          "by which reference, is not known")
         fetches = [f for f in fetches if f[1] != "fixed"]
         checks = [(i, self._fetch_check(i)) for i in self.infos]
-        checks = [(i, kind) for i, kind in checks if kind and not i.ctx.deferred]
-        if fetches and max(len(fetches), len(checks)) * len(publishes) > 400_000:
+        checks = sorted(((i, kind) for i, kind in checks if kind and not i.ctx.deferred), key=lambda c: c[0].index)
+        if fetches and max(len(fetches), len(checks)) * len(publishes) > 150_000:
             self.unknown("OBAAF-JEN-010", fetches[0][0].line,
                          f"{len(fetches)} copies of another job's artifacts, {len(checks)} checks and {len(publishes)} "
                          "publishes, as the file's methods expand, are too many to compare")
             return
-        # For each publish, the latest check before it that can stop it, worked out once: comparing every copy with
-        # every step of its stage took 11.7 seconds on 744 bytes of nested helpers.
-        memo: dict[int, tuple[int, int]] = {}
+        keys: dict[int, frozenset] = {}
 
-        def latest(publish: Info) -> tuple[int, int]:
-            found = memo.get(publish.index)
+        def guards(info: Info) -> frozenset:
+            found = keys.get(id(info))
+            if found is None:
+                found = keys[id(info)] = frozenset(guard_keys(info))
+            return found
+
+        # For each publish and set of conditions the copy runs under, the latest check before the publish that can
+        # stop it, worked out once: comparing every copy with every step of its stage took 11.7 seconds on 744
+        # bytes of nested helpers. A check counts as `gates` says, except that a condition the copy runs under
+        # may also skip the check: when it does not hold, nothing was copied.
+        memo: dict[tuple, tuple[int, int]] = {}
+
+        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int]:
+            key = (publish.index, copy_guards)
+            found = memo.get(key)
             if found is None:
                 full = digest = -1
+                allowed = guards(publish) | copy_guards
                 for check, kind in checks:
-                    if check.index < publish.index and self.gates(check, publish):
-                        if kind == "full":
-                            full = max(full, check.index)
-                        else:
-                            digest = max(digest, check.index)
-                found = memo[publish.index] = (full, digest)
+                    if check.index >= publish.index:
+                        break
+                    # the script itself is read by _fetch_check; here, a catchError, warnError or catch around it
+                    if check.ctx.swallowed or check.ctx.post in FAILURE_PATHS or concurrent(check.ctx, publish.ctx) \
+                            or not guards(check) <= allowed:
+                        continue
+                    if kind == "full":
+                        full = check.index
+                    else:
+                        digest = check.index
+                found = memo[key] = (full, digest)
             return found
+
+        live_calls = {id(i.use.call) for i, _k, _w in fetches if not i.ctx.deferred}
         for info, kind, what in fetches:
             if info.ctx.deferred:
+                if id(info.use.call) in live_calls:
+                    continue            # the same copy is also read where it runs
                 self.unknown("OBAAF-JEN-010", info.line,
                              f"the copy at line {info.line} is in {info.ctx.deferred}; whether and where it runs is "
                              "not known")
                 continue
-            later = [p for p in publishes if (p.index > info.index or concurrent(info.ctx, p.ctx))]
+            again = set(info.ctx.repeats)
+            later = [p for p in publishes if p.index > info.index or concurrent(info.ctx, p.ctx)
+                     or (again and again & set(p.ctx.repeats))]
             unchecked, digest_only = [], []
             for publish in later:
-                full, digest = latest(publish)
-                if concurrent(info.ctx, publish.ctx):
-                    unchecked.append(publish)       # a check before a publish beside the copy did not see the copy
-                elif full > info.index and not self._beside(info, full):
+                if publish.ctx.post in FAILURE_PATHS or publish.index < info.index or concurrent(info.ctx, publish.ctx):
+                    # a publish in a failure path runs when the check failed; one before the copy in the same retry
+                    # block runs after the copy of the try before; one beside the copy is checked by nothing after it
+                    unchecked.append(publish)
                     continue
-                elif digest > info.index:
+                full, digest = latest(publish, guards(info))
+                if full > info.index and not self._beside(info, full):
+                    continue
+                if digest > info.index and not self._beside(info, digest):
                     digest_only.append(publish)
                 else:
                     unchecked.append(publish)
             if kind == "unknown":
                 if unchecked or digest_only:
                     self.unknown("OBAAF-JEN-010", info.line,
-                                 f"the copy at line {info.line} fetches another job's artifacts by {what}, which the "
-                                 "file does not fix, and the pipeline publishes after it")
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 "fix, and the pipeline publishes after it")
                 continue
             if not unchecked:
                 if digest_only:
                     self.unknown("OBAAF-JEN-010", info.line,
-                                 f"the copy at line {info.line} fetches artifacts by {what}; a digest check runs before "
+                                 f"the copy at line {info.line} copies artifacts from {what}; a digest check runs before "
                                  "the publish, but whether its digests come from somewhere other than the build it "
                                  "copied from is not known (obaaf verify release checks them against the signed record)")
                 continue
             if all(p.ctx.deferred for p in unchecked):
                 self.unknown("OBAAF-JEN-010", info.line,
-                             f"the copy at line {info.line} fetches artifacts by {what}, and the only publish after it "
+                             f"the copy at line {info.line} copies artifacts from {what}, and the only publish after it "
                              f"with no check is in {unchecked[0].ctx.deferred}")
                 continue
             here = base_stage(info.ctx.stage)
-            same = any(base_stage(p.ctx.stage) == here and p.index > info.index and not p.ctx.deferred
-                       for p in unchecked)
+            same = any(base_stage(p.ctx.stage) == here and not p.ctx.deferred
+                       and (p.index > info.index or (again and again & set(p.ctx.repeats))) for p in unchecked)
             self.add("OBAAF-JEN-010", info.line,
                      f"Stage '{stage_label(info.ctx.stage)}' copies artifacts from {what}, a reference that moves, "
                      "and does not check their digests before "
@@ -3016,12 +3069,13 @@ class JenkinsRules:
         if cached is not None and cached[0] is info.use.call:
             return cached[1]
         kind = None
-        if info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        stops = status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
+        if stops and info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
             text = info.script
             errexit, pipefail = True, False      # Jenkins runs an `sh` script without a #! line as `sh -xe`
-            stripped = text.lstrip()
-            if stripped.startswith("#!"):
-                first, _, text = stripped.partition("\n")
+            if text.startswith("#!"):           # durable-task reads a #! line only at the very start
+                first, _, text = text.partition("\n")
                 words = first[2:].split()
                 program = words[0].rsplit("/", 1)[-1] if words else ""
                 if program == "env" and len(words) > 1:
@@ -3030,6 +3084,9 @@ class JenkinsRules:
                     text = ""
                 errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in words[1:])
                 pipefail = False
+            lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+            if text and not errexit and len(lines) == 1:
+                errexit = True                    # one command: the script's status is that command's
             if text:
                 commands, _complete = binding_commands(text, errexit, pipefail)
                 for words in commands:
@@ -3051,11 +3108,12 @@ class JenkinsRules:
         out = []
         if last == "copyArtifacts":
             named.add(id(call.callee))
-            if len(call.args) == 1 and isinstance(call.args[0], Name) and not call.named:
-                # copyArtifacts(args): a variable given one map and nothing else is that map
-                values = self._assigned_values(call.args[0].name)
-                if len(values) == 1 and isinstance(values[0], MapLit):
-                    call = Call(callee=call.callee, args=[values[0]], line=call.line)
+            if len(call.args) == 1 and not call.named and not isinstance(call.args[0], (MapLit, Str)):
+                # copyArtifacts(args): a variable given one map and nothing else is that map; anything else
+                # (`base + [...]`, a call) may hold any argument
+                value = self._single_value(call.args[0].name) if isinstance(call.args[0], Name) else None
+                if isinstance(value, MapLit):
+                    call = Call(callee=call.callee, args=[value], line=call.line)
                 else:
                     call = Call(callee=call.callee, named=[("*", None)], line=call.line)
             out.append(self._copy_reference(call_entries(call, "projectName")))
@@ -3065,24 +3123,32 @@ class JenkinsRules:
             if isinstance(cls, Str) and not cls.interpolated and cls.text().rsplit(".", 1)[-1] == "CopyArtifact":
                 named.add(id(cls))
                 out.append(self._copy_reference(entries))
+            elif cls is not None and not (isinstance(cls, Str) and not cls.interpolated):
+                out.append(("unknown", "a step whose $class the file computes"))
         elif last == "invokeMethod" and call.args and literal(call.args[0]) == "copyArtifacts":
             named.add(id(call.args[0]))
             out.append(("unknown", "a copy called through invokeMethod"))
         urls = []
         if info.shell:
-            urls.append(info.script)
+            urls.append(self._expanded(info.script).replace("'", "").replace('"', ""))
         elif last == "httpRequest":
             target = step_arg(call, "url") or first_arg(call)
-            urls.append(text_or_expr(target))
+            if isinstance(target, Name):
+                target = self._single_value(target.name)
+            urls.append(self._expanded(text_or_expr(target)))
         for text in urls:
-            for m in PERMALINK_ARTIFACT.finditer(text or ""):
-                ref = m.group("ref")
-                job = m.group("job")
-                if ref in JENKINS_PERMALINKS:
-                    out.append(("moving", f"job '{job}' by its permalink {ref} (a URL)"))
-                elif not ref.isdigit():
-                    out.append(("unknown", f"job '{job}' by the build reference '{ref}' in a URL"))
+            out += artifact_urls(text or "")
         return out
+
+    def _expanded(self, text: str) -> str:
+        """`text` with `$NAME`, `${NAME}` and `${env.NAME}` replaced by the literal value the file's `environment`
+        gives NAME, so a URL kept there is read where it is used."""
+        if "$" not in text or not self.p.env_values:
+            return text
+        def value(m) -> str:
+            node = self.p.env_values.get(m.group(1) or m.group(2))
+            return node.text() if isinstance(node, Str) else m.group(0)
+        return re.sub(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", value, text)
 
     def _copy_reference(self, entries: dict) -> tuple[str, str]:
         """What a copy's projectName and selector fix (flagship slice 2d.2m)."""
@@ -3094,7 +3160,7 @@ class JenkinsRules:
         selector = entries.get("selector")
         if selector is UNREAD:
             return ("unknown", f"{shown_project} with a selector that a spread map may set")
-        if selector is None:
+        if selector is None or (isinstance(selector, Name) and selector.name == "null"):
             return ("moving", f"{project_text} by the default selector (last successful build)")
         kind, what = self._selector(selector)
         if kind == "moving":
@@ -3107,14 +3173,14 @@ class JenkinsRules:
         """("fixed" | "moving" | "unknown", how it reads) for a copyArtifacts selector: a symbol call
         (`lastSuccessful()`), a map with `$class` (`[$class: 'StatusBuildSelector']`), or a variable that is given
         one of them and nothing else."""
-        if isinstance(node, Name) and node.name in self.p.local_names:
-            values = self._assigned_values(node.name)
-            if len(values) == 1:
-                node = values[0]
+        if isinstance(node, Name):
+            node = self._single_value(node.name)
         symbol, entries = None, {}
         if isinstance(node, Call):
-            symbol = chain_name(node.callee)
-            symbol = symbol.rsplit(".", 1)[-1] if symbol else None
+            # A plugin symbol only when called by its bare name and the file defines nothing by that name
+            # (`def specific(n) { lastSuccessful() }`, `s.specific('42')` are not the plugin's)
+            if isinstance(node.callee, Name) and node.callee.name not in self.p.local_names:
+                symbol = node.callee.name
             entries = call_entries(node, SELECTOR_POSITIONAL.get(symbol))
         elif isinstance(node, MapLit):
             entries = call_entries(Call(callee=Name("[:]", line=node.line), args=[node], line=node.line), None)
@@ -3164,41 +3230,65 @@ class JenkinsRules:
                 f"{path_of(node.callee.target)}.number"
         if ref and "." in ref:
             var, _, attr = ref.partition(".")
-            if attr in ("number", "getNumber()") and var in self._build_vars():
+            value = self._single_value(var) if attr in ("number", "getNumber()") else None
+            if isinstance(value, Call) and isinstance(value.callee, Name) and value.callee.name == "build" \
+                    and "build" not in self.p.local_names:
                 return ("fixed", f"the number of the build it started ({ref})")
         return ("unknown", "specific() with a build number computed at run time")
 
-    def _assigned_values(self, name: str) -> list:
+    def _single_value(self, name: str):
+        """The one value the file gives a variable, or None (flagship slice 2d.2m, from its review): the name must be
+        declared once with a value, never assigned again, never changed through a property, an index or a method
+        (`m.selector = x`, `m['k'] = x`, `m.put(...)`, `m << x`), never a parameter of a method or closure or a loop's
+        variable, and never set through `this.NAME =` or `binding.setVariable`. Anything else may hold another value
+        where the step runs."""
+        table = self.__dict__.get("_values_cache")
+        if table is None:
+            table = self._values_cache = self._value_table()
+        return table.get(name)
+
+    def _value_table(self) -> dict:
         tree = self.p.tree
         if tree is None:
-            return []
-        out = []
-        for n in find_nodes(tree, lambda n: isinstance(n, (Decl, Assign))):
-            if isinstance(n, Decl) and n.name == name and n.value is not None:
-                out.append(n.value)
-            elif isinstance(n, Assign) and isinstance(n.target, Name) and n.target.name == name:
-                out.append(n.value if n.op == "=" else None)
-        return out
+            return {}
+        decls: dict[str, list] = {}
+        blocked: set = set(self.p.method_params)
 
-    def _build_vars(self) -> set:
-        """Variables given only the result of a `build` step the file runs."""
-        cached = self.__dict__.get("_build_vars_cache")
-        if cached is not None:
-            return cached
-        tree = self.p.tree
-        names: dict[str, bool] = {}
-        if tree is not None:
-            for n in find_nodes(tree, lambda n: isinstance(n, (Decl, Assign))):
-                if isinstance(n, Decl):
-                    target, value = n.name, n.value
-                elif isinstance(n.target, Name):
-                    target, value = n.target.name, (n.value if n.op == "=" else None)
-                else:
-                    continue
-                is_build = isinstance(value, Call) and (chain_name(value.callee) or "").rsplit(".", 1)[-1] == "build"
-                names[target] = names.get(target, True) and is_build
-        self._build_vars_cache = {k for k, v in names.items() if v}
-        return self._build_vars_cache
+        def root(node):
+            while isinstance(node, (Prop, Index)):
+                node = node.target
+            return node
+
+        for n in find_nodes(tree, lambda n: True):
+            if isinstance(n, Decl):
+                decls.setdefault(n.name, []).append(n.value)
+            elif isinstance(n, Assign):
+                target = n.target
+                if isinstance(target, Prop) and isinstance(target.target, Name) and target.target.name == "this":
+                    blocked.add(target.name)
+                base = root(target)
+                if isinstance(base, Name):
+                    blocked.add(base.name)
+            elif isinstance(n, (Closure, MethodDef)):
+                blocked.update(p if isinstance(p, str) else getattr(p, "name", "") for p in n.params)
+            elif isinstance(n, Loop):
+                for part in n.header:
+                    blocked.update(x.name for x in find_nodes(part, lambda x: isinstance(x, Name)))
+                    blocked.update(x.name for x in find_nodes(part, lambda x: isinstance(x, Decl)))
+            elif isinstance(n, Call):
+                callee = n.callee
+                if isinstance(callee, Prop):
+                    base = root(callee.target)
+                    if isinstance(base, Name):
+                        blocked.add(base.name)       # any method called on it may change it
+                    if callee.name == "setVariable":
+                        blocked.update(literal(a) or "" for a in n.args[:1])
+            elif isinstance(n, Binary) and n.op in ("<<", "<<=", "+=", "-="):
+                base = root(n.left)
+                if isinstance(base, Name):
+                    blocked.add(base.name)
+        return {name: values[0] for name, values in decls.items()
+                if len(values) == 1 and values[0] is not None and name not in blocked}
 
     def _unread_copy_names(self, named: set) -> int | None:
         """The line of the first place the file names copyArtifacts (or the CopyArtifact class) other than a copy
@@ -3207,15 +3297,17 @@ class JenkinsRules:
         if tree is None:
             return None
         def names_copy(n) -> bool:
-            if isinstance(n, Name):
-                return n.name == "copyArtifacts"
-            if isinstance(n, Prop):
-                return n.name == "copyArtifacts"
+            if isinstance(n, (Name, Prop)):
+                return n.name in ("copyArtifacts", "CopyArtifact")
+            if isinstance(n, Import):
+                return n.path.rsplit(".", 1)[-1] in ("CopyArtifact", "*") and "copyartifact" in n.path
             if isinstance(n, Str):
                 text = n.text()
-                return "copyArtifacts" in text or "CopyArtifact" in text
+                return text == "copyArtifacts" or text.rsplit(".", 1)[-1] == "CopyArtifact"
+            if isinstance(n, Call):
+                return isinstance(n.callee, Str) and n.callee.interpolated     # "$m"(...): a computed method name
             return False
-        lines = [n.line for n in find_nodes(tree, names_copy) if id(n) not in named]
+        lines = [n.line for n in find_nodes(tree, names_copy) if id(n) not in named and n.line]
         return min(lines) if lines else None
 
     # ------------------------------------------------------------------ JEN-011

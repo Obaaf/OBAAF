@@ -255,6 +255,94 @@ CASES = [
      "def f11() {\n  copyArtifacts(projectName: 'b')\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n  sh 'make'\n}\ndef f10() { f11(); f11() }\ndef f9() { f10(); f10() }\ndef f8() { f9(); f9() }\ndef f7() { f8(); f8() }\ndef f6() { f7(); f7() }\ndef f5() { f6(); f6() }\ndef f4() { f5(); f5() }\ndef f3() { f4(); f4() }\ndef f2() { f3(); f3() }\ndef f1() { f2(); f2() }\ndef f0() { f1(); f1() }\nnode {\n  stage('Release') {\n    f0()\n    sh 'aws s3 cp out s3://r/'\n  }\n}\n"),
 ]
 
+# The review's attempts on the slice's first commit (`0b0c0ba`), with what the parent `651cb4e` said.
+REVIEW_CASES = [
+    ('R01_post_failure_publish', 'finding-medium', 'quiet',
+     "pipeline {\n  agent any\n  stages {\n    stage('f') {\n      steps {\n        copyArtifacts(projectName: 'a')\n        sh 'obaaf verify release --policy p --artifacts app.jar'\n      }\n    }\n  }\n  post { failure { sh 'curl -T app.jar https://repo.example/upload' } }\n}\n"),
+    ('R02_post_always_publish', 'finding-medium', 'quiet',
+     "pipeline {\n  agent any\n  stages {\n    stage('f') {\n      steps {\n        copyArtifacts(projectName: 'a')\n        sh 'obaaf verify release --policy p --artifacts app.jar'\n      }\n    }\n  }\n  post { always { sh 'curl -T app.jar https://repo.example/upload' } }\n}\n"),
+    ('R03_try_catch_publish', 'finding-high', 'quiet',
+     "node {\n  try {\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  } catch (e) {\n    sh 'curl -T app.jar https://repo.example/upload'\n  }\n}\n"),
+    ('R04_try_finally_publish', 'finding-high', 'quiet',
+     "node {\n  try {\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  } finally {\n    sh 'curl -T app.jar https://repo.example/upload'\n  }\n}\n"),
+    ('R05_retry_publish_before_copy', 'finding-high', 'quiet',
+     "node {\n  retry(2) {\n    sh 'curl -T app.jar https://repo.example/upload'\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  }\n}\n"),
+    ('R06_control_check_then_publish', 'quiet', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R07_returnStatus_variable', 'finding-high', 'quiet',
+     "node {\n  def rs = true\n  copyArtifacts(projectName: 'a')\n  sh(script: 'obaaf verify release --policy p', returnStatus: rs)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R08_returnStatus_spread', 'finding-high', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh(script: 'obaaf verify release --policy p', *: [returnStatus: true])\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R09_returnStatus_false_counts', 'quiet', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh(script: 'obaaf verify release --policy p', returnStatus: false)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R10_map_var_mutated', 'unknown', 'finding-high',
+     "node {\n  def m = [projectName: 'a', selector: specific('42')]\n  m.selector = lastSuccessful()\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R11_map_var_put', 'unknown', 'finding-high',
+     "node {\n  def m = [projectName: 'a', selector: specific('42')]\n  m.put('selector', lastSuccessful())\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R12_map_var_index_assign', 'unknown', 'finding-high',
+     "node {\n  def m = [projectName: 'a', selector: specific('42')]\n  m['selector'] = lastSuccessful()\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R13_map_var_leftshift', 'unknown', 'finding-high',
+     "node {\n  def m = [projectName: 'a', selector: specific('42')]\n  m << [selector: lastSuccessful()]\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R14_selector_param_shadow', 'unknown', 'unknown',
+     "def fetch(sel) {\n  copyArtifacts(projectName: 'a', selector: sel)\n}\nnode {\n  def sel = specific('42')\n  fetch(lastSuccessful())\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R15_selector_binding_setVariable', 'unknown', 'unknown',
+     "node {\n  def sel = specific('42')\n  binding.setVariable('sel', lastSuccessful())\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R16_selector_this_assign', 'unknown', 'unknown',
+     "node {\n  def sel = specific('42')\n  this.sel = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R17_build_number_param', 'unknown', 'quiet',
+     'def fetch(b) {\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n}\nnode {\n  fetch([number: \'lastSuccessfulBuild\'])\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R18_build_number_closure_param', 'unknown', 'quiet',
+     'node {\n  [[number: \'lastSuccessfulBuild\']].each { b ->\n    copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  }\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R19_build_number_for_var', 'unknown', 'quiet',
+     'node {\n  for (b in [[number: \'lastSuccessfulBuild\']]) {\n    copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  }\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R20_build_redefined', 'unknown', 'quiet',
+     'def build(Map m) { [number: \'lastSuccessfulBuild\'] }\nnode {\n  def b = build(job: \'a\')\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R21_specific_redefined', 'unknown', 'quiet',
+     "def specific(n) { lastSuccessful() }\nnode {\n  copyArtifacts(projectName: 'a', selector: specific('42'))\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R22_specific_on_receiver', 'unknown', 'unknown',
+     "node {\n  def s = this\n  copyArtifacts(projectName: 'a', selector: s.specific('42'))\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R23_build_then_number_control', 'quiet', 'quiet',
+     'node {\n  def b = build job: \'a\'\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R24_selector_var_once_control', 'quiet', 'unknown',
+     "node {\n  def sel = specific('42')\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R25_url_dot_segment', 'finding-high', 'quiet',
+     "node {\n  sh 'curl -fO https://ci.example/job/b/42/../lastSuccessfulBuild/artifact/app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R26_url_job_url_parent', 'finding-high', 'quiet',
+     "node {\n  sh 'curl -fO ${JOB_URL}../b/lastSuccessfulBuild/artifact/app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R27_url_quote_split', 'finding-high', 'quiet',
+     'node {\n  sh \'curl -fO "https://ci.example/job/b/last""SuccessfulBuild/artifact/app.jar"\'\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R28_url_workspace', 'finding-high', 'quiet',
+     "node {\n  sh 'curl -fO https://ci.example/job/b/ws/app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R29_url_in_environment', 'finding-high', 'quiet',
+     "pipeline {\n  agent any\n  environment { ART = 'https://ci.example/job/b/lastSuccessfulBuild/artifact/app.jar' }\n  stages {\n    stage('r') {\n      steps {\n        sh 'curl -fO $ART'\n        sh 'curl -T app.jar https://repo.example/upload'\n      }\n    }\n  }\n}\n"),
+    ('R30_httpRequest_url_variable', 'finding-high', 'quiet',
+     "node {\n  def a = 'https://ci.example/job/b/lastSuccessfulBuild/artifact/app.jar'\n  httpRequest url: a, outputFile: 'app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R31_url_fixed_build_control', 'quiet', 'quiet',
+     "node {\n  sh 'curl -fO https://ci.example/job/b/42/artifact/app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R32_new_CopyArtifact', 'unknown', 'quiet',
+     "node {\n  step(new hudson.plugins.copyartifact.CopyArtifact('a'))\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R33_computed_class', 'unknown', 'quiet',
+     "node {\n  step([$class: 'Copy' + 'Artifact', projectName: 'a'])\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R34_computed_method_name', 'unknown', 'quiet',
+     'node {\n  def m = \'copy\' + \'Artifacts\'\n  "$m"(projectName: \'a\')\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R35_shebang_set_euo', 'quiet', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh '''#!/bin/bash\nset -euo pipefail\nobaaf verify release --policy p\n'''\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R36_shebang_single_command', 'quiet', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh '''#!/bin/bash\nobaaf verify release --policy p\n'''\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R37_indented_shebang_is_sh_xe', 'quiet', 'quiet',
+     "node {\n  copyArtifacts(projectName: 'a')\n  sh '''\n  #!/bin/bash\n  obaaf verify release --policy p\n  echo done\n'''\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R38_copy_and_check_under_one_if', 'quiet', 'quiet',
+     "node {\n  if (params.X) {\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R39_map_plus_specific', 'unknown', 'finding-high',
+     "node {\n  def base = [projectName: 'a']\n  copyArtifacts(base + [selector: specific('42')])\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R40_permission_property_not_a_copy', 'quiet', 'quiet',
+     "properties([[$class: 'CopyArtifactPermissionProperty', projectNames: 'x']])\nnode {\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R41_closure_defined_and_called', 'quiet', 'quiet',
+     "node {\n  def c = { copyArtifacts(projectName: 'a') }\n  c()\n  sh 'obaaf verify release --policy p --artifacts app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R42_selector_null_is_default', 'finding-high', 'unknown',
+     "node {\n  copyArtifacts(projectName: 'a', selector: null)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+]
+
 # The answers that are a stated limit rather than what the file decides, with the reason (docs/bypass-attempts.md).
 LIMITS = {
     "T05_jf_rt_dl_latest_build": "Downloads by other tools (JFrog CLI, Artifactory or Nexus plugins, an object store's "
@@ -294,17 +382,17 @@ def verdict(text: str) -> str:
 
 class ArtifactTransferBypassTest(unittest.TestCase):
     def test_every_attempt(self):
-        for name, expected, _before, text in CASES:
+        for name, expected, _before, text in CASES + REVIEW_CASES:
             with self.subTest(case=name):
                 self.assertEqual(verdict(text), expected)
 
     def test_limits_name_real_cases(self):
-        names = {c[0] for c in CASES}
+        names = {c[0] for c in CASES + REVIEW_CASES}
         self.assertLessEqual(set(LIMITS), names)
 
     def test_no_attempt_is_slow(self):
         # Before the slice, 744 bytes of nested helpers took 11.7 seconds in this rule alone.
-        for name, _expected, _before, text in CASES:
+        for name, _expected, _before, text in CASES + REVIEW_CASES:
             started = time.monotonic()
             verdict(text)
             with self.subTest(case=name):

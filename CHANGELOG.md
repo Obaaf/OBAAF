@@ -28,6 +28,17 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
 
+### Jenkins: another job's artifacts need `obaaf verify release` before the publish
+
+Slice 2d.2m (issue #341); decision D-129. **OBAAF-JEN-010 now reads a copy as Groovy builds it and clears it only with an `obaaf verify release` that stops the publish, so a Jenkinsfile that passed can get a new high or medium finding, or "cannot tell".**
+
+- **More copies are read**: `copyArtifacts` on any receiver, `step([$class: 'CopyArtifact', ...])`, a map given as the only argument or kept in a variable, and Jenkins URLs to another build's artifacts or workspace in a shell step or `httpRequest` (`job/b/lastSuccessfulBuild/artifact/`, `job/b/ws/`, a URL kept in `environment`).
+- **Selectors by their value**: `specific` is fixed only for digits, or for the number of a `build` the file runs; other text (`specific('lastSuccessfulBuild')`) moves; `upstream(fallbackToLastSuccessful: true)` moves; `selector: null` is the default.
+- **Only `obaaf verify release` clears a copy**, run as a command whose failure stops the `sh` script, after the copy and before each publish it covers. A `sha256sum -c`, `cosign verify` or `gpg --verify` there now gives "cannot tell" instead of a pass, because its sums may come from the build that was copied. A check in an `echo` or a comment, after `|| true`, after the publish, in a parallel branch, under a condition the publish does not share, or with a publish in `post { always }` or `failure` or a `catch` block, no longer counts.
+- **"Cannot tell"** for a computed selector, build number, project or `$class`, a spread map, `downstream`, `invokeMethod`, a method pointer or computed method name, and a copy in a method or closure nothing is seen to call (which was a finding).
+- **Severity**: high only when an unchecked publish after the copy is in the copy's own stage, its `post` blocks included. A baseline written for a publish before the copy in its stage (high, "...in the same stage.") now matches nothing and the medium finding is new; one for a publish in the stage's `post` block (medium) does the same the other way. No other message changed.
+- **Cost**: the rule no longer compares every copy with every step of its stage; 744 bytes of nested helpers took 11.7 s in this rule. The record is [bypass-attempts.md](docs/bypass-attempts.md#2d2m-artifacts-from-another-build).
+
 ### Jenkins: an approval must stop the publish
 
 Slice 2d.2l (issue #337); decision D-128. **OBAAF-JEN-005 now asks whether an `input` step really stops each publish until someone approves, so a Jenkinsfile that passed can get a new medium finding.**
