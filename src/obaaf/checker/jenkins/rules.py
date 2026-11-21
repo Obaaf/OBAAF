@@ -36,7 +36,7 @@ from obaaf.checker.jenkins.parser import (
     callee_name, path_of,
 )
 from obaaf.checker.rules import Finding
-from obaaf.checker.workflow import binding_commands, declared_lane
+from obaaf.checker.workflow import _script_tokens, _strip_comment, binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -85,6 +85,33 @@ UNREAD = object()      # an argument a spread map (`*: m`) may set
 # digits, true or false. A word that could be a string or a variable makes the condition one that may change.
 PARAMS_ONLY_GUARD = re.compile(r"if(?: (?:!|params\.\w+|\d+|true|false))+")
 SELECTOR_POSITIONAL = {"specific": "buildNumber", "permalink": "id"}   # a selector's one unnamed argument
+
+
+# A provenance check named in a script (flagship slice 2d.2n): `obaaf verify release`, `gh attestation verify`,
+# `cosign verify-attestation` or `verify-blob-attestation`, `slsa-verifier verify`, also by a path to `obaaf`.
+CHECK_NAMED = re.compile(r"(\S*/)?obaaf['\"]?\s+verify\s+release\b|gh\s+attestation\s+verify\b"
+                         r"|cosign\s+verify-(blob-)?attestation\b|slsa-verifier\s+verify")
+# A condition on the build's result, as in `post { always { if (currentBuild.currentResult == 'SUCCESS') {...} } }`.
+RESULT_GUARD = re.compile(r"\b(currentResult|currentBuild\s*\.\s*result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
+# Words after which the next word names a command, as the shell reads a line.
+COMMAND_START = frozenset({";", "&&", "||", "|", "&", "!", "(", "{", "then", "do", "else", "if", "elif", "while",
+                           "until", "time"})
+
+
+def _asks_help(words) -> bool:
+    """Whether a command asks for help or the version, as argparse reads its options (`--hel` is `--help`)."""
+    return any((w.startswith("-h") and not w.startswith("--"))
+               or (len(w) >= 3 and ("--help".startswith(w) or "--version".startswith(w))) for w in words)
+
+
+def _text_method(node) -> bool:
+    """Whether a script argument is passed through `.trim()`, `.stripIndent()` or the like, which may change where
+    its first line starts."""
+    if node is None:
+        return False
+    return next(find_nodes(node, lambda n: isinstance(n, Call) and isinstance(n.callee, Prop)
+                           and n.callee.name in ("trim", "stripIndent", "stripMargin", "replaceAll", "denormalize",
+                                                 "strip", "stripLeading")), None) is not None
 
 
 def call_entries(call: Call, positional: str | None) -> dict:
@@ -3083,26 +3110,10 @@ class JenkinsRules:
         if cached is not None and cached[0] is info.use.call:
             return cached[1]
         kind = None
-        status = call_entries(info.use.call, "script").get("returnStatus")
-        stops = status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
-        if stops and info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
-            text = info.script
-            errexit, pipefail = True, False      # Jenkins runs an `sh` script without a #! line as `sh -xe`
-            if text.startswith("#!"):           # durable-task reads a #! line only at the very start
-                first, _, text = text.partition("\n")
-                words = first[2:].split()
-                program = words[0].rsplit("/", 1)[-1] if words else ""
-                if program == "env" and len(words) > 1:
-                    program, words = words[1].rsplit("/", 1)[-1], words[1:]
-                if program not in ("sh", "bash", "dash"):
-                    text = ""
-                errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in words[1:])
-                pipefail = False
-            lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-            if text and not errexit and len(lines) == 1:
-                errexit = True                    # one command: the script's status is that command's
-            if text:
-                commands, _complete = binding_commands(text, errexit, pipefail)
+        if self._status_stops(info) and info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
+            read = self._sh_commands(info.script)
+            if read is not None:
+                commands, _complete = read
                 for words in commands:
                     if {"--help", "-h", "--version"} & set(words):
                         continue
@@ -3114,6 +3125,127 @@ class JenkinsRules:
                         kind = "digest"
         self._script_cache[("fetch-check", id(info.use.call))] = (info.use.call, kind)
         return kind
+
+    @staticmethod
+    def _status_stops(info: Info) -> bool:
+        """Whether a failed shell step fails the build: no `returnStatus`, or `returnStatus: false` written out. A
+        computed value may be true (flagship slice 2d.2m)."""
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        return status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
+
+    @staticmethod
+    def _sh_commands(text: str) -> tuple[list[list[str]], bool] | None:
+        """The commands of an `sh` script whose failure fails the step, read by the reader of slice 2d.2e, and
+        whether the whole script was read; None when the script names a #! program other than sh, bash or dash,
+        which the reader does not read (flagship slices 2d.2m and 2d.2n)."""
+        errexit, pipefail = True, False      # Jenkins runs an `sh` script without a #! line as `sh -xe`
+        if text.startswith("#!"):           # durable-task reads a #! line only at the very start
+            first, _, text = text.partition("\n")
+            words = first[2:].split()
+            program = words[0].rsplit("/", 1)[-1] if words else ""
+            if program == "env" and len(words) > 1:
+                program, words = words[1].rsplit("/", 1)[-1], words[1:]
+            if program not in ("sh", "bash", "dash"):
+                return None
+            if any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", w) for w in words[1:]):
+                return None                   # `#!/bin/bash -ne`: read the script, run nothing (2d.2n review)
+            errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in words[1:])
+        lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if not text:
+            return None
+        if not errexit and len(lines) == 1:
+            errexit = True                    # one command: the script's status is that command's
+        return binding_commands(text, errexit, pipefail)
+
+    def _provenance_kind(self, info: Info) -> str | None:
+        """What a step is as OBAAF-JEN-012's check (flagship slice 2d.2n): "full" for `obaaf verify release`,
+        "provenance" for another provenance check (`cosign verify-attestation`, `gh attestation verify`,
+        `slsa-verifier verify`, `obaaf verify release --pre-approval`), each as a command whose failure fails the `sh`
+        step, read by the reader of slice 2d.2e; "unread" (cannot tell) when the step names such a check in a place
+        where the reader may be wrong or does not vouch for it: Groovy puts text into the script (`"... ${x}"`,
+        concatenation), `returnStatus` is computed, `.trim()` may move a #! line to the start, the command is named by
+        a path, the reader stopped before it or does not read it on its line, or the step is `bat`, `powershell`,
+        `pwsh` or another #! program; None otherwise (no such check, a true `returnStatus`, the name only in an `echo`
+        argument or a comment, `--help`). Before 2d.2n the rule searched the script's text."""
+        if not info.shell or not info.script or not CHECK_NAMED.search(info.script):
+            return None
+        cached = self._script_cache.get(("provenance-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        kind = self._provenance_read(info)
+        if kind == "unread" and info.verify not in ("full", "provenance"):
+            kind = None       # the older reading found its failure ignored: `|| true`, a pipe, `set +e`, a later command
+        elif kind == "path":
+            kind = "unread"
+        self._script_cache[("provenance-check", id(info.use.call))] = (info.use.call, kind)
+        return kind
+
+    def _provenance_read(self, info: Info) -> str | None:
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        if status is not None and not ((isinstance(status, Name) and status.name in ("false", "true"))
+                                       or literal(status) in ("false", "true")):
+            return "unread"                        # computed: it may be true
+        if not self._status_stops(info):
+            return None                            # returnStatus: true
+        if info.dynamic or info.exprs:
+            return "unread"                        # Groovy builds the text the shell runs: "... ${EXTRA}"
+        if info.use.name.rsplit(".", 1)[-1] != "sh":
+            return "unread"                        # bat, powershell and pwsh are not read
+        text = info.script
+        if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
+            return "unread"                        # a .trim() may make the #! line the first
+        read = self._sh_commands(text)
+        if read is None:
+            return "unread"                        # another #! program
+        commands, complete = read
+        kind = None
+        for words in commands:
+            if _asks_help(words):
+                continue
+            joined = " ".join(words)
+            if any(r.match(joined) for r in self.release_verify):
+                if any(len(w) >= 4 and "--pre-approval".startswith(w) for w in words):
+                    kind = "provenance"            # everything but the approvals (argparse takes `--pr` for it)
+                elif any("$" in w or "`" in w for w in words[3:]):
+                    # `$FLAGS`, `--artifacts $A` unquoted or a substitution may become --pre-approval or --help; the
+                    # reader's words do not say what was quoted
+                    kind = kind or "expansion"
+                else:
+                    return "full"
+            elif any(r.match(joined) for r in self.verify_cmds):
+                kind = "provenance"
+        if kind == "expansion":
+            return "unread"
+        if kind:
+            return kind
+        # The reader vouches for no check. Cannot tell when the script names one in a command the reader does not
+        # count (`set -o pipefail; obaaf verify release ... | tee log`, `timeout 600 obaaf verify release`, a line
+        # after one it cannot read) and the older reading found nothing that ignores its failure (the caller checks);
+        # no check when the name is only an argument of `echo` or `printf`, is in a comment, or the command asks for
+        # `--help`. A path to `obaaf` is cannot tell whatever the older reading says: which program it is depends on
+        # the workspace.
+        found = None
+        for raw in text.split("\n"):
+            if not CHECK_NAMED.search(raw):
+                continue
+            tokens = _script_tokens(_strip_comment(raw))
+            if tokens is None:
+                found = found or "unread"          # a line the tokenizer cannot split
+                continue
+            command: list[str] = []
+            for word in [w for w, _quoted in tokens] + [";"]:
+                if word not in COMMAND_START:
+                    command.append(word)
+                    continue
+                match = CHECK_NAMED.search(" ".join(command)) if command else None
+                at = max((k for k in range(len(command)) if CHECK_NAMED.search(" ".join(command[k:k + 4]))),
+                         default=0) if match else 0
+                if match and command[0] not in ("echo", "printf", ":") and not _asks_help(command[at:]):
+                    # `OUT="$(obaaf verify release ...)"`, `timeout 600 obaaf verify release`: not counted by the
+                    # reader, but the check may stop the script
+                    found = "path" if match.group(1) else (found or "unread")
+                command = []
+        return found
 
     def _fetches_of(self, info: Info, named: set) -> list[tuple[str, str]]:
         """How a step fetches another job's artifacts: [(kind, what)], kind "moving", "fixed" or "unknown"."""
@@ -3382,31 +3514,115 @@ class JenkinsRules:
                      check.ctx.stage, severity="high")
 
     # ------------------------------------------------------------------ JEN-012
+    def provenance_gates(self, check: Info, target: Info, failing: bool = False) -> bool:
+        """Whether a check step stops `target` when it fails (flagship slice 2d.2n), as an approval does in
+        `approval_gates`: it runs before it, not in a failure path, a sibling parallel branch or a catching block
+        the publish is not in (a check in the very try or catchError block the publish is in, before it, skips it),
+        and every condition that could skip the check also guards the publish. Deferred checks are left to the
+        caller. With `failing`, a publish in a failure path is compared as if it were not in one: the caller says
+        what such a check can establish."""
+        if check.index >= target.index or check.ctx.post in FAILURE_PATHS \
+                or (target.ctx.post in FAILURE_PATHS and not failing):
+            return False      # a publish in a failure path runs when the check failed
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False
+        return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
+
+    @staticmethod
+    def _stage_post_after(publish: Info, checks: list) -> bool:
+        """Whether a publish in a Declarative stage's own post block comes after a check that runs outside that stage,
+        in an earlier one, so that the check's failure skips the publish's stage, post block included (Declarative runs
+        stages in order). Not for the pipeline's own post block, which runs whatever failed."""
+        owner = publish.ctx.post_owner
+        if not owner or publish.ctx.post in (None, "catch/finally"):
+            return False
+        return any(c.ctx.stage and c.ctx.stage[:len(owner)] != owner and c.ctx.post in (None, "success")
+                   and c.ctx.post_owner != () for c in checks)
+
     def provenance_check(self) -> None:
+        """A publish with no check before it, whose failure stops it, of the artifact's provenance, approvals and
+        agent records (`obaaf verify release`). Before flagship slice 2d.2n a check was found by searching the
+        script's text, a check read where a closure nothing calls is written counted where it is written, and a
+        publish in a failure path counted as checked by any check before it."""
         publishes = [i for i in self.infos if i.publish]
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-012")
-        checks = [i for i in self.infos if i.verify in ("full", "provenance")]
-        unchecked = []
+        checks = [(i, kind) for i in self.infos if (kind := self._provenance_kind(i))]
+        called = {id(i.use.call) for i, _k in checks if not i.ctx.deferred}
+        # A check read only where a closure or an uncalled method is written may run through a call the checker does
+        # not follow (`parallel(verify: verify)`, a method pointer) or never: cannot tell for every publish. One that
+        # is also read where it is called is decided there.
+        loose = next((c for c, _k in checks if c.ctx.deferred and id(c.use.call) not in called), None)
+        high, medium, unknown = [], [], []
         for publish in publishes:
-            found = {c.verify for c in checks if self.gates(c, publish)}
-            if "full" not in found:
-                unchecked.append((publish, found))
-        if not unchecked:
-            return
-        # One finding for the file, on the worst step: a step that publishes with no check at all
-        # before one that has a provenance check only. Taking the first in the file let an earlier,
-        # better checked step stand in for a later one that nothing checks, at a lower severity.
-        first, kinds = next((pair for pair in unchecked if "provenance" not in pair[1]), unchecked[0])
-        if "provenance" in kinds:
-            self.add("OBAAF-JEN-012", first.line,
-                     f"The step at line {first.line} publishes after a provenance check only; approvals and agent "
-                     "records are not checked (use obaaf verify release).", first.ctx.stage, severity="medium")
-        else:
+            if publish.ctx.deferred:
+                # read where a closure or an uncalled method is written: it may run anywhere, also before a check
+                # it is written after, or through a call the checker does not follow besides the one it reads
+                unknown.append((publish, f"the publish at line {publish.line} is in {publish.ctx.deferred}; whether "
+                                         "and where it runs is not known"))
+                continue
+            failing = publish.ctx.post in FAILURE_PATHS
+            found = []        # (kind, check)
+            for check, kind in checks:
+                if not check.ctx.deferred and check.index < publish.index and self.provenance_gates(check, publish,
+                                                                                                  failing=failing):
+                    found.append((kind, check))
+            if failing and publish.ctx.post != "catch/finally":
+                # A Declarative post block: a check in an earlier stage stops a stage's post block (a failed check skips
+                # the stage); nothing before the pipeline's own post block, or in the same stage, stops it.
+                found = [(k, c) for k, c in found if self._stage_post_after(publish, [c])]
+                if not found:
+                    if any(RESULT_GUARD.search(g) for g in publish.ctx.guards):
+                        # `post { always { if (currentBuild.currentResult == 'SUCCESS') { ... } } }`: not read
+                        unknown.append((publish, f"the publish at line {publish.line} is in post "
+                                                 f"{{ {publish.ctx.post} }} under a condition on the build's result, "
+                                                 "which is not read"))
+                    else:
+                        high.append(publish)
+                    continue
+            elif failing:
+                # A catch or finally block: a check before it stops the publish only when it runs before the try body
+                # whose failure runs the publish, which is not compared
+                if found:
+                    unknown.append((publish, f"the publish at line {publish.line} is in a catch or finally block; the "
+                                             "check before it stops it only if it runs before the try body whose "
+                                             "failure runs the publish, which is not read"))
+                else:
+                    high.append(publish)
+                continue
+            kinds = {k for k, _c in found}
+            if "full" in kinds:
+                continue
+            if "unread" in kinds or loose is not None:
+                check = max((c for k, c in found if k == "unread"), key=lambda c: c.index, default=loose)
+                where = (f"is in {check.ctx.deferred} and is not seen called"
+                         if check.ctx.deferred else
+                         "is written in a form the checker does not read: Groovy puts text into the script, "
+                         "returnStatus is computed, the command is named by a path or is not on a line of its own, "
+                         "its arguments hold a shell expansion, a line before it is one the shell reader cannot vouch "
+                         "for, or the step is bat, powershell, pwsh or another #! program")
+                unknown.append((publish, f"the check at line {check.line} before the publish at line {publish.line} "
+                                         f"{where}"))
+            elif "provenance" in kinds:
+                medium.append(publish)
+            else:
+                high.append(publish)
+        # One finding for the file, on the worst step: a step that publishes with no check at all before one that
+        # has a provenance check only. Taking the first in the file let an earlier, better checked step stand in for
+        # a later one that nothing checks, at a lower severity.
+        if high:
+            first = high[0]
             self.add("OBAAF-JEN-012", first.line,
                      f"The step at line {first.line} publishes ({first.publish}) without an earlier check that stops "
                      "the build when verification fails.", first.ctx.stage)
+        elif medium:
+            first = medium[0]
+            self.add("OBAAF-JEN-012", first.line,
+                     f"The step at line {first.line} publishes after a provenance check only; approvals and agent "
+                     "records are not checked (use obaaf verify release).", first.ctx.stage, severity="medium")
+        elif unknown:
+            self.unknown("OBAAF-JEN-012", unknown[0][0].line, unknown[0][1])
 
     # ------------------------------------------------------------------ JEN-013
     def secret_names(self, variables: set) -> set:
