@@ -340,7 +340,7 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
                            else "--pin PACKAGE=VERSION")
                 fallback = (f"obaaf fix with {request} and the original check paths and options, including "
                             "any --settings snapshot (the full invocation cannot be printed as a one-line command).")
-                action = action.replace(group["command"], fallback)
+                action = one_line(action.replace(group["command"], fallback))
             else:
                 action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)

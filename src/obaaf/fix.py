@@ -123,8 +123,9 @@ def _verified_plan(source, copy, options, before, metadata, plan, prerequisite="
                 selector = shlex.join(request)
             action = ("After resolving it, preview the same request again" if metadata.get("candidate") or prerequisite
                       else "Retry this step alone")
+            inputs = "paths, options and --settings snapshot" if before.settings_path else "paths and options"
             return (f"{text} {action} by running obaaf fix with {selector}, --candidate for {item.id}, "
-                    "and the original paths and options. The named retry cannot be printed on one line.")
+                    f"and the original {inputs}. The named retry cannot be printed on one line.")
         # A named request run again unchanged fails the same way: say so, and keep its options for after.
         if metadata.get("candidate") or prerequisite:
             return f"{text} After resolving it, preview the same request again with: {command}"

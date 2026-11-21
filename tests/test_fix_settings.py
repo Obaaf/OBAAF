@@ -144,6 +144,22 @@ jobs:
                         self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
             os.chdir(self.root)
 
+    def test_repository_relative_directory_link_preserves_input_spelling(self):
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy")
+        folder.mkdir()
+        alias = Path("current")
+        alias.symlink_to(folder, target_is_directory=True)
+        for name in ("settings.json", "config.yml", "baseline.json"):
+            with self.subTest(name=name):
+                (folder / name).write_text("{}")
+                selected = alias / name
+                result = fix_input_relative(selected, self.root, settings=name == "settings.json")
+                self.assertEqual(result, selected)
+                self.assertEqual(checker._as_found(result, self.root.resolve(), strict=True),
+                                 [selected.as_posix(), (folder / name).as_posix()])
+
     def test_parent_component_is_relative_to_the_linked_directory(self):
         from obaaf.settings_evidence import fix_input_relative
 

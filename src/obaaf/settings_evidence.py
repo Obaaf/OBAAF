@@ -31,7 +31,7 @@ def fix_input_root(target: Path) -> Path:
 
 
 def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
-    """Resolve the containing folder in filesystem order and retain the selected filename."""
+    """Map the input into the proof copy, retaining its ownership name where reproducible."""
     path = Path(value).absolute()
     selected = path
     try:
@@ -45,9 +45,15 @@ def fix_input_relative(value, root: Path, *, settings: bool = False) -> Path:
         relative = path.relative_to(root)
         if any(part.casefold() == ".git" for part in relative.parts):
             raise ValueError(f"check input is in excluded .git metadata: {value}")
+        # Check the physical location even when the checker also names an in-tree alias.
+        proof_path = relative
+        if selected.is_relative_to(root) and ".." not in selected.parts:
+            proof_path = selected.relative_to(root)
+            if any(part.casefold() == ".git" for part in proof_path.parts):
+                raise ValueError(f"check input is in excluded .git metadata: {value}")
         if settings:
             _check_snapshot_path(root, selected, relative)
-        return relative
+        return proof_path
     except (FileNotFoundError, NotADirectoryError) as exc:
         if settings:
             raise ValueError("--settings: the settings path must name a regular snapshot file") from exc
