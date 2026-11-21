@@ -20,7 +20,7 @@ from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import baseline as baseline_mod
 from obaaf.checker.rules import ACCEPTED, FIXED, NEW, UNDECIDED
 from obaaf.checker.todo import todo
-from obaaf.checker.todo_acceptance import migration_command, migration_hint
+from obaaf.checker.todo_acceptance import baseline_identity, migration_command, migration_hint
 from obaaf.checker.workflow import one_line
 
 SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -307,6 +307,9 @@ def _inline_lane_advice(text: str, result: CheckResult) -> str:
     return f"{advice} Lane check: {command}" if command else advice
 
 
+_RESOLVE_SCAN_ERRORS = "Resolve the scan errors before migrating the baseline."
+
+
 def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
     if catalog.causes.problems:
         return ["Action list unavailable because the cause catalogue is inconsistent. Run obaaf catalog for details."]
@@ -324,12 +327,14 @@ def _todo_lines(result: CheckResult, catalog: Catalog) -> list[str]:
             lines.append(f"   {group['pinCandidates']} can be considered for an exact package version; "
                          f"{group['byHand']} require manual review.")
         action, command = group["nextAction"], None
-        if group["command"] is None:
+        if group["id"] == "acceptance-old-baseline":
+            if result.errors:
+                action = _RESOLVE_SCAN_ERRORS
+            elif action != one_line(action):
+                action = migration_hint(action) + " " + baseline_identity(result.baseline_path)
+        elif group["command"] is None:
             action, command = _lane_advice(action, result, "the command below")
-        if group["command"] and result.errors:
-            action, command = "Resolve the scan errors before migrating the baseline.", None
         if action != one_line(action):
-            # The catalogue's own command, such as `obaaf baseline migrate` with the baseline's path.
             action = "Use the original check paths and options; they cannot be printed as a one-line command."
         lines.append("   " + action)
         if command is not None:
@@ -381,8 +386,9 @@ def to_summary(result: CheckResult, catalog: Catalog | None = None,
     lines = [line.replace("; they are listed below.", "; the full report lists them.")
              for line in _lead_lines(result, accepted_risk(result, expiring_within))]
     if result.baseline_used and result.baseline_format == baseline_mod.FORMAT_V1:
+        advice = _RESOLVE_SCAN_ERRORS if result.errors else migration_hint(migration_command(result), summary=True)
         lines.append(f"The baseline is in the old format ({baseline_mod.FORMAT_V1}): none of its entries accepts a "
-                     "finding until it is converted. " + migration_hint(migration_command(result), summary=True))
+                     "finding until it is converted. " + advice)
     lines += [f"error: {one_line(error)}" for error in result.errors]
     if result.errors:
         lines.append("The scan is incomplete and fails regardless of its findings.")
@@ -473,9 +479,12 @@ def to_text(result: CheckResult, catalog: Catalog | None = None, show_fixes: boo
         lines.append(f"Baseline: {accepted} finding(s) accepted by the baseline, {len(active) - accepted} new.")
         if result.baseline_format == baseline_mod.FORMAT_V1:
             lines.append(f"  The baseline is in the old format ({baseline_mod.FORMAT_V1}). Its entries name no owner, "
-                         "reason or expiry date, so none of them accepts a finding. Convert it once, saying who "
-                         "accepts these findings, why and until when:")
-            lines.append("    " + migration_hint(migration_command(result)))
+                         "reason or expiry date, so none of them accepts a finding.")
+            if result.errors:
+                lines.append("    " + _RESOLVE_SCAN_ERRORS)
+            else:
+                lines[-1] += " Convert it once, saying who accepts these findings, why and until when:"
+                lines.append("    " + migration_hint(migration_command(result)))
         if result.baseline_stale:
             lines.append(f"  {len(result.baseline_stale)} baseline entr{'y no longer matches' if len(result.baseline_stale) == 1 else 'ies no longer match'} "
                          "a finding. At or above --fail-on, that fails the check: regenerate the baseline "

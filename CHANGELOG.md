@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Migration waits for a complete scan
+
+With an old-format baseline, the full and summary text reports now ask you to resolve scan errors before migrating it, instead of printing `obaaf baseline migrate` for an incomplete scan. When the migration command cannot be printed on one line, the action list names it and identifies the baseline, and so does a JSON to-do item whose migration is a step before a checkout or pin preview. Otherwise the JSON and SARIF reports are unchanged.
+
 ### Lane commands keep the check's inputs
 
 Lane follow-up commands in text findings and JSON reports now retain the original check inputs, including custom configuration and baseline files, after the label `Lane check:`. A path that cannot be printed on one line names `obaaf check --lanes` to run by hand. Suggested `obaaf fix` and `obaaf baseline migrate` commands now print a path that begins with `=` as `./=...`, as the check commands do, because zsh expands such a word. [Issue #262, item 6](https://github.com/Obaaf/OBAAF/issues/262)
