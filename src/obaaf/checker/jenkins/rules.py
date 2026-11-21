@@ -196,6 +196,7 @@ def _check_at(command: list[str]) -> tuple[str | None, int]:
             runs = True
         elif k and "=" not in word and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
                 not command[k - 1].startswith("-")
+                or "-y" in command[k + 1:k + 8]
                 or next((w for w in command[k + 1:k + 8] if not w.startswith("-")), "") in _PM_VERBS):
             # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
             runs = False
@@ -219,7 +220,8 @@ _NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacm
                           "echo", "printf", "grep", "test", "ls", "cat"})
 # What follows a package manager's name when it is the program run (`apk add`, `pip install`).
 _PM_VERBS = frozenset({"install", "add", "i", "get", "update", "upgrade", "remove", "del", "uninstall", "search", "info",
-                       "show", "fetch", "download", "clone", "commit", "-y"})
+                       "show", "fetch", "download", "clone", "commit", "purge", "reinstall", "autoremove", "dist-upgrade",
+                       "full-upgrade", "build-dep", "source", "list", "-y"})
 # Shells whose `-c` takes a script (flagship slice 2d.2o).
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
 # Programs that run the command given in their other words (flagship slice 2d.2o).
