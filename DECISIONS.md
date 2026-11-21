@@ -121,6 +121,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
 | D-117 | Preserve the scan scope when a legacy baseline blocks a write | Proposed |
+| D-118 | Defer legacy migration guidance until the text report has a complete scan | Proposed |
 | D-119 | Identify the repository input when a preview refuses it | Proposed |
 | D-125 | A check counts only when nothing written in the workflow can change what it runs: every name in an `env` or written to `GITHUB_ENV` by an earlier step that changes what bash or the check's program runs, and every write to `GITHUB_ENV` whose names the checker cannot read | Proposed |
 | D-126 | OBAAF-GHA-006 reports, at medium, a job outside the release lane that holds what publishing needs and restores a cache, directly or through a job it needs; image pushes through build outputs, bake overrides and `docker buildx imagetools create` make a job a release job | Proposed |
@@ -1125,6 +1126,14 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 **Reason.** Migration matches old entries against the selected workflows. Omitting the original scope can compare the entries against a different repository or configuration.
 
 **Status.** Proposed, 2026-11-20 (A1f, #308 review follow-up).
+
+### D-118 Legacy migration advice in text reports
+
+**Decision.** The full and summary text reports direct the reader to resolve scan errors before migrating a legacy baseline. After a complete scan, if a migration argument cannot be printed faithfully on one line, the action list names the migration command, describes the original arguments and identifies the baseline, whether the migration is its own item or a step before a checkout or pin preview: a path that prints on one line as a shell word, another with the characters that cannot be printed escaped and marked as for display only (review of #319). The JSON to-do carries the same identification where the migration is a step before a checkout or pin preview, because that item's `nextAction` is the same text; otherwise JSON and SARIF are unchanged, and the JSON to-do still gives the migration command during an incomplete scan.
+
+**Reason.** Migration requires a complete scan. A reader acting on the to-do list needs to identify the original baseline even when its name prevents a copyable command.
+
+**Status.** Proposed, 2026-11-20 (A1g, #315 items 1 and 2).
 
 ### D-119 Identify the repository input when a preview refuses it
 

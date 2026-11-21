@@ -11,7 +11,7 @@ from obaaf.catalog import Catalog
 from obaaf.causes import Cause
 from obaaf.checker import CheckResult, baseline
 from obaaf.checker.rules import ACCEPTED, FIXED
-from obaaf.checker.todo_acceptance import acceptance_cause, migration_command, migration_hint
+from obaaf.checker.todo_acceptance import acceptance_cause, baseline_identity, migration_command, migration_hint
 from obaaf.checker.todo_upgrade import previous_acceptances
 from obaaf.checker.workflow import one_line
 from obaaf.settings_evidence import fix_input_relative, fix_input_root
@@ -161,7 +161,11 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
     prerequisites = tightening_prerequisite(result) if has_tightening else ""
     if has_tightening and result.baseline_format == baseline.FORMAT_V1 and "acceptance-old-baseline" not in groups:
         # With no matching old entries there is no migration row to carry the scoped command.
-        prerequisites += " " + migration_hint(migration_command(result))
+        command = migration_command(result)
+        prerequisites += " " + migration_hint(command)
+        if command != one_line(command):
+            # The hint names the command but not the file (review of #319): say which baseline it means.
+            prerequisites += " " + baseline_identity(result.baseline_path)
 
     def priority(group: _Group) -> tuple:
         has_preview = group.cause.id == "checkout-credentials" or bool(group.pin_packages)
