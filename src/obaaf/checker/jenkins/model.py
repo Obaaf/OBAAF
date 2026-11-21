@@ -771,8 +771,6 @@ class _Raw:
     text: str
 
 
-# Names a condition may read that mean the same at every call of a method (flagship slice 2d.2l).
-_GLOBAL_ROOTS = {"env", "params", "currentBuild", "true", "false", "null", "scm"}
 
 
 def declared_names(tree, limit: int = 2_000_000) -> set:
@@ -783,7 +781,8 @@ def declared_names(tree, limit: int = 2_000_000) -> set:
         if isinstance(n, (MethodDef, Closure, Block)):
             out.update(x for x in n.params if isinstance(x, str))
         elif isinstance(n, Decl):
-            out.add(n.name)
+            # `def (a, b) = ...` is one Decl named "a,b".
+            out.update(x.strip() for x in n.name.split(",") if x.strip())
         elif isinstance(n, Assign):
             # `x = ...`, `this.x = ...` and `binding.x = ...` declare x; `env.VERSION = ...` or
             # `currentBuild.description = ...` declares nothing (the fifth review of 2d.2l).
@@ -801,41 +800,47 @@ def declared_names(tree, limit: int = 2_000_000) -> set:
                     out.add(h.name)
                 elif isinstance(h, Binary) and h.op == "in" and isinstance(h.left, Name):
                     out.add(h.left.name)
-    out -= _GLOBAL_ROOTS - {"params", "env", "currentBuild"}
+    out -= _LITERAL_NAMES
     return out
 
 
 def condition_names(node, limit: int = 2000) -> frozenset | None:
-    """The names a condition reads, or None when it calls something, holds a closure, or is too large to read
-    to the end (flagship slice 2d.2l)."""
-    names, count = set(), 0
+    """The names a condition reads, each as ("root", name) when it is read as `name.x` or `name[...]` and as
+    ("bare", name) otherwise; None when it calls something, holds a closure, or is too large to read to the end
+    (flagship slice 2d.2l)."""
+    names, rooted, count = [], set(), 0
     for n in find_nodes(node, lambda n: True, limit=limit):
         count += 1
         if isinstance(n, (Call, Closure)):
             return None
+        if isinstance(n, (Prop, Index)) and isinstance(n.target, Name):
+            rooted.add(id(n.target))
         if isinstance(n, Name):
-            names.add(n.name)
-    return frozenset(names) if count < limit else None
+            names.append(n)
+    if count >= limit:
+        return None
+    return frozenset(("root" if id(n) in rooted else "bare", n.name) for n in names)
+
+
+# What a condition may read and still mean the same wherever a method is called: a property of the build's own
+# objects (`env.BRANCH_NAME`, `params.RELEASE`, `currentBuild.result`), and the literal names (2d.2l).
+_BUILD_ROOTS = {"env", "params", "currentBuild"}
+_LITERAL_NAMES = {"true", "false", "null"}
 
 
 def reads_only_globals(names: frozenset | None, local: set) -> bool:
-    """Whether a condition reading `names` means the same wherever a method is called: every name is the build's
-    own (env, params, currentBuild, or an environment variable Jenkins sets) and none is a name the file
-    declares, a parameter or variable of that name included."""
-    if names is None or names & local:
+    """Whether a condition reading `names` means the same wherever a method is called: it reads only properties
+    of env, params and currentBuild, none of which the file declares as a name of its own. A bare name, even
+    `BRANCH_NAME`, may be a parameter or variable the reader does not see (a closure's `{ X -> }`, `def (X, y)`,
+    `binding.setVariable('X', v)`), so it ties the condition to the call (the sixth review of 2d.2l)."""
+    if names is None:
         return False
-    return all(n in _GLOBAL_ROOTS or n in JENKINS_ENV for n in names)
-
-
-# Environment variables Jenkins sets for every build, read bare in Scripted Pipeline (flagship slice 2d.2l: any
-# other upper-case name may be a parameter the parser does not keep, such as a closure's `{ GO -> }`).
-JENKINS_ENV = {"BRANCH_NAME", "BRANCH_IS_PRIMARY", "CHANGE_ID", "CHANGE_URL", "CHANGE_TITLE", "CHANGE_AUTHOR",
-               "CHANGE_AUTHOR_DISPLAY_NAME", "CHANGE_AUTHOR_EMAIL", "CHANGE_TARGET", "CHANGE_BRANCH", "CHANGE_FORK",
-               "TAG_NAME", "TAG_TIMESTAMP", "TAG_UNIXTIME", "TAG_DATE", "BUILD_NUMBER", "BUILD_ID",
-               "BUILD_DISPLAY_NAME", "BUILD_TAG", "BUILD_URL", "JOB_NAME", "JOB_BASE_NAME", "JOB_URL",
-               "EXECUTOR_NUMBER", "NODE_NAME", "NODE_LABELS", "WORKSPACE", "JENKINS_HOME", "JENKINS_URL",
-               "GIT_COMMIT", "GIT_PREVIOUS_COMMIT", "GIT_PREVIOUS_SUCCESSFUL_COMMIT", "GIT_BRANCH", "GIT_LOCAL_BRANCH",
-               "GIT_URL", "GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"}
+    for kind, name in names:
+        if name in local:
+            return False
+        if not (name in _LITERAL_NAMES or (kind == "root" and name in _BUILD_ROOTS)):
+            return False
+    return True
 
 
 def _source_hint(node) -> str:

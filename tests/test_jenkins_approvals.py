@@ -626,15 +626,36 @@ CASES = [
      "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  env.VERSION = '1.0'\n  onMain { sh 'obaaf verify release' }\n  onMain { sh 'npm publish' }\n}\n"),
     ('R5-X05_decl_environment_block', 'quiet', 'quiet',
      "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\npipeline {\n  agent any\n  environment { VERSION = '1.0' }\n  stages {\n    stage('Approve') { steps { script { onMain { input message: 'Release?', submitter: 'release' } } } }\n    stage('Publish') { steps { script { onMain { sh 'npm publish' } } } }\n  }\n}\n"),
-    ('R5-X06_bare_BRANCH_NAME', 'quiet', 'quiet',
+    ('R5-X06_bare_BRANCH_NAME', 'quiet', 'finding',
      "def onMain(Closure body) {\n  if (BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onMain { input message: 'Release?', submitter: 'release' }\n  onMain { sh 'npm publish' }\n}\n"),
     ('R5-X07_params_helper', 'quiet', 'quiet',
      "def onRelease(Closure body) {\n  if (params.RELEASE) { body() }\n}\nnode {\n  env.X = '1'\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
     ('R5-X08_upper_custom_env', 'quiet', 'finding',
      "def onMain(Closure body) {\n  if (DEPLOY_ENV == 'prod') { body() }\n}\nnode {\n  onMain { input message: 'Release?', submitter: 'release' }\n  onMain { sh 'npm publish' }\n}\n"),
+    # The sixth review check, at 56f0865.
+    ('R6-Y01_multi_assign_jenkins_name', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  def (BRANCH_NAME, x) = [c ? 'main' : 'dev', 1]\n  if (BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y01b_multi_assign_params', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  def (params, x) = [[go: c], 1]\n  if (params.go) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y02_with_closure_param_jenkins_name', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  c.with { BRANCH_NAME -> if (BRANCH_NAME) { body() } }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y02b_with_implicit_typed_param', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  c.with { boolean BRANCH_NAME -> if (BRANCH_NAME) { body() } }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y03_catch_var_jenkins_name', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  try { if (!c) { error 'no' } } catch (BRANCH_NAME) { return }\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y04_setVariable', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  binding.setVariable('BRANCH_NAME', c)\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y05_typed_local', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  boolean BRANCH_NAME = c\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
+    ('R6-Y06_this_assign', 'quiet', 'finding',
+     "def onlyIf(boolean c, Closure body) {\n  this.BRANCH_NAME = c\n  if (BRANCH_NAME) { body() }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
 ]
 
 LIMITS = {
+    'R5-X06_bare_BRANCH_NAME':
+        'a bare name read in a helper, even a variable Jenkins sets such as BRANCH_NAME, ties the condition to the call (conservative; write env.BRANCH_NAME)',
+    'R6-Y03_catch_var_jenkins_name':
+        "a bare name read in a helper ties the condition to the call, even where it is the build's own (conservative)",
     'R5-X08_upper_custom_env':
         'an upper-case variable Jenkins does not set, read in a helper, ties the condition to the call (conservative)',
     'R4-V03_binding_var_helper':
