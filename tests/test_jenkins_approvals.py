@@ -613,9 +613,30 @@ CASES = [
      'def withId(String id, Closure body) {\n  withCredentials([string(credentialsId: id, variable: \'T\')]) { body() }\n}\nnode {\n  withId(\'npm\') { sh "echo ${T}" }\n}\n'),
     ('R4-W06_extra_args_vs_params', 'finding', 'unknown',
      "def f(a, Closure body) { body() }\nnode {\n  f(1, 2) { sh 'npm publish' }\n}\n"),
+    # The fifth review pass, at ac7dcca.
+    ('R5-X01_onMain_env_assign', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  env.VERSION = '1.0'\n  stage('Approve') { onMain { input message: 'Release?', submitter: 'release' } }\n  stage('Publish') { onMain { sh 'npm publish' } }\n}\n"),
+    ('R5-X01b_onMain_no_assign', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  stage('Approve') { onMain { input message: 'Release?', submitter: 'release' } }\n  stage('Publish') { onMain { sh 'npm publish' } }\n}\n"),
+    ('R5-X02_onMain_currentBuild_assign', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (currentBuild.result == null) { body() }\n}\nnode {\n  currentBuild.description = 'release'\n  stage('Approve') { onMain { input message: 'Release?', submitter: 'release' } }\n  stage('Publish') { onMain { sh 'npm publish' } }\n}\n"),
+    ('R5-X03_onMain_env_assign_after', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  stage('Approve') { onMain { input message: 'Release?', submitter: 'release' } }\n  stage('Publish') { onMain { sh 'npm publish' } }\n  env.DONE = 'yes'\n}\n"),
+    ('R5-X04_jen011_onMain_env_assign', 'finding', 'finding',
+     "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\nnode {\n  env.VERSION = '1.0'\n  onMain { sh 'obaaf verify release' }\n  onMain { sh 'npm publish' }\n}\n"),
+    ('R5-X05_decl_environment_block', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (env.BRANCH_NAME == 'main') { body() }\n}\npipeline {\n  agent any\n  environment { VERSION = '1.0' }\n  stages {\n    stage('Approve') { steps { script { onMain { input message: 'Release?', submitter: 'release' } } } }\n    stage('Publish') { steps { script { onMain { sh 'npm publish' } } } }\n  }\n}\n"),
+    ('R5-X06_bare_BRANCH_NAME', 'quiet', 'quiet',
+     "def onMain(Closure body) {\n  if (BRANCH_NAME == 'main') { body() }\n}\nnode {\n  onMain { input message: 'Release?', submitter: 'release' }\n  onMain { sh 'npm publish' }\n}\n"),
+    ('R5-X07_params_helper', 'quiet', 'quiet',
+     "def onRelease(Closure body) {\n  if (params.RELEASE) { body() }\n}\nnode {\n  env.X = '1'\n  onRelease { input message: 'Release?', submitter: 'release' }\n  onRelease { sh 'npm publish' }\n}\n"),
+    ('R5-X08_upper_custom_env', 'quiet', 'finding',
+     "def onMain(Closure body) {\n  if (DEPLOY_ENV == 'prod') { body() }\n}\nnode {\n  onMain { input message: 'Release?', submitter: 'release' }\n  onMain { sh 'npm publish' }\n}\n"),
 ]
 
 LIMITS = {
+    'R5-X08_upper_custom_env':
+        'an upper-case variable Jenkins does not set, read in a helper, ties the condition to the call (conservative)',
     'R4-V03_binding_var_helper':
         'a script-binding variable read in a helper ties the condition to the call (conservative)',
     'R4-V05_if_not_vs_neg':

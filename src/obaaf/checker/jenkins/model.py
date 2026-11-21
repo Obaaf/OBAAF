@@ -785,9 +785,14 @@ def declared_names(tree, limit: int = 2_000_000) -> set:
         elif isinstance(n, Decl):
             out.add(n.name)
         elif isinstance(n, Assign):
-            target = path_of(n.target) or path_of(getattr(n.target, "target", None)) or ""
-            if target:
-                out.add(target.split(".")[0])
+            # `x = ...`, `this.x = ...` and `binding.x = ...` declare x; `env.VERSION = ...` or
+            # `currentBuild.description = ...` declares nothing (the fifth review of 2d.2l).
+            target = path_of(n.target) or ""
+            parts = target.split(".")
+            if len(parts) == 1 and parts[0]:
+                out.add(parts[0])
+            elif len(parts) == 2 and parts[0] in ("this", "binding"):
+                out.add(parts[1])
         else:
             for h in n.header:
                 if isinstance(h, Decl):
@@ -1617,7 +1622,7 @@ class Builder:
             cached = (node, digest, condition_names(node))
             self.keys[id(node)] = cached
         tag = cached[1]
-        if ctx.invocation and not reads_only_globals(cached[2], ctx.invocation[1] | self.declared | self.p.local_names):
+        if ctx.invocation and not reads_only_globals(cached[2], ctx.invocation[1] | self.declared):
             tag += f" call {ctx.invocation[0]}"
         return tag
 
