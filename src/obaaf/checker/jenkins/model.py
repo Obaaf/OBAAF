@@ -177,6 +177,8 @@ class Pipeline:
     local_names: set = field(default_factory=set)       # variables, methods and classes the file defines
     method_params: set = field(default_factory=set)     # parameters of methods: their values come from callers
     opaque: list = field(default_factory=list)          # (line, what)
+    tree: object = None                                 # the parsed file (flagship slice 2d.2m: OBAAF-JEN-010 looks
+                                                        # for every place it names copyArtifacts)
     triggers: list = field(default_factory=list)        # Trigger: SCM and webhook triggers named in the file
     literals: dict = field(default_factory=dict)        # variable -> Str assigned to it (last assignment)
     lists: dict = field(default_factory=dict)           # variable -> ListLit assigned to it (last assignment)
@@ -2639,4 +2641,6 @@ def untrusted_source(exprs: list[str], pipeline: Pipeline | None) -> tuple[str, 
 
 
 def build(tree: Block) -> Pipeline:
-    return Builder().build(tree)
+    pipeline = Builder().build(tree)
+    pipeline.tree = tree
+    return pipeline
