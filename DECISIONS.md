@@ -115,6 +115,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-108 | A parity test against a pinned zizmor, and two actions whose inputs are code | Proposed |
 | D-109 | Init hands off to the action list and a separate, proven gate switch reads policy from the target commit | Proposed |
 | D-110 | An exact user-selected npm version can be proposed for directly identified tool installs | Proposed |
+| D-111 | Apply dated settings observations to the environment control of OBAAF-GHA-005 | Proposed |
 | D-114 | Lane follow-up commands retain the inputs of the reported check | Proposed |
 | D-115 | Legacy baseline migration writes only matches eligible for a new acceptance | Proposed |
 | D-116 | Compare JSON edits using JSON string and number semantics | Proposed |
@@ -1061,6 +1062,16 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Status.** Proposed, 2026-11-19 (slice A5b, #291).
 
+### D-111 Apply settings evidence to OBAAF-GHA-005
+
+**Decision.** For each concrete secret a job reads, assess the environment named by its configuration and declared in the workflow against the explicitly selected D-104 snapshot. Record the timestamp and reasons on the environment control. Caller-supplied secrets, unresolved names and ambiguous environments cannot establish exclusive storage.
+
+**Consequence.** All five controls must verify for the finding to count as fixed. A missing code owner remains a separate medium-severity OBAAF-REPO-001 finding. It can fail a medium gate even when all five controls verify and the high-severity job finding clears. Under D-104, explicitly selecting a regular snapshot within the repository permits local use of an untracked file. The local checker does not authenticate the file or compare it with the Git index or pull request head. CI reads the snapshot at the policy path on the target branch. Snapshots do not change the identity of an acceptance. The production catalogue currently lists no egress action release for credential isolation. Each secret name a job reads is assessed, in the environment the job declares, when `protected_secrets` names that environment for it; a glob entry counts, so `*_API_KEY: main-only` can verify `OPENAI_API_KEY`, while a plain-list entry alone, which names no environment, cannot (review of #301). The snapshot reads Actions secrets only: Dependabot secrets are not read, so a Dependabot secret of the same name is not ruled out.
+
+**Evidence.** `EvidenceTests.test_cli_clears_only_with_five_verified_controls` exercises the ordinary checker with a test-only catalogue, a dated snapshot, an independent ownership finding, failed controls, and the fixed count.
+
+**Status.** Proposed, 2026-11-19 (A4b, #300).
+
 ### D-113 Install the GitHub Actions templates from the distribution
 
 **Decision.** Ship the resources used by the GitHub Actions template installer in the OBAAF wheel and source distribution. By default the installer uses the templates that came with the installed version. An explicit `--source` selects the caller’s directory. The caller supplies the OBAAF repository and immutable commit for the generated workflows.
@@ -1073,7 +1084,7 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-114 Lane inspection uses the original check inputs
 
-**Decision.** Lane advice in text findings, JSON findings and JSON to-do items carries the checked path, configuration, platform, baseline, threshold and any selected settings snapshot. When the command cannot be displayed faithfully on one line, the advice asks the reader to run the lane check manually with those inputs.
+**Decision.** Lane advice in text findings, JSON findings and JSON to-do items carries the checked path, configuration, platform, baseline, threshold and any selected settings snapshot. The command follows the label `Lane check:` in a finding's fix and in a JSON to-do item's `nextAction`, whose `command` stays null, and goes on its own line in the text action list. When it cannot be displayed faithfully on one line, the advice names `obaaf check --lanes` and asks the reader to use it with those inputs. The rule's fix gives the form of a `lanes:` key by example, a path from the repository root, and not by the lane command: for a check of one workflow file that command lists the file's jobs by file name, a key the repository's check does not match (review of #311).
 
 **Reason.** A different configuration or repository can classify the same job differently.
 

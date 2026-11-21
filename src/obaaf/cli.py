@@ -116,6 +116,7 @@ def cmd_check(args) -> int:
     except (checker.ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    evidence = None
     if args.settings is not None:
         from obaaf.audit.cli import _origin
         from obaaf.audit.github import plain
@@ -130,25 +131,25 @@ def cmd_check(args) -> int:
         except SnapshotError as exc:
             print(f"error: --settings: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        if target.is_file() or args.lanes:
-            evidence.limitations += ("this scan does not check snapshot code ownership; run obaaf check "
-                                     "on the repository directory without --lanes",)
-        elif not (Path(args.settings).resolve().is_relative_to(base.resolve())
-                  and checker._as_found(Path(args.settings), base.resolve(), strict=True)):
-            # Inside by both tests: where the file is, and the path OBAAF-REPO-001 checks for an owner.
-            # A link from outside to a file inside passes the first and is never checked for an owner.
-            evidence.limitations += ("the snapshot is outside the checked repository; use a repository snapshot "
-                                     "so its code ownership can be checked",)
+        diagnostic = evidence.for_scan(base, not target.is_file() and not args.lanes)
         print(f"Settings snapshot for {plain(evidence.data['repository'])}, taken {evidence.taken_at}.",
               file=sys.stderr)
-        reasons = list(evidence.limitations)
+        reasons = list(diagnostic.limitations)
         if not config.protected_secrets:
             reasons.extend(evidence.inventory_limitations())
         for reason in reasons:
             print(f"Settings evidence: {reason}.", file=sys.stderr)
         for name, environment in sorted(config.protected_secrets.items()):
-            assessment = evidence.assess(name, environment or "")
+            assessment = diagnostic.assess(name, environment or "")
             print(f"Settings evidence for {plain(name)}: {assessment.verdict}: {assessment.reason}.",
+                  file=sys.stderr)
+        if any(not environment or any(c in name for c in "*?")
+               for name, environment in config.protected_secrets.items()):
+            # These lines judge the entries; the finding judges each name a job reads (review of #301).
+            print("Settings evidence: the lines above judge the configuration's entries, and one with a glob "
+                  "or with no environment cannot be verified there. OBAAF-GHA-005 judges each secret name a "
+                  "job reads, in the environment the job declares, and can verify it only when "
+                  "protected_secrets names that environment for every secret of the job, through a glob or not.",
                   file=sys.stderr)
     if args.expiry_warning < 0:
         print("error: --expiry-warning is a number of days, 0 or more (0 turns the warning off)", file=sys.stderr)
@@ -238,8 +239,9 @@ def cmd_check(args) -> int:
     # like the configuration the checker finds itself (OBAAF-REPO-001, slice 2d.2h). So does the
     # baseline being written: the gate will read it with --baseline, and --write-baseline ends as that
     # gate would (slice 3.2b).
-    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline, args.settings) if p]
-    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files)
+    gate_files = [Path(p) for p in (args.baseline, args.config, args.write_baseline) if p]
+    result = checker.check(target, config=config, platform=args.platform, gate_files=gate_files,
+                           settings=evidence)
     result.checked = str(args.path)
     result.fail_on = args.fail_on
     result.settings_path = args.settings or ""
@@ -955,8 +957,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fail on findings at or above a severity (high, medium, low), or never. "
                         "Prefix a category to gate on it alone: authority:medium, hygiene:low, or just authority.")
     x.add_argument("--config", help="checker configuration (default: .github/obaaf.yml if present)")
-    x.add_argument("--settings", metavar="FILE", help="inspect evidence from an explicitly named offline "
-                   "GitHub settings snapshot (a repository scan also checks its code ownership)")
+    x.add_argument("--settings", metavar="FILE", help="use evidence from an explicitly named offline "
+                   "GitHub settings snapshot for OBAAF-GHA-005's environment control, on a scan of the "
+                   "repository that holds it (which also checks its code ownership)")
     x.add_argument("--lanes", action="store_true", help="show how each job was classified and exit")
     x.add_argument("--no-fixes", action="store_true",
                    help="omit each finding's why and fix lines in text output")
