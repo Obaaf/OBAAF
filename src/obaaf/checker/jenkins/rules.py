@@ -26,13 +26,17 @@ from obaaf.catalog import Catalog
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
     COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
-    Pipeline, StepUse, guard_key, shown,
-    chain_name, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
+    KEY_SEP, Pipeline, StepUse, guard_key, shown,
+    chain_name, children, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
     untrusted_source,
 )
-from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Name, Prop, Str, callee_name, path_of
+from obaaf.checker.jenkins.parser import (
+    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop,
+    Str,
+    callee_name, path_of,
+)
 from obaaf.checker.rules import Finding
-from obaaf.checker.workflow import declared_lane
+from obaaf.checker.workflow import binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -62,6 +66,87 @@ REPO_CODE = re.compile(
 WORKSPACE_READ = re.compile(r"\b(readFile|readJSON|readYaml|readProperties|readCSV|readMavenPom|findFiles)\b")
 MUTABLE_SELECTORS = {"lastSuccessful", "lastCompleted", "latestSavedBuild", "permalink", "lastWithArtifacts",
                      "workspace", "buildParameter"}
+# Flagship slice 2d.2m: the copyartifact plugin's selector classes, for `step([$class: 'CopyArtifact', selector:
+# [$class: ...]])` and a selector map, by the symbol each has in Pipeline.
+SELECTOR_CLASSES = {"StatusBuildSelector": "lastSuccessful", "LastCompletedBuildSelector": "lastCompleted",
+                    "SavedBuildSelector": "latestSavedBuild", "PermalinkBuildSelector": "permalink",
+                    "WorkspaceSelector": "workspace", "ParameterizedBuildSelector": "buildParameter",
+                    "SpecificBuildSelector": "specific", "TriggeredBuildSelector": "upstream",
+                    "DownstreamBuildSelector": "downstream", "LastWithArtifactsBuildSelector": "lastWithArtifacts"}
+# A Jenkins URL of another job's artifacts (`.../job/b/lastSuccessfulBuild/artifact/app.jar`), with folders.
+PERMALINK_ARTIFACT = re.compile(r"(?<![\w.-])job/(?P<job>[^/\s'\"]+(?:/job/[^/\s'\"]+)*)/(?P<ref>[^/\s'\"]+)/artifact/")
+JENKINS_PERMALINKS = {"lastBuild", "lastStableBuild", "lastSuccessfulBuild", "lastFailedBuild", "lastUnstableBuild",
+                      "lastUnsuccessfulBuild", "lastCompletedBuild"}
+# A digest check at the start of a command (flagship slice 2d.2m): what it compares against is not known.
+FETCH_DIGEST_CHECK = re.compile(r"(sha1sum|sha224sum|sha256sum|sha384sum|sha512sum|shasum|b2sum|md5sum)\b.*\s"
+                                r"(-c|--check)\b|cosign\s+verify|gpg\s+--verify|minisign\s+-V")
+UNREAD = object()      # an argument a spread map (`*: m`) may set
+# A condition on the build's parameters alone, as a condition's label shows it: `if params.RELEASE`, with `!`,
+# digits, true or false. A word that could be a string or a variable makes the condition one that may change.
+PARAMS_ONLY_GUARD = re.compile(r"if(?: (?:!|params\.\w+|\d+|true|false))+")
+SELECTOR_POSITIONAL = {"specific": "buildNumber", "permalink": "id"}   # a selector's one unnamed argument
+
+
+def call_entries(call: Call, positional: str | None) -> dict:
+    """A step's arguments by name, as Groovy builds them (flagship slice 2d.2m): the named arguments, or a map given
+    as the only argument; the last of a repeated key wins; a spread map (`*: m`) may set any key it comes after or
+    that is not written later, which reads as UNREAD; a single positional argument is `positional`."""
+    entries = list(call.named)
+    if call.args:
+        if len(call.args) == 1 and isinstance(call.args[0], MapLit) and not call.named:
+            entries = [(k if isinstance(k, str) else (literal(k) or "*"), v) for k, v in call.args[0].entries]
+        elif len(call.args) == 1 and positional:
+            entries = [(positional, call.args[0])] + entries
+        else:
+            entries = [("*", None)] + entries
+    out: dict = {}
+    spread = False
+    for key, value in entries:
+        if key == "*":
+            spread = True
+            out = {k: UNREAD for k in out}
+        else:
+            out[key] = value
+    if spread:
+        return _SpreadDict(out)
+    return out
+
+
+class _SpreadDict(dict):
+    """Arguments after a spread map: a key not written after it may be in the map."""
+    def get(self, key, default=None):
+        return super().get(key, UNREAD)
+
+
+# A permalink's artifacts wherever the URL starts (`${JOB_URL}../b/lastSuccessfulBuild/artifact/x`), a job's
+# workspace (`job/b/ws/app.jar`), and a `..` in a URL to artifacts, which curl removes before it asks.
+PERMALINK_ANYWHERE = re.compile(r"(?<![\w-])(?P<ref>" + "|".join(sorted(JENKINS_PERMALINKS)) + r")/artifact/")
+WORKSPACE_URL = re.compile(r"(?<![\w.-])job/(?P<job>[^/\s'\"]+(?:/job/[^/\s'\"]+)*)/ws/")
+DOT_ARTIFACT = re.compile(r"/\.\./\S*/(artifact|ws)/|/(artifact|ws)/\S*/\.\./")
+
+
+def artifact_urls(text: str) -> list[tuple[str, str]]:
+    """How a text fetches another job's artifacts through Jenkins URLs (flagship slice 2d.2m)."""
+    out = []
+    for m in PERMALINK_ARTIFACT.finditer(text):
+        ref, job = m.group("ref"), m.group("job")
+        if ref in JENKINS_PERMALINKS:
+            out.append(("moving", f"job '{job}' by its permalink {ref} (a URL)"))
+        elif not (ref.isascii() and ref.isdigit()):
+            out.append(("unknown", f"job '{job}' by the build reference '{ref}' in a URL"))
+    if not out:
+        for m in PERMALINK_ANYWHERE.finditer(text):
+            out.append(("moving", f"a job by its permalink {m.group('ref')} (a URL)"))
+    for m in WORKSPACE_URL.finditer(text):
+        out.append(("moving", f"the workspace of job '{m.group('job')}' (a URL)"))
+    if not out and DOT_ARTIFACT.search(text):
+        out.append(("unknown", "a URL to another build's artifacts with a `..` in it"))
+    return out
+
+
+def text_or_expr(node) -> str:
+    """A string's text, with interpolation shown as ${...}, or "" for anything else."""
+    return node.text() if isinstance(node, Str) else ""
 
 # Docker run options that reach the host (JEN-006). Flagship slice 2d.2j replaced a list of patterns, which
 # missed `-v/var/run/docker.sock`, `-itv`, `--mount type=bind,source=/`, a quoted `"/:/host"`, `CAP_SYS_ADMIN`
@@ -2852,31 +2937,415 @@ class JenkinsRules:
 
     # ------------------------------------------------------------------ JEN-010
     def artifact_transfer(self) -> None:
-        if not any(i.publish for i in self.infos):
+        """Another job's artifacts fetched by a reference that moves, then published with no check that ties them
+        to a build record first (flagship slice 2d.2m). Before 2d.2m the rule read only `copyArtifacts(...)` called by
+        that name, judged a selector by its name (`specific('lastSuccessfulBuild')` was fixed), took a map given as
+        the only argument for the default selector, and accepted any later shell step of the same stage whose text
+        held `sha256sum -c`, `cosign verify` or `obaaf verify` anywhere (an `echo`, a comment, `|| true`, after the
+        publish); it read every later step of the stage once per copy, so nested helpers took seconds."""
+        publishes = [i for i in self.infos if i.publish]
+        if not publishes:
             return
+        fetches = []           # (info, kind, what): kind is "moving", "unknown" or "fixed"
+        named = set()          # ids of the nodes that name copyArtifacts in a copy the checker read
+        seen_calls: dict[int, list] = {}
         for info in self.infos:
-            if info.use.name != "copyArtifacts":
+            found = seen_calls.get(id(info.use.call))
+            if found is None or found[0] is not info.use.call:
+                found = [info.use.call, self._fetches_of(info, named)]
+                seen_calls[id(info.use.call)] = found
+            for kind, what in found[1]:
+                fetches.append((info, kind, what))
+        stray = self._unread_copy_names(named)
+        if not fetches and stray is None:
+            return
+        self.applicable.add("OBAAF-JEN-010")
+        if stray is not None:
+            self.unknown("OBAAF-JEN-010", stray,
+                         f"line {stray} names copyArtifacts in a form the checker does not read (a method pointer, a "
+                         "computed method name, invokeMethod or a call it could not expand), so what it copies, and "
+                         "by which reference, is not known")
+        fetches = [f for f in fetches if f[1] != "fixed"]
+        checks = [(i, self._fetch_check(i)) for i in self.infos]
+        checks = sorted(((i, kind) for i, kind in checks if kind and not i.ctx.deferred), key=lambda c: c[0].index)
+        keys: dict[int, frozenset] = {}
+
+        def guards(info: Info) -> frozenset:
+            found = keys.get(id(info))
+            if found is None:
+                found = keys[id(info)] = frozenset(guard_keys(info))
+            return found
+
+        def fixed_guards(info: Info) -> frozenset:
+            """The copy's conditions that cannot change between the copy and a check: those on the build's
+            parameters alone (`if (params.RELEASE)`). Others (`if (!fileExists('app.jar'))`) may be false at the
+            check because of the copy."""
+            return frozenset(guard_key(g) for g in info.ctx.guards if PARAMS_ONLY_GUARD.fullmatch(g.split(KEY_SEP, 1)[0]))
+
+        sets = {fixed_guards(info) for info, _k, _w in fetches}
+        if fetches and (max(len(fetches), len(checks)) * len(publishes) > 150_000
+                        or len(sets) * len(publishes) * max(1, len(checks)) > 1_500_000):
+            self.unknown("OBAAF-JEN-010", fetches[0][0].line,
+                         f"{len(fetches)} copies of another job's artifacts, {len(checks)} checks and {len(publishes)} "
+                         "publishes, as the file's methods expand, are too many to compare")
+            return
+
+        # For each publish and set of conditions the copy runs under, the latest check before the publish that can
+        # stop it, worked out once: comparing every copy with every step of its stage took 11.7 seconds on 744
+        # bytes of nested helpers. A check counts as `gates` says, except that a condition the copy runs under
+        # may also skip the check: when it does not hold, nothing was copied.
+        memo: dict[tuple, tuple[int, int]] = {}
+
+        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int]:
+            key = (publish.index, copy_guards)
+            found = memo.get(key)
+            if found is None:
+                full = digest = -1
+                allowed = guards(publish) | copy_guards
+                for check, kind in checks:
+                    if check.index >= publish.index:
+                        break
+                    # the script itself is read by _fetch_check; here, a catchError, warnError or catch around it
+                    if check.ctx.swallowed or check.ctx.post in FAILURE_PATHS or concurrent(check.ctx, publish.ctx) \
+                            or not guards(check) <= allowed:
+                        continue
+                    if kind == "full":
+                        full = check.index
+                    else:
+                        digest = check.index
+                found = memo[key] = (full, digest)
+            return found
+
+        for info, kind, what in fetches:
+            if info.ctx.deferred:
+                # Even when the same closure is also read where it is called: it may run again where the checker
+                # does not see a call (`parallel a: c`), after the check
+                self.unknown("OBAAF-JEN-010", info.line,
+                             f"the copy at line {info.line} is in {info.ctx.deferred}; whether and where it runs is "
+                             "not known")
                 continue
-            self.applicable.add("OBAAF-JEN-010")
-            call = info.use.call
-            selector = named_arg(call, "selector")
-            sel = chain_name(selector.callee) if isinstance(selector, Call) else None
-            mutable = selector is None or sel in MUTABLE_SELECTORS
-            if not mutable:
-                if sel not in ("specific", "upstream"):
-                    self.unknown("OBAAF-JEN-010", info.line, f"copyArtifacts selector {sel or 'computed'} not understood")
+            # A retry or waitUntil block, or a loop, around the copy runs a publish before it again after it
+            again = set(info.ctx.repeats) | {guard_key(g) for g in info.ctx.guards if g.startswith("loop ")}
+            def repeated(p: Info) -> bool:
+                return bool(again) and bool(again & (set(p.ctx.repeats) | guards(p)))
+            later = [p for p in publishes if p.index > info.index or concurrent(info.ctx, p.ctx) or repeated(p)]
+            unchecked, digest_only = [], []
+            for publish in later:
+                if publish.ctx.post in FAILURE_PATHS or publish.index < info.index or concurrent(info.ctx, publish.ctx):
+                    # a publish in a failure path runs when the check failed; one before the copy in the same retry
+                    # block runs after the copy of the try before; one beside the copy is checked by nothing after it
+                    unchecked.append(publish)
+                    continue
+                full, digest = latest(publish, fixed_guards(info))
+                if full > info.index and not self._beside(info, full):
+                    continue
+                if digest > info.index and not self._beside(info, digest):
+                    digest_only.append(publish)
+                else:
+                    unchecked.append(publish)
+            if kind == "unknown":
+                if unchecked or digest_only:
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 "fix, and the pipeline publishes after it")
                 continue
-            later = [i for i in self.by_stage.get(info.ctx.stage, []) if i.index > info.index]
-            if any(i.shell and CHECKSUM_VERIFY.search(i.script) for i in later):
+            if not unchecked:
+                if digest_only:
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}; a digest check runs before "
+                                 "the publish, but whether its digests come from somewhere other than the build it "
+                                 "copied from is not known (obaaf verify release checks them against the signed record)")
                 continue
-            project = literal(named_arg(call, "projectName")) or "another job"
-            same = self.stage_publishes(info.ctx.stage)
+            if all(p.ctx.deferred for p in unchecked):
+                self.unknown("OBAAF-JEN-010", info.line,
+                             f"the copy at line {info.line} copies artifacts from {what}, and the only publish after it "
+                             f"with no check is in {unchecked[0].ctx.deferred}")
+                continue
+            here = base_stage(info.ctx.stage)
+            same = any(base_stage(p.ctx.stage) == here and not p.ctx.deferred
+                       and (p.index > info.index or repeated(p)) for p in unchecked)
             self.add("OBAAF-JEN-010", info.line,
-                     f"Stage '{stage_label(info.ctx.stage)}' copies artifacts from {project} by "
-                     f"{'the default selector (last successful build)' if selector is None else sel + '()'}, "
-                     "a reference that moves, and does not check their digests before "
+                     f"Stage '{stage_label(info.ctx.stage)}' copies artifacts from {what}, a reference that moves, "
+                     "and does not check their digests before "
                      + ("publishing them in the same stage." if same else "the pipeline publishes."),
                      info.ctx.stage, severity="high" if same else "medium")
+
+    def _beside(self, copy: Info, check_index: int) -> bool:
+        """Whether the check at `check_index` runs in a parallel branch beside the copy, so it may run first."""
+        return concurrent(copy.ctx, self.infos[check_index].ctx)
+
+    def _fetch_check(self, info: Info) -> str | None:
+        """'full' for a step that runs `obaaf verify release`, 'digest' for one that runs another digest or
+        signature check, as a command whose failure stops the `sh` script (flagship slice 2d.2m): read with the
+        reader of slice 2d.2e, so a command in an `echo`, a comment, after `|| true`, `&`, `set +e` or `exit`, or in a
+        script that does not stop at a failed command, is no check. `bat`, `powershell` and `pwsh` are not read."""
+        cached = self._script_cache.get(("fetch-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        kind = None
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        stops = status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
+        if stops and info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
+            text = info.script
+            errexit, pipefail = True, False      # Jenkins runs an `sh` script without a #! line as `sh -xe`
+            if text.startswith("#!"):           # durable-task reads a #! line only at the very start
+                first, _, text = text.partition("\n")
+                words = first[2:].split()
+                program = words[0].rsplit("/", 1)[-1] if words else ""
+                if program == "env" and len(words) > 1:
+                    program, words = words[1].rsplit("/", 1)[-1], words[1:]
+                if program not in ("sh", "bash", "dash"):
+                    text = ""
+                errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in words[1:])
+                pipefail = False
+            lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+            if text and not errexit and len(lines) == 1:
+                errexit = True                    # one command: the script's status is that command's
+            if text:
+                commands, _complete = binding_commands(text, errexit, pipefail)
+                for words in commands:
+                    if {"--help", "-h", "--version"} & set(words):
+                        continue
+                    joined = " ".join(words)
+                    if any(r.match(joined) for r in self.release_verify):
+                        kind = "full"
+                        break
+                    if FETCH_DIGEST_CHECK.match(joined) or any(r.match(joined) for r in self.verify_cmds):
+                        kind = "digest"
+        self._script_cache[("fetch-check", id(info.use.call))] = (info.use.call, kind)
+        return kind
+
+    def _fetches_of(self, info: Info, named: set) -> list[tuple[str, str]]:
+        """How a step fetches another job's artifacts: [(kind, what)], kind "moving", "fixed" or "unknown"."""
+        call = info.use.call
+        last = info.use.name.rsplit(".", 1)[-1]
+        out = []
+        if last == "copyArtifacts":
+            named.add(id(call.callee))
+            if len(call.args) == 1 and not call.named and not isinstance(call.args[0], (MapLit, Str)):
+                # copyArtifacts(args): a variable given one map and nothing else is that map; anything else
+                # (`base + [...]`, a call) may hold any argument
+                value = self._single_value(call.args[0].name, call.args[0]) if isinstance(call.args[0], Name) else None
+                if isinstance(value, MapLit):
+                    call = Call(callee=call.callee, args=[value], line=call.line)
+                else:
+                    call = Call(callee=call.callee, named=[("*", None)], line=call.line)
+            out.append(self._copy_reference(call_entries(call, "projectName")))
+        elif last == "step":
+            if len(call.args) == 1 and isinstance(call.args[0], Name) and not call.named:
+                value = self._single_value(call.args[0].name, call.args[0])
+                if isinstance(value, MapLit):
+                    call = Call(callee=call.callee, args=[value], line=call.line)
+            entries = call_entries(call, None)
+            cls = entries.get("$class")
+            if isinstance(cls, Str) and not cls.interpolated and cls.text().rsplit(".", 1)[-1] == "CopyArtifact":
+                named.add(id(cls))
+                out.append(self._copy_reference(entries))
+            elif cls is not None and not (isinstance(cls, Str) and not cls.interpolated):
+                out.append(("unknown", "a step whose $class the file computes"))
+        elif last == "invokeMethod" and call.args and literal(call.args[0]) == "copyArtifacts":
+            named.add(id(call.args[0]))
+            out.append(("unknown", "a copy called through invokeMethod"))
+        urls = []
+        if info.shell:
+            urls += [text.replace("'", "").replace('"', "") for text in self._expanded(info.script, call)]
+        elif last == "httpRequest":
+            target = step_arg(call, "url") or first_arg(call)
+            if isinstance(target, Name):
+                target = self._single_value(target.name, target)
+            urls += self._expanded(text_or_expr(target), call)
+        for text in urls:
+            for found in artifact_urls(text or ""):
+                if found not in out:
+                    out.append(found)
+        return out
+
+    def _expanded(self, text: str, read) -> list[str]:
+        """`text`, and `text` with `$NAME`, `${NAME}` and `${env.NAME}` replaced by the literal value the file's
+        `environment` or a variable it declares gives NAME, so a URL kept there is read where it is used. Both are
+        read and what either shows counts: the shell or a `withEnv` may set NAME to something else, so a value put in
+        never takes away what the text alone shows (from the slice's third review)."""
+        if "$" not in text:
+            return [text]
+        def value(m) -> str:
+            name = m.group(1) or m.group(2)
+            node = self.p.env_values.get(name)
+            if node is None:
+                node = self._single_value(name, read)
+            return node.text() if isinstance(node, Str) else m.group(0)
+        expanded = re.sub(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", value, text)
+        return [text] if expanded == text else [text, expanded]
+
+    def _copy_reference(self, entries: dict) -> tuple[str, str]:
+        """What a copy's projectName and selector fix (flagship slice 2d.2m)."""
+        project = entries.get("projectName")
+        shown_project = (f"'{literal(project)}'" if literal(project) is not None else "a computed project") \
+            if project is not UNREAD else "a project the file does not show"
+        name = literal(project) if project not in (None, UNREAD) else None
+        project_text = name or "another job"
+        selector = entries.get("selector")
+        if selector is UNREAD:
+            return ("unknown", f"{shown_project} with a selector that a spread map may set")
+        if selector is None or (isinstance(selector, Name) and selector.name == "null"):
+            return ("moving", f"{project_text} by the default selector (last successful build)")
+        kind, what = self._selector(selector)
+        if kind == "moving":
+            return ("moving", f"{project_text} by {what}")
+        if kind == "fixed" and name is None:
+            return ("unknown", f"{shown_project}, by {what}")
+        return (kind, f"{project_text} by {what}")
+
+    def _selector(self, node) -> tuple[str, str]:
+        """("fixed" | "moving" | "unknown", how it reads) for a copyArtifacts selector: a symbol call
+        (`lastSuccessful()`), a map with `$class` (`[$class: 'StatusBuildSelector']`), or a variable that is given
+        one of them and nothing else."""
+        if isinstance(node, Name):
+            node = self._single_value(node.name, node)
+        symbol, entries = None, {}
+        if isinstance(node, Call):
+            # A plugin symbol only when called by its bare name and the file defines nothing by that name
+            # (`def specific(n) { lastSuccessful() }`, `s.specific('42')` are not the plugin's)
+            if isinstance(node.callee, Name) and node.callee.name not in self.p.local_names:
+                symbol = node.callee.name
+            entries = call_entries(node, SELECTOR_POSITIONAL.get(symbol))
+        elif isinstance(node, MapLit):
+            entries = call_entries(Call(callee=Name("[:]", line=node.line), args=[node], line=node.line), None)
+            cls = entries.get("$class")
+            if isinstance(cls, Str) and not cls.interpolated:
+                symbol = SELECTOR_CLASSES.get(cls.text().rsplit(".", 1)[-1], "?" + cls.text())
+        if symbol is None:
+            return ("unknown", "a selector the file computes")
+        if symbol in MUTABLE_SELECTORS:
+            return ("moving", f"{symbol}()")
+        if symbol == "specific":
+            return self._build_number(entries.get("buildNumber"))
+        if symbol == "upstream":
+            fallback = entries.get("fallbackToLastSuccessful")
+            if fallback is None or (isinstance(fallback, Name) and fallback.name == "false"):
+                return ("fixed", "upstream()")
+            if isinstance(fallback, Name) and fallback.name == "true":
+                return ("moving", "upstream(fallbackToLastSuccessful: true), which takes the last successful build "
+                                  "when no upstream build started this one")
+            return ("unknown", "upstream() with a fallback the file computes")
+        return ("unknown", f"the selector {symbol.lstrip('?')}")
+
+    def _build_number(self, node) -> tuple[str, str]:
+        """A SpecificBuildSelector's build number: fixed only for digits written in the file, or the number of a
+        build the file started (`def b = build(...)`, then `"${b.number}"`). Other text is read by Jenkins as a
+        permalink or a build's display name, and `${...}` in it is expanded at run time (the plugin's help)."""
+        if node is None or node is UNREAD:
+            return ("unknown", "specific() with a build number the file does not show")
+        text = literal(node)
+        if text is not None:
+            if text.isascii() and text.isdigit():
+                return ("fixed", f"specific('{text}')")
+            if "$" in text:
+                return ("unknown", f"specific('{text}'), whose value is expanded at run time")
+            return ("moving", f"specific('{text}'), which Jenkins reads as a permalink or a build's display name")
+        if isinstance(node, Num):
+            return ("fixed", f"specific({node.value})") if node.value.isdigit() else \
+                ("unknown", f"specific({node.value})")
+        ref = None
+        if isinstance(node, Str) and len(node.exprs) == 1 and node.text() == "${" + str(node.exprs[0]) + "}":
+            ref = node.exprs[0]
+        elif isinstance(node, (Prop, Name)):
+            ref = path_of(node)
+        elif isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args \
+                and node.callee.name in ("toString", "getNumber"):
+            ref = path_of(node.callee.target) if node.callee.name == "toString" else \
+                f"{path_of(node.callee.target)}.number"
+        if ref and "." in ref:
+            var, _, attr = ref.partition(".")
+            value = self._single_value(var, node) if attr in ("number", "getNumber()") else None
+            if isinstance(value, Call) and isinstance(value.callee, Name) and value.callee.name == "build" \
+                    and "build" not in self.p.local_names:
+                return ("fixed", f"the number of the build it started ({ref})")
+        return ("unknown", "specific() with a build number computed at run time")
+
+    def _single_value(self, name: str, read):
+        """The one value the file gives a variable where `read` reads it, or None (flagship slice 2d.2m, from its
+        three reviews): the file must declare the name once, with a value, in a block that encloses the read with
+        no method or class between them (anything else is a property of the script, which a getter, a binding
+        write or `propertyMissing` can give another value), before the read, and name it in exactly one other
+        place, the read (a second assignment, a change through a property, index or method, an alias, an argument,
+        a parameter or loop variable of the same name, or a use inside an interpolated string may change it)."""
+        table = self.__dict__.get("_values_cache")
+        if table is None:
+            table = self._values_cache = self._value_table()
+        decls, parents = table
+        found = decls.get(name)
+        if found is None or read is None:
+            return None
+        decl, value = found
+        block = parents.get(id(decl))
+        if block is None or (getattr(read, "line", 0), getattr(read, "col", 0)) <= (decl.line, decl.col):
+            return None             # read before the declaration, on an earlier line or earlier on its line
+        node = parents.get(id(read))
+        while node is not None:
+            if node is block:
+                return value
+            if isinstance(node, (MethodDef, ClassDef)):
+                return None
+            node = parents.get(id(node))
+        return None
+
+    def _value_table(self) -> tuple[dict, dict]:
+        tree = self.p.tree
+        if tree is None:
+            return {}, {}
+        decls: dict[str, list] = {}
+        uses: dict[str, int] = {}
+        parents: dict[int, object] = {}
+
+        def use(name: str, times: int = 1) -> None:
+            uses[name] = uses.get(name, 0) + times
+
+        stack = [tree]
+        seen = 0
+        while stack and seen < 2_000_000:
+            n = stack.pop()
+            seen += 1
+            for child in children(n):
+                if child is not None and not isinstance(child, (str, int, float, bool)):
+                    parents[id(child)] = n
+                    stack.append(child)
+            if isinstance(n, Decl):
+                decls.setdefault(n.name, []).append(n)
+            elif isinstance(n, (Name, Prop)):
+                use(n.name)
+            elif isinstance(n, Str) and n.interpolated:
+                for expr in n.exprs:
+                    for word in re.findall(r"(?<![\w$])[A-Za-z_]\w*", str(expr)):
+                        use(word)
+            params = getattr(n, "params", None)
+            if isinstance(params, list):
+                for param in params:
+                    use(param if isinstance(param, str) else str(getattr(param, "name", "")))
+        if stack:
+            return {}, {}
+        table = {name: (nodes[0], nodes[0].value) for name, nodes in decls.items()
+                 if len(nodes) == 1 and nodes[0].value is not None and uses.get(name, 0) == 1}
+        return table, parents
+
+    def _unread_copy_names(self, named: set) -> int | None:
+        """The line of the first place the file names copyArtifacts (or the CopyArtifact class) other than a copy
+        the checker read: a method pointer, a computed method name, a call it did not expand."""
+        tree = self.p.tree
+        if tree is None:
+            return None
+        def names_copy(n) -> bool:
+            if isinstance(n, (Name, Prop)):
+                return n.name in ("copyArtifacts", "CopyArtifact")
+            if isinstance(n, Import):
+                return n.path.rsplit(".", 1)[-1] in ("CopyArtifact", "*") and "copyartifact" in n.path
+            if isinstance(n, Str):
+                text = n.text()
+                return text == "copyArtifacts" or text.rsplit(".", 1)[-1] == "CopyArtifact"
+            if isinstance(n, Call):
+                return isinstance(n.callee, Str) and n.callee.interpolated     # "$m"(...): a computed method name
+            return False
+        lines = [n.line for n in find_nodes(tree, names_copy) if id(n) not in named and n.line]
+        return min(lines) if lines else None
 
     # ------------------------------------------------------------------ JEN-011
     def failure_paths(self) -> None:
