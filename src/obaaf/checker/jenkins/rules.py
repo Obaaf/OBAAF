@@ -13,6 +13,7 @@ from __future__ import annotations
 import bisect
 import csv
 import functools
+import itertools
 import posixpath
 import json
 import re
@@ -46,11 +47,9 @@ ALL = "*"
 # post conditions (and Scripted catch/finally blocks) that run when the build failed, was aborted, or
 # is unstable: a publish there can run after a failed or skipped check.
 FAILURE_PATHS = {"always", "changed", "regression", "aborted", "failure", "unstable", "unsuccessful", "cleanup",
-                 "catch/finally"}
+                 "notBuilt", "catch/finally"}   # notBuilt: flagship slice 2d.2o
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}\b")
-CHECKSUM_VERIFY = re.compile(r"(^|[\s;&|(])(sha256sum|sha512sum|shasum)\b[^\n]*\s(-c|--check)\b"
-                             r"|(^|[\s;&|(])cosign\s+verify|(^|[\s;&|(])obaaf\s+verify\b", re.M)
 INSTALLER = re.compile(r"\b(npm|pnpm|yarn|bun|npx|bunx|pip3?|pipx|uv|uvx)\b")
 # Commands that run code from the checkout: build tools, test runners, package scripts, and scripts
 # by path. Best effort; anything else is treated as a fixed tool, one severity level lower.
@@ -93,6 +92,9 @@ CHECK_NAMED = re.compile(r"(\S*/)?obaaf['\"]?\s+verify\s+release\b|gh\s+attestat
                          r"|cosign\s+verify-(blob-)?attestation\b|slsa-verifier\s+verify")
 # A condition on the build's result, as in `post { always { if (currentBuild.currentResult == 'SUCCESS') {...} } }`.
 RESULT_GUARD = re.compile(r"\b(currentResult|currentBuild\s*\.\s*result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
+# The same on `currentBuild` only, for OBAAF-JEN-011 (flagship slice 2d.2o): a local variable named `currentResult` is
+# no guard on the build's result.
+RESULT_GUARD_SET = re.compile(r"\bcurrentBuild\s*\.\s*(currentResult|result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
 # Words after which the next word names a command, as the shell reads a line.
 COMMAND_START = frozenset({";", "&&", "||", "|", "&", "!", "(", "{", "then", "do", "else", "if", "elif", "while",
                            "until", "time"})
@@ -102,6 +104,150 @@ def _asks_help(words) -> bool:
     """Whether a command asks for help or the version, as argparse reads its options (`--hel` is `--help`)."""
     return any((w.startswith("-h") and not w.startswith("--"))
                or (len(w) >= 3 and ("--help".startswith(w) or "--version".startswith(w))) for w in words)
+
+
+# Flagship slice 2d.2o: the programs whose commands OBAAF-JEN-011 counts as a check that should stop a publish, read
+# from a command's words rather than searched for in the script's text.
+_CHECK_NAMES = r"(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shasum|b2sum|gpgv?2?)(?:\.exe)?"
+# Searched for in a script: a program's name, wherever it is (a prefilter, linear in the text's length).
+_CHECK_PROGRAM = re.compile(_CHECK_NAMES + r"['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
+# The first place a check's name appears, for where a step's check is (flagship slice 2d.2o).
+_CHECK_NAME_ANYWHERE = re.compile(r"(?<![\w.-])" + _CHECK_NAMES + r"(?![\w-])", re.I)
+# Matched against one word: the name, after any path.
+_CHECK_WORD = re.compile(r"(?:.*[/\\])?" + _CHECK_NAMES + r"['\"]?", re.I | re.S)
+_SUM_PROGRAMS = frozenset({"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shasum", "b2sum"})
+
+
+def check_words(words: list[str]) -> str | None:
+    """Whether a command, as its words from the command's name on, is a check OBAAF-JEN-011 counts: "check", "path"
+    when the program is named by a path (which program runs depends on the workspace), or None. The checks are the
+    provenance checks of OBAAF-JEN-012 and digest and signature checks: `obaaf verify ...`, `gh attestation verify`,
+    `cosign verify...`, `slsa-verifier verify...`, `sha256sum -c` and its kin, `gpg --verify` (or `--verify-files`)
+    and `gpgv FILE`, also as `NAME.exe` (flagship slice 2d.2o; before it the rule searched the script's text with two
+    patterns and read only the first for a failure it ignores). Only the first 64 words are read."""
+    if not words:
+        return None
+    program = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if program.lower().endswith(".exe"):
+        program = program[:-4].lower()        # Windows: a program's name is not case-sensitive
+    rest = words[1:64]
+    hit = ((program == "obaaf" and rest[:1] == ["verify"])
+           or (program == "gh" and rest[:2] == ["attestation", "verify"])
+           or (program in ("cosign", "slsa-verifier") and bool(rest) and rest[0].startswith("verify"))
+           or (program in _SUM_PROGRAMS and any(w == "--check" or re.fullmatch(r"-[a-zA-Z0-9]*c[a-zA-Z0-9]*", w)
+                                                for w in rest))
+           or (program in ("gpg", "gpg2") and any(w in ("--verify", "--verify-files") for w in rest))
+           or (program == "gpgv" and any(not w.startswith("-") for w in rest)))
+    if not hit:
+        return None
+    return "path" if "/" in words[0] or "\\" in words[0] else "check"
+
+
+# What can change how OBAAF-JEN-011 reads the lines after it, or holds a command it compares (flagship slice 2d.2o). A
+# line with a quote may open a string that runs over several lines, so it is read too.
+_STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return|exec|shopt"
+                          r"|source)\b|(^|[;&|][^\S\n]*)\.[^\S\n]"
+                          r"|[(){}'\"`\\]|<<|\$\?|\$\{\?\}|\$!|PIPESTATUS")
+# Either of the two, searched once over a whole script.
+_LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.pattern + ")", re.M)
+
+
+# A line that holds a command that cannot change the reading (flagship slice 2d.2o), shared by every such line.
+_PLACEHOLDER = ["\u2026"]
+_PLACEHOLDER_LINE = [(_PLACEHOLDER, None)]
+# A line that holds something other than blanks and a comment.
+_COMMAND_LINE = re.compile(r"^[^\S\n]*[^\s#]", re.M)       # as `raw.lstrip()` reads a line: any whitespace first
+
+
+def _commands_of(tokens: list[tuple[str, bool]]) -> list[tuple[list[str], str | None]]:
+    """A line's commands as (words, the operator after it), split where the shell starts a new command."""
+    out, command = [], []
+    for word, quoted in tokens:
+        if not quoted and word in COMMAND_START:
+            out.append((command, word))
+            command = []
+        else:
+            command.append(word)
+    out.append((command, None))
+    return out
+
+
+# Words before a command's name that run it (`sudo cosign verify`, `timeout 600 sha256sum -c`, `env X=1 obaaf ...`).
+_CHECK_WRAPPERS = frozenset({"sudo", "env", "timeout", "nice", "nohup", "time", "command", "exec", "stdbuf", "ionice",
+                             "chronic", "xargs", "doas"})
+
+
+def _check_at(command: list[str]) -> tuple[str | None, int]:
+    """Whether a command runs a check, and where its program is: ("check" or "path", index) when it is the command's
+    name or follows wrapper words and their options and assignments; ("unread", -1) when a program that runs another
+    command runs it (`uv run obaaf verify ...`, `docker run img cosign verify ...`, `ssh host cosign verify ...`,
+    `kubectl exec pod -- ...`), or a quoted string given to `-c` or to `ssh` or `eval` holds it (`bash -c "cd d &&
+    obaaf ..."`), where what runs it is not read; (None, -1) when it only prints the name (`echo`, `printf`, `:`,
+    `command -v`), names the program as an argument (`apt-get install gpgv`, `git commit -m "cosign verify ok"`), or
+    asks for help. Linear in the command's length."""
+    if not command or command[0] in ("echo", "printf", ":"):
+        return None, -1
+    if command[0] == "command" and any(w in ("-v", "-V") for w in command[1:3]):
+        return None, -1
+    prefix, runs = True, command[0].rsplit("/", 1)[-1] in _CHECK_RUNNERS | _CHECK_WRAPPERS
+    for k, word in enumerate(command):
+        if k == 0 or _CHECK_WORD.fullmatch(word):
+            found = check_words(command[k:k + 64])
+            if found:
+                if _asks_help(command[k:k + 64]):
+                    return None, -1
+                if prefix:
+                    return found, k
+                return ("unread", -1) if runs else (None, -1)
+        if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
+                           or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
+            prefix = False
+        if word in ("run", "exec", "--") or (_shell_c(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
+            runs = True
+        elif k and "=" not in word and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
+                not command[k - 1].startswith("-")
+                or ("-y" in command[k + 1:k + 8] and word.rsplit("/", 1)[-1] in _PACKAGE_MANAGERS)
+                or next((w for w in command[k + 1:k + 8] if not w.startswith("-")), "") in _PM_VERBS):
+            # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
+            runs = False
+    for j, w in enumerate(command[1:], 1):
+        if " " in w and _CHECK_PROGRAM.search(w) and (
+                (_shell_c(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
+                or command[0] in ("ssh", "eval")):
+            words = re.findall(r"[^\s;&|()`'\"]+", w)
+            if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
+                return "unread", -1
+    return None, -1
+
+
+def _shell_c(word: str) -> bool:
+    """A shell's option that takes a script, alone or with others (`-c`, `-lc`, `-ec`); linear in the word."""
+    return len(word) > 1 and word[0] == "-" and word[1:].isalpha() and word[1:].isascii() and "c" in word
+# Programs that take a check's name as an argument rather than run it (`sudo apt-get install gpgv`).
+_NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "dpkg", "rpm", "snap", "brew",
+                          "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
+                          "which", "type", "whereis", "man", "git", "curl", "wget", "install", "cp", "mv", "ln", "chmod",
+                          "echo", "printf", "grep", "test", "ls", "cat"})
+# Package managers, whose `-y` says they are the program run (`sudo -E apt-get -y purge gpgv`).
+_PACKAGE_MANAGERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "snap", "brew", "choco",
+                               "winget", "scoop", "pip", "pip3", "npm", "pnpm", "yarn", "gem", "cargo", "dpkg", "rpm"})
+# What follows a package manager's name when it is the program run (`apk add`, `pip install`).
+_PM_VERBS = frozenset({"install", "add", "i", "get", "update", "upgrade", "remove", "del", "uninstall", "search", "info",
+                       "show", "fetch", "download", "clone", "commit", "purge", "reinstall", "autoremove", "dist-upgrade",
+                       "full-upgrade", "build-dep", "source", "list", "-y"})
+# Shells whose `-c` takes a script (flagship slice 2d.2o).
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
+# Programs that run the command given in their other words (flagship slice 2d.2o).
+_CHECK_RUNNERS = frozenset({"sudo", "doas", "su", "ssh", "eval", "xargs", "parallel", "retry", "watch", "flock", "script",
+                            "gosu", "su-exec", "fakeroot", "unbuffer", "setpriv", "chpst", "tini", "dumb-init", "proot",
+                            "torsocks", "proxychains", "proxychains4", "catchsegv", "systemd-run",
+                      "nix-shell", "devbox", "pixi", "npx", "uvx", "pipx", "chroot", "unshare", "nsenter", "bwrap",
+                      "firejail", "strace", "ltrace", "valgrind", "faketime", "setsid", "runuser", "with-contenv"})
+
+
+def _names_check(command: list[str]) -> str | None:
+    """`_check_at` without the position."""
+    return _check_at(command)[0]
 
 
 def _text_method(node) -> bool:
@@ -3134,6 +3280,7 @@ class JenkinsRules:
         return status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
 
     @staticmethod
+    @functools.lru_cache(maxsize=256)       # OBAAF-JEN-011 and 012 read the same scripts (flagship slice 2d.2o)
     def _sh_commands(text: str) -> tuple[list[list[str]], bool] | None:
         """The commands of an `sh` script whose failure fails the step, read by the reader of slice 2d.2e, and
         whether the whole script was read; None when the script names a #! program other than sh, bash or dash,
@@ -3480,38 +3627,509 @@ class JenkinsRules:
         return min(lines) if lines else None
 
     # ------------------------------------------------------------------ JEN-011
+    def _failure_check(self, info: Info) -> tuple[str, str] | None:
+        """What a step is as OBAAF-JEN-011's check (flagship slice 2d.2o): ("stops", "") when the shell reader of slice
+        2d.2e vouches for every check command in it; ("swallowed", why) when the step's own options or script decide
+        that a check's failure does not fail it (`returnStatus: true`, `|| true`, `|| :`, `|| echo`, `|| printf`,
+        `|| exit 0`, a trailing `&`, a pipe without pipefail set before it, `set +e` or a `#!` line without `-e` with
+        more commands after it, a trap on EXIT or ERR that runs `exit 0`, more lines after it in `bat`); ("unread",
+        why) when the step names a check where neither is decided (Groovy puts text into the script, a computed
+        `returnStatus`, `powershell`, another `#!` program, a path to the program, a form the reader does not vouch
+        for); None when it names no check (only in `echo`, a comment, `--help`, or as another program's argument).
+        Every check in the step counts: the worst decides. Before 2d.2o the rule searched the script's text, and read
+        only `verify_commands` for a failure the script ignores."""
+        if not info.shell or not info.script or not _CHECK_PROGRAM.search(info.script):
+            return None
+        cached = self._script_cache.get(("failure-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        result = self._failure_read(info)
+        self._script_cache[("failure-check", id(info.use.call))] = (info.use.call, result)
+        return result
+
+    @staticmethod
+    def _lines_of(text: str) -> list:
+        """A script's lines as the shell joins them (a backslash before a line break), each as its commands with the
+        operator after each (`_commands_of`), or None for a line the tokenizer cannot split. A line with no check, no
+        quote, no `set`, `trap`, compound word, bracket, here-document, `exit`, `wait`, `$?`, `$!` or `PIPESTATUS` is
+        one placeholder command: only that it holds a command matters (a 20,000-line script is not split word by
+        word)."""
+        out, physical, pending = [], [], ""
+        for part in (text.split("\n") if "\\\n" in text or text.endswith("\\") else ()):
+            # a backslash at the end of a line joins the next, but not at the end of a comment
+            trailing = len(part) - len(part.rstrip("\\"))
+            if trailing % 2 == 1 and _strip_comment(part).endswith("\\"):
+                pending += part[:-1]
+                continue
+            physical.append(pending + part)
+            pending = ""
+        if pending:
+            physical.append(pending)
+        if not physical:
+            physical = text.split("\n")        # no line continues another
+        # Which lines need reading, found in one pass over the text rather than two searches per line
+        joined = "\n".join(physical)
+        starts = [0, *itertools.accumulate(len(raw) + 1 for raw in physical[:-1])]
+        wanted = sorted({bisect.bisect_right(starts, m.start()) - 1 for m in _LINE_WANTED.finditer(joined)})
+        previous = 0
+        for n in wanted + [len(physical)]:
+            if n > previous:
+                # the lines between two that matter: one placeholder when any holds a command
+                gap = joined[starts[previous]:starts[n] - 1 if n < len(physical) else len(joined)]
+                if _COMMAND_LINE.search(gap):
+                    out.append((gap.split("\n", 1)[0], _PLACEHOLDER_LINE))
+            previous = n + 1
+            if n == len(physical):
+                break
+            raw = physical[n]
+            tokens = _script_tokens(_strip_comment(raw))
+            if tokens is None:
+                out.append((raw, None))
+            elif tokens:
+                out.append((raw, _commands_of(tokens)))
+        return out
+
+    def _failure_read(self, info: Info) -> tuple[str, str] | None:
+        text = info.script
+        name = info.use.name.rsplit(".", 1)[-1]
+        read = self._sh_commands(text) if name == "sh" else None
+        other = name == "sh" and read is None
+        lines = None
+        if other or name != "sh":
+            # another #! program, powershell or pwsh: its text is not read as a shell's
+            words = re.findall(r"[^\s;&|()`'\",\[\]]+", text)
+            if not any(_CHECK_WORD.fullmatch(w) and check_words(words[i:i + 64]) for i, w in enumerate(words)):
+                return None
+            # its words name a check, but they may be a string it prints: whether it runs one is not known
+            if name == "bat":
+                lines = []
+            else:
+                return ("loose", f"a {name} step is not read, so whether it runs a check is not known" if not other
+                        else "the script names a #! program other than sh, bash or dash, which is not read")
+        else:
+            lines = self._lines_of(text)
+            named = None
+            for raw, line in lines:
+                if line is None:
+                    named = named or ("unread" if _CHECK_PROGRAM.search(raw) else None)
+                    continue
+                if line is _PLACEHOLDER_LINE:
+                    continue
+                for command, _op in line:
+                    kind = _names_check(command)
+                    named = "check" if kind == "check" else (named or kind)
+            if named is None:
+                return None
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        if status is not None and not ((isinstance(status, Name) and status.name in ("false", "true"))
+                                       or literal(status) in ("false", "true")):
+            return ("unread", "its returnStatus is computed and may be true")
+        if not self._status_stops(info):
+            return ("swallowed", "returnStatus: true")
+        if info.dynamic or info.exprs:
+            return ("unread", "Groovy puts text into the script, so what the shell runs is not read")
+        if name == "bat":
+            return self._bat_check(text)
+        if name != "sh":
+            return ("loose", f"a {name} step is not read, so whether it runs a check is not known")
+        if other:
+            return ("loose", "the script names a #! program other than sh, bash or dash, which is not read")
+        if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
+            return ("unread", "a .trim() may make the #! line the first")
+        commands, _complete = read
+        vouched: dict = {}
+        for words in commands:
+            if check_words(words) == "check" and not _asks_help(words):
+                vouched[tuple(words)] = vouched.get(tuple(words), 0) + 1
+        errexit = True
+        if text.startswith("#!"):
+            errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in text.partition("\n")[0][2:].split()[1:])
+        states = self._check_states(lines, errexit)
+        unread, swallowed = None, []
+        if not states:
+            unread = "the shell reader does not vouch for the line the check is on"
+        for key, kind, why, n in states:
+            if kind == "check" and vouched.get(key, 0) > 0:
+                vouched[key] -= 1
+            elif why:
+                swallowed.append((self._check_rank(key), len(swallowed), why, n))
+            elif kind == "path":
+                unread = unread or "the check's program is named by a path, so which program runs depends on the workspace"
+            else:
+                unread = unread or "the shell reader does not vouch for the line the check is on"
+        if swallowed:
+            # The reason of the first check in the catalog's order of `verify_commands`, as the older reading gave it;
+            # where the first swallowed check is, for a publish in the same step
+            first = min(swallowed, key=lambda s: s[3])[3]
+            self._script_cache[("swallow-at", id(info.use.call))] = (info.use.call, text.find(lines[first][0]))
+            return ("swallowed", min(swallowed)[2])
+        return ("unread", unread) if unread else ("stops", "")
+
+    def _check_rank(self, key: tuple) -> int:
+        """Where a check's words come in the catalog's `verify_commands` (the older reading looked for them in that
+        order), after them for the other checks."""
+        joined = " ".join(key)
+        return next((k for k, rx in enumerate(self.verify_cmds) if rx.match(joined)), len(self.verify_cmds))
+
+    @staticmethod
+    def _bat_check(text: str) -> tuple[str, str]:
+        """A `bat` step's check (flagship slice 2d.2o): cmd.exe does not stop at a failed command, so a check with more
+        commands after it is swallowed; one alone on the script's last line, with no `|` or `&` on it, is the step's
+        status; anything else, and a script that tests `errorlevel` or ends with a bare `exit` after it, is not
+        read."""
+        lines = [line.strip() for line in text.replace("^\n", "").split("\n")]
+        lines = [line for line in lines if line and not re.match(r"(?i)(@?rem\b|::)", line)]
+        def leads(line: str) -> bool:
+            words = line.lstrip("@").split()
+            start = 1 if words and words[0].lower() == "call" else 0
+            return bool(check_words(words[start:start + 64]))
+        at = next((k for k, line in enumerate(lines) if _CHECK_PROGRAM.search(line) and leads(line)), None)
+        if at is None:
+            # named only inside another command (`if exist`, `title`, `echo`): whether it runs is not read
+            return ("loose", "the bat script names a check only in a form that is not read")
+        if any(re.search(r"(?i)\b(goto|exit\s+/b|call\s+:)", line) for line in lines[:at]):
+            return ("unread", "the bat script may leave or jump before the check, which is not read")
+        if re.search(r"[|&]", lines[at]) or any(re.search(r"(?i)errorlevel|^@?exit(\s+/b)?\s*$", line)
+                                                for line in lines[at + 1:]):
+            return ("unread", "the bat script tests or keeps the check's result, which is not read")
+        if at < len(lines) - 1:
+            return ("swallowed", "the bat script does not stop at a failed command, and more commands follow it")
+        return ("stops", "")
+
+    @staticmethod
+    def _counts(command: list[str]) -> bool:
+        """Whether a command is one that runs after a check (not a closing word or a redirection alone)."""
+        return bool(command) and command[0] not in ("}", ")", "fi", "done", "esac", "then", "else", "do", "…}") \
+            and not re.match(r"\d*[<>]", command[0])
+
+    @staticmethod
+    def _keeps(command: list[str]) -> tuple[bool, bool]:
+        """Whether a command may keep an earlier command's failure (`$?`, `PIPESTATUS`, a bare `exit`), and whether it
+        waits for a background job by its number (`wait $!`, `wait $pid`, `pid=$!`)."""
+        kept = command == ["exit"] or any("$?" in w or "${?}" in w or "PIPESTATUS" in w for w in command)
+        waits = (command[:1] == ["wait"] and len(command) > 1) or any("$!" in w for w in command)
+        return kept, waits
+
+    @classmethod
+    def _check_states(cls, lines: list, errexit: bool) -> list[tuple[tuple, str, str | None, int]]:
+        """Each check command of an `sh` script, in order, as (its words from the program on, or () when a runner or a
+        quoted string runs it; "check", "path" or "unread"; why the script decides its failure does not fail the step,
+        or None). Lines are read in order: errexit and pipefail set by `set` before the check count, after it they do
+        not. Nothing later is decided once a line cannot be read, a here-document starts, a file is sourced, a trap on
+        EXIT or ERR is set to anything but `exit 0`, or a `set` or `trap` runs inside a compound command, a function
+        or a subshell; a check inside a function definition is never decided, and one inside a compound command only
+        by its own line (`|| true`, `&`, a pipe). Only forms whose effect does not depend on anything else give a
+        reason; a later `$?`, `PIPESTATUS` or bare `exit` leaves errexit and pipes undecided, `wait $!` a background
+        job, and `exec` ends the script with the check. The reasons are worded as before slice 2d.2o, in its order
+        (`set +e` written so before the check, then `||` later on the line or `&` at its end, then a pipe, then
+        errexit off): a finding's message is its identity in a baseline. Linear in the script's size."""
+        how_off = "#!"
+        literal_off = pipefail = trap_zero = lost = in_func = func_opened = False
+        depth = func_depth = case_depth = 0
+        n_lines = len(lines)
+        later_cmd, later_kept, later_wait = [False] * (n_lines + 1), [False] * (n_lines + 1), [False] * (n_lines + 1)
+        for n in range(n_lines - 1, -1, -1):
+            ln = lines[n][1] or []
+            if ln is _PLACEHOLDER_LINE:
+                later_cmd[n], later_kept[n], later_wait[n] = True, later_kept[n + 1], later_wait[n + 1]
+                continue
+            later_cmd[n] = later_cmd[n + 1] or any(cls._counts(c) for c, _o in ln)
+            flags = [cls._keeps(c) for c, _o in ln]
+            later_kept[n] = later_kept[n + 1] or any(k for k, _w in flags)
+            later_wait[n] = later_wait[n + 1] or any(w for _k, w in flags)
+        out = []
+        for n, (raw, line) in enumerate(lines):
+            if line is None:
+                lost = True
+                continue
+            if line is _PLACEHOLDER_LINE:
+                continue        # a command that changes nothing the reading tracks
+            words = [w for command, _op in line for w in command] + [op for _c, op in line if op]
+            case_depth += sum(1 for w in words if w == "case") - sum(1 for w in words if w == "esac")
+            parens = case_depth <= 0 and "case" not in words      # a case pattern's `)` closes nothing
+            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{") or (w == "(" and parens))
+            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}") or (w == ")" and parens))
+            defs = len(re.findall(r"\(\s*\)", raw)) if re.search(r"(^|[\s;&|])[\w.-]+\s*\(\s*\)", raw) else 0
+            opening, closing = max(opening - defs, 0), max(closing - defs, 0)     # `name()` opens nothing
+            if not in_func and (defs or re.search(r"(^|[\s;&|])function\s+[\w.-]+", raw)):
+                in_func, func_depth, func_opened = True, depth, False
+            compound = depth > 0 or opening > 0 or closing > 0
+            heredoc = "<<" in raw
+            line_cmd, line_kept, line_wait = [False] * (len(line) + 1), [False] * (len(line) + 1), \
+                [False] * (len(line) + 1)
+            line_or = [False] * (len(line) + 1)
+            for k in range(len(line) - 1, -1, -1):
+                kept, waits = cls._keeps(line[k][0])
+                line_cmd[k] = line_cmd[k + 1] or cls._counts(line[k][0])
+                line_kept[k] = line_kept[k + 1] or kept
+                line_wait[k] = line_wait[k + 1] or waits
+                line_or[k] = line_or[k + 1] or line[k][1] == "||"
+            ends_bg = next((op for _c, op in reversed(line) if op), None) == "&"
+            for k, (command, op) in enumerate(line):
+                if not command:
+                    continue
+                before = line[k - 1][1] if k else None
+                kind, at = _check_at(command)
+                if kind is None:
+                    name = command[0]
+                    if name in ("source", ".") or heredoc:
+                        lost = True
+                    elif name == "set":
+                        if compound or lost or in_func:
+                            lost = True
+                            continue
+                        args, j = command[1:], 0
+                        if args[:1] == ["+e"]:
+                            literal_off = True
+                        while j < len(args):
+                            w = args[j]
+                            if w in ("-o", "+o") and j + 1 < len(args):
+                                on, option = w == "-o", args[j + 1]
+                                if option == "errexit":
+                                    errexit, how_off = on, (how_off if on else "set")
+                                elif option == "pipefail":
+                                    pipefail = on
+                                j += 2
+                                continue
+                            if w == "--" or not re.fullmatch(r"[-+][a-zA-Z]+", w):
+                                break
+                            on = w[0] == "-"
+                            if "e" in w:
+                                errexit, how_off = on, (how_off if on else "set")
+                            if "o" in w and j + 1 < len(args):
+                                if args[j + 1] == "errexit":
+                                    errexit, how_off = on, (how_off if on else "set")
+                                elif args[j + 1] == "pipefail":
+                                    pipefail = on
+                                j += 2
+                                continue
+                            j += 1
+                    elif name == "shopt" and any(w.startswith("-") and "o" in w for w in command[1:]):
+                        # `shopt -so pipefail` is `set -o pipefail`; `-u` turns it off
+                        if compound or lost or in_func:
+                            lost = True
+                            continue
+                        on = not any(w.startswith("-") and "u" in w for w in command[1:])
+                        for w in command[1:]:
+                            if w == "errexit":
+                                errexit, how_off = on, (how_off if on else "set")
+                            elif w == "pipefail":
+                                pipefail = on
+                    elif name == "trap":
+                        args = [w for w in command[1:] if w != "--"]
+                        if len(args) >= 2 and any(sig in ("EXIT", "ERR", "0") for sig in args[1:]):
+                            if compound or in_func or not re.search(r"(^|[;&|\s])exit\s+0\b", args[0]):
+                                trap_zero, lost = False, lost or args[0] not in ("-", "")
+                            else:
+                                trap_zero = True
+                    continue
+                key = tuple(command[at:at + 64]) if at >= 0 else ()
+                if lost or in_func or heredoc:
+                    out.append((key, kind, None, n))
+                    continue
+                after = line[k + 1][0] if k + 1 < len(line) else []
+                ends = command[0] == "exec"
+                kept = line_kept[k + 1] or later_kept[n + 1]
+                more = not ends and (line_cmd[k + 1] or later_cmd[n + 1])
+                waits = line_wait[k + 1] or later_wait[n + 1]
+                set_off = not errexit and how_off == "set"
+                or_true = op == "||" and bool(after) and (after[0] in ("true", ":", "echo", "printf", "/bin/true",
+                                                                         "/usr/bin/true")
+                                                          or after[:2] in (["exit", "0"], ["return", "0"]))
+                bg = op == "&" and not waits
+                pipe = op == "|" and not pipefail and not kept
+                guarded = before in ("if", "elif", "while", "until", "!", "&&", "||")
+                no_stop = not errexit and more and op not in ("&&", "||") and not kept and not guarded and not compound
+                why = None
+                if or_true or bg or pipe or no_stop:
+                    if literal_off:
+                        why = "set +e before the command"
+                    elif line_or[k] or ends_bg:
+                        why = "|| or & after the command"
+                    elif pipe:
+                        why = "a pipe without pipefail: the step's status is the last command's"
+                    else:
+                        why = ("set +e before the command" if set_off and literal_off else
+                               "the sh script does not stop at a failed command, and more commands follow it")
+                elif trap_zero:
+                    why = "a trap that runs `exit 0` on EXIT or ERR decides the script's status"
+                out.append((key, kind, why, n))
+            depth = max(depth + opening - closing, 0)
+            if in_func:
+                func_opened = func_opened or opening > 0
+                if func_opened and depth <= func_depth:
+                    in_func = False
+        return out
+
+    def _failure_gates(self, check: Info, target: Info) -> bool:
+        """Whether a check's place lets it stop `target` (flagship slice 2d.2o), as `provenance_gates` compares: it
+        runs before it, not in a sibling parallel branch, not caught by a block the publish is not in (a check in the
+        very catchError, warnError or try block the publish is in, before it, skips it), and every condition that
+        could skip the check also guards the publish. A check and a publish in one step are compared by the script,
+        not here."""
+        if check.index > target.index:
+            return False
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False
+        return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
+
+    def _failure_reason(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
+        if kind == "loose":
+            # The step's text names a check in a language that is not read: it may be no check at all
+            return ("unknown", f"whether the step at line {check.line} runs a check that stops the publish at line "
+                               f"{target.line} is not known: {why}")
+        verdict = self._failure_place(check, kind, why, target)
+        if verdict and verdict[0] == "finding" and check.ctx.swallowed:
+            # worded as before slice 2d.2o, which named the catching block for every finding on such a check
+            return ("finding", f"its failure is ignored ({check.ctx.swallowed})")
+        return verdict
+
+    def _failure_place(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
+        """("finding" or "unknown", why) when the check cannot stop `target`, or it is not known; None when it can. The
+        place comes first, then the script, as before slice 2d.2o (a finding's message is its identity). A catching
+        block may mark the build's result, so a publish that runs only on a result is "cannot tell" after it, unless
+        the step itself already ignores the check's failure (`|| true` marks nothing)."""
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            if kind != "swallowed" and (target.ctx.post == "success"
+                                        or any(RESULT_GUARD_SET.search(g) for g in target.ctx.guards)):
+                return ("unknown", f"the check at line {check.line} is in {check.ctx.swallowed}, which may mark the "
+                                   f"build's result; the publish at line {target.line} runs only on a result that is "
+                                   "not read")
+            return ("finding", f"its failure is ignored ({check.ctx.swallowed})")
+        if kind == "swallowed":
+            return ("finding", f"its failure is ignored ({why})")
+        if concurrent(check.ctx, target.ctx):
+            return ("finding", "it runs in a parallel branch beside the publish, not before it")
+        extra = [shown(g) for g in check.ctx.guards if guard_key(g) not in guard_keys(target)]
+        if extra:
+            return ("finding", f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the "
+                               "publish, so it can be skipped")
+        if check.index > target.index:
+            return ("finding", "it does not run before the publish")
+        if kind == "unread":
+            return ("unknown", f"whether the check at line {check.line} stops the publish at line {target.line} is not "
+                               f"known: {why}")
+        return None
+
+    def _sig(self, info: Info) -> tuple:
+        """What decides a check's verdict on a publish besides their order (flagship slice 2d.2o: compared once per
+        kind of publish, not once per pair)."""
+        key = self._script_cache.get(("jen011-sig", id(info)))
+        if key is None or key[0] is not info:
+            key = (info, (frozenset(guard_keys(info)), tuple(info.ctx.branch), info.ctx.swallow_id,
+                          info.ctx.post == "success" or any(RESULT_GUARD_SET.search(g) for g in info.ctx.guards)))
+            self._script_cache[("jen011-sig", id(info))] = key
+        return key[1]
+
+    def _publishes_after(self, info: Info) -> bool:
+        """Whether a step that holds a check whose failure it ignores publishes after that check in its own script, as
+        far as the text shows (a publish written before it cannot be stopped by it, and is no finding of this rule)."""
+        at = self._script_cache.get(("swallow-at", id(info.use.call)))
+        if not info.shell:
+            return True
+        if at and at[0] is info.use.call and at[1] >= 0:
+            pos = at[1]
+        else:
+            # `returnStatus: true`, `bat`: the first check's name in the script
+            found = _CHECK_NAME_ANYWHERE.search(info.script)
+            if not found:
+                return True
+            pos = found.start()
+        starts = [m.start() for rx in self.upload_cmds for m in [rx.search(info.script)] if m]
+        return not starts or max(m.start() for rx in self.upload_cmds for m in rx.finditer(info.script)) > pos
+
+    def _checked_earlier_stage(self, publish: Info, checks: list) -> bool:
+        """A publish in a Declarative stage's own failure-path post block, where no check runs in the publish's stage
+        and a check that stops its step and stops the publish's stage runs in an earlier stage before it: a failed
+        check skips the stage, post block included, so the post block runs only after the checks passed (as
+        OBAAF-JEN-012 reads it since slice 2d.2n)."""
+        owner = publish.ctx.post_owner
+        if not owner or publish.ctx.post in (None, "catch/finally"):
+            return False
+        if any(c.ctx.stage[:len(owner)] == owner for c, _k, _w in checks if c.ctx.stage):
+            return False
+        return self._stage_post_after(publish, [c for c, k, _w in checks if k == "stops" and not c.ctx.deferred
+                                                and c.index < publish.index
+                                                and self.provenance_gates(c, publish, failing=True)])
+
     def failure_paths(self) -> None:
+        """A publish in a failure path, or a check before a publish whose failure does not stop it. Since flagship slice
+        2d.2o checks are read by the shell reader of slice 2d.2e, compared as OBAAF-JEN-012 compares them, and what the
+        file does not decide is "cannot tell"."""
         publishes = [i for i in self.infos if i.publish]
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-011")
+        called = {id(i.use.call) for i in self.infos if not i.ctx.deferred}
+        checks = [(i, *r) for i in self.infos if (r := self._failure_check(i))]
         for info in publishes:
-            if info.ctx.post in FAILURE_PATHS:
-                where = "a catch or finally block" if info.ctx.post == "catch/finally" else \
-                    f"post {{ {info.ctx.post} }}"
-                self.add("OBAAF-JEN-011", info.line,
-                         f"The step at line {info.line} publishes ({info.publish}) in {where}, which runs when the "
-                         "build failed, was aborted or is unstable, so it can publish after a check failed or was "
-                         "skipped.", info.ctx.stage, severity="high")
-        checks = [i for i in self.infos if i.verify or (i.shell and CHECKSUM_VERIFY.search(i.script))]
-        for check in checks:
-            if check.ctx.post in FAILURE_PATHS:
+            if info.ctx.post not in FAILURE_PATHS:
                 continue
-            later = [p for p in publishes if p.index > check.index or concurrent(check.ctx, p.ctx)]
-            target = next((p for p in later if not self.gates(check, p)), None)
-            if target is None:
+            if info.ctx.deferred:
+                if id(info.use.call) not in called:
+                    self.unknown("OBAAF-JEN-011", info.line, f"the publish at line {info.line} is in "
+                                                             f"{info.ctx.deferred}; whether and where it runs is not known")
                 continue
-            if check.swallowed:
-                why = f"its failure is ignored ({check.swallowed})"
-            elif concurrent(check.ctx, target.ctx):
-                why = "it runs in a parallel branch beside the publish, not before it"
-            else:
-                extra = [shown(g) for g in check.ctx.guards if guard_key(g) not in guard_keys(target)]
-                why = (f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the publish, "
-                       "so it can be skipped" if extra else "it does not run before the publish")
-            self.add("OBAAF-JEN-011", check.line,
-                     f"The check at line {check.line} cannot stop the publish at line {target.line}: {why}.",
-                     check.ctx.stage, severity="high")
+            where = "a catch or finally block" if info.ctx.post == "catch/finally" else f"post {{ {info.ctx.post} }}"
+            if info.ctx.post != "catch/finally" and any(RESULT_GUARD_SET.search(g) for g in info.ctx.guards):
+                # Declarative sets the build's result before it runs a post block; a Scripted catch or finally block
+                # runs before anything sets it, so a guard on it there decides nothing
+                self.unknown("OBAAF-JEN-011", info.line, f"the publish at line {info.line} is in {where} under a "
+                                                         "condition on the build's result, which is not read")
+                continue
+            if self._checked_earlier_stage(info, checks):
+                continue
+            self.add("OBAAF-JEN-011", info.line,
+                     f"The step at line {info.line} publishes ({info.publish}) in {where}, which runs when the "
+                     "build failed, was aborted or is unstable, so it can publish after a check failed or was "
+                     "skipped.", info.ctx.stage, severity="high")
+        # A publish in a failure path is reported above; it is still compared here, as before slice 2d.2o, so a check
+        # that cannot stop it is named against the first publish after it (the finding's message is its identity)
+        live = [p for p in publishes if not p.ctx.deferred]
+        groups: dict = {}
+        for p in live:
+            groups.setdefault(self._sig(p), []).append(p)
+        for group in groups.values():
+            group.sort(key=lambda p: p.index)
+        indexes = {key: [p.index for p in group] for key, group in groups.items()}
+        for check, kind, why in checks:
+            if check.ctx.deferred:
+                if id(check.use.call) not in called and live:
+                    self.unknown("OBAAF-JEN-011", check.line,
+                                 f"the check at line {check.line} is in {check.ctx.deferred}; whether and where it "
+                                 "runs, and so whether it can stop a publish, is not known")
+                continue
+            if check.ctx.post in FAILURE_PATHS and kind != "swallowed":
+                continue
+            candidates = []
+            for key, group in groups.items():
+                if concurrent(check.ctx, group[0].ctx):
+                    candidates.append(group[0])
+                    continue
+                # the first publish after the check's step, and the check's own step when it publishes
+                at = bisect.bisect_right(indexes[key], check.index)
+                if at < len(group) and not (kind == "stops" and self._failure_gates(check, group[at])):
+                    candidates.append(group[at])
+                same = bisect.bisect_left(indexes[key], check.index)
+                if same < len(group) and group[same] is check and kind != "stops" and self._publishes_after(check):
+                    candidates.append(check)
+            found = unknown = None
+            # a later step first, as before slice 2d.2o; the check's own step only when nothing after it publishes
+            for target in sorted(candidates, key=lambda p: (p is check, p.index)):
+                verdict = self._failure_reason(check, kind, why, target)
+                if verdict is None:
+                    continue
+                if verdict[0] == "finding":
+                    found = (target, verdict[1])
+                    break
+                unknown = unknown or verdict[1]
+            if found:
+                target, reason = found
+                self.add("OBAAF-JEN-011", check.line,
+                         f"The check at line {check.line} cannot stop the publish at line {target.line}: {reason}.",
+                         check.ctx.stage, severity="high")
+            elif unknown:
+                self.unknown("OBAAF-JEN-011", check.line, unknown)
 
     # ------------------------------------------------------------------ JEN-012
     def provenance_gates(self, check: Info, target: Info, failing: bool = False) -> bool:
