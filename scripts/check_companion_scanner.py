@@ -62,6 +62,9 @@ def check_scanner(name, workspace):
     for line in lines:
         print(f"| {line}")
     if run.stderr:
+        # Prefixed like stdout, so nothing the scanner wrote is read as a workflow command here.
+        for line in run.stderr.splitlines():
+            print(f"stderr | {line}")
         raise SystemExit(f"{name} wrote outside the generated step's combined output stream")
     run.check_returncode()
     marker = re.fullmatch(r"::stop-commands::([0-9a-f-]+)", lines[0]) if lines else None

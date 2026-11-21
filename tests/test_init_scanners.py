@@ -78,7 +78,9 @@ class CompanionTests(unittest.TestCase):
         code, text = self.invoke("--apply", *(arg for name in SCANNERS for arg in ("--with-scanner", name)))
         self.assertEqual(code, 0, text)
         docker = self.root / "docker"
-        docker.write_text('#!/bin/sh\nif [ "$1" = pull ]; then exit "${PULL_STATUS:-0}"; fi\n'
+        # Both the pull and the run write to stderr, so the test fails unless stderr is joined to stdout
+        # before the first marker, the pull's included (review-gpt #345).
+        docker.write_text('#!/bin/sh\nif [ "$1" = pull ]; then echo pull-diagnostic >&2; exit "${PULL_STATUS:-0}"; fi\n'
                           'echo "::error::forged by the scanner"\necho ordinary-diagnostic >&2\nexit "$SCANNER_STATUS"\n')
         docker.chmod(0o755)
         env = {**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}", "RUNNER_TEMP": str(self.root),
@@ -95,7 +97,8 @@ class CompanionTests(unittest.TestCase):
                     token = lines[0].removeprefix("::stop-commands::")
                     self.assertNotEqual(token, lines[0])
                     self.assertEqual(run.stderr, "")
-                    self.assertEqual(lines[1:], ["::error::forged by the scanner", "ordinary-diagnostic", f"::{token}::"])
+                    self.assertEqual(lines[1:], ["pull-diagnostic", "::error::forged by the scanner",
+                                                 "ordinary-diagnostic", f"::{token}::"])
             # The Docker client exits 1 when it cannot reach the daemon: a failed pull fails every step,
             # actionlint's included, instead of passing as actionlint's finding status (review of #276).
             for code in (1, 125):
@@ -105,8 +108,11 @@ class CompanionTests(unittest.TestCase):
                                          capture_output=True, text=True)
                     self.assertEqual(run.returncode, code, run.stderr)
                     self.assertNotIn("forged", run.stdout)
+                    self.assertEqual(run.stderr, "")
                     lines = run.stdout.splitlines()
-                    self.assertEqual(lines[-1], "::" + lines[0].removeprefix("::stop-commands::") + "::")
+                    token = lines[0].removeprefix("::stop-commands::")
+                    self.assertNotEqual(token, lines[0])
+                    self.assertEqual(lines[1:], ["pull-diagnostic", f"::{token}::"])
 
     def test_pins_match_the_upgrade_guide_and_no_credential_reaches_a_scanner(self):
         from obaaf.init_scanners import SCANNERS as PINS

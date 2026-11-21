@@ -22,6 +22,11 @@ from obaaf.init import WORKFLOW
 from obaaf.init_scanners import steps
 
 
+def previous_steps(names):
+    """The scanner steps as init wrote them before #340: without `exec 2>&1`."""
+    return steps(names).replace(b"          exec 2>&1\n", b"")
+
+
 def command(*args):
     out = StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -355,6 +360,25 @@ class GateTests(unittest.TestCase):
         self.assertIn("--fail-on medium", text)
         self.assertEqual(self.workflow.read_bytes(), before)
 
+    def test_scanner_steps_in_mixed_or_edited_form_get_manual_guidance(self):
+        # review-gpt #345: only a complete current or complete pre-#340 suffix is recognised.
+        self.install("--with-scanner", "zizmor", "--with-scanner", "actionlint")
+        current = self.workflow.read_bytes()
+        names = ["zizmor", "actionlint"]
+        body = current.removesuffix(steps(names))
+        self.assertNotEqual(body, current)
+        mixed = body + steps(names).replace(b"          exec 2>&1\n", b"", 1)
+        edited = body + previous_steps(names).replace(b"status=0\n", b"status=0 \n", 1)
+        for label, before in (("mixed", mixed), ("edited", edited)):
+            with self.subTest(label):
+                self.assertNotIn(before, (current, body + previous_steps(names)))
+                self.workflow.write_bytes(before)
+                commit(self.root)
+                code, text = self.gate("--apply")
+                self.assertEqual(code, 0, text)
+                self.assertIn("by hand", text)
+                self.assertEqual(self.workflow.read_bytes(), before)
+
     def test_earlier_generated_workflow_with_companions_is_recognized(self):
         self.install()
         old = Path(__file__).parent / "fixtures/init/report-only-3.3.yaml"
@@ -388,17 +412,18 @@ class GateTests(unittest.TestCase):
         with patch("obaaf.fix_gate.files", return_value=future):
             for count in range(len(SCANNERS) + 1):
                 for names in combinations(SCANNERS, count):
-                    tail = steps(names)
-                    for label, report in (("current report", historical), ("legacy report", legacy),
-                                          ("previous gate", old_gate)):
-                        with self.subTest(scanners=names, workflow=label):
-                            self.workflow.write_bytes(report + tail)
-                            commit(self.root)
-                            code, text = self.gate("--baseline", path, "--apply")
-                            self.assertEqual(code, 0, text)
-                            self.assertIn("Applied the displayed gate change", text)
-                            self.assertEqual(self.workflow.read_bytes(), expected + tail)
-                            self.assertIn("already gates", self.gate("--baseline", path)[1])
+                    # review-gpt #345: scanner steps written before #340 are kept as they are.
+                    for form, tail in (("current steps", steps(names)), ("pre-#340 steps", previous_steps(names))):
+                        for label, report in (("current report", historical), ("legacy report", legacy),
+                                              ("previous gate", old_gate)):
+                            with self.subTest(scanners=names, steps=form, workflow=label):
+                                self.workflow.write_bytes(report + tail)
+                                commit(self.root)
+                                code, text = self.gate("--baseline", path, "--apply")
+                                self.assertEqual(code, 0, text)
+                                self.assertIn("Applied the displayed gate change", text)
+                                self.assertEqual(self.workflow.read_bytes(), expected + tail)
+                                self.assertIn("already gates", self.gate("--baseline", path)[1])
             self.workflow.write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
             commit(self.root)
             code, text = self.gate("--baseline", path, "--apply")
