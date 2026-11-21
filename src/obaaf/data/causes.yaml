@@ -36,7 +36,8 @@ causes:
     sentence: "A release job may restore shared cache data directly or through another job."
     rules: [OBAAF-GHA-006]
     except_kinds:
-      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
+      OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted, capability-restores, capability-restores-self-hosted,
+                      capability-needed-job-restores]
     fix_kind: by-hand
     next: "Review the release job and any named producer. Remove shared cache restores, declare cache-mode: none on the affected job, and rebuild release inputs from trusted sources."
   - id: untrusted-cache-write
@@ -69,7 +70,7 @@ causes:
     sentence: "Checkout leaves a credential available to later steps."
     rules: [OBAAF-GHA-011]
     fix_kind: tightening
-    next: "Set persist-credentials to false on the reported checkout step and review later steps that need credentials."
+    next: "Review later steps that need Git credentials."
   - id: agent-instruction-source
     sentence: "The workflow does not establish that the agent reads instructions from a trusted revision."
     rules: [OBAAF-GHA-012]
@@ -318,6 +319,12 @@ causes:
       OBAAF-GHA-006: [no-cache-mode, no-cache-mode-self-hosted]
     fix_kind: by-hand
     next: "Declare cache-mode: none on the release job."
+  - id: may-publish-cache
+    sentence: "A job that holds what publishing needs, and that OBAAF does not know releases, may restore shared cache data directly or through a job it needs."
+    kinds:
+      OBAAF-GHA-006: [capability-restores, capability-restores-self-hosted, capability-needed-job-restores]
+    fix_kind: by-hand
+    next: "Declare cache-mode: none on the job, or on the jobs it needs that restore, or move the publishing credential or permission to a job that restores no cache. If the job does not release and its caches are trusted, accept the finding and say why."
   - id: unreadable-cache-mode
     sentence: "A job an outsider can start declares a cache-mode the checker cannot read."
     kinds:

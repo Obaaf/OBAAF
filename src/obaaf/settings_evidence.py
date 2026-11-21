@@ -58,10 +58,14 @@ class SettingsEvidence:
 
     def for_scan(self, root: Path, repository_scan: bool) -> SettingsEvidence:
         """Restrict evidence to scans that can check its source file for code ownership."""
+        from obaaf.checker import _as_found
+
         if not repository_scan:
             reason = ("this scan does not check snapshot code ownership; run obaaf check "
                       "on the repository directory without --lanes")
-        elif not self.source.resolve().is_relative_to(root.resolve()):
+        elif not (self.source.resolve().is_relative_to(root.resolve())
+                  and _as_found(self.source, root.resolve(), strict=True)):
+            # A link outside the repository may point inside without being checked for ownership.
             reason = ("the snapshot is outside the checked repository; use a repository snapshot "
                       "so its code ownership can be checked")
         else:
@@ -136,7 +140,9 @@ class SettingsEvidence:
                 return Assessment(CANNOT_TELL, "no selected branch policy establishes protected-branch access")
             if any(p["type"] == "tag" for p in policies):
                 return Assessment(NOT_MET, "the selected policy permits a tag")
-            if any(p["type"] != "branch" or not p["name"] or any(c in p["name"] for c in "*?[\\")
+            # GitHub matches policy names with Ruby's File.fnmatch; `{` is refused too, in case braces
+            # are expanded, so only a name that can be nothing but itself counts as literal.
+            if any(p["type"] != "branch" or not p["name"] or any(c in p["name"] for c in "*?[{\\")
                    for p in policies):
                 return Assessment(CANNOT_TELL, "the selected policy does not name only literal branches")
             reason = self._unread("branches")
