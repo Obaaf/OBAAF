@@ -2512,6 +2512,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     prepared = _prepare_workflows(read, root, None if on_its_own else root, config, declared, script_cmds,
                                   agent_actions, unread_actions, action_cache, steps_state)
     rules_mod.give_call_effects(groups, catalog.detection, config.agents)
+    repository_workflows = _workflow_inventory(prepared, is_repo)
     for path, rel, workflow, reported in prepared:
         rels.append(rel)
         owned_paths.extend(_as_found(path, root))
@@ -2534,7 +2535,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                            agents=config.agents, firewall=firewall, settings=settings).run()
+                                            agents=config.agents, firewall=firewall, settings=settings,
+                                            repository_workflows=repository_workflows).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")
@@ -2598,6 +2600,14 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
                        jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today,
                        whole_repository=whole_repository)
+
+
+def _workflow_inventory(prepared: list, is_repo: bool) -> list[wf_mod.Workflow] | None:
+    """Only a complete set of parsed repository workflows can establish the absence of a subscriber."""
+    if not is_repo or any(isinstance(workflow, OSError) or workflow.error or reported
+                          for _, _, workflow, reported in prepared):
+        return None
+    return [workflow for _, _, workflow, _ in prepared]
 
 
 def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",
@@ -2963,6 +2973,7 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
     prepared = _prepare_workflows(read, root, root if is_repo else None, config, declared, script_cmds,
                                   agent_actions, unread_actions, action_cache, steps_state)
     rules_mod.give_call_effects(groups, catalog.detection, config.agents)
+    repository_workflows = _workflow_inventory(prepared, is_repo)
     for path, rel, workflow, reported in prepared:
         seen.append(rel)
         if isinstance(workflow, OSError):
@@ -2980,7 +2991,8 @@ def lanes(target: Path, config: Config | None = None, platform: str = "auto",
         # must not pass it either. The rules are run only to find those errors.
         try:
             rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                    agents=config.agents, firewall=firewall).run()
+                                    agents=config.agents, firewall=firewall,
+                                    repository_workflows=repository_workflows).run()
         except expr_mod.TooComplex as exc:
             errors.append(f"{rel}: {exc}")
         except (RecursionError, MemoryError):

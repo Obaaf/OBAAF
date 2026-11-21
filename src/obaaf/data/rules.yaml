@@ -750,7 +750,10 @@ rules:
       the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit
       OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
       agent as its command (no other step and no `env` of the job is given a credential, and the job
-      cannot request OIDC tokens) and no step but `actions/upload-artifact` after it. Each credential
+      cannot request OIDC tokens) and no step but `actions/upload-artifact` after it.
+      With either control, an upload by the agent job makes an otherwise verified
+      control "cannot tell" if a job in the same workflow or a downstream
+      `workflow_run` workflow may download the artifact, or the checker cannot inspect all relevant workflows. Each credential
       given to the action's step is placed as the action reads its inputs: a model key named in
       `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and
       one named in `env` or written in `run` (also through `${{ env.KEY }}`) is passed to the command;
@@ -781,7 +784,7 @@ rules:
       (slice 2d.4a), which then runs outside the confined command. Not followed, and so never a reason the
       finding clears: an agent run by a package script (`npm run`), a called workflow, an action from another
       repository or a local action the checker cannot read through (named in a note); code an earlier action
-      runs in its post step; what a later job does with an uploaded artifact (OBAAF-GHA-021 and 022);
+      runs in its post step;
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
       runner with the firewall's label has the firewall, which the label is taken to mean.
     fix: >-

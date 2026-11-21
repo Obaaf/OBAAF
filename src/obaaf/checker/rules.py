@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import agent_flags
+from obaaf.checker.artifact_consumers import artifact_may_be_consumed
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
@@ -746,7 +747,7 @@ class WorkflowRules:
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
                  agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
-                 settings: SettingsEvidence | None = None) -> None:
+                 settings: SettingsEvidence | None = None, repository_workflows: list[Workflow] | None = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -755,6 +756,8 @@ class WorkflowRules:
         # GitHub's native egress firewall (None when no repository was checked, only files).
         self.agents = dict(agents or {})
         self.settings = settings
+        self.repository_workflows = repository_workflows
+        self._artifact_consumers: dict[str, bool] = {}
         self.firewall = firewall
         self.findings: list[Finding] = []
 
@@ -830,7 +833,7 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall, settings=self.settings)
+                               firewall=self.firewall, settings=self.settings, repository_workflows=self.repository_workflows)
         second._through = True
         second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
@@ -2528,6 +2531,15 @@ class WorkflowRules:
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
 
+    def _artifact_may_be_consumed(self, job: Job) -> bool:
+        if job.id not in self._artifact_consumers:
+            self._artifact_consumers[job.id] = artifact_may_be_consumed(self.repository_workflows, self.wf, job)
+        return self._artifact_consumers[job.id]
+
+    _ARTIFACT_NETWORK = ("the checker cannot rule out an artifact download in this workflow or a workflow_run "
+                         "subscriber. The producing job's network restriction does not cover code loaded from "
+                         "that artifact in another job")
+
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
         which case of OBAAF-GHA-020 it is, and that case's values.
@@ -2637,6 +2649,8 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
+        if self._artifact_may_be_consumed(job):
+            unsure.append(self._ARTIFACT_NETWORK)
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             listed = ", ".join(policy.allow) or "nothing"
@@ -3368,6 +3382,8 @@ class WorkflowRules:
             group(unsure, after, " can run after it or beside it, and the checker cannot tell "
                   "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
                   "taken to save files as data)")
+        if self._artifact_may_be_consumed(job):
+            unsure.append(self._ARTIFACT_NETWORK)
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
@@ -3942,6 +3958,9 @@ class WorkflowRules:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "
                           "could run in a step before or beside the one that holds the key")
+        if self._artifact_may_be_consumed(job):
+            unsure.append("the checker cannot rule out a later job downloading the agent's artifact and loading "
+                          "its contents with access to that job's credentials")
         if not held and not problems and not unsure:
             # Every secret of the job is in a confined step and none was placed: nothing to show.
             unsure.append("no secret of the job is placed by the checker in a step that uses the action")
