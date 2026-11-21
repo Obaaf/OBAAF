@@ -32,6 +32,16 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
 
+### Jenkins: a provenance check must stop the publish
+
+Slice 2d.2n; decision D-130. **OBAAF-JEN-012 now reads its checks as the shell runs them and counts only one that stops the publish, so a Jenkinsfile that passed can get "cannot tell" or a new finding, and one that had a finding can get "cannot tell".**
+
+- **A check is read by the shell reader of slice 2d.2e**: `obaaf verify release` on a line of its own, in an `sh` step that stops at a failed command (no `#!` line, `-e` on it, or `set -e` first), with `returnStatus` absent or `false`. `--pre-approval` (or an abbreviation argparse accepts, such as `--pr`) makes it a provenance check: medium.
+- **"Cannot tell"** where the reader does not vouch for a check the older text reading found: Groovy text put into the script (`"... ${x}"`, concatenation), a computed `returnStatus`, a shell expansion or substitution among the check's arguments (`--policy "$POLICY"`), a path or wrapper (`.venv/bin/obaaf`, `timeout 600 obaaf`), `.trim()` before a `#!` line, `bat`, `powershell` and `pwsh` steps, and a line before the check the reader cannot read (`set -Eeuo pipefail`, `export PATH=...`; #347). Also for a publish read where a closure or uncalled method is written, a check read only there and never seen called, and a publish in a `catch` or `finally` block after a check.
+- **No check**: the name only in an `echo` argument or a comment, `--help`, and a check in a closure or method nothing is seen calling no longer clears a publish.
+- **Failure paths**: a publish in the pipeline's `post` block is high whatever check runs before it (it was a pass after any check); one in a stage's `post` block is checked by a check in an earlier stage.
+- Messages are unchanged, so baseline entries still match. OBAAF's own Jenkins release template now gets "cannot tell" (advisory) for this rule: its checks follow `export PATH=...` (#344). The record is [bypass-attempts.md](docs/bypass-attempts.md#2d2n-a-provenance-check-before-the-publish).
+
 ### Jenkins: another job's artifacts need `obaaf verify release` before the publish
 
 Slice 2d.2m (issue #341); decision D-129. **OBAAF-JEN-010 now reads a copy as Groovy builds it and clears it only with an `obaaf verify release` that stops the publish, so a Jenkinsfile that passed can get a new high or medium finding, or "cannot tell".**

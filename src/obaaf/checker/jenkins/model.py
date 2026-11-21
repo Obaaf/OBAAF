@@ -120,6 +120,9 @@ class Ctx:
     # inlined method the step is read in, with the method's parameter names.
     swallow_id: int = 0
     invocation: tuple = ()
+    # Flagship slice 2d.2n: the stage path whose Declarative post block the step is in (() for the pipeline's own), or
+    # None outside one. A Scripted stage may be named "post always", so the stage path alone does not say it.
+    post_owner: tuple | None = None
 
 
 @dataclass
@@ -1742,7 +1745,7 @@ class Builder:
             self.block(stmt.body, body_ctx)
             # catch and finally blocks run after the body failed or stopped part way.
             for h in stmt.handlers:
-                self.block(h, replace(ctx, post="catch/finally"))
+                self.block(h, replace(ctx, post="catch/finally", post_owner=None))
         elif isinstance(stmt, Switch):
             branchy = bool(_BRANCH_VAR.search(_source_hint(stmt.subject)) or _CHANGE_VARS.search(
                 _source_hint(stmt.subject)))
@@ -2591,7 +2594,8 @@ class Builder:
             expr = stmt.expr if isinstance(stmt, ExprStmt) else None
             if isinstance(expr, Call) and expr.closure is not None:
                 cond = callee_name(expr) or "?"
-                self.block(expr.closure, replace(ctx, post=cond, stage=ctx.stage + (f"post {cond}",)))
+                self.block(expr.closure, replace(ctx, post=cond, stage=ctx.stage + (f"post {cond}",),
+                                                 post_owner=ctx.stage))
 
 
 # ------------------------------------------------------------------ untrusted values

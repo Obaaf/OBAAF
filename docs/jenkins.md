@@ -152,6 +152,20 @@ status the script tests (`if (sh(..., returnStatus: true) != 0)`), and whether t
 were copied. Stages are told apart by name, so two Scripted stages with one name, or computed names, are one
 stage for the severity.
 
+**A provenance check that stops the publish** (OBAAF-JEN-012, flagship slice 2d.2n). Each publish needs an
+earlier `obaaf verify release` (without `--pre-approval`) that stops it when it fails: on a line of its own in an
+`sh` script that stops at a failed command, read by the reader of slice 2d.2e, with `returnStatus` absent or
+`false`, not in a parallel branch beside the publish, not in a `catch`, `catchError` or `warnError` the publish is
+not also in, and under no condition the publish does not share. A provenance-only check (`cosign
+verify-attestation`, `gh attestation verify`, `slsa-verifier verify`, `--pre-approval`) gives medium. A publish in
+the pipeline's `post` block is never checked; one in a stage's `post` block is checked by a check in an earlier
+stage; one in a `catch` or `finally` block after a check is "cannot tell". Also "cannot tell": a check the reader
+does not vouch for (Groovy text in the script, a computed `returnStatus`, an expansion among its arguments, a path
+or wrapper, `bat`, `powershell`, `pwsh`, a line before it the reader cannot read), a publish read where a closure
+or uncalled method is written, and a check read only there. To clear it, put `obaaf verify release` on its own
+line in an `sh` step, with literal arguments, before the publish. The limits are listed in
+[bypass-attempts.md](bypass-attempts.md#2d2n-a-provenance-check-before-the-publish).
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
