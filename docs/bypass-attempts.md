@@ -23,7 +23,8 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2i** | **Jenkins files and credentials: which Jenkinsfiles are read, OBAAF-JEN-001, 013, 014, 015** | **2026-11-15** | `tests/test_jenkins_files_credentials.py` |
 | **2d.2k** | **Pipeline code and pins: OBAAF-JEN-004, 008** | **2026-11-17** | `tests/test_jenkins_code_pins.py` |
 | **2d.2j** | **Agent stages and workspaces: OBAAF-JEN-002, 003, 006, 007** ([below](#2d2j-agent-stages-and-workspaces)) | **2026-11-17, 2026-11-20** | `tests/test_jenkins_workspaces.py` |
-| Still open | The rest of 2d.2: OBAAF-JEN-005, 009 to 012; see [the plan](flagship.md) | | |
+| **2d.2l** | **Release approvals: OBAAF-JEN-005** ([below](#2d2l-release-approvals)) | **2026-11-21** | `tests/test_jenkins_approvals.py` |
+| Still open | The rest of 2d.2: OBAAF-JEN-009 to 012; see [the plan](flagship.md) | | |
 
 The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and [2d.2j](#2d2j-agent-stages-and-workspaces).
 
@@ -2868,3 +2869,23 @@ Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 
 | B109 | both | sh '"$WORKSPACE/ci/autofix.sh"' | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
 | B110 | both | sh './ci/autofix' (script without .sh suffix) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
 | B111 | both | def agentCmd = 'claude' + ' -p ...'; sh agentCmd | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+
+## 2d.2l: release approvals
+
+Rule: OBAAF-JEN-005, release without an approval by a named person. Reviewer: one Opus 5.5 sub-agent that did not write the rule, given the code, the rule's text and what the Pipeline: Input Step plugin documents (an abort, or a timeout around the step, throws and stops the build unless caught; `submitter` goes through `Util.fixEmptyAndTrim`; a Declarative stage asks for its `input` before its `when` unless `beforeInput true`). 2026-11-21, run `ptarmigan`. Every attempt is a case in `tests/test_jenkins_approvals.py`, with what the rule said before the slice and what it says now.
+
+**Result before the fixes:** 140 attempts (155 fixture files, some duplicates or invalid): 47 ways past, 9 false positives, 11 answers weaker than due, 6 over-cautious, 67 held. Before the slice the rule asked only whether some `input` step came before the first publish.
+
+| Class | Ways past and false positives | What changed |
+| --- | --- | --- |
+| The input's abort does not stop the publish | 7 ways past: `try { input } catch (e) {}`, `catchError`, `warnError`, `timeout` in a catch, the same in Declarative `script` blocks | An input counts only when its failure stops the build, as a check does for OBAAF-JEN-011 and 012; an input inside the same `catchError` or `try` block as the publish, before it, still counts |
+| The input may be skipped | 17 ways past: a `when` with `beforeInput true` or on the stage's `steps`, Scripted `if`, `else`, `switch`, loops that may run zero times (`for`, `.each`, `.times`), `&&`, `||` and `?:`, a `post { failure }` input, a method nothing calls, a closure never called | Every condition on the input must also guard the publish. Iteration methods, short-circuit operators and `?:` are now conditions in the model, as `for` was. Steps read where a closure or an uncalled method is written are marked and never count as an approval |
+| Parallel branches, order, second publishes | 10 ways past, 3 false positives: an input in a sibling parallel branch, only the first publish tested, a publish in `post { always \| aborted \| failure }` or a `catch` block, a closure assigned before and called after | Every publishing stage is tested. No input gates a publish in a failure path. A publish read only where its closure is written is "cannot tell" unless it is also read where it is called |
+| Submitter values | 10 ways past, 11 weaker: `''`, blank, `null`, `'\u0020'`, the Declarative `submitter ''` or `null`, a repeated key, a later spread, the group `authenticated` | Blank, empty and `null` are no submitter (a finding), trimmed as Java's `String.trim()` does; the last key wins; a spread or a map variable is "cannot tell"; a map given as the only argument is read; `authenticated` is a finding. The lexer now decodes `\uXXXX` in strings |
+| Spellings | 4 false positives: `input(m)`, `input([..])`, `input(*: m)`, a labelled statement | Read as above; a file part of which was not read gives "cannot tell" for a missing approval, not a finding |
+| Publishes the rule does not see | 3: a command in a variable, `gradlew jib`, `buildah push` | Not changed: publish detection is OBAAF-JEN-012's reader, left to 2d.2 |
+| Crashes and slow inputs | none; 2 false positives where a call was not expanded | "Cannot tell", as above |
+
+**Stated limits** (each a case in `LIMITS`): an input whose abort sets a flag that guards the publish does not count, nor one in a Scripted `finally` block, nor one inside `catchError(catchInterruptions: false)` (only the innermost catching block is recorded); all three fail closed, as a finding. A submitter or a map held in a variable, a method parameter or a concatenation of literals is "cannot tell". A shared-library step that might approve is not read; the file-wide note says so. Not verified on a live Jenkins: that `authenticated` lets every signed-in user respond, and that Groovy's last repeated key is the one the step receives.
+
+The reviewer did not re-attack the fixes; the slice's review passes did, and are in the pull request.

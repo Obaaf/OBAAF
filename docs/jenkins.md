@@ -110,6 +110,17 @@ followed by `||`, `&` or a pipe without `pipefail`; in a `#!` script without `-e
 `powershell` script when more commands follow it; in a parallel branch beside the publish; or under
 a `when` or `if` that does not also guard the publish.
 
+**An approval that stops a publish** (OBAAF-JEN-005, flagship slice 2d.2l). An `input` step, or a
+Declarative stage's `input`, counts for a publish on the same terms, with two differences: an input in
+the same `catchError` or `try` block as the publish, before it, still counts, because an abort skips the
+rest of the block; and a stage's `input` is asked before its `when` unless the `when` says `beforeInput
+true`. No input counts for a publish in `post { always }`, `aborted`, `failure` or another failure path,
+or in a `catch` or `finally` block. A blank, empty or `null` `submitter`, and the group `authenticated`,
+let any user who can build the job approve. Not read, and so not counted as an approval: an input whose
+abort sets a flag the publish tests, one in a `finally` block, one inside `catchError(catchInterruptions:
+false)`, and a shared-library step. A submitter held in a variable, a method parameter or a map
+variable is "cannot tell", and so is a missing approval when part of the file was not read.
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply

@@ -28,6 +28,18 @@ The wheel includes the templates used by `obaaf templates install`. Give it the 
 
 The adoption edit proof reads a file as the checker does: the baseline as JSON and the checker configuration as YAML, whether named `.json`, `.yml` or `.yaml` and through any link, and any other `.json` file as JSON. A file with another suffix is still withheld. It checks decoded strings and the exact spelling of numbers outside the proposed changes, and declines invalid JSON or a repeated object member. Other files continue to use the workflow YAML reader.
 
+### Jenkins: an approval must stop the publish
+
+Slice 2d.2l (issue #337); decision D-128. **OBAAF-JEN-005 now asks whether an `input` step really stops each publish until someone approves, so a Jenkinsfile that passed can get a new medium finding.**
+
+- **An input that does not stop the publish no longer counts**: one caught when aborted (`try`/`catch` without a rethrow, `catchError`, `warnError`, a caught `timeout`), one a condition may skip (`if`, `else`, `switch`, a loop, `.each`, `.times`, `&&`, `||`, `?:`, a `when` with `beforeInput true`, a `when` on a stage whose `steps` hold the input), one in a sibling parallel branch or a failure path, and one in a closure or method that may never run. An input in the same `catchError` or `try` block as the publish, before it, still counts. A Declarative stage's `input` is asked before its `when`, as Jenkins does.
+- **Every publishing stage is checked**, not only the first. A publish in `post { always }`, `aborted`, `failure` or another failure path, or in a `catch` or `finally` block, is never gated by an input.
+- **Submitter values as the plugin reads them**: blank, empty or `null` is no submitter (a finding; it was "cannot tell" or nothing), as are `'\u0020'` and the Declarative `submitter ''`; the group `authenticated` is a finding; a repeated key takes the last value; a map given as the only argument is read; a spread map or a map variable is "cannot tell" (it was a finding).
+- **"Cannot tell" instead of a finding** when part of the file was not read, or a publish is read only where its closure is written, not where it runs.
+- **The Jenkins lexer decodes `\uXXXX`** in strings (it read `u0020`), for every Jenkins rule.
+- **The model's conditions are wider for every Jenkins rule**: a step under `&&`, `||`, `?:` or in a closure given to `.each`, `.times` and other iteration methods may not run, as a step in a `for` loop already could not be relied on; a check there no longer counts for OBAAF-JEN-011 and 012.
+- Not changed: which steps publish (OBAAF-JEN-012's reader; a command held in a variable, `gradlew jib` and `buildah push` are not seen, left to slice 2d.2). The record is [bypass-attempts.md](docs/bypass-attempts.md#2d2l-release-approvals).
+
 ### Jenkins: which steps share a workspace
 
 Slice 2d.2j (issue #210); decision D-127. **OBAAF-JEN-003 now follows an AI agent's workspace across stages, so a Jenkinsfile that passed can get a new high or medium finding; OBAAF-JEN-002 and 006 can report settings they missed; OBAAF-JEN-007 can pass a stage it reported.** Every case is an inert test input in `tests/test_jenkins_workspaces.py`; [docs/jenkins.md](docs/jenkins.md) has the table and what the checker cannot decide.

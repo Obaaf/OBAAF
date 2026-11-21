@@ -111,6 +111,9 @@ class Ctx:
     dir: str = ""                 # the folder dir() moved into, relative to the workspace; "?" when computed
     ws: int = 0                   # the Workspace the step runs in (flagship slice 2d.2j); 0 when none is known
     repeats: tuple = ()           # retry and waitUntil blocks around the step, which may run it again (2d.2j)
+    # Flagship slice 2d.2l: the step is read where a closure or a method nothing calls is written, not where it
+    # runs (it may run later, elsewhere or never); the value says which closure or method.
+    deferred: str | None = None
 
 
 @dataclass
@@ -282,6 +285,46 @@ def named_arg(call: Call, key: str):
         if name == key:
             return value
     return None
+
+
+# Groovy methods that run their closure once per item, or not at all (flagship slice 2d.2l).
+ITERATING = {"each", "eachWithIndex", "reverseEach", "times", "upto", "downto", "step", "forEach", "collect",
+             "collectEntries", "collectMany", "findAll", "find", "findResult", "any", "every", "inject", "eachLine",
+             "eachFile", "eachFileRecurse", "eachDir"}
+
+
+def submitter_value(node) -> str | None:
+    """What an input's `submitter` says, as the Pipeline: Input Step plugin reads it (flagship slice 2d.2l):
+    None for no submitter, `null`, or blank text (its setter applies Util.fixEmptyAndTrim, so any user with
+    Build permission can respond); "?" when the file does not fix it; otherwise the text."""
+    if node is None or (isinstance(node, Name) and node.name == "null"):
+        return None
+    text = literal(node)
+    if text is None:
+        return "?"
+    return text if text.strip(JAVA_TRIM) else None
+
+
+# Java's String.trim(), which Util.fixEmptyAndTrim uses, removes the characters up to U+0020 and no others.
+JAVA_TRIM = "".join(chr(c) for c in range(0x21))
+
+
+def input_submitter(call: Call) -> str | None:
+    """The submitter an `input` step is given. Groovy keeps the last of a repeated key, a spread map (`*: m`)
+    may hold one, and a map given as the only argument is the named arguments (`input([submitter: 'x'])`)."""
+    entries = list(call.named)
+    if call.args:
+        if len(call.args) == 1 and isinstance(call.args[0], MapLit) and not call.named:
+            entries = [(k if isinstance(k, str) else literal(k), v) for k, v in call.args[0].entries]
+        elif not all(isinstance(a, Str) for a in call.args):
+            return "?"          # input(m): a map whose keys the file does not show here
+    value, seen = None, False
+    for key, node in entries:
+        if key == "*":
+            value, seen = "?", True       # a later key still overrides what the spread map holds
+        elif key == "submitter":
+            value, seen = submitter_value(node), True
+    return value if seen else None
 
 
 def literal(node) -> str | None:
@@ -1519,12 +1562,15 @@ class Builder:
             self.block(stmt.body, replace(self.context_ws(ctx, stmt.line, f"method {stmt.name}() at line {stmt.line}, "
                                                           "which nothing in this file calls"),
                                           in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line,
-                                          stage=ctx.stage + (f"{stmt.name}()",)))
+                                          stage=ctx.stage + (f"{stmt.name}()",),
+                                          deferred=f"method {stmt.name}() at line {stmt.line}, which nothing in "
+                                                   "this file calls"))
         elif isinstance(stmt, ClassDef):
             self.p.local_names.add(stmt.name)
             self.p.opaque.append((stmt.line, f"class {stmt.name}"))
             self.block(stmt.body, replace(self.context_ws(ctx, stmt.line, f"class {stmt.name} at line {stmt.line}"),
-                                          in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line))
+                                          in_function=stmt.name, cr=CR_UNKNOWN, cr_line=stmt.line,
+                                          deferred=f"class {stmt.name} at line {stmt.line}"))
         elif isinstance(stmt, Annotated):
             if stmt.annotation in ("Library", "groovy.lang.Library"):
                 self.annotation_libraries(stmt)
@@ -1631,9 +1677,9 @@ class Builder:
 
     def expr(self, node, ctx: Ctx) -> None:
         # Operator chains are walked iteratively: a long concatenation must not exhaust the stack.
-        stack = [node]
+        stack = [(node, ctx)]
         while stack:
-            n = stack.pop()
+            n, ctx = stack.pop()
             if isinstance(n, Call):
                 self.call(n, ctx)
             elif isinstance(n, Closure):
@@ -1641,21 +1687,25 @@ class Builder:
                 self.p.nonliteral_names.update(p for p in n.params if isinstance(p, str))
                 # Where a closure is written is not where it runs: outside a workspace it gets one of its own
                 # (flagship slice 2d.2j); where it is called it is walked again in the caller's.
-                self.block(n.body, self.context_ws(ctx, n.line, f"the closure at line {n.line}", "closure"))
+                self.block(n.body, replace(self.context_ws(ctx, n.line, f"the closure at line {n.line}", "closure"),
+                                           deferred=ctx.deferred or f"the closure at line {n.line}"))
             elif isinstance(n, ListLit):
-                stack += reversed(n.items)
+                stack += [(x, ctx) for x in reversed(n.items)]
             elif isinstance(n, MapLit):
-                stack += reversed([v for _, v in n.entries])
+                stack += [(v, ctx) for _, v in reversed(n.entries)]
             elif isinstance(n, Binary):
-                stack += [n.right, n.left]
+                # `a && b`, `a || b`, `a ?: b`: b may not be evaluated (flagship slice 2d.2l).
+                right = replace(ctx, guards=ctx.guards + (f"{n.op} {n.line}",)) if n.op in ("&&", "||", "?:") else ctx
+                stack += [(n.right, right), (n.left, ctx)]
             elif isinstance(n, Unary):
-                stack.append(n.operand)
+                stack.append((n.operand, ctx))
             elif isinstance(n, Ternary):
-                stack += [n.otherwise, n.then, n.cond]
+                branch = replace(ctx, guards=ctx.guards + (f"?: {n.line}",))
+                stack += [(n.otherwise, branch), (n.then, branch), (n.cond, ctx)]
             elif isinstance(n, Prop):
-                stack.append(n.target)
+                stack.append((n.target, ctx))
             elif isinstance(n, Index):
-                stack += [n.index, n.target]
+                stack += [(n.index, ctx), (n.target, ctx)]
 
     # -- calls ---------------------------------------------------------------------------
     def call(self, call: Call, ctx: Ctx) -> None:
@@ -1958,8 +2008,7 @@ class Builder:
         if name == "library":
             self.library_step(call)
         if name in ("input",):
-            sub = named_arg(call, "submitter")
-            self.p.approvals.append(Approval(None if sub is None else (literal(sub) or "?"), call.line, ctx))
+            self.p.approvals.append(Approval(input_submitter(call), call.line, ctx))
         if name == "withEnv":
             for arg in call.args:
                 for s in all_strings(arg):
@@ -1991,6 +2040,9 @@ class Builder:
                 inner = replace(inner, creds=inner.creds + tuple(new))
             if name in ("catchError", "warnError"):
                 inner = replace(inner, swallowed=f"{name} (line {call.line})")
+            if isinstance(call.callee, Prop) and call.callee.name in ITERATING:
+                # xs.each { }, n.times { }: a loop body may run zero times, as `for` (flagship slice 2d.2l).
+                inner = replace(inner, guards=inner.guards + (f"loop {call.line}",))
             if name in ("retry", "waitUntil"):
                 inner = replace(inner, repeats=inner.repeats + (f"{name} {call.line}",))
             if name == "withEnv":
@@ -2187,10 +2239,15 @@ class Builder:
                 if agent.kind != "none" or ctx.agent is None:
                     ctx = replace(ctx, agent=agent)
                 ctx = replace(ctx, ws=self.agent_ws(agent, ctx))
+        pre_when_guards = ctx.guards
+        before_input = False
         for w in secs.get("when", []):
             if w.closure is not None:
                 ctx = self.narrowed(ctx, when_block(w.closure, self.methods), w.line,
                                     "when " + _source_hint(w.closure))
+                before_input = before_input or any(
+                    isinstance(s, ExprStmt) and isinstance(s.expr, Call) and callee_name(s.expr) == "beforeInput"
+                    and path_of(first_arg(s.expr)) != "false" for s in w.closure.stmts)
         # A wrapper step in `options { }` wraps every step of the pipeline or stage: options { withAWS(...) }
         # binds its credentials for them (flagship slice 2d.2i).
         for opt in secs.get("options", []):
@@ -2204,17 +2261,18 @@ class Builder:
                     if oname == "retry":       # options { retry(3) } runs the whole stage again (2d.2j)
                         ctx = replace(ctx, repeats=ctx.repeats + (f"retry {e.line}",))
         for inp in secs.get("input", []):
-            sub = None
+            sub = input_submitter(inp)
             if inp.closure is not None:
                 for s in inp.closure.stmts:
                     e = s.expr if isinstance(s, ExprStmt) else None
                     if isinstance(e, Call) and callee_name(e) == "submitter":
-                        sub = literal(first_arg(e)) or "?"
-            for key, value in inp.named:
-                if key == "submitter":
-                    sub = literal(value) or "?"
-            self.p.approvals.append(Approval(sub, inp.line, ctx))
-            self.record_step("input", inp, ctx)
+                        # `submitter null` or `submitter ''` is no submitter; `submitter` alone is not read.
+                        sub = submitter_value(first_arg(e)) if e.args else "?"
+            # Without `beforeInput true` the stage asks for input before its `when` is evaluated, so the
+            # question is asked whatever the condition says (flagship slice 2d.2l).
+            asked = ctx if before_input else replace(ctx, guards=pre_when_guards)
+            self.p.approvals.append(Approval(sub, inp.line, asked))
+            self.record_step("input", inp, asked)
         return ctx
 
     def agent(self, call: Call) -> Agent | None:

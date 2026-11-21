@@ -25,8 +25,8 @@ import yaml
 from obaaf.catalog import Catalog
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
-    COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline,
-    StepUse,
+    COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
+    Pipeline, StepUse,
     chain_name, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
     untrusted_source,
 )
@@ -1765,25 +1765,75 @@ class JenkinsRules:
                          "credentials; whether that permission is restricted is controller configuration")
 
     # ------------------------------------------------------------------ JEN-005
+    def approval_gates(self, check: Info, target: Info) -> bool:
+        """Whether an input step stops `target` until someone approves (flagship slice 2d.2l): it runs before
+        it on every path that reaches it, and an abort stops the build or skips the target. As `gates`, except
+        that an input in the same catchError or try block as the target, before it, still skips it when
+        aborted; and an input read where a closure or an uncalled method is written does not count."""
+        if check.ctx.deferred or check.index >= target.index or target.ctx.post in FAILURE_PATHS:
+            return False      # a publish in a failure path runs when the input is aborted
+        if check.swallowed and not (check.swallowed == check.ctx.swallowed == target.ctx.swallowed):
+            return False
+        return (check.ctx.post not in FAILURE_PATHS and not concurrent(check.ctx, target.ctx)
+                and set(check.ctx.guards) <= set(target.ctx.guards))
+
     def approvals(self) -> None:
         publishes = [i for i in self.infos if i.publish]
         if publishes or self.p.approvals:
             self.applicable.add("OBAAF-JEN-005")
         for approval in self.p.approvals:
+            names = [n.strip(JAVA_TRIM) for n in (approval.submitter or "").split(",")]
             if approval.submitter is None:
                 self.add("OBAAF-JEN-005", approval.line,
-                         f"The input step at line {approval.line} sets no submitter, so any user with Build permission "
-                         "on the job can approve it, including the person who started the build.",
-                         approval.ctx.stage, severity="medium")
+                         f"The input step at line {approval.line} sets no submitter (or a blank one), so any user "
+                         "with Build permission on the job can approve it, including the person who started the "
+                         "build.", approval.ctx.stage, severity="medium")
             elif approval.submitter == "?":
                 self.unknown("OBAAF-JEN-005", approval.line, "the input step's submitter list is computed at run time")
-        if publishes:
-            first = publishes[0]
-            gates = [i for i in self.infos if i.use.name == "input" and i.index < first.index]
-            if not gates:
-                self.add("OBAAF-JEN-005", first.line,
-                         f"Stage '{stage_label(first.ctx.stage)}' publishes ({first.publish}) with no input step before "
-                         "it, so no person approves the release in the pipeline.", first.ctx.stage,
+            elif any(n.casefold() == "authenticated" for n in names):
+                self.add("OBAAF-JEN-005", approval.line,
+                         f"The input step at line {approval.line} names the group 'authenticated' as a submitter, "
+                         "which every signed-in user is in, so the person who started the build can approve it.",
+                         approval.ctx.stage, severity="medium")
+        inputs = [i for i in self.infos if i.use.name == "input"]
+        # A step the checker could not read, or a call it did not expand, may hold the input.
+        incomplete = bool(self.p.opaque)
+        reported: set = set()
+        for target in publishes:
+            if target.ctx.stage in reported or any(self.approval_gates(i, target) for i in inputs):
+                continue
+            label = stage_label(target.ctx.stage)
+            if target.ctx.deferred:
+                # Read where the closure or method is written; where it runs (after an input or not) is not read.
+                if not any(t.use.call is target.use.call and not t.ctx.deferred for t in publishes):
+                    self.unknown("OBAAF-JEN-005", target.line,
+                                 f"the publish at line {target.line} is in {target.ctx.deferred}; whether an input "
+                                 "step stops it until someone approves depends on where that code runs")
+                continue
+            if target.ctx.post in FAILURE_PATHS:
+                where = "a catch or finally block" if target.ctx.post == "catch/finally" else \
+                    f"a post {{ {target.ctx.post} }} block"
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) in {where}, which runs when an approval "
+                         "is aborted or a step fails, so no input step stops it.", target.ctx.stage,
+                         severity="medium")
+            elif incomplete:
+                self.unknown("OBAAF-JEN-005", target.line,
+                             f"the publish at line {target.line} has no input step before it that the checker "
+                             "read, but part of the file was not read, and it may hold one")
+            elif [i for i in inputs if i.index < target.index]:
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) and no input step stops it on every path: "
+                         "each input before it is caught when aborted, may be skipped by a condition, runs in "
+                         "another parallel branch or a failure path, or is in code that may not run there.",
+                         target.ctx.stage, severity="medium")
+            else:
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) with no input step before "
+                         "it, so no person approves the release in the pipeline.", target.ctx.stage,
                          severity="medium")
         if self.p.approvals:
             self.unknown("OBAAF-JEN-005", self.p.approvals[0].line,
