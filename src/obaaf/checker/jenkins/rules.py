@@ -27,11 +27,12 @@ from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
     COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
     KEY_SEP, Pipeline, StepUse, guard_key, shown,
-    chain_name, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
+    chain_name, children, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
     untrusted_source,
 )
 from obaaf.checker.jenkins.parser import (
-    Assign, Binary, Call, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop, Str,
+    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop,
+    Str,
     callee_name, path_of,
 )
 from obaaf.checker.rules import Finding
@@ -83,8 +84,6 @@ UNREAD = object()      # an argument a spread map (`*: m`) may set
 # A condition on the build's parameters alone, as a condition's label shows it: `if params.RELEASE`, with `!`,
 # digits, true or false. A word that could be a string or a variable makes the condition one that may change.
 PARAMS_ONLY_GUARD = re.compile(r"if(?: (?:!|params\.\w+|\d+|true|false))+")
-# Writes to the script's binding or properties, which can set a variable by a name the file computes.
-BINDING_WRITE = re.compile(r"\bbinding\b|\bsetVariable\b|\bsetProperty\b|\bthis\s*\[|\bgetBinding\b")
 SELECTOR_POSITIONAL = {"specific": "buildNumber", "permalink": "id"}   # a selector's one unnamed argument
 
 
@@ -3126,7 +3125,7 @@ class JenkinsRules:
             if len(call.args) == 1 and not call.named and not isinstance(call.args[0], (MapLit, Str)):
                 # copyArtifacts(args): a variable given one map and nothing else is that map; anything else
                 # (`base + [...]`, a call) may hold any argument
-                value = self._single_value(call.args[0].name) if isinstance(call.args[0], Name) else None
+                value = self._single_value(call.args[0].name, call.args[0]) if isinstance(call.args[0], Name) else None
                 if isinstance(value, MapLit):
                     call = Call(callee=call.callee, args=[value], line=call.line)
                 else:
@@ -3134,7 +3133,7 @@ class JenkinsRules:
             out.append(self._copy_reference(call_entries(call, "projectName")))
         elif last == "step":
             if len(call.args) == 1 and isinstance(call.args[0], Name) and not call.named:
-                value = self._single_value(call.args[0].name)
+                value = self._single_value(call.args[0].name, call.args[0])
                 if isinstance(value, MapLit):
                     call = Call(callee=call.callee, args=[value], line=call.line)
             entries = call_entries(call, None)
@@ -3149,28 +3148,33 @@ class JenkinsRules:
             out.append(("unknown", "a copy called through invokeMethod"))
         urls = []
         if info.shell:
-            urls.append(self._expanded(info.script).replace("'", "").replace('"', ""))
+            urls += [text.replace("'", "").replace('"', "") for text in self._expanded(info.script, call)]
         elif last == "httpRequest":
             target = step_arg(call, "url") or first_arg(call)
             if isinstance(target, Name):
-                target = self._single_value(target.name)
-            urls.append(self._expanded(text_or_expr(target)))
+                target = self._single_value(target.name, target)
+            urls += self._expanded(text_or_expr(target), call)
         for text in urls:
-            out += artifact_urls(text or "")
+            for found in artifact_urls(text or ""):
+                if found not in out:
+                    out.append(found)
         return out
 
-    def _expanded(self, text: str) -> str:
-        """`text` with `$NAME`, `${NAME}` and `${env.NAME}` replaced by the literal value the file's `environment`
-        gives NAME, so a URL kept there is read where it is used."""
+    def _expanded(self, text: str, read) -> list[str]:
+        """`text`, and `text` with `$NAME`, `${NAME}` and `${env.NAME}` replaced by the literal value the file's
+        `environment` or a variable it declares gives NAME, so a URL kept there is read where it is used. Both are
+        read and what either shows counts: the shell or a `withEnv` may set NAME to something else, so a value put in
+        never takes away what the text alone shows (from the slice's third review)."""
         if "$" not in text:
-            return text
+            return [text]
         def value(m) -> str:
             name = m.group(1) or m.group(2)
             node = self.p.env_values.get(name)
             if node is None:
-                node = self._single_value(name)
+                node = self._single_value(name, read)
             return node.text() if isinstance(node, Str) else m.group(0)
-        return re.sub(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", value, text)
+        expanded = re.sub(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", value, text)
+        return [text] if expanded == text else [text, expanded]
 
     def _copy_reference(self, entries: dict) -> tuple[str, str]:
         """What a copy's projectName and selector fix (flagship slice 2d.2m)."""
@@ -3196,7 +3200,7 @@ class JenkinsRules:
         (`lastSuccessful()`), a map with `$class` (`[$class: 'StatusBuildSelector']`), or a variable that is given
         one of them and nothing else."""
         if isinstance(node, Name):
-            node = self._single_value(node.name)
+            node = self._single_value(node.name, node)
         symbol, entries = None, {}
         if isinstance(node, Call):
             # A plugin symbol only when called by its bare name and the file defines nothing by that name
@@ -3252,37 +3256,61 @@ class JenkinsRules:
                 f"{path_of(node.callee.target)}.number"
         if ref and "." in ref:
             var, _, attr = ref.partition(".")
-            value = self._single_value(var) if attr in ("number", "getNumber()") else None
+            value = self._single_value(var, node) if attr in ("number", "getNumber()") else None
             if isinstance(value, Call) and isinstance(value.callee, Name) and value.callee.name == "build" \
                     and "build" not in self.p.local_names:
                 return ("fixed", f"the number of the build it started ({ref})")
         return ("unknown", "specific() with a build number computed at run time")
 
-    def _single_value(self, name: str):
-        """The one value the file gives a variable, or None (flagship slice 2d.2m, from its two reviews): the file
-        must declare the name once, with a value, and name it in exactly one other place, the read; anything else
-        (a second assignment, a change through a property, index or method, an alias, an argument, a parameter or
-        loop variable of the same name, a use inside an interpolated string or a comment) may give it another value
-        where the step runs, and so does any write to the script's binding or properties (`binding.x =`,
-        `setVariable`, `setProperty`, `this[...] =`), which may name it in a computed way."""
+    def _single_value(self, name: str, read):
+        """The one value the file gives a variable where `read` reads it, or None (flagship slice 2d.2m, from its
+        three reviews): the file must declare the name once, with a value, in a block that encloses the read with
+        no method or class between them (anything else is a property of the script, which a getter, a binding
+        write or `propertyMissing` can give another value), before the read, and name it in exactly one other
+        place, the read (a second assignment, a change through a property, index or method, an alias, an argument,
+        a parameter or loop variable of the same name, or a use inside an interpolated string may change it)."""
         table = self.__dict__.get("_values_cache")
         if table is None:
             table = self._values_cache = self._value_table()
-        return table.get(name)
+        decls, parents = table
+        found = decls.get(name)
+        if found is None or read is None:
+            return None
+        decl, value = found
+        block = parents.get(id(decl))
+        if block is None or getattr(read, "line", 0) < decl.line:
+            return None
+        node = parents.get(id(read))
+        while node is not None:
+            if node is block:
+                return value
+            if isinstance(node, (MethodDef, ClassDef)):
+                return None
+            node = parents.get(id(node))
+        return None
 
-    def _value_table(self) -> dict:
-        tree, source = self.p.tree, self.p.source
-        if tree is None or BINDING_WRITE.search(source or ""):
-            return {}
+    def _value_table(self) -> tuple[dict, dict]:
+        tree = self.p.tree
+        if tree is None:
+            return {}, {}
         decls: dict[str, list] = {}
         uses: dict[str, int] = {}
+        parents: dict[int, object] = {}
 
         def use(name: str, times: int = 1) -> None:
             uses[name] = uses.get(name, 0) + times
 
-        for n in find_nodes(tree, lambda n: True):
+        stack = [tree]
+        seen = 0
+        while stack and seen < 2_000_000:
+            n = stack.pop()
+            seen += 1
+            for child in children(n):
+                if child is not None and not isinstance(child, (str, int, float, bool)):
+                    parents[id(child)] = n
+                    stack.append(child)
             if isinstance(n, Decl):
-                decls.setdefault(n.name, []).append(n.value)
+                decls.setdefault(n.name, []).append(n)
             elif isinstance(n, (Name, Prop)):
                 use(n.name)
             elif isinstance(n, Str) and n.interpolated:
@@ -3293,8 +3321,11 @@ class JenkinsRules:
             if isinstance(params, list):
                 for param in params:
                     use(param if isinstance(param, str) else str(getattr(param, "name", "")))
-        return {name: values[0] for name, values in decls.items()
-                if len(values) == 1 and values[0] is not None and uses.get(name, 0) == 1}
+        if stack:
+            return {}, {}
+        table = {name: (nodes[0], nodes[0].value) for name, nodes in decls.items()
+                 if len(nodes) == 1 and nodes[0].value is not None and uses.get(name, 0) == 1}
+        return table, parents
 
     def _unread_copy_names(self, named: set) -> int | None:
         """The line of the first place the file names copyArtifacts (or the CopyArtifact class) other than a copy

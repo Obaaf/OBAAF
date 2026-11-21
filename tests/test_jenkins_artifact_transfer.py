@@ -285,7 +285,7 @@ REVIEW_CASES = [
      "node {\n  def m = [projectName: 'a', selector: specific('42')]\n  m << [selector: lastSuccessful()]\n  copyArtifacts(m)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R14_selector_param_shadow', 'unknown', 'unknown',
      "def fetch(sel) {\n  copyArtifacts(projectName: 'a', selector: sel)\n}\nnode {\n  def sel = specific('42')\n  fetch(lastSuccessful())\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
-    ('R15_selector_binding_setVariable', 'unknown', 'unknown',
+    ('R15_selector_binding_setVariable', 'quiet', 'unknown',
      "node {\n  def sel = specific('42')\n  binding.setVariable('sel', lastSuccessful())\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R16_selector_this_assign', 'unknown', 'unknown',
      "node {\n  def sel = specific('42')\n  this.sel = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
@@ -357,7 +357,7 @@ REVIEW2_CASES = [
      'node {\n  def m = [projectName: \'a\', selector: specific(\'1\')]\n  echo "${m.put(\'selector\', lastSuccessful())}"\n  copyArtifacts(m)\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
     ('R2_06_binding_property', 'unknown', 'unknown',
      "def other() { def sel = specific('42') }\nnode {\n  binding.sel = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
-    ('R2_07_this_index', 'unknown', 'unknown',
+    ('R2_07_this_index', 'quiet', 'unknown',
      "node {\n  def sel = specific('42')\n  this['sel'] = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R2_08_copy_condition_changes', 'finding-high', 'quiet',
      "node {\n  if (!fileExists('app.jar')) { copyArtifacts(projectName: 'a') }\n  if (!fileExists('app.jar')) { sh 'obaaf verify release --policy p --artifacts app.jar' }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
@@ -375,6 +375,27 @@ REVIEW2_CASES = [
      "node {\n  if (params.RELEASE) {\n    copyArtifacts(projectName: 'a')\n    sh 'obaaf verify release --policy p --artifacts app.jar'\n  }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
     ('R2_15_step_map_variable_not_a_copy', 'quiet', 'quiet',
      "node {\n  def pub = [$class: 'JUnitResultArchiver', testResults: 'r.xml']\n  step(pub)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+]
+
+# The third review's attempts, on 957f17d, with what the parent 651cb4e said. A local variable the file declares
+# in an enclosing block wins over the script's binding and properties, so R15 and R2_07 are quiet.
+REVIEW3_CASES = [
+    ('R3_01_decl_not_enclosing_getter', 'unknown', 'unknown',
+     "def unused() { def sel = specific('42') }\ndef getSel() { lastSuccessful() }\nnode {\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R3_02_property_write_through_alias', 'unknown', 'unknown',
+     "def unused() { def sel = specific('42') }\nnode {\n  def s = this\n  s['sel'] = lastSuccessful()\n  copyArtifacts(projectName: 'a', selector: sel)\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R3_03_build_getter', 'unknown', 'quiet',
+     'def unused() { def b = build(job: \'a\') }\ndef getB() { [number: \'lastSuccessfulBuild\'] }\nnode {\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R3_04_top_level_decl_not_seen_in_method', 'unknown', 'unknown',
+     "def sel = specific('42')\ndef fetch() { copyArtifacts(projectName: 'a', selector: sel) }\nnode {\n  fetch()\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R3_05_shell_assigns_over_groovy_value', 'unknown', 'quiet',
+     "node {\n  def REF = '42'\n  sh 'REF=lastSuccessfulBuild; curl -fO https://ci/job/b/$REF/artifact/app.jar'\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
+    ('R3_06_withEnv_over_environment', 'unknown', 'quiet',
+     "pipeline {\n  agent any\n  environment { REF = '42' }\n  stages {\n    stage('r') {\n      steps {\n        withEnv(['REF=lastSuccessfulBuild']) { sh 'curl -fO https://ci/job/b/$REF/artifact/app.jar' }\n        sh 'curl -T app.jar https://repo.example/upload'\n      }\n    }\n  }\n}\n"),
+    ('R3_07_comment_binding_keeps_build_number', 'quiet', 'quiet',
+     '// binding of the release\nnode {\n  def b = build job: \'a\'\n  copyArtifacts(projectName: \'a\', selector: specific("${b.number}"))\n  sh \'curl -T app.jar https://repo.example/upload\'\n}\n'),
+    ('R3_08_local_wins_in_with_closure', 'quiet', 'unknown',
+     "node {\n  def sel = specific('42')\n  [x: 1].with { copyArtifacts(projectName: 'a', selector: sel) }\n  sh 'curl -T app.jar https://repo.example/upload'\n}\n"),
 ]
 
 # The answers that are a stated limit rather than what the file decides, with the reason (docs/bypass-attempts.md).
@@ -419,17 +440,17 @@ def verdict(text: str) -> str:
 
 class ArtifactTransferBypassTest(unittest.TestCase):
     def test_every_attempt(self):
-        for name, expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES:
+        for name, expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES + REVIEW3_CASES:
             with self.subTest(case=name):
                 self.assertEqual(verdict(text), expected)
 
     def test_limits_name_real_cases(self):
-        names = {c[0] for c in CASES + REVIEW_CASES + REVIEW2_CASES}
+        names = {c[0] for c in CASES + REVIEW_CASES + REVIEW2_CASES + REVIEW3_CASES}
         self.assertLessEqual(set(LIMITS), names)
 
     def test_no_attempt_is_slow(self):
         # Before the slice, 744 bytes of nested helpers took 11.7 seconds in this rule alone.
-        for name, _expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES:
+        for name, _expected, _before, text in CASES + REVIEW_CASES + REVIEW2_CASES + REVIEW3_CASES:
             started = time.monotonic()
             verdict(text)
             with self.subTest(case=name):
