@@ -213,6 +213,22 @@ class Pipeline:
     script_vars: set = field(default_factory=set)       # variables and parameters given `this` or `steps`
     literal_values: dict = field(default_factory=dict)  # name -> every literal assigned to it, environment included
     workspaces: dict = field(default_factory=dict)      # id -> Workspace (flagship slice 2d.2j)
+    # Flagship slice 2d.2, OBAAF-JEN-009: parameters that cannot carry text (booleanParam, choice); names whose
+    # value comes from outside the file (name -> why); names that stand for `env` or `params`; the methods the
+    # file defines, so a call's result can be read; a value assigned to an environment variable whose name is
+    # computed ((source, severity)); a closure parameter that takes each name of a literal list.
+    safe_params: set = field(default_factory=set)
+    caller_values: dict = field(default_factory=dict)
+    env_aliases: set = field(default_factory=set)
+    param_aliases: set = field(default_factory=set)
+    method_defs: dict = field(default_factory=dict)
+    env_any: tuple | None = None
+    key_lists: dict = field(default_factory=dict)
+    webhook_unread: int | None = None                   # line of a GenericTrigger whose variables are not read
+    shell_aliases: dict = field(default_factory=dict)   # def run = this.&sh: run -> sh
+    uncalled_methods: set = field(default_factory=set)  # methods of the file that nothing in it calls
+    shadowed: set = field(default_factory=set)          # env or params declared by the file itself
+    closure_params: dict = field(default_factory=dict)  # def run = { x -> ... }: run -> [x]
 
 
 # ----------------------------------------------------------------------- helpers
@@ -500,6 +516,74 @@ def git_text(script: str) -> bool:
                 _GIT_SAFE_PLACEHOLDERS.sub("", spec).count("%"):
             return True
     return False
+
+
+# Flagship slice 2d.2 (OBAAF-JEN-009): what a git command run with `returnStdout: true` prints. Commit text and the
+# names of changed files are written by a change's author; branch and tag names by people with write access.
+_GIT_CMD = re.compile(_GIT_PREFIX + r"([\w-]+)")
+_GIT_ANY_FORMAT = re.compile(r"--(?:format|pretty)(?:[= ](?:(['\"])(.*?)\1|(\S+)))?")
+_GIT_REF_TEXT = re.compile(r"%\((?:subject|body|contents|trailers|(?:author|committer|tagger)(?:name|email))")
+_GIT_SAFE_DATES = re.compile(r"%(?:cr|ar|cD|aD|cR|aR|ch|ah|cs|as|ct|at|cd|ad|ci|ai|cI|aI|H|h|T|t|P|p|n|%)")
+_GIT_NAMES = re.compile(r"--name-only|--name-status|--stat\b|--numstat")
+_GIT_BRANCH_CMDS = re.compile(r"rev-parse\s+(?:.*\s)?--abbrev-ref|rev-parse\s+(?:.*\s)?--symbolic-full-name|"
+                              r"branch\s+(?:.*\s)?--show-current|describe\b|symbolic-ref\b|name-rev\b|"
+                              r"tag\s+(?:.*\s)?(?:--points-at|--contains|-l|--list)|branch\s+(?:-r|-a|--remote)")
+
+
+def _format_has_text(spec: str) -> bool:
+    if "$" in spec:                      # a format held in a variable: what it prints is not fixed
+        return True
+    spec = re.sub(r"^(t?format:)", "", spec)
+    if spec in ("oneline", "short", "medium", "full", "fuller", "reference", "email", "raw", "mboxrd"):
+        return True
+    return bool(_GIT_REF_TEXT.search(spec)) or _GIT_SAFE_DATES.sub("", spec).count("%") > 0
+
+
+def git_output(script: str):
+    """(shown, severity, root) for what a script's git commands print, or None for hashes, dates and counts.
+    Every git command on every line is read (a `%%` is `%`, as a batch file writes it)."""
+    found = []
+    text = script.replace("%%", "%")
+    for line in text.splitlines():
+        for m in _GIT_CMD.finditer(line):
+            cmd = m.group(1)
+            rest = line[m.end():]
+            nxt = re.search(r"(?:&&|\|\||[;|&])", rest)
+            args = rest[:nxt.start()] if nxt else rest
+            formats = [f.group(2) if f.group(1) else (f.group(3) or "") for f in _GIT_ANY_FORMAT.finditer(args)]
+            if cmd in ("log", "show", "whatchanged", "reflog") or (cmd == "cat-file" and re.search(
+                    r"(?:^|\s)(?:-p|commit|tag)\b", args)):
+                if _GIT_NAMES.search(args) or not formats or any(_format_has_text(f) for f in formats):
+                    found.append(("git commit text", "high"))
+            elif cmd == "rev-list" and formats and any(_format_has_text(f) for f in formats):
+                found.append(("git commit text", "high"))
+            elif cmd in ("for-each-ref", "branch", "tag") and formats and any(
+                    _GIT_REF_TEXT.search(f) or "$" in f for f in formats):
+                found.append(("git commit text", "high"))
+            elif cmd in ("diff", "diff-tree", "diff-index", "ls-files", "ls-tree", "status") and (
+                    _GIT_NAMES.search(args) or cmd in ("ls-files", "ls-tree", "status")):
+                found.append(("names of changed files from git", "high"))
+            elif _GIT_BRANCH_CMDS.match(cmd + " " + args.strip()) or (
+                    cmd in ("for-each-ref", "branch", "tag") and not formats):
+                found.append(("a branch or tag name from git", "low"))
+    if not found:
+        return None
+    rank = {"low": 1, "medium": 2, "high": 3}
+    best = max(found, key=lambda f: rank[f[1]])
+    return (best[0], best[1], best[0])
+
+
+def _truthy_node(node) -> bool:
+    """Whether a step argument may be true: anything but a missing argument or a literal false (2d.2)."""
+    if node is None:
+        return False
+    text = path_of(node) or (node.text().strip().lower() if isinstance(node, Str) and not node.interpolated
+                             else None)
+    return text not in ("false", "null", "")
+
+
+_PARAM_KINDS = {"string", "text", "password", "booleanParam", "choice", "file", "stashedFile", "base64File", "run",
+                "credentials"}
 
 
 _CHANGE_VARS = re.compile(r"\b(?:env\.)?(?:CHANGE_(?:ID|TARGET|BRANCH|TITLE|AUTHOR\w*|URL|FORK)|gitlabMergeRequest\w*|"
@@ -1536,8 +1620,15 @@ class Builder:
                 self.defs.setdefault(target.name, []).append(target)
                 if not target.params:
                     self.methods[target.name] = target.body
+        self.p.method_defs = self.defs
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
+        self.p.uncalled_methods = {n for n in self.defs if n not in self.called}
+        # `env` or `params` declared by the file (a parameter, a closure's parameter or a variable) is not the
+        # build's (flagship slice 2d.2); assigning `env.X = ...` declares nothing.
+        for n in find_nodes(tree, lambda n: isinstance(n, (Decl, MethodDef, Closure, Block))):
+            names = [n.name] if isinstance(n, Decl) else [x for x in getattr(n, "params", ()) if isinstance(x, str)]
+            self.p.shadowed.update(x for x in names if x in ("env", "params"))
         # Every name the file declares anywhere, before the walk: a method's or closure's parameter, a variable, an
         # assigned name, a loop variable (flagship slice 2d.2l, from its fourth review: names collected while
         # walking missed methods defined below their use and closure parameters).
@@ -1571,6 +1662,22 @@ class Builder:
         self.p.kind = "declarative" if declarative else "scripted"
         # Triggers decide who can start the whole pipeline, wherever they are declared (a triggers {}
         # directive or properties([pipelineTriggers([...])])), so read them before walking.
+        # Build parameters, wherever declared (a parameters {} directive or properties([parameters([...])])):
+        # string, text and password parameters carry text; a booleanParam or a choice cannot (flagship slice 2d.2).
+        texty: set = set()
+        safe: set = set()
+        for c in find_nodes(tree, lambda n: isinstance(n, Call) and callee_name(n) == "parameters"):
+            for d in find_nodes(c, lambda n: isinstance(n, Call) and callee_name(n) in _PARAM_KINDS):
+                pname = literal(named_arg(d, "name"))
+                if pname:
+                    (safe if callee_name(d) in ("booleanParam", "choice") else texty).add(pname)
+        self.p.string_params.update(texty)
+        self.p.safe_params.update(safe - texty)
+        self.list_decls = {}
+        for n in find_nodes(tree, lambda n: isinstance(n, (Decl, Assign))):
+            name = n.name if isinstance(n, Decl) else path_of(n.target)
+            if name and isinstance(n.value, ListLit):
+                self.list_decls.setdefault(name, []).append(n.value)
         for node in _trigger_nodes(tree):
             self.trigger(node)
         start = Ctx(cr=CR_YES) if any(t.change_requests for t in self.p.triggers) else Ctx()
@@ -1597,16 +1704,42 @@ class Builder:
                                           literal(arg("causeString")))))
             for key, source in (("genericVariables", "payload"), ("genericRequestVariables", "request parameter"),
                                 ("genericHeaderVariables", "request header")):
-                for item in _list_items(arg(key)):
+                given = arg(key)
+                if isinstance(given, Name):
+                    # The list held in a variable assigned once (flagship slice 2d.2); anything else is not read.
+                    found = self.list_decls.get(given.name, [])
+                    given = found[0] if len(found) == 1 else None
+                    if given is None:
+                        self.p.webhook_unread = node.line
+                elif given is not None and not isinstance(given, ListLit):
+                    self.p.webhook_unread = node.line
+                for item in _list_items(given):
                     var = literal(_entry(item, "key"))
                     path = literal(_entry(item, "value")) or ""
                     if not var:
+                        if isinstance(item, (MapLit, Call)):
+                            self.p.webhook_unread = node.line
                         continue
                     text += " " + path
-                    words = re.search(r"title|description|body|message|comment|text|name|label|branch|ref|subject|"
-                                      r"display", path, re.I)
-                    severity = "high" if source == "payload" and words else "medium"
-                    self.p.tainted[var] = (f"webhook {source} {path or var}".strip(), severity)
+                    # A payload value is text anyone who can send the hook chose, unless the path ends in a field
+                    # that is a number, a count or an identifier (flagship slice 2d.2: `$` and `$.pull_request`,
+                    # which hold the title, were medium, and `$.pull_request.comments`, a count, was high).
+                    last = re.split(r"[.\[\]]+", path.strip("$.[] "))[-1] if path.strip("$.[] ") else ""
+                    numeric = re.search(r"(^|_)(id|number|count|size|sha|comments|commits|additions|deletions|"
+                                        r"changed_files|review_comments)$|_at$", last, re.I)
+                    severity = "medium" if source != "payload" or numeric else "high"
+                    shown = f"webhook {source} {path or var}".strip()
+                    names = {var, var + "_0"}
+                    if source == "request header":
+                        # Header variables reach the build lower-cased (the plugin's page shows `headerwithnumber`
+                        # for a header variable `headerWithNumber`); other characters as `_` is assumed.
+                        folded = var.lower()
+                        names |= {folded, folded + "_0", re.sub(r"[^a-z0-9_]", "_", folded),
+                                  re.sub(r"[^a-z0-9_]", "_", folded) + "_0"}
+                    for n in names:
+                        current = self.p.tainted.get(n)
+                        if current is None or _RANK[severity] > _RANK[current[1]]:
+                            self.p.tainted[n] = (shown, severity)
             change_requests = bool(re.search(r"pull|merge_request|mergeRequest|\bpr\b|pr:|changes", text, re.I))
         elif name in ("ghprbTrigger", "githubPullRequests", "GhprbTrigger", "bitbucketPR"):
             change_requests = True
@@ -1668,10 +1801,20 @@ class Builder:
                 self.p.import_aliases[words[words.index("as") + 1]] = target
             return
         if isinstance(stmt, ExprStmt):
+            e = stmt.expr
+            if isinstance(e, Binary) and e.op == "<<" and path_of(e.left):
+                self.track_value(path_of(e.left), e.right, merge=True)    # sb << value (2d.2)
             self.expr(stmt.expr, ctx)
         elif isinstance(stmt, Decl):
             self.p.local_names.add(stmt.name)
             if stmt.value is not None:
+                if "," in stmt.name:
+                    # def (a, b) = [x, y]: each name takes its element, or any of them (flagship slice 2d.2).
+                    names = [n.strip() for n in stmt.name.split(",")]
+                    items = stmt.value.items if isinstance(stmt.value, ListLit) else []
+                    for i, n in enumerate(names):
+                        self.p.local_names.add(n)
+                        self.track_value(n, items[i] if i < len(items) else stmt.value)
                 self.track_value(stmt.name, stmt.value)
                 self.expr(stmt.value, ctx)
         elif isinstance(stmt, Assign):
@@ -1690,13 +1833,32 @@ class Builder:
                     if "." not in attr:
                         self.closure_maps.setdefault(base, {})[attr] = stmt.value.body
                 if path_of(stmt.target):
-                    self.track_value(target.removeprefix("env."), stmt.value)
+                    plain = target
+                    for prefix in ("this.", "binding.", "script."):
+                        if plain.startswith(prefix) and "." not in plain[len(prefix):]:
+                            plain = plain[len(prefix):]          # this.T = x: T holds it (2d.2)
+                    if plain.startswith("env.") and "${" in plain:
+                        self.taint_env_any(stmt.value)           # env."${n}" = x
+                    else:
+                        self.track_value(plain.removeprefix("env."), stmt.value)
+                    if target.endswith(".delegate") and target.split(".")[0] in (
+                            self.p.method_params | set(self.p.caller_values)) and path_of(stmt.value):
+                        # body.delegate = config; body(): the caller's closure fills config (a vars/ step).
+                        self.p.caller_values.setdefault(path_of(stmt.value),
+                                                        "a map the caller's closure fills, outside this file")
                     for prefix in ("this.", "binding."):
                         if target.startswith(prefix) and "." not in target[len(prefix):]:
                             self.p.nonliteral_names.add(target[len(prefix):])
                 elif isinstance(stmt.target, Index) and path_of(stmt.target.target) in ("binding", "this") and \
                         literal(stmt.target.index) is not None:
                     self.p.nonliteral_names.add(literal(stmt.target.index))   # binding['code'] = ...
+                elif isinstance(stmt.target, Index) and path_of(stmt.target.target) in {"env", "this.env"} | \
+                        self.p.env_aliases:
+                    key = literal(stmt.target.index)
+                    if key is not None:
+                        self.track_value(key, stmt.value)          # env['T'] = x (2d.2)
+                    else:
+                        self.taint_env_any(stmt.value)
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
@@ -1730,6 +1892,7 @@ class Builder:
                 elif isinstance(h, Binary) and h.op == "in" and isinstance(h.left, Name):
                     self.p.local_names.add(h.left.name)
                     self.p.nonliteral_names.add(h.left.name)
+                    self.bind_each([h.left.name], h.right)           # for (x in values) (2d.2)
                 self.expr(h, ctx)
             # A loop body may run zero times: it is conditional.
             loop = f"loop {stmt.line}{KEY_SEP}loop {self.site(ctx, stmt)}"
@@ -1833,6 +1996,7 @@ class Builder:
             self.closure_maps.pop(name, None)
             if isinstance(value, Closure):
                 self.closure_vars[name] = value.body
+                self.p.closure_params[name] = [x for x in value.params if isinstance(x, str)] or ["it"]
             elif isinstance(value, Prop) and isinstance(value.target, Name) and value.target.name == "this" and \
                     value.name in self.defs:
                 self.method_refs[name] = value.name        # this.&build (the parser reads `.&` as `.`)
@@ -1865,22 +2029,73 @@ class Builder:
                 self.p.groovy_shells.add(name)
             if cname.split(".")[-1] in ("getEngineByName", "getEngineByExtension", "getEngineByMimeType"):
                 self.p.groovy_shells.add(name)          # a JSR-223 engine: engine.eval(...) compiles text
-        # def msg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim(): the output is text
-        # the commit's author wrote.
-        base = value
-        while isinstance(base, Call) and isinstance(base.callee, Prop) and isinstance(base.callee.target, Call):
-            base = base.callee.target
-        if isinstance(base, Call) and callee_name(base) in SHELL_STEPS:
-            script = shell_script(base)
-            text = script.text() if isinstance(script, Str) else ""
-            if git_text(text):
-                self.p.tainted[name] = ("git commit text", "high")
-                return
-        source = untrusted_source(source_texts(value), self.p)
-        if source:
-            current = self.p.tainted.get(name)
-            if current is None or _RANK[source[1]] >= _RANK[current[1]]:
-                self.p.tainted[name] = source
+        # What text the value can carry, read from its structure (flagship slice 2d.2): a variable is tainted with
+        # the root source, so a chain of copies reads `u (from CHANGE_TITLE)`. The output of a git command run with
+        # returnStdout is commit text, file names or branch names (values.Judge.shell_output).
+        from obaaf.checker.jenkins.values import Judge
+        if not merge:
+            self.p.shell_aliases.pop(name, None)
+            arms = [value.then, value.otherwise] if isinstance(value, Ternary) else [value]
+            pointed = [a.name for a in arms if isinstance(a, Prop) and isinstance(a.target, Name) and
+                       a.target.name in ("this", "steps") and a.name in SHELL_STEPS]
+            if pointed and len(pointed) == len(arms):
+                self.p.shell_aliases[name] = pointed[0]       # def run = this.&sh (the parser reads .& as .)
+                self.p.shell_aliases[name + ".call"] = pointed[0]
+        judge = Judge(self.p)
+        kind = judge.root_kind(value)
+        if kind == "env" and not merge:
+            self.p.env_aliases.add(name)                 # def e = env; "${e.CHANGE_TITLE}"
+        elif kind == "params" and not merge:
+            self.p.param_aliases.add(name)               # def p = params
+        if kind is not None:
+            return
+        self.taint(name, judge.value(value))
+
+    def taint(self, name: str, found) -> None:
+        """Record that `name` can hold what `found` (a values.Judge result) says: a source and its severity, or a
+        value from outside the file ("cannot tell")."""
+        if not found or not name:
+            return
+        _shown, severity, root = found
+        if severity == "unknown":
+            if name not in self.p.tainted:
+                self.p.caller_values.setdefault(name, root)
+            return
+        current = self.p.tainted.get(name)
+        if current is None or _RANK[severity] >= _RANK[current[1]]:
+            self.p.tainted[name] = (root, severity)
+
+    def taint_env_any(self, value) -> None:
+        """A value assigned to an environment variable whose name the file computes: any `env.X` may hold it."""
+        from obaaf.checker.jenkins.values import Judge, worst
+        found = Judge(self.p).value(value)
+        if found and found[1] != "unknown":
+            current = (self.p.env_any[0], self.p.env_any[1], self.p.env_any[0]) if self.p.env_any else None
+            best = worst(current, found)
+            self.p.env_any = (best[2], best[1])
+
+    def bind_each(self, names: list, receiver) -> None:
+        """A closure given to an iteration method, or a for-in loop, gets the receiver's elements in its parameters
+        (flagship slice 2d.2: `[env.CHANGE_TITLE].each { t -> sh "echo ${t}" }` was quiet)."""
+        from obaaf.checker.jenkins.values import Judge
+        judge = Judge(self.p)
+        kind = judge.root_kind(receiver)
+        if kind is not None:
+            found = ("params", "medium", "params") if kind == "params" else (
+                "every environment variable", "high", "every environment variable")
+        else:
+            found = judge.value(receiver)
+        if isinstance(receiver, Name) and receiver.name in self.p.lists:
+            receiver = self.p.lists[receiver.name]
+        keys = None
+        if isinstance(receiver, ListLit) and receiver.items and all(literal(x) is not None for x in receiver.items):
+            keys = [literal(x) for x in receiver.items]
+        for n in names:
+            if not isinstance(n, str):
+                continue
+            if keys is not None:
+                self.p.key_lists[n] = keys
+            self.taint(n, found)
 
     def expr(self, node, ctx: Ctx) -> None:
         # Operator chains are walked iteratively: a long concatenation must not exhaust the stack.
@@ -1926,6 +2141,13 @@ class Builder:
             if name.startswith(prefix) and "." not in name[len(prefix):]:
                 name = name[len(prefix):]
                 break
+        # def s = this; s.sh "...": a variable holding the script is the script (flagship slice 2d.2).
+        head, _, rest = name.partition(".")
+        if rest in SHELL_STEPS and head in self.p.script_vars:
+            name = rest
+        if name in self.p.shell_aliases:
+            name = self.p.shell_aliases[name]             # def run = this.&sh; run "..." (2d.2)
+        self.values_flow(call)
         if name.startswith("this.") and name.endswith(".call") and name[5:-5] in self.defs:
             name = name[5:-5]             # this.&build.call(): the parser reads `.&` as `.`
         # Groovy the file does not hold, run through any receiver (flagship slice 2d.2k). Recorded here,
@@ -2222,6 +2444,18 @@ class Builder:
             self.p.approvals.append(Approval(input_submitter(call), call.line, ctx))
         if name == "withEnv":
             for arg in call.args:
+                # withEnv(["T=" + value]): an entry built with + (flagship slice 2d.2).
+                entries = arg.items if isinstance(arg, ListLit) else []
+                for item in entries:
+                    if isinstance(item, Binary) and item.op == "+":
+                        leftmost = item
+                        while isinstance(leftmost, Binary) and leftmost.op == "+":
+                            leftmost = leftmost.left
+                        head_text = leftmost.text() if isinstance(leftmost, Str) else ""
+                        var, eq, _ = head_text.partition("=")
+                        if eq and var.strip():
+                            self.p.nonliteral_names.add(var.strip())
+                            self.track_value(var.strip(), item)
                 for s in all_strings(arg):
                     var, eq, _ = s.text().partition("=")
                     if eq:
@@ -2290,6 +2524,53 @@ class Builder:
             return replace(node, left=self._lists_in(node.left, depth + 1), right=self._lists_in(node.right, depth + 1))
         return node
 
+    _MUTATORS = {"append", "add", "addAll", "put", "putAll", "push", "leftShift", "offer", "addFirst", "addLast",
+                 "insert", "set", "putAt", "plus", "concat"}
+    _SETTERS = {"binding.setVariable", "binding.setProperty", "setProperty", "this.setProperty", "setVariable",
+                "env.setProperty", "env.put", "env.putAt", "this.binding.setVariable"}
+
+    def values_flow(self, call: Call) -> None:
+        """Where a call moves a value for OBAAF-JEN-009 (flagship slice 2d.2): an iteration method's closure gets
+        the receiver's elements; `sb.append(x)`, `list.add(x)` and `map.put(k, x)` put x in the receiver;
+        `env.setProperty('T', x)` and `binding.setVariable('T', x)` set T."""
+        callee = call.callee
+        closure_params = None
+        if call.closure is not None:
+            closure_params = list(call.closure.params) or ["it"]
+        elif call.args and isinstance(call.args[-1], Closure):
+            closure_params = [p for p in call.args[-1].params if isinstance(p, str)] or ["it"]
+        if isinstance(callee, Prop):
+            from obaaf.checker.jenkins.values import ITERATORS
+            if closure_params is not None and callee.name in ITERATORS:
+                self.bind_each(closure_params, callee.target)
+            target = path_of(callee.target)
+            full = path_of(callee) or ""
+            if full in self._SETTERS or (callee.name in ("setProperty", "put", "putAt") and target in
+                                         self.p.env_aliases):
+                if len(call.args) >= 2:
+                    key = literal(call.args[0])
+                    if key is not None:
+                        self.track_value(key, call.args[1])
+                    elif full.startswith("env.") or target in self.p.env_aliases:
+                        self.taint_env_any(call.args[1])
+                return
+            if callee.name == "call" and target in self.p.closure_params:
+                for i, n in enumerate(self.p.closure_params[target]):
+                    if i < len(call.args):
+                        self.track_value(n, call.args[i])
+            if callee.name in self._MUTATORS and target and call.args and target not in ("env", "params"):
+                self.track_value(target, ListLit(list(call.args), line=call.line), merge=True)
+        elif isinstance(callee, Name) and callee.name in self.p.closure_params:
+            # run(value) for def run = { x -> ... }: the closure's parameters take the arguments (2d.2).
+            names = self.p.closure_params[callee.name]
+            for i, n in enumerate(names):
+                if i < len(call.args):
+                    self.track_value(n, call.args[i])
+        elif isinstance(callee, Name) and callee.name in ("setProperty", "setVariable") and len(call.args) >= 2:
+            key = literal(call.args[0])
+            if key is not None:
+                self.track_value(key, call.args[1])
+
     def inline(self, name: str, call: Call, ctx: Ctx) -> None:
         """Walk a method of this file where it is called, so its steps get the caller's stage,
         credentials, post condition and conditions. Arguments flow into the parameters."""
@@ -2309,6 +2590,14 @@ class Builder:
         # A trailing closure is the last argument, so it binds to the last parameter: a parameter before it with
         # a default value takes the default (flagship slice 2d.2l: `def withTimeout(int m = 60, Closure body)`).
         pairs = list(zip(mdef.params, call.args))
+        if call.named and mdef.params:
+            # notify(title: x): Groovy passes the named arguments as a map in the first parameter (2d.2).
+            named_map = MapLit([(k, v) for k, v in call.named], line=call.line)
+            pairs = [(mdef.params[0], named_map)] + list(zip(mdef.params[1:], call.args))
+        if len(call.args) > len(mdef.params) >= 1 and call.closure is None:
+            # run('a', x): the last parameter of `def run(String... xs)` takes the rest (2d.2).
+            rest = ListLit(list(call.args[len(mdef.params) - 1:]), line=call.line)
+            pairs = list(zip(mdef.params[:-1], call.args)) + [(mdef.params[-1], rest)]
         if call.closure is not None and mdef.params:
             closure = Closure([], call.closure, line=call.line)
             if len(call.args) < len(mdef.params):
@@ -2617,7 +2906,17 @@ UNTRUSTED = {
     "ghprbSourceBranch": "high", "ghprbCommentBody": "high", "ghprbActualCommitAuthor": "high",
     "ghprbTriggerAuthor": "high", "ghprbPullAuthorLoginMention": "low", "ghprbPullAuthorLogin": "low",
     "ghprbTargetBranch": "low",
+    # Flagship slice 2d.2: the comment that triggered a GitLab build; ghprb's e-mail addresses; and the
+    # Bitbucket Push and Pull Request plugin's variables, read from its README's table on 2026-11-22.
+    "gitlabTriggerPhrase": "high", "ghprbPullAuthorEmail": "medium", "ghprbActualCommitAuthorEmail": "medium",
+    "ghprbTriggerAuthorEmail": "medium", "ghprbTriggerAuthorLogin": "low", "ghprbTriggerAuthorLoginMention": "low",
+    "BITBUCKET_PULL_REQUEST_TITLE": "high", "BITBUCKET_PULL_REQUEST_DESCRIPTION": "high",
+    "BITBUCKET_SOURCE_BRANCH": "high", "BITBUCKET_PULL_REQUEST_COMMENT_TEXT": "high", "BITBUCKET_PAYLOAD": "high",
+    "BITBUCKET_ACTOR": "low", "BITBUCKET_TARGET_BRANCH": "low",
 }
+# Jenkins reads environment variables without regard to case (hudson.EnvVars), so `env.change_title` is
+# CHANGE_TITLE (flagship slice 2d.2). Bare names in Groovy keep their case.
+UNTRUSTED_FOLDED = {k.lower(): (k, v) for k, v in UNTRUSTED.items()}
 _RANK = {"low": 1, "medium": 2, "high": 3}
 _UNTRUSTED_RE = re.compile(r"(?<![\w.])(?:env\s*\.\s*|env\s*\[\s*['\"])?("
                            + "|".join(sorted(UNTRUSTED, key=len, reverse=True)) + r")\b")

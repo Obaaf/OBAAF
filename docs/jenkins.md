@@ -221,11 +221,44 @@ credential bound where a change request can reach it is available to the change'
 take the Jenkinsfile itself from the target branch for untrusted changes, but the workspace, the
 build scripts and the tests are still the change's own.
 
-**Untrusted values.** Groovy interpolation (`"${...}"`), concatenation or `String.format` of a
-change request's title, source branch or author name; build parameters; branch and tag names; GitLab
-and GitHub Pull Request Builder variables; values a webhook trigger reads from the request; and
-commit text read with `git log` or `git show`. They are followed through variables, `env['X']`,
-`env.getProperty('X')`, method calls such as `.trim()`, `?:`, maps, lists and method parameters.
+**Untrusted values** (OBAAF-JEN-009; flagship slice 2d.2). Text others control, built into a command or into
+Groovy code before it runs: a change request's title, source branch or author name; build parameters (a
+`booleanParam` or `choice` cannot carry text and is not counted); branch and tag names; GitLab, GitHub Pull
+Request Builder and Bitbucket Push and Pull Request variables; values a webhook trigger reads (header variables
+also under their lower-case names); pipeline-github's `pullRequest` fields; `currentBuild.changeSets` and build
+causes; an `input` step's answer; and what `git log`, `git show`, `git cat-file -p`, `git rev-list --format`,
+`git for-each-ref --format=%(subject)` print (commit text), `git diff --name-only` and `git status` (file names)
+and `git rev-parse --abbrev-ref` or `git describe` (branch names, low), run with `returnStdout`.
+
+Each value is read from its structure, not by searching its text for names. `env` is read through aliases
+(`def e = env`, `this.env`, `env.getEnvironment()`, `System.getenv`), `?.`, comments and any letter case (Jenkins
+reads environment names without regard to case); `env[n]` and `env."${n}"` through a variable that only holds a
+literal, and a computed name is cannot tell. A value is followed through variables, `def (a, b) = [...]`,
+`env.X = ...`, `env['X'] = ...`, `env.setProperty`, `binding.setVariable`, `this.X = ...`, `withEnv` entries
+(written with `+` too), `sb << x`, `.append`, `.add` and `.put`, a closure's or a `for` loop's parameter over the
+value (`each`, `collect`, `with` and other iteration methods), a closure held in a variable and called, what a
+method of the file returns, named arguments into a `Map` parameter and varargs. A result that is a number, a
+boolean or a digest (`.length()`, `.toInteger()`, `as Integer`, `==`, `.contains()`, `.encodeBase64()`), a
+ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za-z0-9._-]', '')` whitelist carry
+no text. A value from a caller outside the file (a parameter of a method nothing here calls, a local copy of one,
+the map a `vars/` step's closure fills through `body.delegate`) is cannot tell. What the reader does not follow
+(past a budget per value) it reads by the names in its text, as before.
+
+The sinks are `sh`, `bat`, `powershell` and `pwsh` (also as `steps.sh`, through a variable holding `this`, a
+pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%`, which cmd expands before it parses the line
+(so `bat 'echo %CHANGE_TITLE%'` is not the safe form it is in `sh`), the Docker Pipeline plugin's
+`docker.build`, `image.run`, `withRun`, `push`, `tag` and `pull`, which it runs through a shell step, and
+`inside(args)`, whose args become `docker run` options; Publish Over SSH's `execCommand` and SSH Steps' `command`;
+`"...".execute()`; `load`, `evaluate`, `Eval.me`, a `GroovyShell` or script engine and Job DSL's `scriptText`
+(high); and parameters passed to another job with `build` (medium), in a list held in a variable, in the
+`[$class: 'StringParameterValue', ...]` form or built from `params`.
+
+Not read (each is a test case with its reason in `tests/test_jenkins_injection.py`): taint is kept by name for the
+whole file and never cleared, so a name reused elsewhere, or reassigned to a constant, is still reported; keys of
+one map are not told apart; a check of the value before it is used (`==~`, `when { branch ... }`, an `if`, the
+webhook's `regexpFilter`) is not read; quoting done in Groovy is not recognised; the contents of workspace files
+(`readFile`, `readJSON`, the output of commands other than git) are not counted as untrusted; text written with
+`writeFile` and run later is not followed; a computed step name and `invokeMethod` make the file cannot tell.
 
 **AI agents.** An agent CLI in a shell step (the patterns in `src/obaaf/data/detection.yaml`), a
 repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and commands declared

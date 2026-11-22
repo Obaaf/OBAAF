@@ -65,11 +65,29 @@ _ORDINARY_RUN = re.compile(r"[^\\$\n]*")
 _UNICODE_ESCAPE = re.compile(r"u*([0-9a-fA-F]{4})")
 
 
+_SOURCE_UNICODE_ESCAPE = re.compile(r"(\\+)(u+)([0-9a-fA-F]{4})")
+
+
+def translate_unicode_escapes(text: str) -> str:
+    """The source as Groovy 2.4, which Jenkins runs, reads it: before lexing, its UnicodeEscapingReader turns
+    every `\\uXXXX` (and `\\uuXXXX`) preceded by an even number of other backslashes into the character it
+    names, so `"\\u0024{env.CHANGE_TITLE}"` is an interpolation (flagship slice 2d.2, OBAAF-JEN-009)."""
+    if "\\u" not in text:
+        return text
+
+    def one(m: re.Match) -> str:
+        slashes = m.group(1)
+        if len(slashes) % 2 == 0:
+            return m.group(0)
+        return slashes[:-1] + chr(int(m.group(3), 16))
+    return _SOURCE_UNICODE_ESCAPE.sub(one, text)
+
+
 class Lexer:
     def __init__(self, text: str, deadline: float | None = None):
         if len(text.encode("utf-8", errors="replace")) > MAX_BYTES:
             raise LimitExceeded(f"file exceeds {MAX_BYTES} bytes", 1, 1)
-        self.src = text
+        self.src = translate_unicode_escapes(text)
         self.pos = 0
         self.line = 1
         self.col = 1
@@ -292,6 +310,17 @@ class Lexer:
                 if self.pos >= len(src):
                     raise LexError("unterminated ${...} in a string", start_line, start_col)
                 ch = src[self.pos]
+                # A comment inside ${...} is skipped as Groovy skips it: its braces do not count (2d.2).
+                if src.startswith("/*", self.pos):
+                    end = src.find("*/", self.pos + 2)
+                    if end == -1:
+                        raise LexError("unterminated comment in ${...}", start_line, start_col)
+                    self._advance(end + 2 - self.pos)
+                    continue
+                if src.startswith("//", self.pos):
+                    end = src.find("\n", self.pos)
+                    self._advance((len(src) if end == -1 else end) - self.pos)
+                    continue
                 if src.startswith("'''", self.pos) or src.startswith('"""', self.pos):
                     q = src[self.pos:self.pos + 3]
                     self._advance(3)

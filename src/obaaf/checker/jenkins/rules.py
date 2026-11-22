@@ -1314,7 +1314,11 @@ class JenkinsRules:
             # A call the file does not define and the checker does not know: most likely a shared-library
             # step, whose code is not in this file. Method calls on a step's result (sh(...).trim()) and
             # on local variables are not steps.
-            receiver_is_call = isinstance(call.callee, Prop) and isinstance(call.callee.target, Call)
+            receiver_is_call = isinstance(call.callee, Prop) and (
+                isinstance(call.callee.target, Call) or (
+                    # 'a,b'.split(','), "x".take(20): a method of a literal is not a step (flagship slice 2d.2);
+                    # .execute() starts a process and stays unknown code for the other rules.
+                    isinstance(call.callee.target, (Str, Num, ListLit, MapLit)) and call.callee.name != "execute"))
             base = name.split(".")[0]
             if name and not receiver_is_call and not name.startswith("new ") and name not in known.KNOWN_STEPS \
                     and base not in defined and base not in known.KNOWN_OBJECTS and name not in self.agent_steps \
@@ -3066,48 +3070,192 @@ class JenkinsRules:
 
     # ------------------------------------------------------------------ JEN-009
     def injection(self) -> None:
+        """Untrusted text built into a command or into Groovy code before it runs (flagship slice 2d.2). Each value
+        is read from its structure by values.Judge: through `env` and `params` aliases, case-insensitive environment
+        names, closure and loop parameters, method results, mutated builders and maps; a result that is a number, a
+        boolean or a whitelisted rewrite carries no text. Before 2d.2 the rule searched the interpolation's text for
+        names, so `def e = env` then `${e.CHANGE_TITLE}` passed and `${env.CHANGE_TITLE.length()}` was high."""
+        from obaaf.checker.jenkins.values import Judge, worst
+        memo: dict = {}
+        current: list = [frozenset()]
+
+        def judged(node):
+            if node is None:
+                return None
+            key = (id(node), current[0])
+            hit = memo.get(key)
+            if hit is not None and hit[0] is node:
+                return hit[1]
+            found = Judge(self.p, function_params=set(current[0])).value(node)
+            memo[key] = (node, found)
+            return found
+
+        def params_of(ctx) -> frozenset:
+            # A value from outside the file is a parameter of the uncalled method the step is in, and only there.
+            fn = ctx.in_function
+            if fn in self.p.uncalled_methods:
+                return frozenset(p for d in self.p.method_defs.get(fn, []) for p in d.params if isinstance(p, str))
+            return frozenset()
+
+        def caller_reason(found, what: str) -> str:
+            if found[2] == "a value passed in by a method's caller outside this file":
+                return f"{what} uses a value passed in by a method's caller outside this file"
+            return f"{what} uses {found[0]}, {found[2]}"
+
+        if self.p.webhook_unread is not None and any(i.shell for i in self.infos):
+            self.applicable.add("OBAAF-JEN-009")
+            self.unknown("OBAAF-JEN-009", self.p.webhook_unread,
+                         "the webhook trigger's variables are given in a form the checker does not read, so which "
+                         "names carry the payload cannot be told")
+        loads_seen = set()
         for info in self.infos:
             name = info.use.name
+            call = info.use.call
+            current[0] = params_of(info.ctx)
             if info.shell:
                 self.applicable.add("OBAAF-JEN-009")
-                source = untrusted_source(info.exprs, self.p)
-                if source:
+                script = shell_script(call)
+                if script is None:
+                    spread = named_arg(call, "*")
+                    script = spread if spread is not None else None
+                found = judged(script)
+                if found and found[1] != "unknown":
                     self.add("OBAAF-JEN-009", info.line,
                              f"The {name} step in stage '{stage_label(info.ctx.stage)}' builds its script with Groovy "
-                             f"interpolation of {source[0]}. The value becomes part of the command before the shell "
-                             "runs, so it can run commands of its own.", info.ctx.stage, severity=source[1])
-                elif any(e.split(".")[0] in self.p.method_params for e in info.exprs if e):
-                    # A method nothing in this file calls: its callers, and what they pass, are elsewhere.
-                    self.unknown("OBAAF-JEN-009", info.line,
-                                 f"the {name} step at line {info.line} uses a value passed in by a method's caller "
-                                 "outside this file")
+                             f"interpolation of {found[0]}. The value becomes part of the command before the shell "
+                             "runs, so it can run commands of its own.", info.ctx.stage, severity=found[1])
+                elif found:
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"the {name} step at line {info.line}"))
+                if name.rsplit(".", 1)[-1] == "bat":
+                    self._bat_percent(info, script)
             elif name in ("load", "evaluate"):
-                arg = first_arg(info.use.call)
-                source = untrusted_source(source_texts(arg), self.p) if arg is not None else None
-                if source:
+                loads_seen.add((name, info.line))
+                arg = first_arg(call)
+                found = judged(arg)
+                if found and found[1] != "unknown":
                     self.add("OBAAF-JEN-009", info.line,
                              f"{name} at line {info.line} takes Groovy {('code' if name == 'evaluate' else 'from a path')} "
-                             f"built from {source[0]}.", info.ctx.stage, severity="high")
+                             f"built from {found[0]}.", info.ctx.stage, severity="high")
+                elif found:
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"{name} at line {info.line}"))
             elif info.trigger:
                 self.applicable.add("OBAAF-JEN-009")
-                params = named_arg(info.use.call, "parameters")
-                exprs = []
-                for item in (params.items if isinstance(params, ListLit) else []):
+                params = named_arg(call, "parameters")
+                if isinstance(params, Name) and params.name in self.p.lists:
+                    params = self.p.lists[params.name]
+                items = params.items if isinstance(params, ListLit) else ([params] if params is not None else [])
+                results = []
+                for item in items:
                     # Booleans and choices cannot carry commands; string, text and run parameters can.
                     if isinstance(item, Call) and chain_name(item.callee) in ("booleanParam", "choice"):
                         continue
-                    for st in _strings(item):
-                        exprs += st.exprs
-                    for node in _values(item):
-                        p = path_of(node)
-                        if p:
-                            exprs.append(p)
-                source = untrusted_source(exprs, self.p)
-                if source and source[1] != "low":
+                    if isinstance(item, MapLit) and any(
+                            k == "$class" and (literal(v) or "").split(".")[-1] in (
+                                "BooleanParameterValue", "ChoiceParameterValue") for k, v in item.entries):
+                        continue
+                    results.append(judged(item))
+                found = worst(*results)
+                if found and found[1] not in ("low", "unknown"):
                     job = f"Job '{info.trigger}'" if info.trigger != "a computed job name" else "A job with a computed name"
                     self.add("OBAAF-JEN-009", info.line,
-                             f"{job} is started with a parameter taken from {source[0]}. Check that the job treats it "
+                             f"{job} is started with a parameter taken from {found[0]}. Check that the job treats it "
                              "as data, never as part of a command.", info.ctx.stage, severity="medium")
+                elif found and found[1] == "unknown":
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"the build step at line {info.line}"))
+            else:
+                self._docker_and_remote(info, judged, caller_reason)
+        # Groovy compiled at run time by other means (Eval.me, a GroovyShell, a script engine, Job DSL): the code is
+        # the value (flagship slice 2d.2; before, only `load` and `evaluate` by those names were read).
+        for kind, cname, ccall, ctx, _certain in self.p.code_loads:
+            current[0] = params_of(ctx)
+            bare = cname.rsplit(".", 1)[-1]
+            if (cname in ("load", "evaluate") and (cname, ccall.line) in loads_seen) or "(a pointer)" in cname:
+                continue
+            arg = named_arg(ccall, "scriptText") if kind == "jobDsl" else first_arg(ccall)
+            if kind == "jobDsl" and arg is None:
+                continue
+            found = judged(arg)
+            if found and found[1] != "unknown":
+                self.applicable.add("OBAAF-JEN-009")
+                self.add("OBAAF-JEN-009", ccall.line,
+                         f"{cname} at line {ccall.line} compiles Groovy built from {found[0]}, which runs on the "
+                         "controller with the pipeline's rights.", ctx.stage, severity="high")
+            elif found:
+                self.unknown("OBAAF-JEN-009", ccall.line, caller_reason(found, f"{bare} at line {ccall.line}"))
+
+    _DOCKER_SHELL = {"build", "run", "withRun", "push", "tag", "pull"}
+
+    def _docker_and_remote(self, info, judged, caller_reason) -> None:
+        """The Docker Pipeline plugin runs `docker build`, `docker run`, `docker push`, `docker tag` and `docker pull`
+        through a shell step with the image name and arguments in the command line; `inside(args)` passes args as
+        `docker run` options. Publish Over SSH's `execCommand` and SSH Steps' `command` run in a remote shell."""
+        from obaaf.checker.jenkins.values import worst
+        name = info.use.name
+        call = info.use.call
+        parts = name.split(".")
+        method = parts[-1]
+        values = []
+        what = None
+        if (parts[0] == "docker" or parts[0] in self.p.docker_vars) and len(parts) > 1 and (
+                method in self._DOCKER_SHELL or method == "inside"):
+            if name == "docker.image" or (name == "docker.build" and False):
+                return
+            values += [judged(a) for a in call.args] + [judged(v) for _, v in call.named]
+            inner = call.callee.target if isinstance(call.callee, Prop) else None
+            if isinstance(inner, Call) and chain_name(inner.callee) in ("docker.image", "docker.build"):
+                values += [judged(a) for a in inner.args]
+            elif isinstance(inner, Name):
+                values.append(judged(inner))
+            if name in ("docker.image", "docker.withRegistry", "docker.withServer", "docker.withTool"):
+                return
+            what = ("as docker run options, so it can add options of its own (a host mount, --privileged)"
+                    if method == "inside" else "to a docker command the Docker Pipeline plugin runs through a shell "
+                    "step, so it can run commands of its own")
+        elif method == "execute" and isinstance(call.callee, Prop) and not call.args:
+            # "...".execute(): Groovy starts the process on the controller, splitting the text into words.
+            values.append(judged(call.callee.target))
+            what = "to a process the controller starts (String.execute()), so it can run commands of its own"
+        elif name in ("sshTransfer", "sshCommand", "sshScript"):
+            key = "execCommand" if name == "sshTransfer" else "command" if name == "sshCommand" else "script"
+            values.append(judged(named_arg(call, key)))
+            what = "to a command run in a shell on a remote host, so it can run commands of its own"
+        else:
+            return
+        found = worst(*values)
+        if found is None:
+            if what is not None:
+                self.applicable.add("OBAAF-JEN-009")
+            return
+        self.applicable.add("OBAAF-JEN-009")
+        if found[1] == "unknown":
+            self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"{name} at line {info.line}"))
+            return
+        self.add("OBAAF-JEN-009", info.line, f"{name} at line {info.line} passes {found[0]} {what}.",
+                 info.ctx.stage, severity=found[1])
+
+    _BAT_VAR = re.compile(r"%([A-Za-z_][\w.-]*)%")
+
+    def _bat_percent(self, info, script) -> None:
+        """cmd expands `%NAME%` before it parses the line, so `bat 'echo %CHANGE_TITLE%'`, the form that is safe in
+        sh, runs whatever the title holds (flagship slice 2d.2)."""
+        from obaaf.checker.jenkins.model import UNTRUSTED_FOLDED
+        if not isinstance(script, Str):
+            return
+        for m in self._BAT_VAR.finditer(script.text()):
+            var = m.group(1)
+            hit = UNTRUSTED_FOLDED.get(var.lower())
+            found = (hit[0], hit[1]) if hit else None
+            if found is None and var in self.p.tainted:
+                root, sev = self.p.tainted[var]
+                found = (var if var == root else f"{var} (from {root})", sev)
+            if found is None and var in self.p.string_params and var not in self.p.safe_params:
+                found = (f"parameter {var}", "medium")
+            if found:
+                self.add("OBAAF-JEN-009", info.line,
+                         f"The bat step in stage '{stage_label(info.ctx.stage)}' expands %{var}% ({found[0]}): cmd "
+                         "puts the value into the line before it parses it, so it can run commands of its own.",
+                         info.ctx.stage, severity=found[1])
+                return
 
     # ------------------------------------------------------------------ JEN-010
     def artifact_transfer(self) -> None:
