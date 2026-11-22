@@ -83,6 +83,16 @@ def parse_expr(text: str):
             node = None
     except Exception:              # noqa: BLE001 -- any failure falls back to reading the names in the text
         node = None
+    if node is None:
+        # Command syntax, as in `${tool 'M3'}` and `${tool name: 'jdk17', type: 'jdk'}`: read as a statement.
+        try:
+            from obaaf.checker.jenkins.parser import parse
+            result = parse(body)
+            stmts = result.tree.stmts if result.tree is not None and not result.problems else []
+            if len(stmts) == 1 and isinstance(stmts[0], ExprStmt):
+                node = stmts[0].expr
+        except Exception:          # noqa: BLE001
+            node = None
     if len(_EXPR_CACHE) > 20000:
         _EXPR_CACHE.clear()
     _EXPR_CACHE[text] = node
@@ -457,13 +467,15 @@ class Judge:
     def method_result(self, name: str, call: Call, scope: dict):
         """What a method of this file returns, with its parameters given what the call passes."""
         if name in self.stack:
-            self.recursed = True                         # a method calling itself: the cycle adds nothing new
-            return None
+            # A method calling itself: the recursive call can return what it is given (the third review of 2d.2).
+            self.recursed = True
+            return worst(*(self.value(a, scope) for a in call.args), *(self.value(v, scope) for _, v in call.named))
         if len(self.stack) > 12:
             from obaaf.checker.jenkins import model as m
-            # Past twelve methods deep the result is not followed: the names in the call's text, else cannot tell.
-            return self.by_text(m.source_texts(call)) or (
-                f"the result of {name}()", "unknown", "a chain of methods deeper than the checker follows")
+            # Past twelve methods deep the result is not followed: the names in the call's text, and cannot tell.
+            self.cut = True
+            return worst(self.by_text(m.source_texts(call)),
+                         (f"the result of {name}()", "unknown", "a chain of methods deeper than the checker follows"))
         defs = self.p.method_defs.get(name) or []
         if not defs:
             return None
@@ -505,13 +517,21 @@ class Judge:
         """The state a method's result can depend on: what is recorded for every word its body and the methods it
         calls contain, and the sizes of the pipeline's other records."""
         p = self.p
-        words = _method_words(p, name)
+        words = set(_method_words(p, name))
+        # A literal held in a word can be a key the method reads (`env[k]` with k = 'T'); a key stored with a dot
+        # (`m.t = x`) is read through its first part (the third review of slice 2d.2).
+        for w in list(words):
+            words.update(p.literal_values.get(w, ()))
+        dotted = [k for k in p.tainted if "." in k and k.split(".")[0] in words]
+        words.update(dotted)
+        self.budget -= len(words)
+        p.judge_budget -= len(words)
         state = []
         for w in words:
             entry = (p.tainted.get(w), p.caller_values.get(w), w in p.env_aliases, w in p.param_aliases,
                      w in p.script_vars, w in p.string_params, w in p.safe_params, w in p.method_params,
                      w in p.nonliteral_names, tuple(sorted(p.literal_values.get(w, ()))),
-                     tuple(p.key_lists.get(w, ())))
+                     tuple(p.key_lists.get(w, ())), w in p.local_names)
             if any(entry):
                 state.append((w, entry))
         return tuple(sorted(state, key=lambda x: x[0])), p.env_any

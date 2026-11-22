@@ -231,7 +231,7 @@ class Pipeline:
     # values.Judge's cache of method results and the total work it may do for one file (flagship slice 2d.2).
     judge_cache: dict = field(default_factory=dict)
     judge_words: dict = field(default_factory=dict)
-    judge_budget: int = 1_000_000
+    judge_budget: int = 300_000
     taint_version: int = 0
     # Names set in the environment by the file (env.X =, env['X'] =, withEnv, environment {}, webhook variables):
     # what bat's %NAME% expands (flagship slice 2d.2).

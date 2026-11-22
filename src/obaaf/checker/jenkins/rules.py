@@ -3238,26 +3238,38 @@ class JenkinsRules:
         self.add("OBAAF-JEN-009", info.line, f"{name} at line {info.line} passes {found[0]} {what}.",
                  info.ctx.stage, severity=found[1])
 
-    _BAT_NAME = re.compile(r"([A-Za-z_][\w.-]*)(?::[^%\n]*)?%")
-
-    @classmethod
-    def _bat_vars(cls, text: str):
-        """The names cmd expands in a batch file's text: %NAME%, %NAME:~0,5% and %NAME:a=b%, read left to right, so
-        `%A%%B%` is two; `%%` is a literal percent sign (so `%%NAME%%` prints the name)."""
+    @staticmethod
+    def _bat_vars(text: str):
+        """The names cmd expands in a batch file's text, read as cmd reads them: from each `%` to the next on the line
+        (so `%A%%B%` is two, `%ProgramFiles(x86)%` one, and `50% done %X%` the name ` done `); `%%` is a literal
+        percent sign; `%1` and `%~dp0` are arguments. `%NAME:~0,5%` and `%NAME:a=b%` are NAME."""
         i, n = 0, len(text)
         while i < n:
             j = text.find("%", i)
             if j == -1 or j + 1 >= n:
                 return
-            if text[j + 1] == "%":
+            nxt = text[j + 1]
+            if nxt == "%":
                 i = j + 2
                 continue
-            m = cls._BAT_NAME.match(text, j + 1)
-            if m is None:
-                i = j + 1
+            if nxt.isdigit() or nxt == "*":
+                i = j + 2
                 continue
-            yield m.group(1)
-            i = m.end()
+            if nxt == "~":
+                k = j + 2
+                while k < n and text[k].isalpha():
+                    k += 1
+                i = k + 1
+                continue
+            end = text.find("%", j + 1)
+            line_end = text.find("\n", j + 1)
+            if end == -1 or (line_end != -1 and line_end < end):
+                i = j + 1 if line_end == -1 else line_end + 1
+                continue
+            name = text[j + 1:end].split(":", 1)[0]
+            if name:
+                yield name
+            i = end + 1
 
     def _bat_percent(self, info, script) -> None:
         """cmd expands `%NAME%` before it parses the line, so `bat 'echo %CHANGE_TITLE%'`, the form that is safe in

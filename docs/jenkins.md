@@ -247,8 +247,9 @@ ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za
 `replaceAll`, and only a class of letters, digits and `._@:+,/-`) carry no text. A value from a caller outside the
 file (a parameter of a method nothing here calls, inside that method; a local copy of one, an `env.X` set from
 one, the map a `vars/` step's closure fills through `body.delegate` or `body.setDelegate`) is cannot tell. So is an
-interpolation the parser cannot read, and so is any value past the reader's budget (per value, and per file, about
-a million steps): past it the value is read by the names in its text and is at least cannot tell, never a pass.
+interpolation the parser cannot read (command syntax such as `${tool 'M3'}` is read as a statement), and so is any
+value past the reader's budget (per value, and per file, about 300,000 steps): past it the value is read by the
+names in its text and is at least cannot tell, never a pass. A method calling itself returns what it is given.
 Values nested deeper than it reads are read by the names in their text, as before.
 
 The sinks are `sh`, `bat`, `powershell` and `pwsh` (also as `steps.sh`, through a variable holding `this`, a
