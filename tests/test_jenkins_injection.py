@@ -2,7 +2,7 @@
 
 Each case is one attempt, run as a Jenkinsfile: 172 by an Opus 5.5 attacker that did not write the rule
 (ids A001 to A172), on the rule as it was at `653b153`; 29 by the run that took the slice (ids B-a01 to
-B-a30), before it changed anything; and 145, 65, 59, 15 and 9 by a second Opus 5.5 sub-agent in its five
+B-a30), before it changed anything; and 145, 65, 59, 15 and 11 by a second Opus 5.5 sub-agent in its five
 reviews of the slice (ids R1- to R5-). `expected` is what OBAAF-JEN-009 says after the slice
 ("finding-<severity>", "unknown" for cannot tell, or "quiet"); `before` is what it said at `653b153`
 (recorded, not asserted; "?" where it was not recorded); `why` is the judgement of whoever wrote the
