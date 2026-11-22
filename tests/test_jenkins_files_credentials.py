@@ -243,7 +243,8 @@ EXPECT = [
     ('f06_env_index_var', 'OBAAF-JEN-013', 'unknown', None),
     ('e01_each', 'OBAAF-JEN-013', 'unknown', None),
     ('e02_with', 'OBAAF-JEN-013', 'unknown', None),
-    ('e06_multi', 'OBAAF-JEN-013', 'unknown', None),
+    # Flagship slice 2d.2 reads `def (a, b) = [x, y]` element by element, so `a` holds TOKEN: a finding.
+    ('e06_multi', 'OBAAF-JEN-013', 'finding', 'medium'),
     ('e07_closure_ret', 'OBAAF-JEN-013', 'finding', 'medium'),
     ('c02_methodptr_lastarg', 'OBAAF-JEN-001', 'finding', 'medium'),
     ('c03_methodref_var_lastarg', 'OBAAF-JEN-001', 'finding', 'medium'),

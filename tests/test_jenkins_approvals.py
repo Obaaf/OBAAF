@@ -412,9 +412,11 @@ CASES = [
      "def onlyIf(boolean cond, Closure body) {\n  if (cond) {\n    body()\n  }\n}\nnode {\n  onlyIf(params.ASK) { input message: 'Release?', submitter: 'release' }\n  onlyIf(true) { sh 'npm publish' }\n}\n"),
     ('R-K04_beforeOptions', 'quiet', 'finding',
      "pipeline {\n  agent any\n  stages {\n    stage('Approve') {\n      when { beforeOptions true; expression { params.ASK } }\n      input { message 'Release?'; submitter 'release' }\n      steps { echo 'ok' }\n    }\n    stage('Publish') { steps { sh 'npm publish' } }\n  }\n}\n"),
-    ('R-K05_slashy_unicode', 'quiet', 'quiet',
+    # Flagship slice 2d.2 reads the source as Groovy 2.4 does, `\\uXXXX` turned into its character before lexing, so
+    # these two are no longer limits: the submitter is a space, which the reader does not vouch for.
+    ('R-K05_slashy_unicode', 'quiet', 'unknown',
      "node {\n  input message: 'Release?', submitter: /\\u0020/\n  sh 'npm publish'\n}\n"),
-    ('R-K05b_dollar_slashy_unicode', 'quiet', 'quiet',
+    ('R-K05b_dollar_slashy_unicode', 'quiet', 'finding',
      "node {\n  input message: 'Release?', submitter: $/\\u0020/$\n  sh 'npm publish'\n}\n"),
     ('R-K06_computed_key_override', 'finding', 'quiet',
      "def k = 'submitter'\nnode {\n  input([message: 'Release?', submitter: 'release', (k): ''])\n  sh 'npm publish'\n}\n"),
@@ -703,10 +705,6 @@ LIMITS = {
         'two conditions with the same text count as one, though each evaluation may differ',
     'R-F06_same_when_text':
         'two `when` blocks with the same text count as one, though a file changes between them',
-    'R-K05_slashy_unicode':
-        '`\\\\u0020` is not decoded in a slashy string',
-    'R-K05b_dollar_slashy_unicode':
-        '`\\\\u0020` is not decoded in a dollar-slashy string',
     'R-K06_computed_key_override':
         'a computed map key that names `submitter` is not read',
     'R-K07_safe_nav_with':
